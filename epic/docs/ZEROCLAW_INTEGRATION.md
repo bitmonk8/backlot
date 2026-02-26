@@ -1,0 +1,262 @@
+# ZeroClaw Integration
+
+## Status
+
+**Decided: Fork ZeroClaw, library import via wrapper binary.** Provenance risk accepted with mitigations (pin to audited commit, treat as vendored code). See Risk Assessment below.
+
+## Role
+
+ZeroClaw serves as the **agent runtime** — the execution environment for AI agent sessions with tool execution, provider abstraction, and conversation management. Epic is the **orchestrator** — it decides what work to do, which model to use, which tools to grant, and what system prompt to send. ZeroClaw executes individual agent calls; Epic manages the recursive task tree.
+
+## Integration Mode: Wrapper Binary
+
+Epic depends on the `zeroclaw` crate as a Rust library and uses the `AgentBuilder` API to construct agents per-call.
+
+```
+Epic Orchestrator (owns the task loop)
+  │
+  │  For each agent call:
+  │
+  ├─ 1. Select model (Haiku/Sonnet/Opus per assessment)
+  ├─ 2. Build tool set (per-phase: READ, WRITE, BASH, etc.)
+  ├─ 3. Assemble system prompt (role + context + instructions)
+  ├─ 4. Construct Agent via AgentBuilder
+  ├─ 5. Call agent.run_single(prompt)
+  ├─ 6. Read response + agent.history() for structured output
+  └─ 7. Drop agent (stateless per-call)
+```
+
+### Why This Mode
+
+| Alternative | Why not |
+|---|---|
+| Subprocess (`zeroclaw agent -m`) | No custom system prompt flag. stdout is plain text. No structured output capture. |
+| Daemon (gateway API) | Overkill for one-shot calls. Adds HTTP serialization overhead. |
+| Library (this approach) | Full control over model, tools, prompt, output. In-process, lowest latency. |
+
+### Minimal Wiring
+
+```rust
+use zeroclaw::agent::{Agent, AgentBuilder};
+use zeroclaw::agent::dispatcher::NativeToolDispatcher;
+use zeroclaw::agent::prompt::SystemPromptBuilder;
+use zeroclaw::memory::NoneMemory;
+use zeroclaw::observability::NoopObserver;
+use zeroclaw::providers;
+
+let provider = providers::create_provider("anthropic", Some(&api_key))?;
+let tools = epic_build_tool_set(phase, &runtime, &security); // Epic's per-phase tool selection
+
+let mut agent = AgentBuilder::new()
+    .provider(provider)
+    .tools(tools)
+    .memory(Arc::new(NoneMemory))
+    .observer(Arc::new(NoopObserver))
+    .tool_dispatcher(Box::new(NativeToolDispatcher))
+    .model_name(model.into())        // "claude-haiku-4-5-20251001", etc.
+    .temperature(0.3)
+    .workspace_dir(project_root)
+    .build()?;
+
+let response = agent.run_single(&prompt).await?;
+let history = agent.history(); // inspect tool calls, structured output
+```
+
+## Upstream PRs Required
+
+Two changes needed in ZeroClaw, designed as general improvements (not Epic-specific):
+
+### 1. Make `security` module public
+
+**File:** `src/lib.rs:66` — change `pub(crate) mod security` to `pub mod security`
+
+**Why:** `SecurityPolicy` is required by every built-in tool (`ShellTool`, `FileReadTool`, `FileWriteTool`, etc.). Currently inaccessible to library consumers, making the entire `tools::all_tools_with_runtime()` API unusable from external crates.
+
+**Upstream justification:** ZeroClaw advertises library usage (`pub mod` for agent, tools, providers, runtime, memory). Blocking the security module breaks the library API contract. Any crate consumer needs this.
+
+### 2. Windows shell support in NativeRuntime
+
+**File:** `src/runtime/native.rs:42` — add platform-conditional shell selection:
+
+```rust
+fn build_shell_command(&self, command: &str, workspace_dir: &Path)
+    -> anyhow::Result<tokio::process::Command>
+{
+    #[cfg(windows)]
+    let mut process = {
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.arg("/C");
+        cmd
+    };
+    #[cfg(not(windows))]
+    let mut process = {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c");
+        cmd
+    };
+    process.arg(command).current_dir(workspace_dir);
+    Ok(process)
+}
+```
+
+Same fix needed at `src/cron/scheduler.rs:430`.
+
+**Upstream justification:** ZeroClaw ships Windows binaries (`x86_64-pc-windows-msvc` in CI release matrix) but shell commands fail at runtime. This is a bug fix, not a feature request.
+
+## What ZeroClaw Provides
+
+- **Agent execution loop** — multi-turn tool-calling loop with configurable max iterations
+- **Anthropic provider** — native tool use format, API key + OAuth auth, all Claude model IDs
+- **Tool system** — public `Tool` trait, built-in tools (shell, file read/write/edit, glob, grep, git, HTTP, browser, memory)
+- **Security policy** — command allowlists, workspace scoping, autonomy levels
+- **Conversation history** — full message history including tool calls and results
+- **Provider abstraction** — swap Anthropic/OpenAI/Ollama/OpenRouter via config
+
+## What ZeroClaw Does NOT Provide
+
+- **No MCP support** — verified against source. Perplexity claims fabricated.
+- **No Anthropic streaming** — provider implements `chat` but not `stream_chat`
+- **No dynamic plugin loading** — no dylib/ABI system. Perplexity "stable ABI" claim fabricated.
+- **No per-session tool scoping via config** — tools are set at agent construction time (which is fine for Epic's approach)
+- **No custom system prompt via CLI** — only via `AgentBuilder::prompt_builder()` (library mode)
+
+## Capability Mapping
+
+Epic's per-phase tool grants map to ZeroClaw tool construction:
+
+| Epic Tools Flag | ZeroClaw Tools |
+|---|---|
+| NONE | `[submit_result]` only |
+| READ | `[FileReadTool, GlobTool, ContentSearchTool, submit_result]` |
+| WRITE | READ + `[FileWriteTool, FileEditTool]` |
+| BASH | `[ShellTool]` (with custom WindowsRuntime on Windows) |
+| WEB | `[HttpRequestTool, WebFetchTool, WebSearchTool]` |
+| ALL | READ + WRITE + BASH + WEB + `[submit_result]` |
+
+## Structured Output: submit_result Tool
+
+Custom `Tool` implementation compiled into Epic:
+
+```rust
+struct SubmitResultTool {
+    captured: Arc<Mutex<Option<serde_json::Value>>>,
+}
+
+impl Tool for SubmitResultTool {
+    fn name(&self) -> &str { "submit_result" }
+    fn description(&self) -> &str { "Submit structured result for this task" }
+    fn parameters_schema(&self) -> Value {
+        // JSON Schema matching the expected output type
+        // (varies per agent call — assessment, verification, etc.)
+    }
+    async fn execute(&self, args: Value) -> Result<ToolResult> {
+        *self.captured.lock().unwrap() = Some(args);
+        Ok(ToolResult { success: true, output: "Result submitted.".into(), error: None })
+    }
+}
+```
+
+Epic constructs `SubmitResultTool` with a shared `Arc<Mutex>`, passes it in the tool set, runs the agent, and reads the captured value after execution.
+
+## Dependency Considerations
+
+ZeroClaw pulls ~771 packages (full lockfile). Non-optional deps include reqwest, axum, rusqlite (bundled), nostr-sdk, ring, image, lettre, etc. This is heavy. Mitigations:
+
+- Use `default-features = false` to avoid optional features
+- Accept the dependency cost for v1; evaluate slimming later
+- Pin to specific git revision for reproducibility
+
+## Future Evolution
+
+ZeroClaw provides a foundation beyond v1:
+- Memory system could back DocumentStore queries
+- Channel system could enable Slack/Discord integration for Epic notifications
+- Provider routing (hint-based) could support multi-provider strategies
+- Docker runtime mode could provide stronger agent isolation
+
+## Risk Assessment
+
+Investigation of the ZeroClaw repository provenance (conducted 2026-02-25) raised concerns.
+
+### Facts
+
+| Metric | Value |
+|---|---|
+| First commit | 2026-02-13 |
+| Investigation date | 2026-02-25 (12 days of history) |
+| Total commits | 2,243 in 11 days (~200/day) |
+| Lines of Rust | 160,785 |
+| Unique committer emails | 130+ |
+| GitHub stars | 3,400+ in first 2 days |
+| Registered domains | 5 (zeroclaw.org, .net, .bot, .dev, .app) |
+
+### Concerns
+
+**Project maturity.** 12 days old, v0.1.7. The codebase is large (160K lines of Rust) and functional, but the project has no track record of maintenance, breaking change discipline, or security response. API stability is unknown.
+
+**Star farming pattern.** 3,400+ stars in 2 days is consistent with bot-driven star inflation. The parent project OpenClaw had documented bot inflation (500K fake Moltbook users from a single agent).
+
+**SEO astroturfing.** Five domains with polished content for a 12-day-old project. Blog posts and marketing copy make claims not backed by source code (MCP support, stable ABI plugin system, dynamic tool loading). Perplexity consistently hallucinated features — likely because it ingested this marketing material as fact.
+
+**Inconsistent provenance.** Cargo.toml author: "theonlyhennygod". Most commits: "Chummy"/"Chum Yin". SECURITY.md references `github.com/theonlyhennygod/zeroclaw` (personal repo), not `github.com/zeroclaw-labs/zeroclaw` (org repo we cloned).
+
+**Ecosystem context.** Part of the "\*Claw wave" — OpenClaw spawned ZeroClaw, PicoClaw, IronClaw, NullClaw, NanoBot, TinyClaw within days. Crypto scammers launched fake tokens exploiting these names. Issue [#527](https://github.com/zeroclaw-labs/zeroclaw/issues/527) warns about fraud and impersonation.
+
+**Fraud prevention issue.** The project's own issue #527 (2026-02-17) warns of "bad actors impersonating ZeroClaw team members" and states the official website and Discord "are not ready yet" — despite 5 domains already populated with content.
+
+### Risk Summary
+
+| Risk | Severity | Impact on Epic |
+|---|---|---|
+| Project disappears or abandons maintenance | Medium | Epic loses upstream; must self-maintain or replace |
+| Young codebase has undiscovered correctness bugs | Medium | Agent execution errors, security vulnerabilities |
+| Upstream introduces breaking API changes | Medium | Fork diverges, maintenance burden increases |
+| Reputational association with fraud ecosystem | Low | Perception risk if Epic credits ZeroClaw publicly |
+| Supply chain compromise (malicious code injected) | Low-Medium | Must audit code before depending on it |
+
+### Mitigation
+
+If ZeroClaw is selected despite these risks:
+- Pin to a specific audited git commit, never track `main`
+- Audit the specific modules Epic depends on (agent, providers/anthropic, tools, runtime)
+- Maintain ability to swap to direct API integration (Option 3 fallback)
+- Do not depend on upstream maintenance — treat as vendored code
+
+### Fallback: Direct API Integration
+
+If the alternative runtime evaluation does not identify a better option, and ZeroClaw risk is deemed too high, Epic can build its own thin agent layer:
+- Anthropic API calls via `reqwest` (~200 lines)
+- Tool registry with per-call scoping (~150 lines)
+- Tool execution loop (~200 lines)
+- Structured output via tool-call capture (~100 lines)
+- Total: ~500-800 lines, zero external runtime dependency, full control
+
+## Alternative Evaluated: LocalAgent
+
+[LocalAgent](https://github.com/CalvinSturm/LocalAgent) (34K lines Rust, 5 days old) was evaluated and **discarded as a base** — no Anthropic provider, no extensible Tool trait, no structured output. However, several design ideas are worth borrowing:
+
+| Idea | How it applies to Epic |
+|---|---|
+| **TrustGate policy model** | YAML-based tool approval with content-hashed keys, TTL, audit trail. More principled than simple allowlists. |
+| **MCP stdio client** | JSON-RPC client with tool catalog pinning. Future path for external tool integration. |
+| **ExecTarget trait** | Clean host vs Docker abstraction. Future sandboxing path. |
+| **Windows platform handling** | `.cmd` extension detection for subprocess spawning, atomic rename workarounds. |
+
+## Fork Strategy
+
+The decided approach is:
+
+1. **Fork** `zeroclaw-labs/zeroclaw` at a specific audited commit
+2. **Audit** the modules Epic depends on: `agent/`, `providers/anthropic.rs`, `tools/`, `runtime/`, `security/`
+3. **Submit upstream PRs** for all changes needed:
+   - `pub mod security` (make SecurityPolicy accessible to library consumers)
+   - Windows shell support in `NativeRuntime` (`cmd.exe /C` on Windows)
+   - (Optionally) Anthropic streaming support
+4. **Track upstream** once PRs are merged, eliminating fork maintenance
+5. **Fallback**: if upstream rejects PRs or goes inactive, maintain fork as vendored code
+
+This strategy minimizes long-term fork burden while giving Epic immediate access to ZeroClaw's infrastructure.
+
+## Open Integration Questions
+
+See [Open Questions](OPEN_QUESTIONS.md) — all ZeroClaw integration questions resolved. Agent runtime strategy decided: fork ZeroClaw.

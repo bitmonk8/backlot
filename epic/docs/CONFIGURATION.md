@@ -1,0 +1,135 @@
+# Configuration
+
+## Goal
+
+Epic must work on any software project. All project-specific behavior is configured, not hardcoded.
+
+## Configuration File
+
+Project configuration lives in a file at the project root (e.g., `epic.toml` or `.epic/config.toml` — format TBD).
+
+### Verification Steps
+
+```toml
+[[verification]]
+name = "Build"
+command = ["cargo", "build"]
+timeout = 300
+
+[[verification]]
+name = "Lint"
+command = ["cargo", "clippy", "--", "-D", "warnings"]
+timeout = 300
+
+[[verification]]
+name = "Test"
+command = ["cargo", "test"]
+timeout = 600
+```
+
+Example for a Python project:
+```toml
+[[verification]]
+name = "Build"
+command = ["python", "please.py", "build"]
+timeout = 300
+
+[[verification]]
+name = "Lint"
+command = ["python", "please.py", "lint"]
+timeout = 300
+
+[[verification]]
+name = "Test"
+command = ["python", "please.py", "test"]
+timeout = 600
+```
+
+### Model Preferences
+
+```toml
+[models]
+fast = "haiku-4.5"       # Assessment, checkpoints, document ops
+balanced = "sonnet-4.5"  # Implementation, branch verification
+strong = "opus-4.6"      # Recovery, complex decomposition
+
+# Or override with provider-specific model IDs
+# fast = "custom:https://my-endpoint.com/haiku"
+```
+
+### Project Paths
+
+```toml
+[project]
+root = "."                    # Project root (default: config file location)
+epic_dir = ".epic"            # Epic working directory
+```
+
+### Agent Hosting
+
+```toml
+[zeroclaw]
+runtime = "native"            # "native" or "docker"
+# Additional ZeroClaw configuration TBD
+```
+
+## Depth and Budget Configuration
+
+```toml
+[limits]
+max_depth = 8                 # Task tree depth cap
+max_recovery_rounds = 2       # Per branch
+retry_budget = 3              # Retries per model tier per leaf
+branch_fix_rounds = 3         # Verification fix rounds per branch
+```
+
+## Init: `epic init`
+
+Agent-driven interactive configuration scaffolding.
+
+### Flow
+
+1. **Explore** — An agent scans the project directory for build system markers and tooling:
+   - Build systems: `Cargo.toml`, `package.json`, `pyproject.toml`, `Makefile`, `CMakeLists.txt`, `build.gradle`, `go.mod`, etc.
+   - Test frameworks: presence of test directories, test config files (`jest.config`, `pytest.ini`, `.cargo/config.toml` test settings)
+   - Linters/formatters: `clippy`, `eslint`, `ruff`, `black`, `prettier`, `golangci-lint`, etc.
+   - CI config: `.github/workflows/`, `.gitlab-ci.yml` — extract existing build/test/lint commands as hints
+
+2. **Present findings** — Report what was detected:
+   - "Found Cargo.toml (Rust project). Detected: `cargo build`, `cargo test`, `cargo clippy`."
+   - "Found `.github/workflows/ci.yml` with additional lint step: `cargo fmt --check`."
+
+3. **Confirm interactively** — Ask the user which verification steps to enable:
+   - Pre-filled with detected commands
+   - User can accept, modify, add, or decline each step
+   - Ask about model preferences (or accept defaults)
+   - Ask about depth/budget limits (or accept defaults)
+
+4. **Write `epic.toml`** — Generate config with confirmed choices. Declined options included as comments for reference. Result is always a valid, minimal config file.
+
+### Fallback
+
+If no project markers are detected, scaffold a minimal `epic.toml` with empty `[[verification]]` sections and commented examples. Warn the user that verification steps need manual configuration.
+
+## CLI Interface
+
+```
+epic init                      # Interactive — agent-driven config scaffolding
+epic                           # Interactive — capture problem + requirements
+epic "problem description"     # Direct — start with problem statement
+epic --resume                  # Resume interrupted epic
+epic --config path/to/config   # Explicit config file
+```
+
+## Configuration Resolution
+
+1. Explicit `--config` flag
+2. `.epic/config.toml` in current directory
+3. `epic.toml` in current directory
+4. Defaults (no verification steps — warn and proceed)
+
+## Open Questions
+
+- ~~Config format: TOML vs YAML vs RON?~~ — **Decided: TOML.**
+- ~~Should `epic init` generate a starter config file?~~ — **Decided: Yes, agent-driven interactive init.** See Init section below.
+- ~~How much ZeroClaw config belongs in epic's config vs ZeroClaw's own config?~~ — **Decided: Epic owns all config.** No separate ZeroClaw config file. The `[zeroclaw]` section in `epic.toml` exposes any ZeroClaw-specific knobs.
