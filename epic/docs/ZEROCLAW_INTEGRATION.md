@@ -64,7 +64,7 @@ let history = agent.history(); // inspect tool calls, structured output
 
 ## Upstream PRs (Applied in Fork)
 
-Both changes are applied in the `epic/hardening` branch and have dedicated PR branches for upstream submission:
+Both changes are applied in the `epic/hardening` branch. Dedicated PR branches exist (`pr/public-security`, `pr/windows-shell`) as courtesy upstream submissions, but the fork is self-contained and does not depend on upstream acceptance:
 
 ### 1. Make `security` module public (branch: `pr/public-security`)
 
@@ -191,15 +191,15 @@ Investigation of the ZeroClaw repository provenance (conducted 2026-02-25) raise
 
 ### Mitigation
 
-If ZeroClaw is selected despite these risks:
-- Pin to a specific audited git commit, never track `main`
-- Audit the specific modules Epic depends on (agent, providers/anthropic, tools, runtime)
-- Maintain ability to swap to direct API integration (Option 3 fallback)
-- Do not depend on upstream maintenance — treat as vendored code
+Applied mitigations (fork selected, risk accepted):
+- Pinned to audited commit via git submodule at `deps/zeroclaw/`
+- Audited all modules Epic depends on (agent, providers/anthropic, tools, runtime) — see [audit summary](audit/SUMMARY.md)
+- Architecture maintains ability to swap to direct API integration (fallback, see below)
+- Treated as vendored code — no assumption of upstream maintenance
 
 ### Fallback: Direct API Integration
 
-If the alternative runtime evaluation does not identify a better option, and ZeroClaw risk is deemed too high, Epic can build its own thin agent layer:
+Architectural safety valve. If the ZeroClaw fork becomes unmaintainable or a blocking defect is found, Epic can replace it with a thin agent layer:
 - Anthropic API calls via `reqwest` (~200 lines)
 - Tool registry with per-call scoping (~150 lines)
 - Tool execution loop (~200 lines)
@@ -221,18 +221,14 @@ If the alternative runtime evaluation does not identify a better option, and Zer
 
 **Complete.** Fork at [bitmonk8/zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork), branch `epic/hardening`. Added as git submodule at `deps/zeroclaw/` in the Epic repo.
 
-### Patches applied (5 commits)
+### Patches applied (4 commits, 5 logical changes)
 
 | Commit | Change | Files |
 |---|---|---|
 | `2be0012` | `pub mod security` — library consumers can access `SecurityPolicy` | `src/lib.rs` |
 | `1b5cfa3` | Windows shell support — `#[cfg(windows)]` using `cmd /C` | `src/runtime/native.rs`, `src/cron/scheduler.rs` |
 | `4e16f8b` | Remove URL-to-curl auto-conversion (prompt injection hardening) | `src/agent/loop_.rs` |
-| `5dbb203` | Remove wa-rs/qrcode supply chain deps, fix `mut shell_cmd` | `Cargo.toml`, `Cargo.lock`, `src/cron/scheduler.rs` |
-
-### Upstream PR strategy
-
-PR-ready branches exist (`pr/public-security`, `pr/windows-shell`) for submitting to upstream. If accepted, fork maintenance burden decreases. If rejected or upstream goes inactive, the fork is self-contained as vendored code.
+| `5dbb203` | Remove wa-rs/qrcode supply chain deps + fix missing `mut shell_cmd` | `Cargo.toml`, `Cargo.lock`, `src/cron/scheduler.rs` |
 
 ### Usage
 

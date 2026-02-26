@@ -14,7 +14,7 @@
 - [x] ZeroClaw fork prepared — `epic/hardening` branch with all hardening patches applied
 - [x] Git repositories created — [epic](https://github.com/bitmonk8/epic), [zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork)
 - [x] ZeroClaw fork added as git submodule at `deps/zeroclaw/`
-- [ ] Finalize design documents — review all docs for consistency with resolved decisions
+- [x] Finalize design documents — reviewed all docs for consistency with resolved decisions
 - [ ] Scaffold Rust project (`cargo init`)
 - [ ] Implementation begins
 
@@ -35,9 +35,8 @@ Tracked in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). Summary by area:
 
 ## Next Work Candidates
 
-1. **Finalize design documents** — Review all docs for consistency with resolved decisions, fill any gaps.
-2. **Scaffold Rust project** — `cargo init`, set up dependencies, module structure per ARCHITECTURE.md. ZeroClaw dependency via `path = "deps/zeroclaw"`.
-3. **Begin implementation** — Start with core orchestrator loop and agent call wiring.
+1. **Scaffold Rust project** — `cargo init`, set up dependencies, module structure per ARCHITECTURE.md. ZeroClaw dependency via `path = "deps/zeroclaw"`.
+2. **Begin implementation** — Start with core orchestrator loop and agent call wiring.
 
 ## Decisions Made
 
@@ -143,7 +142,7 @@ Tracked in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). Summary by area:
 
 ### 2026-02-26: ZeroClaw fork complete
 
-**Action:** Fork prepared at [bitmonk8/zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork), branch `epic/hardening` (5 commits ahead of upstream `main`).
+**Action:** Fork prepared at [bitmonk8/zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork), branch `epic/hardening` (4 commits ahead of upstream `main`, 5 logical changes).
 
 **Hardening patches applied:**
 1. `pub mod security` — makes `SecurityPolicy` accessible to library consumers (`src/lib.rs:66`)

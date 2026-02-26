@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Real-time visibility into epic execution: task tree, agent output, progress, and metrics. Users watch the orchestrator work and can understand what's happening at any point.
+Real-time visibility into epic execution: task tree, agent output, progress, and metrics. Users watch the orchestrator work and can understand what's happening at any point. **Read-only monitoring for v1** — orchestrator emits events, TUI consumes. Decoupled architecture supports adding interactive controls later.
 
 ## Layout
 
@@ -16,7 +16,7 @@ Real-time visibility into epic execution: task tree, agent output, progress, and
 │    ✓ Sub-A         │  → Design + Decompose ... ✓ [45s]  │
 │      ✓ A.1         │  → Execute subtask C.1             │
 │      ✓ A.2         │    → Implement ...                 │
-│    ✓ Sub-B         │      [agent output streaming]      │
+│    ✓ Sub-B         │      [agent output events]         │
 │    ▸ Sub-C         │                                     │
 │      ▸ C.1 ←       │                                     │
 │        C.2         │                                     │
@@ -42,7 +42,7 @@ Indentation shows parent-child hierarchy. Since tasks are uniform (no type disti
 
 Streams agent output and phase transitions for the current task:
 - Phase start/end with duration
-- Agent text output (streaming)
+- Agent text output (event-level, no token streaming in v1)
 - Tool calls (summarized)
 - Verification results (pass/fail per step)
 - Discovery notifications
@@ -54,17 +54,19 @@ Token usage per model tier, session cost, task count (completed/total).
 
 ## Rust TUI Framework
 
-Candidate: `ratatui` — mature Rust TUI framework with async support. Alternatives: `cursive`, `tui-rs` (predecessor to ratatui).
+`ratatui` with `crossterm` backend. De facto Rust TUI framework, async-compatible with tokio, actively maintained successor to tui-rs.
 
 ## Event System
 
 The orchestrator emits events consumed by the TUI:
 - `TaskStarted { id, goal }`
 - `PhaseChanged { task_id, phase }`
-- `AgentOutput { task_id, text }` (streaming)
+- `AgentOutput { task_id, text }` (event-level, not token-streamed)
 - `VerificationResult { task_id, step, passed }`
 - `TaskCompleted { id, outcome }`
 - `DiscoveryRecorded { task_id, summary }`
 - `MetricsUpdated { tokens, cost }`
+- `ErrorOccurred { task_id, error }`
+- `FixLoopIteration { task_id, attempt, model }`
 
 Events also feed file logging (structured JSONL) for post-run analysis.

@@ -6,7 +6,7 @@ Epic must work on any software project. All project-specific behavior is configu
 
 ## Configuration File
 
-Project configuration lives in a file at the project root (e.g., `epic.toml` or `.epic/config.toml` — format TBD).
+Project configuration lives in `epic.toml` at the project root (TOML format). User-level defaults in `~/.config/epic/config.toml`, overridden field-by-field by the project file. See [Configuration Resolution](#configuration-resolution) for full precedence.
 
 ### Verification Steps
 
@@ -70,7 +70,8 @@ epic_dir = ".epic"            # Epic working directory
 ```toml
 [zeroclaw]
 runtime = "native"            # "native" or "docker"
-# Additional ZeroClaw configuration TBD
+# Epic owns all config — no separate ZeroClaw config file.
+# All ZeroClaw settings are passed programmatically via AgentBuilder.
 ```
 
 ## Depth and Budget Configuration
@@ -123,10 +124,13 @@ epic --config path/to/config   # Explicit config file
 
 ## Configuration Resolution
 
+Project config (highest priority wins):
 1. Explicit `--config` flag
-2. `.epic/config.toml` in current directory
-3. `epic.toml` in current directory
+2. `epic.toml` in current directory
+3. `.epic/config.toml` in current directory
 4. Defaults (no verification steps — warn and proceed)
+
+User-level defaults (`~/.config/epic/config.toml`) are loaded first and overridden field-by-field by the project config above.
 
 ## Open Questions
 

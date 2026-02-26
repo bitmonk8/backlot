@@ -1,6 +1,6 @@
 # Task Model — Recursive Problem-Solver
 
-Based on EPIC_DESIGN2. This document adapts the design for Rust implementation.
+Based on EPIC_DESIGN2 (`C:\UnitySrc\fds2\EPIC_DESIGN2.md`). This document adapts the design for Rust implementation.
 
 ## Core Concept
 
@@ -47,11 +47,12 @@ Root task is always forced to branch (guarantees recovery machinery exists).
 
 ## Leaf Path
 
-1. Implement (model chosen by assessment)
+1. Implement (model chosen by assessment: Haiku/Sonnet/Opus)
    - Research Service available as a tool
-2. Build/lint/test gates
-3. File-level review
-4. Local simplification review
+   - Structured output via `submit_result` tool (see [Agent Design](AGENT_DESIGN.md))
+2. Verification gates — configurable per-project via `epic.toml` (build, lint, test, etc.)
+3. File-level review — model: max(Haiku, implementing model), capped at Sonnet
+4. Local simplification review — same model as file-level review
 5. Fix loop on failure (3 retries per model tier, then escalate)
 6. Commit on success, full rollback on terminal failure
 
@@ -63,7 +64,7 @@ Root task is always forced to branch (guarantees recovery machinery exists).
 2. Create subtasks with magnitude estimates
 3. Execute subtasks sequentially (DFS preorder)
 4. Inter-subtask checkpoint on discoveries
-5. Branch verification: correctness + completeness + aggregate simplification
+5. Branch verification (Sonnet): correctness + completeness + aggregate simplification
 6. Up to 3 fix rounds; root gets one additional Opus round
 
 ## Recovery

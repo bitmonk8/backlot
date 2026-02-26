@@ -25,7 +25,7 @@ Centralized knowledge collection at `.epic/docs/`. All tasks see all accumulated
 
 ### Librarian
 
-A lightweight (Haiku) agent manages document placement, merging, and restructuring. Prevents documents from growing unbounded. Handles deduplication.
+A ZeroClaw agent (Haiku model, read-only tools, `submit_result` for document placement decisions) manages document placement, merging, and restructuring. Routed through `AgentBuilder` like all other agent calls. Prevents documents from growing unbounded. Handles deduplication.
 
 ## Research Service
 
@@ -52,7 +52,7 @@ The research service is demand-driven — called when an agent hits uncertainty 
 
 ## Rust Implementation Considerations
 
-- Document store is file-based (markdown files in `.epic/docs/`)
-- Query/record operations invoke agent calls (Haiku) — needs ZeroClaw integration
-- Consider whether ZeroClaw's built-in memory system (SQLite vector/keyword search) can serve as the query backend, with markdown files as the source of truth
+- Document store is file-based (markdown files in `.epic/docs/`) for v1. Small document counts make this sufficient; SQLite index can layer on later if needed.
+- Query/record operations invoke agent calls (Haiku) via ZeroClaw `AgentBuilder`
+- ZeroClaw's built-in memory system is disabled (`NoneMemory`). Epic owns all persistent knowledge storage.
 - Serde for structured responses from librarian/query agents

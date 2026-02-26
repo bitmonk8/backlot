@@ -17,16 +17,28 @@
 │   → verify, leaf/branch paths)              │
 ├────────────────┬────────────────────────────┤
 │  Services      │  Agent Layer               │
-│  - Research    │  - ZeroClaw integration     │
-│  - Verification│  - Model selection          │
-│  - Document    │  - Tool access control      │
-│    Store       │  - Prompt assembly          │
+│  - Research    │  - All calls via ZeroClaw   │
+│  - Verification│    AgentBuilder API         │
+│  - Document    │  - Per-call model selection │
+│    Store       │  - Per-call tool scoping    │
+│                │  - Prompt assembly          │
 ├────────────────┴────────────────────────────┤
 │  Infrastructure                             │
 │  (git operations, state persistence,        │
 │   event system, metrics, configuration)     │
 └─────────────────────────────────────────────┘
 ```
+
+## Tech Stack
+
+| Concern | Choice | Crate(s) |
+|---|---|---|
+| Async runtime | tokio | `tokio` |
+| Error handling | thiserror at module boundaries, anyhow for propagation | `thiserror`, `anyhow` |
+| Serialization | serde ecosystem | `serde`, `serde_json`, `toml` |
+| Agent runtime | ZeroClaw fork (library, `AgentBuilder` API) | `zeroclaw` (path dep at `deps/zeroclaw/`) |
+| TUI | ratatui + crossterm, read-only monitoring for v1 | `ratatui`, `crossterm` |
+| Config format | TOML | `toml` |
 
 ## Module Structure (Preliminary)
 
@@ -49,14 +61,14 @@ src/
 ├── services/
 │   ├── research.rs          # Research service (DocumentStore + exploration)
 │   ├── verification.rs      # Build/lint/test execution
-│   └── document_store.rs    # Centralized knowledge management
+│   └── document_store.rs    # File-based (markdown) knowledge store; librarian via ZeroClaw agent
 ├── tui/
-│   ├── mod.rs               # TUI application
+│   ├── mod.rs               # TUI application (read-only monitoring for v1)
 │   ├── task_tree.rs         # Task tree widget
-│   ├── worklog.rs           # Worklog panel
+│   ├── worklog.rs           # Worklog panel (event-level updates, no token streaming)
 │   └── metrics.rs           # Metrics display
 ├── config/
-│   ├── mod.rs               # Configuration loading
+│   ├── mod.rs               # Configuration loading (TOML; ~/.config/epic/config.toml + project epic.toml)
 │   └── project.rs           # Per-project verification config
 ├── git.rs                   # Git operations (commit, rollback, diff)
 ├── state.rs                 # EpicState persistence and resume
@@ -99,7 +111,7 @@ For each subtask (DFS preorder):
 All major components receive their dependencies explicitly. No globals, statics, or singletons. The entry point constructs the dependency graph and threads it through.
 
 Key dependency types:
-- `AgentContext` — bundles agent factory, document store, verification config
+- `AgentContext` — bundles ZeroClaw `AgentBuilder` factory, document store, verification config. Each agent call constructs a new `Agent` (stateless per-call).
 - `EventEmitter` — trait object for logging/TUI events
-- `ProjectConfig` — verification steps, paths, model preferences
+- `ProjectConfig` — verification steps, paths, model preferences (loaded from TOML)
 - `EpicState` — task tree and session state (owned by orchestrator)
