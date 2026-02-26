@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Design / Research / Specification** — No code yet. Building the design documents and resolving open questions before implementation begins.
+**Implementation** — Core orchestrator loop complete. Agent wiring next.
 
 ## Milestones
 
@@ -16,7 +16,8 @@
 - [x] ZeroClaw fork added as git submodule at `deps/zeroclaw/`
 - [x] Finalize design documents — reviewed all docs for consistency with resolved decisions
 - [x] Scaffold Rust project — `cargo init`, module structure, dependencies, Clippy lints configured
-- [ ] Implementation begins
+- [x] Core orchestrator loop — task types, events, state, AgentService trait, DFS loop with retry/escalation, 6 tests passing
+- [ ] Agent call wiring — connect orchestrator to ZeroClaw AgentBuilder API
 
 ## Open Question Tally
 
@@ -35,8 +36,9 @@ Tracked in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). Summary by area:
 
 ## Next Work Candidates
 
-1. **Begin implementation** — Start with core orchestrator loop and agent call wiring.
-2. **Agent call wiring** — Connect orchestrator to ZeroClaw `AgentBuilder` API, implement `submit_result` tool.
+1. **Agent call wiring** — Implement `AgentService` backed by ZeroClaw `AgentBuilder` API. Implement `submit_result` tool for structured output. Requires fixing ZeroClaw compilation (schemars ICE on rustc 1.93.1).
+2. **State persistence integration** — Wire `EpicState::save`/`load` into the main run loop for session resume.
+3. **TUI event consumer** — Connect `EventReceiver` to ratatui task tree and worklog panels.
 
 ## Decisions Made
 
@@ -154,3 +156,15 @@ Tracked in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). Summary by area:
 **Integration:** Added as git submodule at `deps/zeroclaw/` in the Epic repo. Epic will reference via `zeroclaw = { path = "deps/zeroclaw" }` in Cargo.toml.
 
 **Compilation note:** ZeroClaw compiles successfully with both Rust 1.92.0 and 1.93.1. Intermittent compiler crashes observed (~20-40% failure rate) attributed to hardware instability on the development machine (Intel i9-14900K, known Raptor Lake issue). Not a software defect.
+
+### 2026-02-26: Core orchestrator loop implemented
+
+**Scope:** Task types (`TaskId`, `Task`, `TaskPath`, `TaskPhase`, `Model`, `Attempt`, `MagnitudeEstimate`, `TaskOutcome`), assessment/branch/verify data structs, `Event` enum with unbounded channel, `EpicState` with `HashMap<TaskId, Task>` + JSON persistence, `AgentService` trait (6 async methods), `Orchestrator<A: AgentService>` with DFS loop, retry/escalation (3 retries per tier, Haiku→Sonnet→Opus), verification-failure-equals-task-failure for v1.
+
+**Files modified:** `src/task/{mod,assess,branch,leaf,verify}.rs`, `src/events.rs`, `src/state.rs`, `src/agent/mod.rs`, `src/orchestrator.rs`, `src/main.rs`.
+
+**Tests (6):** single_leaf, two_children, leaf_retry_and_escalation, terminal_failure, depth_cap_forces_leaf, persistence_round_trip. All pass with `MockAgentService`.
+
+**Deferred for v1:** Fix loop after verification failure, full recovery re-decomposition, checkpoint adjust/escalate actions.
+
+**Note:** ZeroClaw dependency made optional — `schemars` derive triggers ICE (E0080 scalar size mismatch) on rustc 1.93.1. Needs investigation before agent wiring.

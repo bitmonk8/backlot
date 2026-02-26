@@ -9,6 +9,7 @@ mod state;
 mod task;
 mod tui;
 
-fn main() {
-    println!("epic");
+#[tokio::main]
+async fn main() {
+    println!("epic — orchestrator compiled, no agent wired yet");
 }
