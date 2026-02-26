@@ -11,8 +11,11 @@
 - [x] ZeroClaw security audit complete (CONDITIONAL PASS — no backdoors, see [audit summary](audit/SUMMARY.md))
 - [x] Agent runtime strategy decided (fork ZeroClaw)
 - [x] All open questions resolved (23/23)
-- [ ] Design documents finalized
-- [ ] Rust project scaffolded (`cargo init`)
+- [x] ZeroClaw fork prepared — `epic/hardening` branch with all hardening patches applied
+- [x] Git repositories created — [epic](https://github.com/bitmonk8/epic), [zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork)
+- [x] ZeroClaw fork added as git submodule at `deps/zeroclaw/`
+- [ ] Finalize design documents — review all docs for consistency with resolved decisions
+- [ ] Scaffold Rust project (`cargo init`)
 - [ ] Implementation begins
 
 ## Open Question Tally
@@ -32,9 +35,9 @@ Tracked in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). Summary by area:
 
 ## Next Work Candidates
 
-1. **Prepare ZeroClaw fork** — Identify audited commit to pin, plan fork repo structure, list modules to vendor vs exclude.
-2. **Finalize design documents** — Review all docs for consistency with resolved decisions, fill any gaps.
-3. **Scaffold Rust project** — `cargo init`, set up dependencies, module structure per ARCHITECTURE.md.
+1. **Finalize design documents** — Review all docs for consistency with resolved decisions, fill any gaps.
+2. **Scaffold Rust project** — `cargo init`, set up dependencies, module structure per ARCHITECTURE.md. ZeroClaw dependency via `path = "deps/zeroclaw"`.
+3. **Begin implementation** — Start with core orchestrator loop and agent call wiring.
 
 ## Decisions Made
 
@@ -81,7 +84,9 @@ Tracked in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). Summary by area:
 
 **Rationale:** Security audit passed (CONDITIONAL PASS, no backdoors). The codebase provides functional agent runtime infrastructure (providers, tools, memory, tool dispatch) that would take significant effort to reimplement. Provenance risk is real but mitigated by pinning to audited commit and treating the fork as vendored code with no assumption of upstream maintenance.
 
-**Mitigations:** Pin to audited commit, never track `main` blindly. Audit all modules Epic depends on. Maintain direct-API fallback capability in the architecture. Remove GLM URL-to-curl fallback from fork. Disable `wa-rs` WhatsApp crate (supply chain concern).
+**Mitigations:** Pin to audited commit, never track `main` blindly. Audit all modules Epic depends on. Maintain direct-API fallback capability in the architecture. Remove GLM URL-to-curl fallback from fork. Remove `wa-rs` WhatsApp crate family (supply chain concern).
+
+**Status:** Fork complete. See [2026-02-26 entry](#2026-02-26-zeroclaw-fork-complete) below.
 
 ### 2026-02-25: Agent SDK approach
 
@@ -135,3 +140,18 @@ Tracked in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). Summary by area:
 
 **Config ownership:**
 - Epic owns all config — no separate ZeroClaw config file, `[zeroclaw]` section in epic.toml suffices
+
+### 2026-02-26: ZeroClaw fork complete
+
+**Action:** Fork prepared at [bitmonk8/zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork), branch `epic/hardening` (5 commits ahead of upstream `main`).
+
+**Hardening patches applied:**
+1. `pub mod security` — makes `SecurityPolicy` accessible to library consumers (`src/lib.rs:66`)
+2. Windows shell support — `#[cfg(windows)]` using `cmd /C` in `NativeRuntime` (`src/runtime/native.rs`) and cron scheduler (`src/cron/scheduler.rs`)
+3. GLM URL-to-curl removal — eliminated `build_curl_command()` and all bare-URL auto-conversion from `src/agent/loop_.rs` (prompt injection hardening)
+4. wa-rs supply chain removal — removed all 6 wa-rs crates, `serde-big-array`, `qrcode`, and the `whatsapp-web` feature flag from `Cargo.toml`
+5. `mut` fix — missing `mut` on `shell_cmd` in cron scheduler Windows branch
+
+**Integration:** Added as git submodule at `deps/zeroclaw/` in the Epic repo. Epic will reference via `zeroclaw = { path = "deps/zeroclaw" }` in Cargo.toml.
+
+**Compilation note:** ZeroClaw compiles successfully with both Rust 1.92.0 and 1.93.1. Intermittent compiler crashes observed (~20-40% failure rate) attributed to hardware instability on the development machine (Intel i9-14900K, known Raptor Lake issue). Not a software defect.

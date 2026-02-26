@@ -40,12 +40,17 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 | [Audit Summary](audit/SUMMARY.md) | Security audit results: CONDITIONAL PASS, no backdoors found |
 | [Status](STATUS.md) | Current phase, milestones, next work candidates, decisions log |
 
+## Repository
+
+- **Epic:** [github.com/bitmonk8/epic](https://github.com/bitmonk8/epic)
+- **ZeroClaw fork:** [github.com/bitmonk8/zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork) (submodule at `deps/zeroclaw/`)
+
 ## Reference Material
 
 - `C:\UnitySrc\fds2\EPIC_DESIGN2.md` — The recursive problem-solver design document (authoritative design source)
 - `C:\UnitySrc\fds2\tools\epic\` — fds2_epic Python implementation (reference implementation)
-- [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) — Agent hosting platform
+- [ZeroClaw upstream](https://github.com/zeroclaw-labs/zeroclaw) — Agent hosting platform (forked, not used directly)
 
 ## Status
 
-**Phase: Design / Research / Specification**
+**Phase: Design / Research / Specification** — ZeroClaw fork complete, git repos established. Next: finalize design docs, scaffold Rust project.

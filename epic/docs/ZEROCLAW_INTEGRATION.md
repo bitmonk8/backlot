@@ -2,7 +2,7 @@
 
 ## Status
 
-**Decided: Fork ZeroClaw, library import via wrapper binary.** Provenance risk accepted with mitigations (pin to audited commit, treat as vendored code). See Risk Assessment below.
+**Complete.** ZeroClaw forked, hardening patches applied, added as submodule at `deps/zeroclaw/`. See [Fork Status](#fork-status) and [Risk Assessment](#risk-assessment).
 
 ## Role
 
@@ -62,46 +62,21 @@ let response = agent.run_single(&prompt).await?;
 let history = agent.history(); // inspect tool calls, structured output
 ```
 
-## Upstream PRs Required
+## Upstream PRs (Applied in Fork)
 
-Two changes needed in ZeroClaw, designed as general improvements (not Epic-specific):
+Both changes are applied in the `epic/hardening` branch and have dedicated PR branches for upstream submission:
 
-### 1. Make `security` module public
+### 1. Make `security` module public (branch: `pr/public-security`)
 
-**File:** `src/lib.rs:66` — change `pub(crate) mod security` to `pub mod security`
+**File:** `src/lib.rs:66` — `pub(crate) mod security` → `pub mod security`
 
-**Why:** `SecurityPolicy` is required by every built-in tool (`ShellTool`, `FileReadTool`, `FileWriteTool`, etc.). Currently inaccessible to library consumers, making the entire `tools::all_tools_with_runtime()` API unusable from external crates.
+**Why:** `SecurityPolicy` is required by every built-in tool. Without this, library consumers cannot construct any built-in tools.
 
-**Upstream justification:** ZeroClaw advertises library usage (`pub mod` for agent, tools, providers, runtime, memory). Blocking the security module breaks the library API contract. Any crate consumer needs this.
+### 2. Windows shell support in NativeRuntime (branch: `pr/windows-shell`)
 
-### 2. Windows shell support in NativeRuntime
+**Files:** `src/runtime/native.rs:42`, `src/cron/scheduler.rs:430` — `#[cfg(windows)]` branch using `cmd /C`.
 
-**File:** `src/runtime/native.rs:42` — add platform-conditional shell selection:
-
-```rust
-fn build_shell_command(&self, command: &str, workspace_dir: &Path)
-    -> anyhow::Result<tokio::process::Command>
-{
-    #[cfg(windows)]
-    let mut process = {
-        let mut cmd = tokio::process::Command::new("cmd.exe");
-        cmd.arg("/C");
-        cmd
-    };
-    #[cfg(not(windows))]
-    let mut process = {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c");
-        cmd
-    };
-    process.arg(command).current_dir(workspace_dir);
-    Ok(process)
-}
-```
-
-Same fix needed at `src/cron/scheduler.rs:430`.
-
-**Upstream justification:** ZeroClaw ships Windows binaries (`x86_64-pc-windows-msvc` in CI release matrix) but shell commands fail at runtime. This is a bug fix, not a feature request.
+**Why:** ZeroClaw ships Windows binaries but shell commands were hardcoded to `sh -c`.
 
 ## What ZeroClaw Provides
 
@@ -242,21 +217,27 @@ If the alternative runtime evaluation does not identify a better option, and Zer
 | **ExecTarget trait** | Clean host vs Docker abstraction. Future sandboxing path. |
 | **Windows platform handling** | `.cmd` extension detection for subprocess spawning, atomic rename workarounds. |
 
-## Fork Strategy
+## Fork Status
 
-The decided approach is:
+**Complete.** Fork at [bitmonk8/zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork), branch `epic/hardening`. Added as git submodule at `deps/zeroclaw/` in the Epic repo.
 
-1. **Fork** `zeroclaw-labs/zeroclaw` at a specific audited commit
-2. **Audit** the modules Epic depends on: `agent/`, `providers/anthropic.rs`, `tools/`, `runtime/`, `security/`
-3. **Submit upstream PRs** for all changes needed:
-   - `pub mod security` (make SecurityPolicy accessible to library consumers)
-   - Windows shell support in `NativeRuntime` (`cmd.exe /C` on Windows)
-   - (Optionally) Anthropic streaming support
-4. **Track upstream** once PRs are merged, eliminating fork maintenance
-5. **Fallback**: if upstream rejects PRs or goes inactive, maintain fork as vendored code
+### Patches applied (5 commits)
 
-This strategy minimizes long-term fork burden while giving Epic immediate access to ZeroClaw's infrastructure.
+| Commit | Change | Files |
+|---|---|---|
+| `2be0012` | `pub mod security` — library consumers can access `SecurityPolicy` | `src/lib.rs` |
+| `1b5cfa3` | Windows shell support — `#[cfg(windows)]` using `cmd /C` | `src/runtime/native.rs`, `src/cron/scheduler.rs` |
+| `4e16f8b` | Remove URL-to-curl auto-conversion (prompt injection hardening) | `src/agent/loop_.rs` |
+| `5dbb203` | Remove wa-rs/qrcode supply chain deps, fix `mut shell_cmd` | `Cargo.toml`, `Cargo.lock`, `src/cron/scheduler.rs` |
 
-## Open Integration Questions
+### Upstream PR strategy
 
-See [Open Questions](OPEN_QUESTIONS.md) — all ZeroClaw integration questions resolved. Agent runtime strategy decided: fork ZeroClaw.
+PR-ready branches exist (`pr/public-security`, `pr/windows-shell`) for submitting to upstream. If accepted, fork maintenance burden decreases. If rejected or upstream goes inactive, the fork is self-contained as vendored code.
+
+### Usage
+
+```toml
+# Epic's Cargo.toml
+[dependencies]
+zeroclaw = { path = "deps/zeroclaw" }
+```
