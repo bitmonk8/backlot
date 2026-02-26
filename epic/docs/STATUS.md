@@ -15,7 +15,7 @@
 - [x] Git repositories created — [epic](https://github.com/bitmonk8/epic), [zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork)
 - [x] ZeroClaw fork added as git submodule at `deps/zeroclaw/`
 - [x] Finalize design documents — reviewed all docs for consistency with resolved decisions
-- [ ] Scaffold Rust project (`cargo init`)
+- [x] Scaffold Rust project — `cargo init`, module structure, dependencies, Clippy lints configured
 - [ ] Implementation begins
 
 ## Open Question Tally
@@ -35,8 +35,8 @@ Tracked in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). Summary by area:
 
 ## Next Work Candidates
 
-1. **Scaffold Rust project** — `cargo init`, set up dependencies, module structure per ARCHITECTURE.md. ZeroClaw dependency via `path = "deps/zeroclaw"`.
-2. **Begin implementation** — Start with core orchestrator loop and agent call wiring.
+1. **Begin implementation** — Start with core orchestrator loop and agent call wiring.
+2. **Agent call wiring** — Connect orchestrator to ZeroClaw `AgentBuilder` API, implement `submit_result` tool.
 
 ## Decisions Made
 

@@ -53,4 +53,4 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 
 ## Status
 
-**Phase: Design / Research / Specification** — ZeroClaw fork complete, git repos established, design docs finalized. Next: scaffold Rust project.
+**Phase: Implementation** — Design complete, Rust project scaffolded with module structure per ARCHITECTURE.md. Next: core orchestrator loop and agent call wiring.
