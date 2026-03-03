@@ -24,7 +24,7 @@ impl ChatCompletionsProvider {
     #[allow(clippy::expect_used)] // Client::new() panics on same failure
     pub fn new(base_url: String, api_key: String, compat: CompatFlags) -> Self {
         Self {
-            base_url,
+            base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             compat,
             client: Client::builder()

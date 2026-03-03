@@ -84,8 +84,6 @@ pub struct OutputSchema {
 pub struct ProviderConfig {
     pub api: ApiKind,
     #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
     pub credential: Option<String>,
     #[serde(default)]
     pub compat: Option<CompatFlags>,
@@ -1415,5 +1413,21 @@ suffix = ["--profile", "{policy_file}"]
         let f = write_temp_config(toml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::InvalidSandboxConfig(msg)) if msg.contains("{policy_file}") && msg.contains("not configured")));
+    }
+
+    #[tokio::test]
+    async fn legacy_base_url_in_toml_ignored() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+base_url = "https://stale.example.com"
+"#;
+        let f = write_temp_config(toml);
+        let config = Config::load(f.path()).await.expect("should parse despite unknown base_url field");
+        assert_eq!(config.active_provider().expect("provider").api, ApiKind::Messages);
     }
 }

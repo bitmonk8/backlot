@@ -46,11 +46,40 @@ impl TerminalPrompter {
 
 impl Prompter for TerminalPrompter {
     fn password(&self, prompt: &str) -> Result<String, FlickError> {
-        dialoguer::Password::new()
-            .with_prompt(prompt)
-            .allow_empty_password(true)
-            .interact_on(&self.term)
-            .map_err(|e| FlickError::Io(std::io::Error::other(e)))
+        use dialoguer::console::Key;
+
+        let map_io = |e| FlickError::Io(std::io::Error::other(e));
+
+        self.term.write_str(&format!("{prompt}: ")).map_err(map_io)?;
+        self.term.flush().map_err(map_io)?;
+
+        let mut input = String::new();
+        loop {
+            match self.term.read_key().map_err(map_io)? {
+                Key::Enter => break,
+                Key::Backspace if !input.is_empty() => {
+                    input.pop();
+                    // Erase the last '*': move back, overwrite with space, move back
+                    self.term.write_str("\x08 \x08").map_err(map_io)?;
+                    self.term.flush().map_err(map_io)?;
+                }
+                Key::Char(c) if !c.is_control() => {
+                    input.push(c);
+                    self.term.write_str("*").map_err(map_io)?;
+                    self.term.flush().map_err(map_io)?;
+                }
+                Key::CtrlC => {
+                    self.term.write_line("").map_err(map_io)?;
+                    return Err(FlickError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "interrupted",
+                    )));
+                }
+                _ => {}
+            }
+        }
+        self.term.write_line("").map_err(map_io)?;
+        Ok(input)
     }
 
     fn select(

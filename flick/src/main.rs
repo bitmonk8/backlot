@@ -138,7 +138,7 @@ async fn cmd_run(
         .as_deref()
         .unwrap_or_else(|| config.model().provider());
     let cred_entry = cred_store.get(cred_name).await?;
-    let provider = create_provider(provider_config, cred_entry.key);
+    let provider = create_provider(provider_config, cred_entry.key, &cred_entry.base_url);
 
     let mut policy_file_path = String::new();
     let tools = match config.sandbox() {
@@ -507,7 +507,6 @@ async fn cmd_init_core(
         max_tokens,
         system_prompt: system_prompt.as_deref(),
         api,
-        base_url,
         tool_read_file: read_file,
         tool_write_file: write_file,
         tool_list_directory: list_directory,
@@ -554,7 +553,6 @@ struct ConfigGenParams<'a> {
     max_tokens: Option<u32>,
     system_prompt: Option<&'a str>,
     api: flick::ApiKind,
-    base_url: &'a str,
     tool_read_file: bool,
     tool_write_file: bool,
     tool_list_directory: bool,
@@ -638,20 +636,9 @@ fn generate_config_toml(p: &ConfigGenParams<'_>) -> String {
     // Provider section
     out.push_str("# ── Provider ─────────────────────────────────────────────────────────\n");
     out.push_str("# api: \"messages\" (Anthropic) or \"chat_completions\" (OpenAI-compatible)\n");
-    out.push_str("# base_url: override the default endpoint (optional)\n");
     out.push_str("# credential: credential store key (defaults to provider name)\n");
     let _ = writeln!(out, "[provider.{}]", p.provider_name);
     let _ = writeln!(out, "api = \"{}\"", p.api);
-
-    let default_base_url = match p.api {
-        flick::ApiKind::Messages => "https://api.anthropic.com",
-        flick::ApiKind::ChatCompletions => "https://api.openai.com",
-    };
-    if p.base_url == default_base_url {
-        let _ = writeln!(out, "# base_url = \"{}\"", toml_escape_basic(p.base_url));
-    } else {
-        let _ = writeln!(out, "base_url = \"{}\"", toml_escape_basic(p.base_url));
-    }
     let _ = writeln!(out, "# credential = \"{}\"", toml_escape_basic(p.provider_name));
     out.push('\n');
 
@@ -1433,7 +1420,7 @@ api = "messages"
     }
 
     #[tokio::test]
-    async fn init_core_nondefault_base_url() {
+    async fn init_core_nondefault_base_url_absent_from_toml() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
         store.set("litellm", "sk-key", flick::ApiKind::Messages, "http://custom:4000").await.expect("set");
@@ -1455,9 +1442,7 @@ api = "messages"
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("base_url = \"http://custom:4000\""));
-        // Should NOT be commented
-        assert!(!text.contains("# base_url = \"http://custom:4000\""));
+        assert!(!text.contains("base_url"), "base_url should not appear in generated TOML");
     }
 
     #[test]
@@ -1468,13 +1453,13 @@ api = "messages"
             max_tokens: Some(64_000),
             system_prompt: Some("You are Flick, a fast LLM runner."),
             api: flick::ApiKind::Messages,
-            base_url: "https://api.anthropic.com",
             tool_read_file: true,
             tool_write_file: false,
             tool_list_directory: true,
             tool_shell_exec: false,
         };
         let toml_str = generate_config_toml(&params);
+        assert!(!toml_str.contains("base_url"), "base_url should not appear in generated TOML");
         let config = Config::parse(&toml_str).expect("generated TOML should parse");
         assert_eq!(config.model().provider(), "anthropic");
         assert_eq!(config.model().name(), "claude-sonnet-4-20250514");
@@ -1487,7 +1472,7 @@ api = "messages"
     }
 
     #[tokio::test]
-    async fn init_core_default_base_url_commented() {
+    async fn init_core_default_base_url_absent_from_toml() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = init_store_with_anthropic(dir.path()).await;
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
@@ -1507,7 +1492,7 @@ api = "messages"
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("# base_url = \"https://api.anthropic.com\""));
+        assert!(!text.contains("base_url"), "base_url should not appear in generated TOML");
     }
 
     // -- Test gap #11: system prompt with newlines --
@@ -1610,7 +1595,6 @@ api = "messages"
             max_tokens: None,
             system_prompt: Some("You are Flick, a fast LLM runner."),
             api: flick::ApiKind::ChatCompletions,
-            base_url: "https://api.openai.com",
             tool_read_file: false,
             tool_write_file: false,
             tool_list_directory: false,

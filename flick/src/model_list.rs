@@ -39,6 +39,41 @@ impl HttpModelFetcher {
     }
 }
 
+/// Parse a JSON model-list response body into `Vec<FetchedModel>`.
+fn parse_model_response(body: &serde_json::Value) -> Result<Vec<FetchedModel>, FlickError> {
+    let data = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            FlickError::Io(std::io::Error::other(
+                "model response missing 'data' array",
+            ))
+        })?;
+
+    let mut models = Vec::new();
+    for item in data {
+        if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
+            let max_completion_tokens = item
+                .get("top_provider")
+                .and_then(|tp| tp.get("max_completion_tokens"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok());
+            let context_length = item
+                .get("context_length")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok());
+            models.push(FetchedModel {
+                id: id.to_string(),
+                max_completion_tokens,
+                context_length,
+            });
+        }
+    }
+
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(models)
+}
+
 impl ModelFetcher for HttpModelFetcher {
     fn fetch_models<'a>(
         &'a self,
@@ -47,7 +82,8 @@ impl ModelFetcher for HttpModelFetcher {
         api: ApiKind,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<FetchedModel>, FlickError>> + Send + 'a>> {
         Box::pin(async move {
-            let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+            let root = base_url.trim_end_matches('/');
+            let url = format!("{root}/v1/models");
 
             let request = match api {
                 ApiKind::Messages => self
@@ -66,6 +102,38 @@ impl ModelFetcher for HttpModelFetcher {
                 .await
                 .map_err(|e| FlickError::Io(std::io::Error::other(format!("model fetch: {e}"))))?;
 
+            // Fallback: if base_url ends with /anthropic and we got 404,
+            // retry at the root (strip /anthropic) since LiteLLM serves
+            // models at the proxy root, not under the /anthropic prefix.
+            if response.status().as_u16() == 404 {
+                if let Some(stripped) = root.strip_suffix("/anthropic") {
+                    let fallback_url = format!("{stripped}/v1/models");
+                    let fallback_req = match api {
+                        ApiKind::Messages => self
+                            .client
+                            .get(&fallback_url)
+                            .header("x-api-key", api_key)
+                            .header("anthropic-version", "2023-06-01"),
+                        ApiKind::ChatCompletions => self
+                            .client
+                            .get(&fallback_url)
+                            .header("Authorization", format!("Bearer {api_key}")),
+                    };
+                    let fallback_resp = fallback_req.send().await.map_err(|e| {
+                        FlickError::Io(std::io::Error::other(format!("model fetch: {e}")))
+                    })?;
+                    if fallback_resp.status().is_success() {
+                        let body: serde_json::Value =
+                            fallback_resp.json().await.map_err(|e| {
+                                FlickError::Io(std::io::Error::other(format!(
+                                    "model fetch parse: {e}"
+                                )))
+                            })?;
+                        return parse_model_response(&body);
+                    }
+                }
+            }
+
             if !response.status().is_success() {
                 let status = response.status().as_u16();
                 let body = response.text().await.unwrap_or_default();
@@ -79,37 +147,7 @@ impl ModelFetcher for HttpModelFetcher {
                 .await
                 .map_err(|e| FlickError::Io(std::io::Error::other(format!("model fetch parse: {e}"))))?;
 
-            let data = body
-                .get("data")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| {
-                    FlickError::Io(std::io::Error::other(
-                        "model response missing 'data' array",
-                    ))
-                })?;
-
-            let mut models = Vec::new();
-            for item in data {
-                if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
-                    let max_completion_tokens = item
-                        .get("top_provider")
-                        .and_then(|tp| tp.get("max_completion_tokens"))
-                        .and_then(serde_json::Value::as_u64)
-                        .and_then(|v| u32::try_from(v).ok());
-                    let context_length = item
-                        .get("context_length")
-                        .and_then(serde_json::Value::as_u64)
-                        .and_then(|v| u32::try_from(v).ok());
-                    models.push(FetchedModel {
-                        id: id.to_string(),
-                        max_completion_tokens,
-                        context_length,
-                    });
-                }
-            }
-
-            models.sort_by(|a, b| a.id.cmp(&b.id));
-            Ok(models)
+            parse_model_response(&body)
         })
     }
 }
@@ -348,4 +386,5 @@ mod tests {
             .await;
         assert!(result.is_err());
     }
+
 }

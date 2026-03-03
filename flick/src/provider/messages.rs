@@ -23,7 +23,7 @@ impl MessagesProvider {
     #[allow(clippy::expect_used)] // Client::new() panics on same failure
     pub fn new(base_url: String, api_key: String) -> Self {
         Self {
-            base_url,
+            base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             client: Client::builder()
                 .connect_timeout(Duration::from_secs(30))

@@ -128,27 +128,20 @@ pub(crate) fn extract_token_pair(
     }
 }
 
-/// Construct a provider from config.
+/// Construct a provider from config. `base_url` comes from the credential store.
 pub fn create_provider(
     provider_config: &ProviderConfig,
     api_key: String,
+    base_url: &str,
 ) -> ProviderInstance {
     match provider_config.api {
         crate::ApiKind::Messages => {
-            let base_url = provider_config
-                .base_url
-                .clone()
-                .unwrap_or_else(|| messages::DEFAULT_BASE_URL.to_string());
-            ProviderInstance::Messages(messages::MessagesProvider::new(base_url, api_key))
+            ProviderInstance::Messages(messages::MessagesProvider::new(base_url.to_string(), api_key))
         }
         crate::ApiKind::ChatCompletions => {
-            let base_url = provider_config
-                .base_url
-                .clone()
-                .unwrap_or_else(|| chat_completions::DEFAULT_BASE_URL.to_string());
             let compat = provider_config.compat.clone().unwrap_or_default();
             ProviderInstance::ChatCompletions(chat_completions::ChatCompletionsProvider::new(
-                base_url, api_key, compat,
+                base_url.to_string(), api_key, compat,
             ))
         }
     }
@@ -210,11 +203,10 @@ mod tests {
     fn create_provider_messages_variant() {
         let config = ProviderConfig {
             api: ApiKind::Messages,
-            base_url: Some("https://custom.anthropic.com".into()),
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&config, "test-key".into());
+        let provider = create_provider(&config, "test-key".into(), "https://custom.anthropic.com");
         match &provider {
             ProviderInstance::Messages(p) => {
                 assert_eq!(p.base_url(), "https://custom.anthropic.com");
@@ -227,13 +219,12 @@ mod tests {
     fn create_provider_chat_completions_variant() {
         let config = ProviderConfig {
             api: ApiKind::ChatCompletions,
-            base_url: Some("https://custom.openai.com".into()),
             credential: None,
             compat: Some(CompatFlags {
                 explicit_tool_choice_auto: true,
             }),
         };
-        let provider = create_provider(&config, "test-key".into());
+        let provider = create_provider(&config, "test-key".into(), "https://custom.openai.com");
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert_eq!(p.base_url(), "https://custom.openai.com");
@@ -244,14 +235,13 @@ mod tests {
     }
 
     #[test]
-    fn create_provider_default_base_urls() {
+    fn create_provider_base_url_passed_through() {
         let messages_config = ProviderConfig {
             api: ApiKind::Messages,
-            base_url: None,
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&messages_config, "key".into());
+        let provider = create_provider(&messages_config, "key".into(), "https://api.anthropic.com");
         match &provider {
             ProviderInstance::Messages(p) => {
                 assert_eq!(p.base_url(), "https://api.anthropic.com");
@@ -261,11 +251,10 @@ mod tests {
 
         let openai_config = ProviderConfig {
             api: ApiKind::ChatCompletions,
-            base_url: None,
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&openai_config, "key".into());
+        let provider = create_provider(&openai_config, "key".into(), "https://api.openai.com");
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert_eq!(p.base_url(), "https://api.openai.com");
@@ -278,11 +267,10 @@ mod tests {
     fn create_provider_chat_completions_default_flags() {
         let config = ProviderConfig {
             api: ApiKind::ChatCompletions,
-            base_url: None,
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&config, "key".into());
+        let provider = create_provider(&config, "key".into(), "https://api.openai.com");
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert!(!p.compat().explicit_tool_choice_auto);

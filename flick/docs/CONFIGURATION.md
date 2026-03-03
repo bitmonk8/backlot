@@ -20,12 +20,10 @@ schema = { type = "object", properties = { answer = { type = "string" } } }
 
 [provider.anthropic]
 api = "messages"
-base_url = "https://api.anthropic.com"
 credential = "anthropic"
 
 [provider.openrouter]
 api = "chat_completions"
-base_url = "https://openrouter.ai/api"
 credential = "openrouter"
 [provider.openrouter.compat]
 explicit_tool_choice_auto = true
@@ -92,7 +90,6 @@ Top-level string. Optional system prompt sent to the model.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `api` | string | yes | — | `"messages"` or `"chat_completions"` |
-| `base_url` | string | no | per-API default | API base URL |
 | `credential` | string | no | provider name | Key name in credential store |
 
 ### `[provider.<name>.compat]`

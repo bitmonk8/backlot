@@ -473,11 +473,9 @@ max_tokens = 64000
 
 # ── Provider ─────────────────────────────────────────────────────────
 # api: "messages" (Anthropic) or "chat_completions" (OpenAI-compatible)
-# base_url: override the default endpoint (optional)
 # credential: credential store key (defaults to provider name)
 [provider.anthropic]
 api = "messages"
-# base_url = "https://api.anthropic.com"
 # credential = "anthropic"
 
 # ── Compatibility Flags (optional) ──────────────────────────────────
@@ -524,9 +522,7 @@ shell_exec = false
 
 ### Generated Provider Section Rules
 
-- If the stored `base_url` matches the default for the API type, emit it as
-  a comment (`# base_url = "..."`).
-- If the stored `base_url` is non-default, emit it uncommented.
+- `base_url` is not emitted (stored in credential store only).
 - `credential` is always commented out (defaults to provider name).
 
 ### Comment Rules
