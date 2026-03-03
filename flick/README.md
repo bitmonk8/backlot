@@ -96,6 +96,33 @@ With `--raw`, only text deltas are printed as plain text. Errors go to stderr.
 6. Append tool results to history
 7. Goto 1 (capped at 25 iterations)
 
+## Tool Permissions and Safety
+
+`[[resources]]` declares which paths builtin file tools (`read_file`, `write_file`, `list_directory`) may access. This is an in-process intent guardrail — it stops accidental out-of-scope access and makes the operator's declared policy visible.
+
+It is not a security boundary:
+
+- `shell_exec = true` gives the model full shell access as the process user. `[[resources]]` does not apply to shell commands.
+- Custom `command` tools receive model-controlled arguments substituted into shell templates and are not restricted by `[[resources]]`.
+
+The right mental model is the same as Claude Code's permission system: permissions reduce accidental overreach and express what the agent is supposed to do. They do not prevent a model from doing anything the process user can do.
+
+**For hard isolation, run Flick inside a container or VM** with only the required paths mounted. That is the only way to enforce a genuine boundary on what the agent can access. A minimal Docker invocation:
+
+```sh
+docker run --rm -i \
+  --cap-drop ALL \
+  --network none \
+  --read-only \
+  -v "$(pwd)/workspace:/workspace" \
+  my-flick-image \
+  flick run --config /workspace/config.toml --query "..."
+```
+
+OS-level per-tool sandboxing (Landlock on Linux, Seatbelt on macOS) is planned as a built-in enforcement layer for `[[resources]]` but is not yet implemented. See `docs/SANDBOX.md`.
+
+---
+
 ## Configuration
 
 Flick is configured via a TOML file. Full example:
@@ -240,7 +267,7 @@ Exactly one of `command` or `executable` is required.
 | `path` | string | yes | Path to file or directory |
 | `access` | string | yes | `"read"` or `"read_write"` |
 
-Resource sandboxing restricts builtin tool access. Path traversal (`..`) is denied. If no resources are defined, all paths are allowed.
+Restricts builtin file tool access (`read_file`, `write_file`, `list_directory`). Path traversal (`..`) is denied. If no resources are defined, all paths are allowed. Does not apply to `shell_exec` or custom `command` tools. See [Tool Permissions and Safety](#tool-permissions-and-safety).
 
 ### `[pricing]`
 
