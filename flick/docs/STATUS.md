@@ -28,7 +28,6 @@ Implementation complete. 241 tests pass (206 lib, 10 bin, 13 agent, 12 integrati
 - Sandboxing Phase 2: Approach B — native OS primitives (Linux, macOS, Windows)
 - Sandboxing Phase 3: Approach C — container mode (Linux only)
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
-- tokio 1.49.0 + `panic = "abort"` incompatibility on Rust 1.93 (release build)
 - Fix Later items (see `REVIEW_FINDINGS.md`)
 
 ## Decisions
