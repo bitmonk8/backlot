@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -10,6 +11,7 @@ use flick::credential::CredentialStore;
 use flick::error::FlickError;
 use flick::event::{EventEmitter, JsonLinesEmitter, RawEmitter, Event};
 use flick::model::ReasoningLevel;
+use flick::model_list::{self, ModelFetcher};
 use flick::prompter::{Prompter, TerminalPrompter};
 use flick::provider::{DynProvider, create_provider};
 use flick::sandbox;
@@ -61,6 +63,12 @@ enum Commands {
     },
     /// List onboarded providers
     List,
+    /// Interactive config file generator
+    Init {
+        /// Output file path (use '-' for stdout)
+        #[arg(long, default_value = "flick.toml")]
+        output: PathBuf,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -82,6 +90,7 @@ async fn main() {
         }
         Commands::Setup { provider } => (cmd_setup(&provider).await, false),
         Commands::List => (cmd_list().await, false),
+        Commands::Init { output } => (cmd_init(output).await, false),
     };
 
     if let Err(e) = result {
@@ -283,6 +292,7 @@ async fn cmd_setup_core(
         || provider_name == ".."
         || provider_name.contains(std::path::MAIN_SEPARATOR)
         || provider_name.contains('/')
+        || provider_name.contains('.')
         || provider_name.bytes().any(|b| b < 0x20)
     {
         return Err(FlickError::Config(
@@ -323,6 +333,385 @@ async fn cmd_setup_core(
     store.set(provider_name, key.trim(), api, &base_url).await?;
     prompter.message(&format!("Credential stored for '{provider_name}'."))?;
     Ok(())
+}
+
+/// Thin wrapper: uses real terminal prompter, credential store, and HTTP model fetcher.
+async fn cmd_init(output: PathBuf) -> Result<(), FlickError> {
+    let output_str = output.to_string_lossy().to_string();
+    let prompter = TerminalPrompter::new();
+    let store = CredentialStore::new()?;
+    let fetcher = model_list::HttpModelFetcher::new();
+
+    if output_str == "-" {
+        let stdout = std::io::stdout().lock();
+        cmd_init_core("-", &prompter, &store, &fetcher, stdout).await
+    } else {
+        let mut buf = Vec::new();
+        cmd_init_core(&output_str, &prompter, &store, &fetcher, &mut buf).await?;
+        // Use create_new for atomic fail-if-exists (closes TOCTOU race window
+        // between the early check in cmd_init_core and this write).
+        let mut file = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&output)
+            .await
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    FlickError::Io(std::io::Error::other(format!(
+                        "Error: {} already exists. Use a different --output path.",
+                        output.display()
+                    )))
+                } else {
+                    FlickError::Io(e)
+                }
+            })?;
+        use tokio::io::AsyncWriteExt;
+        file.write_all(&buf).await.map_err(FlickError::Io)
+    }
+}
+
+/// Testable core: all dependencies injected.
+#[allow(clippy::too_many_lines)]
+async fn cmd_init_core(
+    output_path: &str,
+    prompter: &dyn Prompter,
+    store: &CredentialStore,
+    fetcher: &dyn ModelFetcher,
+    mut writer: impl Write,
+) -> Result<(), FlickError> {
+    // Step 0 — File existence check (early abort before interactive flow;
+    // cmd_init also uses create_new for atomic race-free creation)
+    if output_path != "-" && std::path::Path::new(output_path).exists() {
+        return Err(FlickError::Io(std::io::Error::other(format!(
+            "Error: {output_path} already exists. Use a different --output path."
+        ))));
+    }
+
+    // Step 1 — Provider
+    let providers = store.list().await?;
+    if providers.is_empty() {
+        return Err(FlickError::Io(std::io::Error::other(
+            "No providers configured. Run 'flick setup <provider>' first.",
+        )));
+    }
+
+    let provider_items: Vec<String> = providers
+        .iter()
+        .map(|p| format!("{} ({})", p.name, p.api))
+        .collect();
+    let provider_idx = prompter.select("Select provider", &provider_items, 0)?;
+    let provider_info = &providers[provider_idx];
+    let provider_name = &provider_info.name;
+    let api = provider_info.api;
+    let base_url = &provider_info.base_url;
+
+    // Step 2 — Model
+    prompter.message(&format!("Fetching models from {provider_name}..."))?;
+    let cred_entry = store.get(provider_name).await?;
+
+    let (model_name, provider_max_tokens) =
+        match fetcher.fetch_models(base_url, &cred_entry.key, api).await {
+            Ok(models) if !models.is_empty() => {
+                let mut items: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+                items.push("(custom)".to_string());
+                let model_idx = prompter.select("Select model", &items, 0)?;
+                if model_idx == items.len() - 1 {
+                    (prompt_model_name(prompter)?, None)
+                } else {
+                    let selected = &models[model_idx];
+                    (selected.id.clone(), selected.max_completion_tokens)
+                }
+            }
+            Ok(_empty) => (prompt_model_name(prompter)?, None),
+            Err(e) => {
+                prompter.message(&format!(
+                    "Could not fetch models from provider: {e}"
+                ))?;
+                (prompt_model_name(prompter)?, None)
+            }
+        };
+
+    // Step 3 — Max tokens
+    let default_max = provider_max_tokens
+        .or_else(|| flick::model::default_max_output_tokens(&model_name))
+        .unwrap_or(8192);
+
+    let max_tokens: Option<u32> = match api {
+        flick::ApiKind::ChatCompletions => {
+            let prompt_label = if provider_max_tokens.is_some() {
+                "Max output tokens"
+            } else {
+                "Max output tokens (enter 'none' to omit)"
+            };
+            let input = prompter.input(
+                prompt_label,
+                Some(&default_max.to_string()),
+            )?;
+            if input.trim().eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(parse_max_tokens(&input)?)
+            }
+        }
+        flick::ApiKind::Messages => {
+            let input = prompter.input(
+                "Max output tokens",
+                Some(&default_max.to_string()),
+            )?;
+            Some(parse_max_tokens(&input)?)
+        }
+    };
+
+    // Step 4 — System prompt
+    let system_input = prompter.input(
+        "System prompt",
+        Some("You are Flick, a fast LLM runner."),
+    )?;
+    let system_prompt = {
+        let trimmed = system_input.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+            None
+        } else {
+            Some(system_input)
+        }
+    };
+
+    // Step 5 — Tools
+    let tool_items = vec![
+        "read_file".to_string(),
+        "write_file".to_string(),
+        "list_directory".to_string(),
+        "shell_exec (unrestricted system access)".to_string(),
+    ];
+    let tool_defaults = [false, false, false, false];
+    let selected_tools = prompter.multi_select("Enable builtin tools", &tool_items, &tool_defaults)?;
+
+    let read_file = selected_tools.contains(&0);
+    let write_file = selected_tools.contains(&1);
+    let list_directory = selected_tools.contains(&2);
+    let mut shell_exec = selected_tools.contains(&3);
+
+    if shell_exec
+        && !prompter.confirm(
+            "shell_exec grants the model unrestricted system access. Enable?",
+            false,
+        )?
+    {
+        shell_exec = false;
+    }
+
+    // Step 6 — Write
+    let params = ConfigGenParams {
+        provider_name,
+        model_name: &model_name,
+        max_tokens,
+        system_prompt: system_prompt.as_deref(),
+        api,
+        base_url,
+        tool_read_file: read_file,
+        tool_write_file: write_file,
+        tool_list_directory: list_directory,
+        tool_shell_exec: shell_exec,
+    };
+    let toml_output = generate_config_toml(&params);
+
+    if output_path != "-" {
+        prompter.message(&format!("Writing config to {output_path}"))?;
+    }
+    writer.write_all(toml_output.as_bytes()).map_err(FlickError::Io)?;
+
+    Ok(())
+}
+
+fn prompt_model_name(prompter: &dyn Prompter) -> Result<String, FlickError> {
+    let name = prompter.input("Model name", None)?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(FlickError::Io(std::io::Error::other(
+            "No model name provided, aborting.",
+        )));
+    }
+    Ok(name)
+}
+
+fn parse_max_tokens(input: &str) -> Result<u32, FlickError> {
+    let v = input.trim().parse::<u32>().map_err(|_| {
+        FlickError::Io(std::io::Error::other(format!(
+            "invalid max_tokens value: {input}"
+        )))
+    })?;
+    if v == 0 {
+        return Err(FlickError::Io(std::io::Error::other(
+            "invalid max_tokens value: must be > 0",
+        )));
+    }
+    Ok(v)
+}
+
+struct ConfigGenParams<'a> {
+    provider_name: &'a str,
+    model_name: &'a str,
+    max_tokens: Option<u32>,
+    system_prompt: Option<&'a str>,
+    api: flick::ApiKind,
+    base_url: &'a str,
+    tool_read_file: bool,
+    tool_write_file: bool,
+    tool_list_directory: bool,
+    tool_shell_exec: bool,
+}
+
+/// Escape a string for use inside a TOML basic string (`"..."`).
+///
+/// Escapes backslash, double-quote, and all control characters forbidden by
+/// the TOML spec (U+0000–U+001F except U+0009 TAB, plus U+007F DEL).
+fn toml_escape_basic(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\t' => out.push('\t'),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            '\u{0000}'..='\u{001F}' | '\u{007F}' => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn generate_config_toml(p: &ConfigGenParams<'_>) -> String {
+    let mut out = String::new();
+
+    // Header
+    out.push_str("# Flick configuration\n");
+    out.push_str("# Generated by `flick init`. Edit freely.\n");
+    out.push_str("# Reference: docs/CONFIGURATION.md\n");
+    out.push('\n');
+
+    // System prompt — top-level key, must appear before any table header
+    out.push_str("# ── System Prompt (optional) ────────────────────────────────────────\n");
+    match p.system_prompt {
+        Some(sp) if (sp.contains('\n') || sp.contains('"')) && !sp.contains("'''") => {
+            let _ = writeln!(out, "system_prompt = '''\n{sp}'''");
+        }
+        Some(sp) => {
+            let _ = writeln!(out, "system_prompt = \"{}\"", toml_escape_basic(sp));
+        }
+        None => {
+            out.push_str("# system_prompt = \"You are Flick, a fast LLM runner.\"\n");
+        }
+    }
+    out.push('\n');
+
+    // Model section
+    out.push_str("# ── Model ────────────────────────────────────────────────────────────\n");
+    out.push_str("# provider: must match a [provider.*] section below\n");
+    out.push_str("# name:     model identifier\n");
+    out.push_str("# max_tokens: maximum output tokens (omit to use model default, Chat\n");
+    out.push_str("#   Completions only; Messages API requires a value)\n");
+    out.push_str("# temperature: sampling temperature (optional)\n");
+    out.push_str("#   Messages API: 0.0–1.0 | Chat Completions: 0.0–2.0\n");
+    out.push_str("[model]\n");
+    let _ = writeln!(out, "provider = \"{}\"", toml_escape_basic(p.provider_name));
+    let _ = writeln!(out, "name = \"{}\"", toml_escape_basic(p.model_name));
+    match p.max_tokens {
+        Some(v) => { let _ = writeln!(out, "max_tokens = {v}"); }
+        None => out.push_str("# max_tokens = 8192\n"),
+    }
+    out.push_str("# temperature = 0.0\n");
+    out.push('\n');
+
+    // Reasoning section
+    out.push_str("# ── Reasoning (optional) ────────────────────────────────────────────\n");
+    out.push_str("# level: minimal (1k tokens), low (4k), medium (10k), high (32k)\n");
+    out.push_str("# For Messages API: budget must be < max_tokens\n");
+    out.push_str("# [model.reasoning]\n");
+    out.push_str("# level = \"medium\"\n");
+    out.push('\n');
+
+    // Provider section
+    out.push_str("# ── Provider ─────────────────────────────────────────────────────────\n");
+    out.push_str("# api: \"messages\" (Anthropic) or \"chat_completions\" (OpenAI-compatible)\n");
+    out.push_str("# base_url: override the default endpoint (optional)\n");
+    out.push_str("# credential: credential store key (defaults to provider name)\n");
+    let _ = writeln!(out, "[provider.{}]", p.provider_name);
+    let _ = writeln!(out, "api = \"{}\"", p.api);
+
+    let default_base_url = match p.api {
+        flick::ApiKind::Messages => "https://api.anthropic.com",
+        flick::ApiKind::ChatCompletions => "https://api.openai.com",
+    };
+    if p.base_url == default_base_url {
+        let _ = writeln!(out, "# base_url = \"{}\"", toml_escape_basic(p.base_url));
+    } else {
+        let _ = writeln!(out, "base_url = \"{}\"", toml_escape_basic(p.base_url));
+    }
+    let _ = writeln!(out, "# credential = \"{}\"", toml_escape_basic(p.provider_name));
+    out.push('\n');
+
+    // Compat flags
+    out.push_str("# ── Compatibility Flags (optional) ──────────────────────────────────\n");
+    let _ = writeln!(out, "# [provider.{}.compat]", p.provider_name);
+    out.push_str("# explicit_tool_choice_auto = false\n");
+    out.push('\n');
+
+    // Tools section
+    out.push_str("# ── Builtin Tools ───────────────────────────────────────────────────\n");
+    out.push_str("# shell_exec and custom tools bypass resource restrictions.\n");
+    out.push_str("[tools]\n");
+    let _ = writeln!(out, "read_file = {}", p.tool_read_file);
+    let _ = writeln!(out, "write_file = {}", p.tool_write_file);
+    let _ = writeln!(out, "list_directory = {}", p.tool_list_directory);
+    let _ = writeln!(out, "shell_exec = {}", p.tool_shell_exec);
+    out.push('\n');
+
+    write_commented_sections(&mut out);
+
+    out
+}
+
+fn write_commented_sections(out: &mut String) {
+    // Custom tools
+    out.push_str("# ── Custom Tools (optional) ─────────────────────────────────────────\n");
+    out.push_str("# [[tools.custom]]\n");
+    out.push_str("# name = \"my_tool\"\n");
+    out.push_str("# description = \"What the tool does\"\n");
+    out.push_str("# parameters = { type = \"object\", properties = { arg = { type = \"string\" } } }\n");
+    out.push_str("# command = \"echo {{arg}}\"       # shell command (OR executable, not both)\n");
+    out.push_str("# executable = \"./tools/my_tool\" # receives JSON on stdin\n");
+    out.push('\n');
+
+    // Resources
+    out.push_str("# ── Resources (optional) ────────────────────────────────────────────\n");
+    out.push_str("# Restricts builtin tool access. If omitted, all paths allowed.\n");
+    out.push_str("# Does NOT restrict shell_exec or custom tools.\n");
+    out.push_str("# [[resources]]\n");
+    out.push_str("# path = \"src/\"\n");
+    out.push_str("# access = \"read_write\"\n");
+    out.push('\n');
+
+    // Pricing
+    out.push_str("# ── Pricing (optional) ──────────────────────────────────────────────\n");
+    out.push_str("# Overrides builtin model pricing. Omit to use registry defaults.\n");
+    out.push_str("# [pricing]\n");
+    out.push_str("# input_per_million = 3.0\n");
+    out.push_str("# output_per_million = 15.0\n");
+    out.push('\n');
+
+    // Sandbox
+    out.push_str("# ── Sandbox (optional) ──────────────────────────────────────────────\n");
+    out.push_str("# Wrapper prefix for sandboxed tool execution. See docs/SANDBOX.md.\n");
+    out.push_str("# [sandbox]\n");
+    out.push_str("# wrapper = [\"bwrap\", \"--die-with-parent\"]\n");
+    out.push_str("# read_args = [\"--ro-bind\", \"{path}\", \"{path}\"]\n");
+    out.push_str("# read_write_args = [\"--bind\", \"{path}\", \"{path}\"]\n");
+    out.push_str("# suffix = [\"--\"]\n");
 }
 
 async fn read_stdin() -> Result<String, FlickError> {
@@ -571,5 +960,674 @@ api = "messages"
         let output_str = String::from_utf8(output).expect("utf8");
         let parsed: serde_json::Value = serde_json::from_str(output_str.trim()).expect("valid JSON");
         assert_eq!(parsed["model"], "test");
+    }
+
+    // -- cmd_init_core tests --
+
+    use flick::model_list::{FetchedModel, MockModelFetcher};
+
+    /// Helper: create a store with one anthropic (messages) provider.
+    async fn init_store_with_anthropic(dir: &std::path::Path) -> CredentialStore {
+        let store = CredentialStore::with_dir(dir.to_path_buf());
+        store
+            .set("anthropic", "sk-ant-key", flick::ApiKind::Messages, "https://api.anthropic.com")
+            .await
+            .expect("set anthropic");
+        store
+    }
+
+    #[tokio::test]
+    async fn init_core_no_providers_error() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+        let fetcher = MockModelFetcher::with_models(vec![]);
+        let prompter = MockPrompter::new();
+        let mut output = Vec::new();
+
+        let result = cmd_init_core("-", &prompter, &store, &fetcher, &mut output).await;
+        assert!(result.is_err());
+        let err_msg = result.expect_err("should be error").to_string();
+        assert!(err_msg.contains("No providers configured"));
+    }
+
+    #[tokio::test]
+    async fn init_core_basic_messages() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        // Prompts in order:
+        // select provider (0), select model (0), input max_tokens ("64000"),
+        // input system_prompt (default), multi_select tools ([]),
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("provider = \"anthropic\""));
+        assert!(text.contains("name = \"claude-sonnet-4-20250514\""));
+        assert!(text.contains("max_tokens = 64000"));
+        assert!(text.contains("api = \"messages\""));
+        assert!(text.contains("read_file = false"));
+        assert!(text.contains("write_file = false"));
+        assert!(text.contains("list_directory = false"));
+        assert!(text.contains("shell_exec = false"));
+    }
+
+    #[tokio::test]
+    async fn init_core_multi_provider_select() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+        store.set("anthropic", "k1", flick::ApiKind::Messages, "https://api.anthropic.com").await.expect("set");
+        store.set("openai", "k2", flick::ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set");
+
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "gpt-4o".into(),
+            max_completion_tokens: Some(16_384),
+            context_length: Some(128_000),
+        }]);
+
+        // Select second provider (index 1 = openai), select model (0),
+        // input max_tokens, input system prompt, multi_select tools
+        let prompter = MockPrompter::new()
+            .with_selects(vec![1, 0])
+            .with_inputs(vec!["16384".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("provider = \"openai\""));
+        assert!(text.contains("api = \"chat_completions\""));
+    }
+
+    #[tokio::test]
+    async fn init_core_model_fetch_fails_fallback() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_error(
+            FlickError::Io(std::io::Error::other("network error")),
+        );
+
+        // select provider (0), input model name, input max_tokens, input system prompt, multi_select tools
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0])
+            .with_inputs(vec!["custom-model".into(), "8192".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("name = \"custom-model\""));
+        let messages = prompter.collected_messages();
+        assert!(messages.iter().any(|m| m.contains("Could not fetch models")));
+    }
+
+    #[tokio::test]
+    async fn init_core_custom_model_selection() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        // select provider (0), select model (1 = "(custom)"), input model name,
+        // input max_tokens, input system prompt, multi_select tools
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 1])
+            .with_inputs(vec!["my-model".into(), "8192".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("name = \"my-model\""));
+    }
+
+    #[tokio::test]
+    async fn init_core_empty_custom_model_error() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        // select provider (0), select model (1 = "(custom)"), input empty model name
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 1])
+            .with_inputs(vec![String::new()]);
+
+        let mut output = Vec::new();
+        let result = cmd_init_core("-", &prompter, &store, &fetcher, &mut output).await;
+        assert!(result.is_err());
+        let err_msg = result.expect_err("should be error").to_string();
+        assert!(err_msg.contains("No model name provided"));
+    }
+
+    #[tokio::test]
+    async fn init_core_max_tokens_from_provider_metadata() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(32_000),
+            context_length: Some(200_000),
+        }]);
+
+        // select provider (0), select model (0), input max_tokens ("32000"),
+        // input system prompt, multi_select tools
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["32000".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("max_tokens = 32000"));
+    }
+
+    #[tokio::test]
+    async fn init_core_max_tokens_registry_fallback() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        // Model matches builtin registry but no max_completion_tokens from provider
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: None,
+            context_length: Some(200_000),
+        }]);
+
+        // Registry default for claude-sonnet-4-20250514 is 64000
+        // select provider (0), select model (0), input max_tokens ("64000"),
+        // input system prompt, multi_select tools
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("max_tokens = 64000"));
+    }
+
+    #[tokio::test]
+    async fn init_core_max_tokens_hardcoded_fallback() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        // Unknown model, no metadata
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "unknown-model-xyz".into(),
+            max_completion_tokens: None,
+            context_length: None,
+        }]);
+
+        // Hardcoded fallback is 8192
+        // select provider (0), select model (0), input max_tokens ("8192"),
+        // input system prompt, multi_select tools
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["8192".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("max_tokens = 8192"));
+    }
+
+    #[tokio::test]
+    async fn init_core_max_tokens_none_chat_completions() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+        store.set("openai", "sk-key", flick::ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set");
+
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "gpt-4o".into(),
+            max_completion_tokens: Some(16_384),
+            context_length: Some(128_000),
+        }]);
+
+        // select provider (0), select model (0), input "none",
+        // input system prompt, multi_select tools
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["none".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("# max_tokens = 8192"));
+        assert!(!text.contains("\nmax_tokens ="));
+    }
+
+    #[tokio::test]
+    async fn init_core_system_prompt_with_quotes() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        // select provider (0), select model (0), input max_tokens,
+        // input system prompt with quotes, multi_select tools
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec![
+                "64000".into(),
+                "You are \"Flick\", a fast runner.".into(),
+            ])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("system_prompt = '''\nYou are \"Flick\", a fast runner.'''"));
+    }
+
+    #[tokio::test]
+    async fn init_core_system_prompt_none() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        // select provider (0), select model (0), input max_tokens,
+        // input "none" for system prompt, multi_select tools
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["64000".into(), "none".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("# system_prompt = "));
+        assert!(!text.contains("\nsystem_prompt = "));
+    }
+
+    #[tokio::test]
+    async fn init_core_tool_selection() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        // select provider (0), select model (0), input max_tokens,
+        // input system prompt, multi_select tools [0, 2] = read_file + list_directory
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![0, 2]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("read_file = true"));
+        assert!(text.contains("write_file = false"));
+        assert!(text.contains("list_directory = true"));
+        assert!(text.contains("shell_exec = false"));
+    }
+
+    #[tokio::test]
+    async fn init_core_shell_exec_confirmed() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        // select provider (0), select model (0), input max_tokens,
+        // input system prompt, multi_select tools [3] = shell_exec, confirm true
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![3]])
+            .with_confirms(vec![true]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("shell_exec = true"));
+    }
+
+    #[tokio::test]
+    async fn init_core_shell_exec_rejected() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        // select provider (0), select model (0), input max_tokens,
+        // input system prompt, multi_select tools [3] = shell_exec, confirm false
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![3]])
+            .with_confirms(vec![false]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("shell_exec = false"));
+    }
+
+    #[tokio::test]
+    async fn init_core_file_exists_error() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![]);
+        let prompter = MockPrompter::new();
+
+        let existing_file = dir.path().join("flick.toml");
+        std::fs::write(&existing_file, "existing").expect("write file");
+
+        let mut output = Vec::new();
+        let result = cmd_init_core(
+            existing_file.to_str().expect("path str"),
+            &prompter,
+            &store,
+            &fetcher,
+            &mut output,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err_msg = result.expect_err("should be error").to_string();
+        assert!(err_msg.contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn init_core_stdout_mode() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        // Verify no "Writing config" message for stdout mode
+        let messages = prompter.collected_messages();
+        assert!(!messages.iter().any(|m| m.contains("Writing config")));
+
+        // Verify output was written
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(!text.is_empty());
+        assert!(text.contains("[model]"));
+    }
+
+    #[tokio::test]
+    async fn init_core_nondefault_base_url() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+        store.set("litellm", "sk-key", flick::ApiKind::Messages, "http://custom:4000").await.expect("set");
+
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("base_url = \"http://custom:4000\""));
+        // Should NOT be commented
+        assert!(!text.contains("# base_url = \"http://custom:4000\""));
+    }
+
+    #[test]
+    fn generate_config_toml_round_trip_messages() {
+        let params = ConfigGenParams {
+            provider_name: "anthropic",
+            model_name: "claude-sonnet-4-20250514",
+            max_tokens: Some(64_000),
+            system_prompt: Some("You are Flick, a fast LLM runner."),
+            api: flick::ApiKind::Messages,
+            base_url: "https://api.anthropic.com",
+            tool_read_file: true,
+            tool_write_file: false,
+            tool_list_directory: true,
+            tool_shell_exec: false,
+        };
+        let toml_str = generate_config_toml(&params);
+        let config = Config::parse(&toml_str).expect("generated TOML should parse");
+        assert_eq!(config.model().provider(), "anthropic");
+        assert_eq!(config.model().name(), "claude-sonnet-4-20250514");
+        assert_eq!(config.model().max_tokens(), Some(64_000));
+        assert_eq!(config.system_prompt(), Some("You are Flick, a fast LLM runner."));
+        assert!(config.tools().read_file);
+        assert!(!config.tools().write_file);
+        assert!(config.tools().list_directory);
+        assert!(!config.tools().shell_exec);
+    }
+
+    #[tokio::test]
+    async fn init_core_default_base_url_commented() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert!(text.contains("# base_url = \"https://api.anthropic.com\""));
+    }
+
+    // -- Test gap #11: system prompt with newlines --
+
+    #[tokio::test]
+    async fn init_core_system_prompt_with_newlines() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec![
+                "64000".into(),
+                "Line one\nLine two\nLine three".into(),
+            ])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        // Multi-line prompt should use ''' literal string
+        assert!(text.contains("system_prompt = '''\nLine one\nLine two\nLine three'''"));
+        // Verify it round-trips through TOML parsing
+        let config = Config::parse(&text).expect("generated TOML should parse");
+        assert_eq!(config.system_prompt(), Some("Line one\nLine two\nLine three"));
+    }
+
+    // -- Test gap #12: system prompt containing ''' --
+
+    #[tokio::test]
+    async fn init_core_system_prompt_with_triple_quotes() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = init_store_with_anthropic(dir.path()).await;
+        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
+            id: "claude-sonnet-4-20250514".into(),
+            max_completion_tokens: Some(64_000),
+            context_length: Some(200_000),
+        }]);
+
+        let prompter = MockPrompter::new()
+            .with_selects(vec![0, 0])
+            .with_inputs(vec![
+                "64000".into(),
+                "Use '''triple quotes''' carefully".into(),
+            ])
+            .with_multi_selects(vec![vec![]]);
+
+        let mut output = Vec::new();
+        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
+            .await
+            .expect("init_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        // Contains ''', so must fall through to escaped basic string
+        assert!(text.contains("system_prompt = \"Use \\'\\'\\'triple quotes\\'\\'\\' carefully\"")
+            || text.contains("system_prompt = \"Use '''triple quotes''' carefully\""));
+        // Verify it round-trips through TOML parsing
+        let config = Config::parse(&text).expect("generated TOML should parse");
+        assert_eq!(config.system_prompt(), Some("Use '''triple quotes''' carefully"));
+    }
+
+    // -- Test gap #13: max_tokens = 0 rejection --
+
+    #[test]
+    fn parse_max_tokens_rejects_zero() {
+        let result = parse_max_tokens("0");
+        assert!(result.is_err());
+        let err_msg = result.expect_err("should be error").to_string();
+        assert!(err_msg.contains("must be > 0"));
+    }
+
+    // -- B5: provider names with dots rejected --
+
+    #[tokio::test]
+    async fn setup_core_rejects_dot_in_provider_name() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-key".into()]);
+
+        let result = cmd_setup_core("my.provider", &prompter, &store).await;
+        assert!(result.is_err(), "dot in provider name should be rejected");
+    }
+
+    // -- C2: round-trip test for Chat Completions with max_tokens = None --
+
+    #[test]
+    fn generate_config_toml_round_trip_chat_completions_no_max_tokens() {
+        let params = ConfigGenParams {
+            provider_name: "openai",
+            model_name: "gpt-4o",
+            max_tokens: None,
+            system_prompt: Some("You are Flick, a fast LLM runner."),
+            api: flick::ApiKind::ChatCompletions,
+            base_url: "https://api.openai.com",
+            tool_read_file: false,
+            tool_write_file: false,
+            tool_list_directory: false,
+            tool_shell_exec: false,
+        };
+        let toml_str = generate_config_toml(&params);
+        // Verify the commented-out max_tokens line is present
+        assert!(toml_str.contains("# max_tokens ="), "expected commented-out max_tokens line");
+        // Verify no active max_tokens line
+        assert!(!toml_str.lines().any(|l| {
+            let trimmed = l.trim();
+            trimmed.starts_with("max_tokens") && !trimmed.starts_with('#')
+        }), "max_tokens should only appear as a comment");
+        // Verify the generated TOML parses successfully
+        let config = Config::parse(&toml_str).expect("generated TOML with commented max_tokens should parse");
+        assert_eq!(config.model().provider(), "openai");
+        assert_eq!(config.model().name(), "gpt-4o");
+        assert!(config.model().max_tokens().is_none());
     }
 }

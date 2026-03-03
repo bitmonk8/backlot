@@ -5,6 +5,7 @@ pub mod credential;
 pub mod error;
 pub mod event;
 pub mod model;
+pub mod model_list;
 pub mod prompter;
 pub mod provider;
 pub mod sandbox;

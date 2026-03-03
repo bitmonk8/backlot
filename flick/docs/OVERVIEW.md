@@ -20,10 +20,14 @@ Epic invokes Flick as a subprocess. Flick handles a single agent session (query 
 ```
 flick run --config <toml> [--query <text>] [--context <json>] [--raw] [--dry-run] [--model <id>] [--reasoning <level>]
 flick setup <provider>
+flick init [--output <path>]
+flick list
 ```
 
 - `run`: query the model, stream events to stdout
 - `setup`: interactive credential onboarding per provider
+- `init`: interactive config generator (writes `flick.toml` by default; `--output` to change path)
+- `list`: show onboarded providers with API type and base URL
 - Query from `--query` or stdin
 - `--context`: JSON file with prior message history
 - `--raw`: plain text output instead of JSON-lines
@@ -85,3 +89,4 @@ The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` 
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Module descriptions and data flow |
 | [CONFIGURATION.md](CONFIGURATION.md) | Full config reference |
 | [SANDBOX.md](SANDBOX.md) | Sandboxing design (wrapper prefix, native, containers) |
+| [INIT_COMMAND.md](INIT_COMMAND.md) | `flick init` interactive config generator spec |

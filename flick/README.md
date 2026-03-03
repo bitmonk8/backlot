@@ -47,6 +47,7 @@ flick run --config config.toml --query "What is Rust?"
 ```
 flick run --config <toml> [OPTIONS]
 flick setup <provider>
+flick init [--output <path>]
 flick list
 ```
 
@@ -62,13 +63,21 @@ flick list
 | `--model <id>` | Override model ID from config |
 | `--reasoning <level>` | Override reasoning level (`minimal`, `low`, `medium`, `high`) |
 
+### `flick init`
+
+Interactive config generator. Walks through provider selection, model, tools, and writes a commented TOML config file.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output <path>` | `flick.toml` | Output file path |
+
 ### `flick setup`
 
-Interactive credential onboarding. Prompts for an API key and stores it encrypted at `~/.flick/credentials`.
+Interactive credential onboarding. Prompts for an API key, API type, and base URL, then stores them encrypted at `~/.flick/credentials`.
 
 ### `flick list`
 
-Lists onboarded provider names, one per line, sorted alphabetically. Produces no output if no credentials exist.
+Lists onboarded providers in tab-separated columns (name, API type, base URL), sorted alphabetically. Produces no output if no credentials exist.
 
 ## Output Format
 
@@ -403,7 +412,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-284 tests (247 lib, 12 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
+330 tests (266 lib, 39 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
 
 ## License
 
