@@ -8,6 +8,7 @@ use crate::error::ToolError;
 use crate::tool::CommandRunner;
 
 /// Replace `{cwd}`, `{path}`, `{policy_file}`, `{pid}` in a template string.
+///
 /// Uses single-pass scanning to prevent substituted values from being
 /// re-expanded by later replacements. Unknown placeholders are left as-is.
 #[allow(clippy::literal_string_with_formatting_args)]
@@ -40,9 +41,9 @@ fn single_pass_replace(template: &str, replacements: &[(&str, &str)]) -> String 
 
         let mut matched = false;
         for &(placeholder, value) in replacements {
-            if after_brace.starts_with(placeholder) {
+            if let Some(rest) = after_brace.strip_prefix(placeholder) {
                 result.push_str(value);
-                remaining = &after_brace[placeholder.len()..];
+                remaining = rest;
                 matched = true;
                 break;
             }
@@ -136,6 +137,7 @@ pub fn build_prefix(
 /// `{policy_file}`, and `{pid}`. All expansion happens in a single pass per
 /// stage, and substituted values are never re-scanned, preventing second-order
 /// expansion of placeholder-like patterns in resource paths.
+#[allow(clippy::literal_string_with_formatting_args)]
 pub fn generate_policy_content(
     template: &str,
     read_rule: Option<&str>,
@@ -317,7 +319,7 @@ impl CommandRunner for SandboxCommandRunner {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::needless_pass_by_value)]
 mod tests {
     use super::*;
 
@@ -670,19 +672,20 @@ mod tests {
         read_write_args: Vec<String>,
         suffix: Vec<String>,
     ) -> SandboxConfig {
+        use std::fmt::Write;
         // Parse from TOML to respect private fields
         let mut toml_str = format!(
             "wrapper = {}\n",
             format_toml_array(&wrapper),
         );
         if !read_args.is_empty() {
-            toml_str.push_str(&format!("read_args = {}\n", format_toml_array(&read_args)));
+            let _ = writeln!(toml_str, "read_args = {}", format_toml_array(&read_args));
         }
         if !read_write_args.is_empty() {
-            toml_str.push_str(&format!("read_write_args = {}\n", format_toml_array(&read_write_args)));
+            let _ = writeln!(toml_str, "read_write_args = {}", format_toml_array(&read_write_args));
         }
         if !suffix.is_empty() {
-            toml_str.push_str(&format!("suffix = {}\n", format_toml_array(&suffix)));
+            let _ = writeln!(toml_str, "suffix = {}", format_toml_array(&suffix));
         }
         toml::from_str(&toml_str).expect("test sandbox config should parse")
     }

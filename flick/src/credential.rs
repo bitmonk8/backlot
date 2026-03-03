@@ -1,14 +1,38 @@
 use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
+use crate::ApiKind;
 use crate::error::CredentialError;
 
 const NONCE_LEN: usize = 12;
 const PREFIX: &str = "enc3:";
+
+/// Internal serialized form for the credentials file.
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredProvider {
+    key: String,
+    api: ApiKind,
+    base_url: String,
+}
+
+/// Returned by `get()` — contains decrypted key + provider metadata.
+pub struct ProviderEntry {
+    pub key: String,
+    pub api: ApiKind,
+    pub base_url: String,
+}
+
+/// Returned by `list()` — provider name + metadata (no key).
+pub struct ProviderInfo {
+    pub name: String,
+    pub api: ApiKind,
+    pub base_url: String,
+}
 
 /// Encrypted credential store at `~/.flick/`.
 pub struct CredentialStore {
@@ -26,29 +50,54 @@ impl CredentialStore {
         Self { dir }
     }
 
-    /// Decrypt and return the API key for the given provider name.
-    pub async fn get(&self, provider: &str) -> Result<String, CredentialError> {
+    /// Decrypt and return the provider entry (key + metadata) for the given provider name.
+    pub async fn get(&self, provider: &str) -> Result<ProviderEntry, CredentialError> {
         let key = self.load_secret_key().await?;
         let creds = self.load_credentials_file().await?;
-        let encrypted = creds
+        let stored = creds
             .get(provider)
             .ok_or_else(|| CredentialError::NotFound(provider.to_string()))?;
-        decrypt(&key, encrypted, provider)
+        let decrypted_key = decrypt(&key, &stored.key, provider)?;
+        Ok(ProviderEntry {
+            key: decrypted_key,
+            api: stored.api,
+            base_url: stored.base_url.clone(),
+        })
     }
 
-    /// Return sorted provider names from the credentials file.
-    pub async fn list(&self) -> Result<Vec<String>, CredentialError> {
+    /// Return sorted provider info from the credentials file.
+    pub async fn list(&self) -> Result<Vec<ProviderInfo>, CredentialError> {
         let creds = self.load_credentials_file().await?;
-        Ok(creds.into_keys().collect())
+        Ok(creds
+            .into_iter()
+            .map(|(name, stored)| ProviderInfo {
+                name,
+                api: stored.api,
+                base_url: stored.base_url,
+            })
+            .collect())
     }
 
-    /// Encrypt and store an API key for the given provider.
-    pub async fn set(&self, provider: &str, api_key: &str) -> Result<(), CredentialError> {
+    /// Encrypt and store a provider entry.
+    pub async fn set(
+        &self,
+        provider: &str,
+        api_key: &str,
+        api: ApiKind,
+        base_url: &str,
+    ) -> Result<(), CredentialError> {
         let key = self.load_or_create_secret_key().await?;
         let encrypted = encrypt(&key, api_key, provider)?;
 
         let mut creds = self.load_credentials_file().await?;
-        creds.insert(provider.to_string(), encrypted);
+        creds.insert(
+            provider.to_string(),
+            StoredProvider {
+                key: encrypted,
+                api,
+                base_url: base_url.to_string(),
+            },
+        );
         self.write_credentials_file(&creds).await?;
         Ok(())
     }
@@ -150,18 +199,23 @@ impl CredentialStore {
         Ok(key)
     }
 
-    async fn load_credentials_file(&self) -> Result<BTreeMap<String, String>, CredentialError> {
+    async fn load_credentials_file(
+        &self,
+    ) -> Result<BTreeMap<String, StoredProvider>, CredentialError> {
         let path = self.credentials_path();
         let text = match tokio::fs::read_to_string(&path).await {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
             Err(e) => return Err(CredentialError::Io(e)),
         };
-        toml::from_str::<BTreeMap<String, String>>(&text)
+        toml::from_str::<BTreeMap<String, StoredProvider>>(&text)
             .map_err(|e| CredentialError::InvalidFormat(e.to_string()))
     }
 
-    async fn write_credentials_file(&self, creds: &BTreeMap<String, String>) -> Result<(), CredentialError> {
+    async fn write_credentials_file(
+        &self,
+        creds: &BTreeMap<String, StoredProvider>,
+    ) -> Result<(), CredentialError> {
         let text = toml::to_string(creds)
             .map_err(|e| CredentialError::InvalidFormat(e.to_string()))?;
         let path = self.credentials_path();
@@ -425,15 +479,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_returns_provider_names_after_set() {
+    async fn list_returns_provider_info_after_set() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
-        store.set("openai", "key1").await.expect("set openai");
-        store.set("anthropic", "key2").await.expect("set anthropic");
+        store.set("openai", "key1", ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set openai");
+        store.set("anthropic", "key2", ApiKind::Messages, "https://api.anthropic.com").await.expect("set anthropic");
 
-        let names = store.list().await.expect("list");
-        assert_eq!(names, vec!["anthropic", "openai"]);
+        let providers = store.list().await.expect("list");
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].name, "anthropic");
+        assert_eq!(providers[0].api, ApiKind::Messages);
+        assert_eq!(providers[1].name, "openai");
+        assert_eq!(providers[1].api, ApiKind::ChatCompletions);
     }
 
     #[tokio::test]
@@ -441,8 +499,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
-        let names = store.list().await.expect("list");
-        assert!(names.is_empty());
+        let providers = store.list().await.expect("list");
+        assert!(providers.is_empty());
     }
 
     #[tokio::test]
@@ -450,11 +508,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
-        store.set("zebra", "k").await.expect("set");
-        store.set("alpha", "k").await.expect("set");
-        store.set("middle", "k").await.expect("set");
+        store.set("zebra", "k", ApiKind::ChatCompletions, "https://example.com").await.expect("set");
+        store.set("alpha", "k", ApiKind::ChatCompletions, "https://example.com").await.expect("set");
+        store.set("middle", "k", ApiKind::ChatCompletions, "https://example.com").await.expect("set");
 
-        let names = store.list().await.expect("list");
+        let providers = store.list().await.expect("list");
+        let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "middle", "zebra"]);
     }
 
@@ -464,11 +523,13 @@ mod tests {
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
         store
-            .set("anthropic", "sk-ant-test-key-123")
+            .set("anthropic", "sk-ant-test-key-123", ApiKind::Messages, "https://api.anthropic.com")
             .await
             .expect("set should succeed");
-        let retrieved = store.get("anthropic").await.expect("get should succeed");
-        assert_eq!(retrieved, "sk-ant-test-key-123");
+        let entry = store.get("anthropic").await.expect("get should succeed");
+        assert_eq!(entry.key, "sk-ant-test-key-123");
+        assert_eq!(entry.api, ApiKind::Messages);
+        assert_eq!(entry.base_url, "https://api.anthropic.com");
     }
 
     #[tokio::test]
@@ -476,11 +537,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
-        store.set("provider_a", "key_a").await.expect("set a");
-        store.set("provider_b", "key_b").await.expect("set b");
+        store.set("provider_a", "key_a", ApiKind::Messages, "https://a.com").await.expect("set a");
+        store.set("provider_b", "key_b", ApiKind::ChatCompletions, "https://b.com").await.expect("set b");
 
-        assert_eq!(store.get("provider_a").await.expect("get a"), "key_a");
-        assert_eq!(store.get("provider_b").await.expect("get b"), "key_b");
+        assert_eq!(store.get("provider_a").await.expect("get a").key, "key_a");
+        assert_eq!(store.get("provider_b").await.expect("get b").key, "key_b");
     }
 
     #[tokio::test]
@@ -488,10 +549,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
-        store.set("openai", "old-key").await.expect("set old");
-        store.set("openai", "new-key").await.expect("set new");
+        store.set("openai", "old-key", ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set old");
+        store.set("openai", "new-key", ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set new");
 
-        assert_eq!(store.get("openai").await.expect("get"), "new-key");
+        assert_eq!(store.get("openai").await.expect("get").key, "new-key");
     }
 
     #[tokio::test]
@@ -500,7 +561,7 @@ mod tests {
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
         // Set something to create the secret key file
-        store.set("existing", "key").await.expect("set");
+        store.set("existing", "key", ApiKind::Messages, "https://example.com").await.expect("set");
         let result = store.get("nonexistent").await;
         assert!(matches!(result, Err(CredentialError::NotFound(_))));
     }
@@ -531,7 +592,7 @@ mod tests {
         let key_path = dir.path().join(".secret_key");
         std::fs::write(&key_path, "not-hex").expect("write key");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let result = store.set("test", "key-value").await;
+        let result = store.set("test", "key-value", ApiKind::Messages, "https://example.com").await;
         assert!(result.is_err());
     }
 
@@ -540,11 +601,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         // Create a valid key first
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        store.set("seed", "value").await.expect("initial set");
+        store.set("seed", "value", ApiKind::Messages, "https://example.com").await.expect("initial set");
         // Corrupt the credentials file
         let creds_path = dir.path().join("credentials");
         std::fs::write(&creds_path, "[[[invalid toml").expect("corrupt file");
-        let result = store.set("test", "new-key").await;
+        let result = store.set("test", "new-key", ApiKind::Messages, "https://example.com").await;
         assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
     }
 
@@ -571,10 +632,10 @@ mod tests {
         let path = dir.path().to_path_buf();
 
         let store1 = CredentialStore::with_dir(path.clone());
-        store1.set("test", "persistent-key").await.expect("set");
+        store1.set("test", "persistent-key", ApiKind::Messages, "https://example.com").await.expect("set");
 
         let store2 = CredentialStore::with_dir(path);
-        assert_eq!(store2.get("test").await.expect("get"), "persistent-key");
+        assert_eq!(store2.get("test").await.expect("get").key, "persistent-key");
     }
 
     #[tokio::test]
@@ -582,7 +643,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
         // Create a valid secret key first
-        store.set("seed", "value").await.expect("initial set");
+        store.set("seed", "value", ApiKind::Messages, "https://example.com").await.expect("initial set");
         // Write credentials with integer value instead of string
         let creds_path = dir.path().join("credentials");
         std::fs::write(&creds_path, "provider = 42\n").expect("write");
@@ -597,7 +658,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        store.set("test_provider", "secret-key").await.expect("set credential");
+        store.set("test_provider", "secret-key", ApiKind::Messages, "https://example.com").await.expect("set credential");
 
         let key_path = dir.path().join(".secret_key");
         let key_perms = std::fs::metadata(&key_path)
@@ -650,7 +711,7 @@ mod tests {
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
         store
-            .set("provider_a", "original-key")
+            .set("provider_a", "original-key", ApiKind::Messages, "https://example.com")
             .await
             .expect("initial set");
 
@@ -658,12 +719,12 @@ mod tests {
         let tmp_path = dir.path().join("credentials.tmp");
         std::fs::create_dir_all(&tmp_path).expect("create blocking dir");
 
-        let result = store.set("provider_a", "new-key").await;
+        let result = store.set("provider_a", "new-key", ApiKind::Messages, "https://example.com").await;
         assert!(result.is_err(), "set should fail when temp path is a directory");
 
         // Original credential must survive
-        let retrieved = store.get("provider_a").await.expect("get after failed write");
-        assert_eq!(retrieved, "original-key");
+        let entry = store.get("provider_a").await.expect("get after failed write");
+        assert_eq!(entry.key, "original-key");
 
         // Clean up blocking directory so tempdir drop succeeds
         std::fs::remove_dir(&tmp_path).expect("remove blocking dir");

@@ -17,6 +17,7 @@ chacha20poly1305 = "0.10"
 zeroize = { version = "1", features = ["alloc"] }
 hex = "0.4"
 shell-escape = "0.1"
+dialoguer = "0.12"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [target.'cfg(windows)'.dependencies]

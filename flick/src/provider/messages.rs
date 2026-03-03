@@ -39,9 +39,14 @@ impl MessagesProvider {
 
     #[allow(clippy::unused_self)]
     fn build_body(&self, params: &RequestParams<'_>) -> serde_json::Value {
+        // Messages API always requires max_tokens.
+        // Resolve: explicit → registry → 8192.
+        let resolved_max = params.max_tokens
+            .or_else(|| crate::model::default_max_output_tokens(params.model))
+            .unwrap_or(8192);
         let mut body = serde_json::json!({
             "model": params.model,
-            "max_tokens": params.max_tokens,
+            "max_tokens": resolved_max,
         });
 
         if let Some(temp) = params.temperature {
@@ -80,7 +85,7 @@ impl MessagesProvider {
         }
 
         if let Some(level) = params.reasoning {
-            let budget = anthropic_budget_tokens(level).min(params.max_tokens.saturating_sub(1));
+            let budget = anthropic_budget_tokens(level).min(resolved_max.saturating_sub(1));
             if budget > 0 {
                 body["thinking"] = serde_json::json!({
                     "type": "enabled",
@@ -332,7 +337,7 @@ mod tests {
         let (msgs, tools) = minimal_params();
         let params = crate::provider::RequestParams {
             model: "claude-sonnet-4-20250514",
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             system_prompt: None,
             messages: &msgs,
@@ -350,12 +355,49 @@ mod tests {
     }
 
     #[test]
+    fn build_body_none_max_tokens_uses_registry_fallback() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: None,
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params);
+        // Registry has 64000 for claude-sonnet-4
+        assert_eq!(body["max_tokens"], 64_000);
+    }
+
+    #[test]
+    fn build_body_none_max_tokens_unknown_model_uses_8192() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "unknown-model",
+            max_tokens: None,
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params);
+        assert_eq!(body["max_tokens"], 8192);
+    }
+
+    #[test]
     fn build_body_with_system_and_temperature() {
         let provider = make_provider();
         let (msgs, tools) = minimal_params();
         let params = crate::provider::RequestParams {
             model: "claude-sonnet-4-20250514",
-            max_tokens: 2048,
+            max_tokens: Some(2048),
             temperature: Some(0.5),
             system_prompt: Some("Be helpful"),
             messages: &msgs,
@@ -379,7 +421,7 @@ mod tests {
         }];
         let params = crate::provider::RequestParams {
             model: "claude-sonnet-4-20250514",
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             system_prompt: None,
             messages: &msgs,
@@ -398,7 +440,7 @@ mod tests {
         let (msgs, tools) = minimal_params();
         let params = crate::provider::RequestParams {
             model: "claude-sonnet-4-20250514",
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             system_prompt: None,
             messages: &msgs,

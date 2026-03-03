@@ -17,7 +17,7 @@ use flick::provider::{
 #[derive(Debug)]
 pub struct CapturedParams {
     pub model: String,
-    pub max_tokens: u32,
+    pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub system_prompt: Option<String>,
     pub messages: Vec<Message>,

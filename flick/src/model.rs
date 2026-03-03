@@ -16,6 +16,8 @@ pub struct ModelInfo {
     pub id: &'static str,
     pub input_per_million: f64,
     pub output_per_million: f64,
+    pub context_window: Option<u32>,
+    pub max_output_tokens: Option<u32>,
 }
 
 /// Look up a model by ID in the builtin registry.
@@ -33,6 +35,11 @@ pub const fn anthropic_budget_tokens(level: ReasoningLevel) -> u32 {
     }
 }
 
+/// Look up the default `max_output_tokens` for a model by ID.
+pub fn default_max_output_tokens(model_id: &str) -> Option<u32> {
+    resolve_model(model_id).and_then(|m| m.max_output_tokens)
+}
+
 /// Map reasoning level to `OpenAI` `reasoning_effort` string.
 pub const fn openai_reasoning_effort(level: ReasoningLevel) -> &'static str {
     match level {
@@ -47,41 +54,57 @@ static BUILTIN_MODELS: [ModelInfo; 8] = [
         id: "claude-sonnet-4-20250514",
         input_per_million: 3.0,
         output_per_million: 15.0,
+        context_window: Some(200_000),
+        max_output_tokens: Some(64_000),
     },
     ModelInfo {
         id: "claude-opus-4-20250514",
         input_per_million: 15.0,
         output_per_million: 75.0,
+        context_window: Some(200_000),
+        max_output_tokens: Some(32_000),
     },
     ModelInfo {
         id: "claude-haiku-3-5-20241022",
         input_per_million: 0.80,
         output_per_million: 4.0,
+        context_window: Some(200_000),
+        max_output_tokens: Some(8_192),
     },
     ModelInfo {
         id: "gpt-4o",
         input_per_million: 2.50,
         output_per_million: 10.0,
+        context_window: Some(128_000),
+        max_output_tokens: Some(16_384),
     },
     ModelInfo {
         id: "gpt-4o-mini",
         input_per_million: 0.15,
         output_per_million: 0.60,
+        context_window: Some(128_000),
+        max_output_tokens: Some(16_384),
     },
     ModelInfo {
         id: "o3-mini",
         input_per_million: 1.10,
         output_per_million: 4.40,
+        context_window: Some(200_000),
+        max_output_tokens: Some(100_000),
     },
     ModelInfo {
         id: "deepseek-chat",
         input_per_million: 0.27,
         output_per_million: 1.10,
+        context_window: Some(64_000),
+        max_output_tokens: Some(8_192),
     },
     ModelInfo {
         id: "deepseek-reasoner",
         input_per_million: 0.55,
         output_per_million: 2.19,
+        context_window: Some(64_000),
+        max_output_tokens: Some(8_192),
     },
 ];
 
@@ -116,6 +139,25 @@ mod tests {
         assert_eq!(openai_reasoning_effort(ReasoningLevel::Low), "low");
         assert_eq!(openai_reasoning_effort(ReasoningLevel::Medium), "medium");
         assert_eq!(openai_reasoning_effort(ReasoningLevel::High), "high");
+    }
+
+    #[test]
+    fn resolve_model_has_token_fields() {
+        let info = resolve_model("claude-sonnet-4-20250514").expect("known model");
+        assert_eq!(info.context_window, Some(200_000));
+        assert_eq!(info.max_output_tokens, Some(64_000));
+    }
+
+    #[test]
+    fn default_max_output_tokens_known_model() {
+        assert_eq!(default_max_output_tokens("claude-sonnet-4-20250514"), Some(64_000));
+        assert_eq!(default_max_output_tokens("gpt-4o"), Some(16_384));
+        assert_eq!(default_max_output_tokens("o3-mini"), Some(100_000));
+    }
+
+    #[test]
+    fn default_max_output_tokens_unknown_model() {
+        assert_eq!(default_max_output_tokens("nonexistent-model"), None);
     }
 
     #[test]

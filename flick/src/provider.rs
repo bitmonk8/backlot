@@ -12,7 +12,8 @@ use crate::model::ReasoningLevel;
 /// Parameters for a provider request.
 pub struct RequestParams<'a> {
     pub model: &'a str,
-    pub max_tokens: u32,
+    /// Maximum *output* tokens (not context window). Matches API field name.
+    pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub system_prompt: Option<&'a str>,
     pub messages: &'a [Message],
@@ -133,14 +134,14 @@ pub fn create_provider(
     api_key: String,
 ) -> ProviderInstance {
     match provider_config.api {
-        crate::config::ApiKind::Messages => {
+        crate::ApiKind::Messages => {
             let base_url = provider_config
                 .base_url
                 .clone()
                 .unwrap_or_else(|| messages::DEFAULT_BASE_URL.to_string());
             ProviderInstance::Messages(messages::MessagesProvider::new(base_url, api_key))
         }
-        crate::config::ApiKind::ChatCompletions => {
+        crate::ApiKind::ChatCompletions => {
             let base_url = provider_config
                 .base_url
                 .clone()
@@ -202,7 +203,8 @@ pub(crate) mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ApiKind, CompatFlags, ProviderConfig};
+    use crate::ApiKind;
+    use crate::config::{CompatFlags, ProviderConfig};
 
     #[test]
     fn create_provider_messages_variant() {

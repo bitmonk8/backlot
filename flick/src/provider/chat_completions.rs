@@ -49,11 +49,14 @@ impl ChatCompletionsProvider {
             "model": params.model,
         });
 
-        // Reasoning models require max_completion_tokens instead of max_tokens
-        if params.reasoning.is_some() {
-            body["max_completion_tokens"] = serde_json::json!(params.max_tokens);
-        } else {
-            body["max_tokens"] = serde_json::json!(params.max_tokens);
+        // Chat Completions: if max_tokens is None, omit entirely (API uses model default).
+        // If Some, reasoning models use max_completion_tokens, others use max_tokens.
+        if let Some(max) = params.max_tokens {
+            if params.reasoning.is_some() {
+                body["max_completion_tokens"] = serde_json::json!(max);
+            } else {
+                body["max_tokens"] = serde_json::json!(max);
+            }
         }
 
         // OpenAI reasoning models reject requests containing temperature.
@@ -448,7 +451,7 @@ mod tests {
         let (msgs, tools) = minimal_params();
         let params = RequestParams {
             model: "gpt-4o",
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             system_prompt: None,
             messages: &msgs,
@@ -465,12 +468,31 @@ mod tests {
     }
 
     #[test]
+    fn build_body_none_max_tokens_omits_field() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = RequestParams {
+            model: "gpt-4o",
+            max_tokens: None,
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
     fn build_body_with_system_prompt() {
         let provider = make_provider();
         let (msgs, tools) = minimal_params();
         let params = RequestParams {
             model: "gpt-4o",
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             system_prompt: Some("Be helpful"),
             messages: &msgs,
@@ -502,7 +524,7 @@ mod tests {
         }];
         let params = RequestParams {
             model: "gpt-4o",
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             system_prompt: None,
             messages: &msgs,
@@ -521,7 +543,7 @@ mod tests {
         let (msgs, tools) = minimal_params();
         let params = RequestParams {
             model: "o3-mini",
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             system_prompt: None,
             messages: &msgs,
@@ -542,7 +564,7 @@ mod tests {
         let schema = serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}});
         let params = RequestParams {
             model: "gpt-4o",
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             system_prompt: None,
             messages: &msgs,
@@ -694,7 +716,7 @@ mod tests {
         let schema = serde_json::json!({"type": "object"});
         let params = RequestParams {
             model: "gpt-4o",
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: None,
             system_prompt: None,
             messages: &msgs,

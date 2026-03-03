@@ -242,7 +242,7 @@ schema = {"type" = "object"}
     let params = agent::build_params(&config, &messages, &tool_defs);
 
     assert_eq!(params.model, "test-model-123");
-    assert_eq!(params.max_tokens, 2048);
+    assert_eq!(params.max_tokens, Some(2048));
     assert_eq!(params.temperature, None);
     assert_eq!(params.system_prompt, Some("Be helpful"));
     assert_eq!(params.messages.len(), 1);
@@ -376,7 +376,7 @@ output_per_million = 2.0
     assert_eq!(captured.len(), 1);
     let p = &captured[0];
     assert_eq!(p.model, "test-model-456");
-    assert_eq!(p.max_tokens, 4096);
+    assert_eq!(p.max_tokens, Some(4096));
     assert_eq!(p.temperature, Some(0.5));
     assert_eq!(p.system_prompt.as_deref(), Some("Test system prompt"));
     assert_eq!(p.messages.len(), 1);

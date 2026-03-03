@@ -1,4 +1,4 @@
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -10,6 +10,7 @@ use flick::credential::CredentialStore;
 use flick::error::FlickError;
 use flick::event::{EventEmitter, JsonLinesEmitter, RawEmitter, Event};
 use flick::model::ReasoningLevel;
+use flick::prompter::{Prompter, TerminalPrompter};
 use flick::provider::{DynProvider, create_provider};
 use flick::sandbox;
 use flick::tool::ToolRegistry;
@@ -127,8 +128,8 @@ async fn cmd_run(
         .credential
         .as_deref()
         .unwrap_or_else(|| config.model().provider());
-    let api_key = cred_store.get(cred_name).await?;
-    let provider = create_provider(provider_config, api_key);
+    let cred_entry = cred_store.get(cred_name).await?;
+    let provider = create_provider(provider_config, cred_entry.key);
 
     let mut policy_file_path = String::new();
     let tools = match config.sandbox() {
@@ -253,28 +254,27 @@ async fn cmd_list() -> Result<(), FlickError> {
     cmd_list_core(&store, stdout).await
 }
 
-/// Testable core: writes one provider name per line to output.
+/// Testable core: writes one provider per line to output (tab-separated columns).
 async fn cmd_list_core(store: &CredentialStore, mut output: impl Write) -> Result<(), FlickError> {
     let providers = store.list().await?;
-    for name in &providers {
-        writeln!(output, "{name}").map_err(FlickError::Io)?;
+    for info in &providers {
+        writeln!(output, "{}\t{}\t{}", info.name, info.api, info.base_url)
+            .map_err(FlickError::Io)?;
     }
     Ok(())
 }
 
-/// Thin wrapper: uses real stdin/stderr and credential store.
+/// Thin wrapper: uses real terminal prompter and credential store.
 async fn cmd_setup(provider_name: &str) -> Result<(), FlickError> {
-    let stdin = std::io::stdin().lock();
-    let stderr = std::io::stderr().lock();
+    let prompter = TerminalPrompter::new();
     let store = CredentialStore::new()?;
-    cmd_setup_core(provider_name, stdin, stderr, &store).await
+    cmd_setup_core(provider_name, &prompter, &store).await
 }
 
-/// Testable core: I/O injected via BufRead/Write, credential store passed in.
+/// Testable core: prompts injected via Prompter trait, credential store passed in.
 async fn cmd_setup_core(
     provider_name: &str,
-    mut input: impl BufRead,
-    mut output: impl Write,
+    prompter: &dyn Prompter,
     store: &CredentialStore,
 ) -> Result<(), FlickError> {
     let provider_name = provider_name.trim();
@@ -289,17 +289,39 @@ async fn cmd_setup_core(
             flick::error::ConfigError::UnknownProvider(provider_name.to_string()),
         ));
     }
-    writeln!(output, "Enter API key for '{provider_name}':").map_err(FlickError::Io)?;
-    let mut key = String::new();
-    input.read_line(&mut key).map_err(FlickError::Io)?;
-    let key = key.trim();
-    if key.is_empty() {
-        writeln!(output, "No key provided, aborting.").map_err(FlickError::Io)?;
+
+    let key = prompter.password(&format!("API key for '{provider_name}'"))?;
+    if key.trim().is_empty() {
+        prompter.message("No key provided, aborting.")?;
         return Err(FlickError::Io(std::io::Error::other("setup aborted: no key provided")));
     }
 
-    store.set(provider_name, key).await?;
-    writeln!(output, "Credential stored for '{provider_name}'.").map_err(FlickError::Io)?;
+    // API type: infer for known providers, otherwise prompt
+    let api = if provider_name.contains("anthropic") {
+        prompter.message("Inferred API type: messages (Anthropic)")?;
+        flick::ApiKind::Messages
+    } else {
+        let items = vec![
+            "chat_completions (OpenAI-compatible)".to_string(),
+            "messages (Anthropic)".to_string(),
+        ];
+        let idx = prompter.select("API type", &items, 0)?;
+        if idx == 1 {
+            flick::ApiKind::Messages
+        } else {
+            flick::ApiKind::ChatCompletions
+        }
+    };
+
+    // Base URL: default based on API type
+    let default_url = match api {
+        flick::ApiKind::Messages => "https://api.anthropic.com",
+        flick::ApiKind::ChatCompletions => "https://api.openai.com",
+    };
+    let base_url = prompter.input("Base URL", Some(default_url))?;
+
+    store.set(provider_name, key.trim(), api, &base_url).await?;
+    prompter.message(&format!("Credential stored for '{provider_name}'."))?;
     Ok(())
 }
 
@@ -321,35 +343,73 @@ async fn read_stdin() -> Result<String, FlickError> {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use flick::prompter::MockPrompter;
 
     // -- cmd_setup_core tests --
 
     #[tokio::test]
-    async fn setup_core_stores_credential() {
+    async fn setup_core_stores_credential_anthropic() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let input = b"sk-test-key-123\n";
-        let mut output = Vec::new();
+        // Anthropic provider: password + base URL input (API type inferred)
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-test-key-123".into()])
+            .with_inputs(vec!["https://api.anthropic.com".into()]);
 
-        cmd_setup_core("anthropic", &input[..], &mut output, &store).await.expect("setup_core");
+        cmd_setup_core("anthropic", &prompter, &store).await.expect("setup_core");
 
-        let output_str = String::from_utf8(output).expect("utf8");
-        assert!(output_str.contains("Enter API key"));
-        assert!(output_str.contains("Credential stored"));
+        let messages = prompter.collected_messages();
+        assert!(messages.iter().any(|m| m.contains("Credential stored")));
+        assert!(messages.iter().any(|m| m.contains("Inferred API type")));
 
-        // Verify credential was persisted
-        let store2 = CredentialStore::with_dir(dir.path().to_path_buf());
-        assert_eq!(store2.get("anthropic").await.expect("get"), "sk-test-key-123");
+        let entry = store.get("anthropic").await.expect("get");
+        assert_eq!(entry.key, "sk-test-key-123");
+        assert_eq!(entry.api, flick::ApiKind::Messages);
+        assert_eq!(entry.base_url, "https://api.anthropic.com");
+    }
+
+    #[tokio::test]
+    async fn setup_core_stores_credential_openai() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+        // Non-anthropic provider: password + select API type + base URL input
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-openai-key".into()])
+            .with_selects(vec![0]) // chat_completions
+            .with_inputs(vec!["https://api.openai.com".into()]);
+
+        cmd_setup_core("openai", &prompter, &store).await.expect("setup_core");
+
+        let entry = store.get("openai").await.expect("get");
+        assert_eq!(entry.key, "sk-openai-key");
+        assert_eq!(entry.api, flick::ApiKind::ChatCompletions);
+        assert_eq!(entry.base_url, "https://api.openai.com");
+    }
+
+    #[tokio::test]
+    async fn setup_core_custom_base_url() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-key".into()])
+            .with_selects(vec![1]) // messages
+            .with_inputs(vec!["http://proxy:4000".into()]);
+
+        cmd_setup_core("litellm", &prompter, &store).await.expect("setup_core");
+
+        let entry = store.get("litellm").await.expect("get");
+        assert_eq!(entry.api, flick::ApiKind::Messages);
+        assert_eq!(entry.base_url, "http://proxy:4000");
     }
 
     #[tokio::test]
     async fn setup_core_rejects_forward_slash() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let input = b"sk-key\n";
-        let mut output = Vec::new();
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-key".into()]);
 
-        let result = cmd_setup_core("my/provider", &input[..], &mut output, &store).await;
+        let result = cmd_setup_core("my/provider", &prompter, &store).await;
         assert!(result.is_err(), "forward slash in provider name should be rejected");
     }
 
@@ -357,11 +417,11 @@ mod tests {
     async fn setup_core_rejects_platform_separator() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let input = b"sk-key\n";
-        let mut output = Vec::new();
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-key".into()]);
 
         let name = format!("my{}provider", std::path::MAIN_SEPARATOR);
-        let result = cmd_setup_core(&name, &input[..], &mut output, &store).await;
+        let result = cmd_setup_core(&name, &prompter, &store).await;
         assert!(result.is_err(), "path separator in provider name should be rejected");
     }
 
@@ -369,10 +429,10 @@ mod tests {
     async fn setup_core_rejects_empty_name() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let input = b"sk-key\n";
-        let mut output = Vec::new();
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-key".into()]);
 
-        let result = cmd_setup_core("", &input[..], &mut output, &store).await;
+        let result = cmd_setup_core("", &prompter, &store).await;
         assert!(result.is_err(), "empty provider name should be rejected");
     }
 
@@ -380,10 +440,10 @@ mod tests {
     async fn setup_core_rejects_whitespace_only_name() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let input = b"sk-key\n";
-        let mut output = Vec::new();
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-key".into()]);
 
-        let result = cmd_setup_core("  ", &input[..], &mut output, &store).await;
+        let result = cmd_setup_core("  ", &prompter, &store).await;
         assert!(result.is_err(), "whitespace-only provider name should be rejected");
     }
 
@@ -391,13 +451,13 @@ mod tests {
     async fn setup_core_rejects_control_characters() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let input = b"sk-key\n";
-        let mut output = Vec::new();
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-key".into()]);
 
-        let result = cmd_setup_core("my\0provider", &input[..], &mut output, &store).await;
+        let result = cmd_setup_core("my\0provider", &prompter, &store).await;
         assert!(result.is_err(), "null byte in provider name should be rejected");
 
-        let result = cmd_setup_core("my\nprovider", &input[..], &mut output, &store).await;
+        let result = cmd_setup_core("my\nprovider", &prompter, &store).await;
         assert!(result.is_err(), "newline in provider name should be rejected");
     }
 
@@ -405,13 +465,13 @@ mod tests {
     async fn setup_core_rejects_dot_traversal() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let input = b"sk-key\n";
-        let mut output = Vec::new();
+        let prompter = MockPrompter::new()
+            .with_passwords(vec!["sk-key".into()]);
 
-        let result = cmd_setup_core(".", &input[..], &mut output, &store).await;
+        let result = cmd_setup_core(".", &prompter, &store).await;
         assert!(result.is_err(), "'.' as provider name should be rejected");
 
-        let result = cmd_setup_core("..", &input[..], &mut output, &store).await;
+        let result = cmd_setup_core("..", &prompter, &store).await;
         assert!(result.is_err(), "'..' as provider name should be rejected");
     }
 
@@ -419,30 +479,33 @@ mod tests {
     async fn setup_core_empty_key_aborts() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let input = b"\n";
-        let mut output = Vec::new();
+        let prompter = MockPrompter::new()
+            .with_passwords(vec![String::new()]);
 
-        let result = cmd_setup_core("test", &input[..], &mut output, &store).await;
+        let result = cmd_setup_core("test", &prompter, &store).await;
         assert!(result.is_err(), "empty key should return error");
 
-        let output_str = String::from_utf8(output).expect("utf8");
-        assert!(output_str.contains("No key provided"));
+        let messages = prompter.collected_messages();
+        assert!(messages.iter().any(|m| m.contains("No key provided")));
     }
 
     // -- cmd_list_core tests --
 
     #[tokio::test]
-    async fn list_core_outputs_provider_names() {
+    async fn list_core_outputs_tab_separated_columns() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        store.set("anthropic", "k1").await.expect("set");
-        store.set("openai", "k2").await.expect("set");
+        store.set("anthropic", "k1", flick::ApiKind::Messages, "https://api.anthropic.com").await.expect("set");
+        store.set("openai", "k2", flick::ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set");
 
         let mut output = Vec::new();
         cmd_list_core(&store, &mut output).await.expect("list_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert_eq!(text, "anthropic\nopenai\n");
+        assert_eq!(
+            text,
+            "anthropic\tmessages\thttps://api.anthropic.com\nopenai\tchat_completions\thttps://api.openai.com\n"
+        );
     }
 
     #[tokio::test]

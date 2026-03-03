@@ -39,8 +39,9 @@ pub struct Config {
 pub struct ModelConfig {
     provider: String,
     name: String,
-    #[serde(default = "default_max_tokens")]
-    max_tokens: u32,
+    /// Maximum *output* tokens (not context window). Matches API field name.
+    #[serde(default)]
+    max_tokens: Option<u32>,
     #[serde(default)]
     temperature: Option<f32>,
     #[serde(default)]
@@ -56,7 +57,7 @@ impl ModelConfig {
         &self.name
     }
 
-    pub const fn max_tokens(&self) -> u32 {
+    pub const fn max_tokens(&self) -> Option<u32> {
         self.max_tokens
     }
 
@@ -90,12 +91,7 @@ pub struct ProviderConfig {
     pub compat: Option<CompatFlags>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApiKind {
-    Messages,
-    ChatCompletions,
-}
+pub use crate::ApiKind;
 
 /// Per-provider quirk flags. All default to false.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -209,10 +205,6 @@ impl SandboxConfig {
     }
 }
 
-const fn default_max_tokens() -> u32 {
-    8192
-}
-
 impl Config {
     pub async fn load(path: &Path) -> Result<Self, ConfigError> {
         let text = tokio::fs::read_to_string(path).await.map_err(|e| {
@@ -292,7 +284,7 @@ impl Config {
         const BUILTIN_NAMES: &[&str] = &["read_file", "write_file", "list_directory", "shell_exec"];
         const _: () = assert!(BUILTIN_NAMES.len() == 4, "update BUILTIN_NAMES when ToolsConfig changes");
 
-        if self.model.max_tokens == 0 {
+        if self.model.max_tokens == Some(0) {
             return Err(ConfigError::InvalidModelConfig(
                 "max_tokens must be greater than 0".into(),
             ));
@@ -389,10 +381,12 @@ impl Config {
         if let Some(reasoning) = &self.model.reasoning {
             if provider.api == ApiKind::Messages {
                 let budget = anthropic_budget_tokens(reasoning.level);
-                if budget >= self.model.max_tokens {
+                let effective_max = self.model.max_tokens
+                    .or_else(|| crate::model::default_max_output_tokens(&self.model.name))
+                    .unwrap_or(8192);
+                if budget >= effective_max {
                     return Err(ConfigError::InvalidModelConfig(format!(
-                        "reasoning budget_tokens ({budget}) must be less than max_tokens ({})",
-                        self.model.max_tokens
+                        "reasoning budget_tokens ({budget}) must be less than max_tokens ({effective_max})",
                     )));
                 }
             }
@@ -506,7 +500,7 @@ api = "messages"
         let f = write_temp_config(toml);
         let config = Config::load(f.path()).await.expect("should parse");
         assert_eq!(config.model.name, "claude-sonnet-4-20250514");
-        assert_eq!(config.model.max_tokens, 8192);
+        assert!(config.model.max_tokens.is_none());
     }
 
     #[tokio::test]
@@ -858,6 +852,37 @@ api = "messages"
     }
 
     #[tokio::test]
+    async fn max_tokens_none_when_omitted() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+"#;
+        let f = write_temp_config(toml);
+        let config = Config::load(f.path()).await.expect("should parse");
+        assert!(config.model().max_tokens().is_none());
+    }
+
+    #[tokio::test]
+    async fn max_tokens_some_when_set() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+max_tokens = 4096
+
+[provider.test]
+api = "messages"
+"#;
+        let f = write_temp_config(toml);
+        let config = Config::load(f.path()).await.expect("should parse");
+        assert_eq!(config.model().max_tokens(), Some(4096));
+    }
+
+    #[tokio::test]
     async fn validate_temperature_out_of_range_rejected() {
         let toml = r#"
 [model]
@@ -1054,6 +1079,7 @@ api = "messages"
 [model]
 provider = "test"
 name = "claude-sonnet-4-20250514"
+max_tokens = 1024
 reasoning = {level = "high"}
 
 [provider.test]
@@ -1061,7 +1087,7 @@ api = "messages"
 "#;
         let f = write_temp_config(toml);
         let result = Config::load(f.path()).await;
-        // High = 32000, default max_tokens = 8192 → rejected
+        // High = 32000, max_tokens = 1024 → rejected
         assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("budget_tokens")));
     }
 
