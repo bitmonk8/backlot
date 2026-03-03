@@ -58,6 +58,8 @@ enum Commands {
         /// Provider name to configure
         provider: String,
     },
+    /// List onboarded providers
+    List,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -78,6 +80,7 @@ async fn main() {
             (r, raw)
         }
         Commands::Setup { provider } => (cmd_setup(&provider).await, false),
+        Commands::List => (cmd_list().await, false),
     };
 
     if let Err(e) = result {
@@ -241,6 +244,22 @@ async fn cmd_run_core(
     };
 
     agent::run(config, provider, tools, &mut context, emitter.as_mut()).await
+}
+
+/// Thin wrapper: uses real stdout and credential store.
+async fn cmd_list() -> Result<(), FlickError> {
+    let store = CredentialStore::new()?;
+    let stdout = std::io::stdout().lock();
+    cmd_list_core(&store, stdout).await
+}
+
+/// Testable core: writes one provider name per line to output.
+async fn cmd_list_core(store: &CredentialStore, mut output: impl Write) -> Result<(), FlickError> {
+    let providers = store.list().await?;
+    for name in &providers {
+        writeln!(output, "{name}").map_err(FlickError::Io)?;
+    }
+    Ok(())
 }
 
 /// Thin wrapper: uses real stdin/stderr and credential store.
@@ -408,6 +427,33 @@ mod tests {
 
         let output_str = String::from_utf8(output).expect("utf8");
         assert!(output_str.contains("No key provided"));
+    }
+
+    // -- cmd_list_core tests --
+
+    #[tokio::test]
+    async fn list_core_outputs_provider_names() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+        store.set("anthropic", "k1").await.expect("set");
+        store.set("openai", "k2").await.expect("set");
+
+        let mut output = Vec::new();
+        cmd_list_core(&store, &mut output).await.expect("list_core");
+
+        let text = String::from_utf8(output).expect("utf8");
+        assert_eq!(text, "anthropic\nopenai\n");
+    }
+
+    #[tokio::test]
+    async fn list_core_empty_produces_no_output() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+
+        let mut output = Vec::new();
+        cmd_list_core(&store, &mut output).await.expect("list_core");
+
+        assert!(output.is_empty());
     }
 
     // -- cmd_run_core tests --

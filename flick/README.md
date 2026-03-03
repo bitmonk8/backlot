@@ -47,6 +47,7 @@ flick run --config config.toml --query "What is Rust?"
 ```
 flick run --config <toml> [OPTIONS]
 flick setup <provider>
+flick list
 ```
 
 ### `flick run`
@@ -64,6 +65,10 @@ flick setup <provider>
 ### `flick setup`
 
 Interactive credential onboarding. Prompts for an API key and stores it encrypted at `~/.flick/credentials`.
+
+### `flick list`
+
+Lists onboarded provider names, one per line, sorted alphabetically. Produces no output if no credentials exist.
 
 ## Output Format
 
@@ -373,6 +378,9 @@ Credentials are stored at `~/.flick/credentials` (TOML, encrypted with ChaCha20-
 # Store a credential
 flick setup anthropic
 
+# List stored credentials
+flick list
+
 # Credentials are referenced by name in config
 [provider.anthropic]
 credential = "anthropic"   # matches the name passed to `flick setup`
@@ -395,7 +403,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-273 tests (238 lib, 10 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
+284 tests (247 lib, 12 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
 
 ## License
 

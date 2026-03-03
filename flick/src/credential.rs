@@ -36,6 +36,12 @@ impl CredentialStore {
         decrypt(&key, encrypted, provider)
     }
 
+    /// Return sorted provider names from the credentials file.
+    pub async fn list(&self) -> Result<Vec<String>, CredentialError> {
+        let creds = self.load_credentials_file().await?;
+        Ok(creds.into_keys().collect())
+    }
+
     /// Encrypt and store an API key for the given provider.
     pub async fn set(&self, provider: &str, api_key: &str) -> Result<(), CredentialError> {
         let key = self.load_or_create_secret_key().await?;
@@ -416,6 +422,40 @@ mod tests {
         let encrypted = encrypt(&key, "secret", "anthropic").expect("encrypt");
         let result = decrypt(&key, &encrypted, "openai");
         assert!(matches!(result, Err(CredentialError::DecryptionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn list_returns_provider_names_after_set() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+
+        store.set("openai", "key1").await.expect("set openai");
+        store.set("anthropic", "key2").await.expect("set anthropic");
+
+        let names = store.list().await.expect("list");
+        assert_eq!(names, vec!["anthropic", "openai"]);
+    }
+
+    #[tokio::test]
+    async fn list_returns_empty_when_no_credentials() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+
+        let names = store.list().await.expect("list");
+        assert!(names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_returns_sorted_order() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = CredentialStore::with_dir(dir.path().to_path_buf());
+
+        store.set("zebra", "k").await.expect("set");
+        store.set("alpha", "k").await.expect("set");
+        store.set("middle", "k").await.expect("set");
+
+        let names = store.list().await.expect("list");
+        assert_eq!(names, vec!["alpha", "middle", "zebra"]);
     }
 
     #[tokio::test]
