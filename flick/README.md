@@ -90,11 +90,13 @@ By default, Flick emits one JSON object per line to stdout:
 {"type":"tool_call","call_id":"tc_1","tool_name":"read_file","arguments":"{...}"}
 {"type":"tool_result","call_id":"tc_1","success":true,"output":"..."}
 {"type":"usage","input_tokens":1200,"output_tokens":340,"cache_creation_input_tokens":800,"cache_read_input_tokens":400}
-{"type":"done","usage":{"input_tokens":1200,"output_tokens":340,"cost_usd":0.0087,"iterations":2}}
+{"type":"done","usage":{"input_tokens":1200,"output_tokens":340,"cost_usd":0.0087,"iterations":2,"context_hash":"00a1b2c3d4e5f67890abcdef12345678"}}
 {"type":"error","message":"...","code":"rate_limit"}
 ```
 
 The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` fields are omitted when zero.
+
+The `done` event's `context_hash` is the xxh3-128 hex digest of the serialized context. Callers can resume the conversation via `--context ~/.flick/contexts/{context_hash}.json`.
 
 With `--raw`, only text content is printed as plain text. Errors go to stderr.
 
