@@ -1,6 +1,9 @@
 @echo off
 title Flick Project Assistant
 
+rem -- Configure environment --
+set PATH=%~dp0target\debug;%PATH%
+
 rem -- Bootstrap Claude Code as the Flick Project Assistant --
 rem The detailed prompt lives in prompts\project_assistant.md.
 rem --append-system-prompt preserves CLAUDE.md instructions.

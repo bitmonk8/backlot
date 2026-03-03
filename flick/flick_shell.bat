@@ -2,7 +2,7 @@
 title Flick shell
 
 rem -- Configure environment --
-rem set PATH=xxx;%PATH%
+set PATH=%~dp0target\debug;%PATH%
 
 rem -- Keep shell open --
 cmd /k echo Ready.

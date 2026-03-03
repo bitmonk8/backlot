@@ -1,5 +1,6 @@
 #!/bin/bash
 cd "$(dirname "$0")"
+export PATH="$PWD/target/debug:$PATH"
 
 echo "Starting Flick Project Assistant..."
 echo 'Type "go" or press Enter to get a project status summary.'
