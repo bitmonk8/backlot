@@ -100,7 +100,6 @@ Top-level string. Optional system prompt sent to the model.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `explicit_tool_choice_auto` | bool | false | Send `tool_choice: "auto"` explicitly |
-| `skip_stream_options` | bool | false | Omit `stream_options` from request (for providers that reject it) |
 
 ### `[tools]`
 

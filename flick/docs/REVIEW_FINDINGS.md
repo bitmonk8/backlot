@@ -1,6 +1,6 @@
 # Flick — Open Issues
 
-## Fix Later (26)
+## Fix Later (21)
 
 ### L1. No `deny_unknown_fields` — config typos silently ignored — `config.rs`
 
@@ -30,49 +30,21 @@ Misspelled config fields (e.g., `temprature`) are silently discarded. A user who
 - **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Quality
 
-### L5. `validate_params` uses `ProviderError::SseParse` for request-building validation — `chat_completions.rs:117-124`
+### L5. No handling of `refusal` field for OpenAI models — `chat_completions.rs:267-351`
 
-`"tools and output_schema cannot be used together"` is a validation error, not an SSE parse error. Error code reported as `"provider_sse_error"` instead of `"invalid_request"`.
-
-- **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
-- **Category:** Quality
-
-### L6. `unwrap_or(0)` on missing `index` field silently corrupts tool call state — `chat_completions.rs:376`
-
-`tc["index"].as_u64().unwrap_or(0)` silently defaults a missing `index` to 0. If the server sends malformed data, this merges the delta into tool call index 0, corrupting arguments silently.
-
-- **Severity:** Medium — **Fix Risk:** Low — **Effort:** Trivial
-- **Category:** Bug
-
-### L7. No handling of `refusal` field for OpenAI models — `chat_completions.rs:361-418`
-
-OpenAI models can return a `refusal` field in the delta instead of `content`. The parser silently ignores it. A refusal produces an empty response with no error — the user sees nothing.
+OpenAI models can return a `refusal` field in `choices[0].message` instead of `content`. The `parse_response` function silently ignores it. A refusal produces an empty response with no error — the user sees nothing.
 
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Bug
 
-### L8. Spawned SSE tasks not aborted on consumer drop — `sse.rs:51-165`
-
-When the consumer drops `ReceiverStream`, the parser task only discovers this on the next `tx.send()` failure. If the byte stream is stalled, two orphaned tasks linger for up to `idle_timeout` (5 minutes). The agent loop does not drop streams mid-flight, so this is unlikely to manifest.
-
-- **Severity:** Medium — **Fix Risk:** Medium — **Effort:** Medium
-- **Category:** Robustness
-
-### L9. Cache token usage not accumulated in agent loop — `agent.rs:96-99`
+### L6. Cache token usage not accumulated in agent loop — `agent.rs:96-99`
 
 `cache_creation_input_tokens` and `cache_read_input_tokens` are emitted per-request but not tracked in `RunSummary`. Cost computation uses only `input_tokens`/`output_tokens`. Cost will be inaccurate for cached Anthropic conversations.
 
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Robustness
 
-### L10. Usage accumulation assumes incremental events — `agent.rs:94-99`
-
-If a provider emits cumulative usage across multiple `Usage` events within a single stream, the `+=` accumulation double-counts. Contract between agent and provider SSE parsers needs explicit verification.
-
-- **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
-- **Category:** Bug
-
-### L11. `ContentBlock` has no unknown-variant fallback — `context.rs:29-55`
+### L7. `ContentBlock` has no unknown-variant fallback — `context.rs:29-55`
 
 Deserialization of an unknown `type` field (e.g., `{"type":"image"}`) produces a hard error. If a future provider or persisted context file contains an unfamiliar content block type, `Context::load_from_file` fails entirely.
 
@@ -100,14 +72,7 @@ Value `C:\Users\test\` becomes `"C:\Users\test\"` — the `\"` escapes the closi
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Security
 
-### L15. SSE `data:` multi-line concatenation not implemented — `sse.rs:171-182`
-
-Per the SSE spec, multiple `data:` lines should be concatenated with `\n`. Current implementation keeps only the last `data:` line. Neither Anthropic nor OpenAI currently emit multi-line data blocks.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
-- **Category:** Robustness
-
-### L16. No test for `build_request` / dry-run path — `tests/`
+### L12. No test for `build_request` / dry-run path — `tests/`
 
 The `--dry-run` code path that calls `build_request` is completely untested at the integration level. `MockProvider::build_request` returns `Ok(json!({}))` always.
 
@@ -149,9 +114,9 @@ When `params.output_schema` is `Some`, the Messages provider discards it without
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Trivial
 - **Category:** UX
 
-### L22. Empty thinking signature stored in context, breaks next API call — `agent.rs:116-121`
+### L22. Empty thinking signature stored in context, breaks next API call — `agent.rs`
 
-When the stream provides `ThinkingDelta` events but no `ThinkingSignature` event (e.g., Chat Completions provider, or a malformed Anthropic stream), a `ContentBlock::Thinking { signature: "" }` is pushed to context. When that context is later replayed to the Anthropic Messages API in a multi-turn session, the empty signature violates the API contract and produces a hard error on the next iteration.
+When the provider returns thinking content with an empty signature (e.g., Chat Completions provider, or a malformed Anthropic response), a `ContentBlock::Thinking { signature: "" }` is pushed to context. When that context is later replayed to the Anthropic Messages API in a multi-turn session, the empty signature violates the API contract and produces a hard error on the next iteration.
 
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Bug
@@ -186,7 +151,7 @@ For non-existent destination paths, `check_access` resolves an ancestor and appe
 
 ---
 
-## Fix When Touched (90)
+## Fix When Touched (72)
 
 ### T1. `read_stdin` accepts unlimited input size — `main.rs:246-248`
 
@@ -236,12 +201,6 @@ Public API accepts any `&str` including TOML-special characters. Caller validate
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
-### T9. No read timeout on Messages API HTTP client — `messages.rs:29-32`
-
-30s `connect_timeout` but no `read_timeout`. Server that sends headers slowly could hang the client indefinitely before SSE parsing begins.
-
-- **Severity:** Medium — **Fix Risk:** Low — **Effort:** Trivial
-
 ### T10. `build_body` does not enforce temperature + thinking mutual exclusion — `messages.rs:42-101`
 
 Anthropic API rejects requests with both `temperature` and thinking enabled. `build_body` does not guard; caller enforcement exists but is not defensive.
@@ -254,33 +213,9 @@ User requests reasoning but `max_tokens` is too small. Thinking is silently disa
 
 - **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
 
-### T12. `message_stop` does not flush pending tool call state — `messages.rs:310`
-
-Tool call blocks that never received `content_block_stop` produce no `ToolCallEnd`. Unbalanced start/end pairs on protocol anomalies.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
-
-### T13. `input_json_delta` for unknown block index silently dropped — `messages.rs:269-277`
-
-Delta for an index not in `block_states` silently returns empty events. No warning or error emitted for this protocol violation.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Trivial
-
 ### T14. `convert_message` drops Thinking blocks silently for Chat Completions — `chat_completions.rs:244-253`
 
 Thinking-only messages produce empty `"content": ""`. OpenAI accepts this but it is noise in the context window.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
-
-### T15. No read timeout on Chat Completions HTTP client — `chat_completions.rs:31-33`
-
-Same as T9 but for the Chat Completions provider.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Trivial
-
-### T16. `content_filter` and `length` finish reasons clear tool calls without `ToolCallEnd` — `chat_completions.rs:433-449`
-
-Consumer sees `ToolCallStart` events for tool calls that never complete. Unbalanced start/end pairs.
 
 - **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
 
@@ -289,36 +224,6 @@ Consumer sees `ToolCallStart` events for tool calls that never complete. Unbalan
 `.header("content-type", "application/json")` is redundant with `.json(&body)` which sets it automatically.
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
-
-### T18. SSE block delimiter only matches `\n\n`, not `\r\n\r\n` — `sse.rs:113`
-
-Proxies using `\r\n` line endings would cause blocks to never split. Buffer grows to 16 MiB limit and errors.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
-
-### T19. `chunk.to_vec()` unnecessary copy on common path — `sse.rs:81`
-
-Copies `Bytes` into `Vec<u8>` before UTF-8 validation. Could validate directly on `&chunk`.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
-
-### T20. `handle_http_error` discards response body for 401/403 — `sse.rs:232-245`
-
-`AuthFailed` variant has no message field. Useful diagnostic text from the response body is lost.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Trivial
-
-### T21. Duplicate `call_id` in `ToolCallStart` silently uses first match — `agent.rs:77-81`
-
-Two tool calls with the same `call_id` (protocol violation) would result in silent corruption — second call executes with default error state.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
-
-### T22. `ToolCallEnd` emitted before argument fixup — `agent.rs:42, 69-72`
-
-Consumer sees empty arguments in the event while agent internally uses correct values from delta accumulation.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
 
 ### T23. No error event emitted for iteration limit — `agent.rs:187-188`
 
@@ -406,21 +311,15 @@ Unit tests cover Windows quoting, but no integration test exercises template sub
 
 ### T37. JSON lines output test missing `Usage` event — `tests/integration.rs:281-322`
 
-Mock provider emits no `Usage` event. Does not test the common 3-line output (text_delta + usage + done).
+Mock provider emits no `Usage` event. Does not test the common 3-line output (text + usage + done).
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
-### T38. Non-fatal error test doesn't verify Done iteration count — `tests/agent.rs:316-351`
+### T38. Non-fatal error test doesn't verify Done iteration count — `tests/agent.rs`
 
-`run_stream_nonfatal_error_does_not_abort` does not confirm `iterations == 1` in the Done event.
+`run_nonfatal_warning_emitted` does not confirm `iterations == 1` in the Done event.
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
-
-### T39. SSE `parse_event_data` ignores multi-line `data:` fields per RFC — `sse.rs:171-182`
-
-Multiple `data:` lines should be concatenated with `\n`. Current implementation keeps only the last. Neither Anthropic nor OpenAI currently emits multi-line data blocks.
-
-- **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 
 ### T40. Whitespace-only stdin produces misleading `no_query` error — `main.rs:248, 173`
 
@@ -500,12 +399,6 @@ Neither the Unix nor Windows path calls `sync_all()` after writing the key file.
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
-### T53. `ping` SSE events cause unnecessary JSON parse — `messages.rs:209-214, 328`
-
-Anthropic sends periodic `ping` keep-alive events with `data: {}`. The parser requires both `event_type` and `data` to proceed, so pings pass through, triggering `serde_json::from_str` and then the wildcard catch-all. This allocates and immediately discards a `serde_json::Value` per keep-alive.
-
-- **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
-
 ### T54. System prompt serialised as plain string, blocking prompt caching — `messages.rs:53-55`
 
 `body["system"] = json!(system)` produces a JSON string. The Anthropic API also accepts `system` as an array of content blocks, which is required to attach `cache_control` headers for prompt caching.
@@ -530,12 +423,6 @@ OpenAI supports `"strict": true` on function tool definitions for schema-enforce
 
 - **Severity:** Low — **Fix Risk:** Medium — **Effort:** Low
 
-### T58. Duplicate tool-call index with different `id` silently ignored — `chat_completions.rs:379-398`
-
-If a server sends a second chunk with the same `index` but a different `id`, the `Entry::Vacant` guard silently discards the second id.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Trivial
-
 ### T59. Tool result `is_error` double-prefixes "Error:" in Chat Completions — `chat_completions.rs:195-196`
 
 Error content is wrapped as `format!("Error: {content}")`. Tool implementations in `tool.rs` already produce messages like `"Error: file not found"`, resulting in `"Error: Error: file not found"` in the API payload.
@@ -548,41 +435,17 @@ An empty `params.messages` would be serialised and rejected by the OpenAI API wi
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
-### T61. `ToolCallState` omits name, preventing truncation diagnostics — `chat_completions.rs:279-282`
-
-When `finish_reason` is `"length"` or `"content_filter"` and pending tool calls are discarded, the error message cannot include which tools were truncated.
-
-- **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
-
-### T62. SSE `id:` and `retry:` fields silently ignored — `sse.rs:171-182`
-
-`parse_event_data` handles only `event:` and `data:`. The SSE spec also defines `id:` (reconnect last-event-ID) and `retry:` (reconnect delay). Neither Anthropic nor OpenAI currently use these, but compliant proxies may send them.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
-
-### T63. HTTP 408 (Request Timeout) not classified as retryable — `sse.rs:232-283`
+### T63. HTTP 408 (Request Timeout) not classified as retryable — `http.rs`
 
 `handle_http_error` maps 408 to `ProviderError::Api`, which `classify_for_retry` treats as non-retryable. RFC 7231 explicitly permits retry on 408.
 
 - **Severity:** Low — **Fix Risk:** Low — **Effort:** Trivial
-
-### T64. SSE channel capacity 64 is an undocumented magic number — `sse.rs:48`
-
-`tokio::sync::mpsc::channel(64)` uses a hardcoded capacity with no named constant or comment explaining the choice.
-
-- **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
 ### T65. Blanket/manual `DynProvider` coherence trap undocumented — `provider.rs:68-83, 140-154`
 
 `ProviderInstance` has a manual `DynProvider` impl, coexisting with the blanket `impl<T: Provider> DynProvider for T`. If someone later adds `impl Provider for ProviderInstance`, the compiler will reject both impls as conflicting. No comment warns of this constraint.
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
-
-### T66. Fatal stream errors and `result?` have inconsistent consumer signaling — `agent.rs:41, 103-110`
-
-A `StreamEvent::Error { fatal: true }` emits the event to the consumer before returning `Err`. A `ProviderError` on line 41 (`result?`) returns `Err` without emitting any event. Consumers see different signaling for two functionally equivalent failure modes.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
 
 ### T67. Tool panic in `join_all` aborts loop without emitting error event — `agent.rs:156-167`
 
@@ -601,12 +464,6 @@ If a tool execution future panics (e.g., a programming error in a custom-tool ha
 `entry.file_type().await?` propagates an error for one broken directory entry (e.g., a dangling symlink in a TOCTOU window), aborting the entire listing. The remaining valid entries are lost.
 
 - **Severity:** Low — **Fix Risk:** Low — **Effort:** Trivial
-
-### T70. `ThinkingSignature` events concatenated instead of replaced — `agent.rs:51-53`
-
-`current_thinking_signature.push_str(&signature)` appends to the signature string. The Anthropic API sends a single opaque signature value, not a stream of deltas. Multiple `ThinkingSignature` events (protocol anomaly) would produce a concatenated invalid string.
-
-- **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
 ### T71. `RunSummary` missing cache token count fields — `event.rs:57-63`
 
@@ -640,7 +497,7 @@ Deserialised contexts bypass all push-method invariants. A persisted file could 
 
 ### T76. `ProviderError` missing `InvalidRequest` variant — `error.rs:78-100`
 
-L5 documents that `SseParse` is misused for client-side validation errors. The root cause is the absence of an `InvalidRequest(String)` (or `ValidationFailed`) variant.
+`chat_completions::validate_params` uses `ResponseParse` for client-side validation errors (e.g., tools + output_schema mutual exclusion). The root cause is the absence of an `InvalidRequest(String)` (or `ValidationFailed`) variant.
 
 - **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
 
@@ -653,18 +510,6 @@ Any `serde_json::Error` propagated via `?` in a `FlickError` context becomes `Fl
 ### T78. `Message.content` missing `#[serde(default)]` — `context.rs:16-20`
 
 A serialised message with the `content` key absent fails deserialisation with "missing field". Externally produced or hand-edited context files may omit it.
-
-- **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
-
-### T79. `MockProvider::new` has misleading `const` qualifier — `tests/common/mod.rs:50`
-
-`const fn MockProvider::new(...)` takes `Vec<Vec<StreamEvent>>` which heap-allocates at runtime. `const fn` implies compile-time constructibility but the function is always called at runtime.
-
-- **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
-
-### T80. No test for multiple `ThinkingSignature` events in one iteration — `agent.rs:51-53`
-
-The integration and agent tests send exactly one `ThinkingSignature`. There is no test documenting or verifying behaviour when two arrive (which would concatenate per T70).
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
@@ -688,7 +533,7 @@ The integration and agent tests send exactly one `ThinkingSignature`. There is n
 
 ### T84. No raw-mode integration test with tool calls — `tests/integration.rs`
 
-`end_to_end_raw_output` exercises text-only output. No test verifies that `RawEmitter` silently drops `ToolCallStart`, `ToolCallDelta`, `ToolCallEnd`, and `ToolResult` events.
+`end_to_end_raw_output` exercises text-only output. No test verifies that `RawEmitter` silently drops `ToolCall` and `ToolResult` events.
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Low
 
@@ -716,14 +561,29 @@ All test `StreamEvent::Usage` events set `cache_creation_input_tokens: 0` and `c
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
-### T89. No test for multiple `Usage` events in a single iteration — `agent.rs:96-98`
+---
 
-`run_usage_accumulation_across_iterations` covers cross-iteration accumulation (one `Usage` per iteration). No test verifies intra-iteration accumulation when a provider emits mid-stream and final `Usage` events within one stream.
+## Post-SSE Removal Simplifications
 
-- **Severity:** Medium — **Fix Risk:** None — **Effort:** Trivial
+SSE/streaming support was removed (src/provider/sse.rs deleted, non-streaming `ModelResponse` path only). All vestiges fixed.
 
-### T90. `run_tool_call_delta_unknown_id` asserts only no-crash — `tests/agent.rs:140-156`
+### ~~S1. `StreamEvent` → `Event` rename~~ — DONE
 
-The test sends a `ToolCallDelta` with an unknown `call_id` and asserts `result.unwrap()`. It does not assert that no `ToolResult` event was emitted or that context state is unchanged.
+### ~~S2. Comment/doc vestiges of streaming~~ — DONE
 
-- **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
+### ~~S3. Vestigial `stream` assertions in provider tests~~ — DONE
+
+### S4. `futures-util` dependency used only for `join_all` — `Cargo.toml:20`, `agent.rs:1`
+
+The entire `futures-util` crate (with `alloc` feature) is pulled in for a single `join_all` call in `execute_tools`. Alternatives:
+- Inline a 10-line `join_all` equivalent using `Pin<Box<dyn Future>>` and manual polling
+- Accept the dependency (it is lightweight and well-maintained)
+
+Not a clear win — document for awareness. The dependency is justified if concurrent tool execution remains important.
+
+- **Fix Risk:** Low — **Effort:** Low
+
+### ~~S5. `ProviderInstance::inner()` vtable indirection~~ — DONE
+
+### ~~S6. Stale references in existing findings~~ — DONE
+

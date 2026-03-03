@@ -1,6 +1,6 @@
 # Flick
 
-Ultra-small, ultra-fast command-line LLM agent written in Rust. Takes a TOML config and a query, streams typed events to stdout, and executes tools via an agent loop.
+Ultra-small, ultra-fast command-line LLM agent written in Rust. Takes a TOML config and a query, emits typed events to stdout, and executes tools via an agent loop.
 
 ## Requirements
 
@@ -65,18 +65,16 @@ flick setup <provider>
 
 Interactive credential onboarding. Prompts for an API key and stores it encrypted at `~/.flick/credentials`.
 
-## Streaming Output
+## Output Format
 
 By default, Flick emits one JSON object per line to stdout:
 
 ```jsonl
-{"type":"text_delta","text":"Hello "}
-{"type":"thinking_delta","text":"..."}
-{"type":"tool_call_start","call_id":"tc_1","tool_name":"read_file"}
-{"type":"tool_call_delta","call_id":"tc_1","arguments_delta":"..."}
-{"type":"tool_call_end","call_id":"tc_1","arguments":"{...}"}
-{"type":"tool_result","call_id":"tc_1","success":true,"output":"..."}
+{"type":"text","text":"Hello, world!"}
+{"type":"thinking","text":"..."}
 {"type":"thinking_signature","signature":"sig_..."}
+{"type":"tool_call","call_id":"tc_1","tool_name":"read_file","arguments":"{...}"}
+{"type":"tool_result","call_id":"tc_1","success":true,"output":"..."}
 {"type":"usage","input_tokens":1200,"output_tokens":340,"cache_creation_input_tokens":800,"cache_read_input_tokens":400}
 {"type":"done","usage":{"input_tokens":1200,"output_tokens":340,"cost_usd":0.0087,"iterations":2}}
 {"type":"error","message":"...","code":"rate_limit"}
@@ -84,12 +82,12 @@ By default, Flick emits one JSON object per line to stdout:
 
 The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` fields are omitted when zero.
 
-With `--raw`, only text deltas are printed as plain text. Errors go to stderr.
+With `--raw`, only text content is printed as plain text. Errors go to stderr.
 
 ## Agent Loop
 
 1. Call provider with message history
-2. Stream events to stdout, accumulate text and tool calls
+2. Emit response events to stdout (text, thinking, tool calls, usage)
 3. Append assistant message to history
 4. If no tool calls, emit `done` and exit
 5. Execute tool calls, emit `tool_result` events
@@ -235,7 +233,6 @@ Compatibility flags for Chat Completions providers:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `explicit_tool_choice_auto` | bool | false | Send `tool_choice: "auto"` explicitly |
-| `skip_stream_options` | bool | false | Omit `stream_options` from request |
 
 ### `[tools]`
 
@@ -333,8 +330,6 @@ Ollama (local):
 [provider.ollama]
 api = "chat_completions"
 base_url = "http://localhost:11434"
-[provider.ollama.compat]
-skip_stream_options = true
 ```
 
 ## Credential Store
@@ -359,7 +354,7 @@ The initial HTTP request uses exponential backoff for transient errors:
 - **Defaults:** 3 retries, 500ms initial delay, 2x multiplier, 30s cap
 - **429 responses:** `Retry-After` header overrides computed backoff
 
-Retry applies only to the initial request. Once SSE streaming begins, no retries are attempted (events have already been emitted to stdout).
+Retry applies only to the HTTP request/response exchange.
 
 ## Testing
 
@@ -367,7 +362,7 @@ Retry applies only to the initial request. Once SSE streaming begins, no retries
 cargo test
 ```
 
-295 tests (263 lib, 4 bin, 16 agent, 12 integration). One additional Unix-only test for file permissions.
+241 tests (206 lib, 10 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
 
 ## License
 

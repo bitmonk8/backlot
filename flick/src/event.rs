@@ -1,31 +1,24 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufWriter, Write};
 
-// -- Stream events ---------------------------------------------------------
+// -- Events ----------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-pub enum StreamEvent {
-    TextDelta {
+pub enum Event {
+    Text {
         text: String,
     },
-    ThinkingDelta {
+    Thinking {
         text: String,
     },
     ThinkingSignature {
         signature: String,
     },
-    ToolCallStart {
+    ToolCall {
         call_id: String,
         tool_name: String,
-    },
-    ToolCallDelta {
-        call_id: String,
-        arguments_delta: String,
-    },
-    ToolCallEnd {
-        call_id: String,
         arguments: String,
     },
     ToolResult {
@@ -70,7 +63,7 @@ const fn is_zero(v: &u64) -> bool {
 // -- Event emitters --------------------------------------------------------
 
 pub trait EventEmitter {
-    fn emit(&mut self, event: &StreamEvent);
+    fn emit(&mut self, event: &Event);
 }
 
 /// Emits one JSON object per line to the given writer.
@@ -89,11 +82,11 @@ impl<W: Write> JsonLinesEmitter<W> {
 }
 
 impl<W: Write> EventEmitter for JsonLinesEmitter<W> {
-    fn emit(&mut self, event: &StreamEvent) {
+    fn emit(&mut self, event: &Event) {
         if self.broken {
             return;
         }
-        // Serialization of StreamEvent should never fail; if it does we
+        // Serialization of Event should never fail; if it does we
         // silently drop the event rather than panicking on stdout I/O.
         if serde_json::to_writer(&mut self.writer, event).is_err() {
             self.broken = true;
@@ -105,7 +98,7 @@ impl<W: Write> EventEmitter for JsonLinesEmitter<W> {
     }
 }
 
-/// Emits plain text for `text_delta` events, ignores structured events.
+/// Emits plain text for `text` events, ignores structured events.
 pub struct RawEmitter<W: Write> {
     writer: BufWriter<W>,
     broken: bool,
@@ -121,18 +114,18 @@ impl<W: Write> RawEmitter<W> {
 }
 
 impl<W: Write> EventEmitter for RawEmitter<W> {
-    fn emit(&mut self, event: &StreamEvent) {
+    fn emit(&mut self, event: &Event) {
         if self.broken {
             return;
         }
         let result = match event {
-            StreamEvent::TextDelta { text } => {
+            Event::Text { text } => {
                 write!(self.writer, "{text}").and_then(|()| self.writer.flush())
             }
-            StreamEvent::Done { .. } => {
+            Event::Done { .. } => {
                 writeln!(self.writer).and_then(|()| self.writer.flush())
             }
-            StreamEvent::Error { message, fatal, .. } => {
+            Event::Error { message, fatal, .. } => {
                 let prefix = if *fatal { "Error" } else { "Warning" };
                 writeln!(self.writer, "\n{prefix}: {message}").and_then(|()| self.writer.flush())
             }
@@ -154,14 +147,14 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::TextDelta {
+            emitter.emit(&Event::Text {
                 text: "hello".into(),
             });
         }
         let output = String::from_utf8(buf).expect("valid utf8");
         let parsed: serde_json::Value =
             serde_json::from_str(output.trim()).expect("valid JSON");
-        assert_eq!(parsed["type"], "text_delta");
+        assert_eq!(parsed["type"], "text");
         assert_eq!(parsed["text"], "hello");
     }
 
@@ -170,10 +163,10 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::TextDelta {
+            emitter.emit(&Event::Text {
                 text: "a".into(),
             });
-            emitter.emit(&StreamEvent::TextDelta {
+            emitter.emit(&Event::Text {
                 text: "b".into(),
             });
         }
@@ -182,14 +175,14 @@ mod tests {
     }
 
     #[test]
-    fn raw_emitter_outputs_text_delta() {
+    fn raw_emitter_outputs_text() {
         let mut buf = Vec::new();
         {
             let mut emitter = RawEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::TextDelta {
+            emitter.emit(&Event::Text {
                 text: "hello".into(),
             });
-            emitter.emit(&StreamEvent::TextDelta {
+            emitter.emit(&Event::Text {
                 text: " world".into(),
             });
         }
@@ -202,15 +195,16 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut emitter = RawEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::Usage {
+            emitter.emit(&Event::Usage {
                 input_tokens: 100,
                 output_tokens: 50,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             });
-            emitter.emit(&StreamEvent::ToolCallStart {
+            emitter.emit(&Event::ToolCall {
                 call_id: "c1".into(),
                 tool_name: "read_file".into(),
+                arguments: "{}".into(),
             });
         }
         let output = String::from_utf8(buf).expect("valid utf8");
@@ -222,7 +216,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::Done {
+            emitter.emit(&Event::Done {
                 usage: RunSummary {
                     input_tokens: 100,
                     output_tokens: 50,
@@ -244,7 +238,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut emitter = RawEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::Error {
+            emitter.emit(&Event::Error {
                 message: "something broke".into(),
                 code: "test_error".into(),
                 fatal: true,
@@ -267,56 +261,26 @@ mod tests {
         }
         let mut emitter = JsonLinesEmitter::new(FailWriter);
         // Should not panic
-        emitter.emit(&StreamEvent::TextDelta { text: "test".into() });
+        emitter.emit(&Event::Text { text: "test".into() });
     }
 
     #[test]
-    fn json_lines_emitter_tool_call_start() {
+    fn json_lines_emitter_tool_call() {
         let mut buf = Vec::new();
         {
             let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::ToolCallStart {
+            emitter.emit(&Event::ToolCall {
                 call_id: "tc_1".into(),
                 tool_name: "read_file".into(),
+                arguments: r#"{"path":"/tmp"}"#.into(),
             });
         }
         let output = String::from_utf8(buf).expect("valid utf8");
         let parsed: serde_json::Value = serde_json::from_str(output.trim()).expect("valid JSON");
-        assert_eq!(parsed["type"], "tool_call_start");
+        assert_eq!(parsed["type"], "tool_call");
         assert_eq!(parsed["call_id"], "tc_1");
         assert_eq!(parsed["tool_name"], "read_file");
-    }
-
-    #[test]
-    fn json_lines_emitter_tool_call_delta() {
-        let mut buf = Vec::new();
-        {
-            let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::ToolCallDelta {
-                call_id: "tc_1".into(),
-                arguments_delta: "{\"path\"".into(),
-            });
-        }
-        let output = String::from_utf8(buf).expect("valid utf8");
-        let parsed: serde_json::Value = serde_json::from_str(output.trim()).expect("valid JSON");
-        assert_eq!(parsed["type"], "tool_call_delta");
-        assert_eq!(parsed["call_id"], "tc_1");
-    }
-
-    #[test]
-    fn json_lines_emitter_tool_call_end() {
-        let mut buf = Vec::new();
-        {
-            let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::ToolCallEnd {
-                call_id: "tc_1".into(),
-                arguments: "{\"path\":\"/tmp\"}".into(),
-            });
-        }
-        let output = String::from_utf8(buf).expect("valid utf8");
-        let parsed: serde_json::Value = serde_json::from_str(output.trim()).expect("valid JSON");
-        assert_eq!(parsed["type"], "tool_call_end");
-        assert_eq!(parsed["arguments"], "{\"path\":\"/tmp\"}");
+        assert_eq!(parsed["arguments"], r#"{"path":"/tmp"}"#);
     }
 
     #[test]
@@ -324,7 +288,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::ToolResult {
+            emitter.emit(&Event::ToolResult {
                 call_id: "tc_1".into(),
                 success: true,
                 output: "file contents".into(),
@@ -337,18 +301,18 @@ mod tests {
     }
 
     #[test]
-    fn json_lines_emitter_thinking_delta_and_signature() {
+    fn json_lines_emitter_thinking_and_signature() {
         let mut buf = Vec::new();
         {
             let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::ThinkingDelta { text: "hmm".into() });
-            emitter.emit(&StreamEvent::ThinkingSignature { signature: "sig_abc".into() });
+            emitter.emit(&Event::Thinking { text: "hmm".into() });
+            emitter.emit(&Event::ThinkingSignature { signature: "sig_abc".into() });
         }
         let output = String::from_utf8(buf).expect("valid utf8");
         let lines: Vec<&str> = output.trim().lines().collect();
         assert_eq!(lines.len(), 2);
         let p1: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON");
-        assert_eq!(p1["type"], "thinking_delta");
+        assert_eq!(p1["type"], "thinking");
         assert_eq!(p1["text"], "hmm");
         let p2: serde_json::Value = serde_json::from_str(lines[1]).expect("valid JSON");
         assert_eq!(p2["type"], "thinking_signature");
@@ -360,7 +324,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::Error {
+            emitter.emit(&Event::Error {
                 message: "something went wrong".into(),
                 code: "test_error".into(),
                 fatal: true,
@@ -386,20 +350,20 @@ mod tests {
         }
         let mut emitter = RawEmitter::new(FailWriter);
         // None of these should panic
-        emitter.emit(&StreamEvent::TextDelta { text: "test".into() });
-        emitter.emit(&StreamEvent::Done { usage: RunSummary::default() });
-        emitter.emit(&StreamEvent::Error { message: "err".into(), code: "e".into(), fatal: true });
+        emitter.emit(&Event::Text { text: "test".into() });
+        emitter.emit(&Event::Done { usage: RunSummary::default() });
+        emitter.emit(&Event::Error { message: "err".into(), code: "e".into(), fatal: true });
     }
 
     #[test]
-    fn raw_emitter_thinking_delta_ignored() {
+    fn raw_emitter_thinking_ignored() {
         let mut buf = Vec::new();
         {
             let mut emitter = RawEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::ThinkingDelta {
+            emitter.emit(&Event::Thinking {
                 text: "reasoning step".into(),
             });
-            emitter.emit(&StreamEvent::ThinkingSignature {
+            emitter.emit(&Event::ThinkingSignature {
                 signature: "sig_abc".into(),
             });
         }
@@ -412,7 +376,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut emitter = JsonLinesEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::Usage {
+            emitter.emit(&Event::Usage {
                 input_tokens: 42,
                 output_tokens: 7,
                 cache_creation_input_tokens: 0,
@@ -431,10 +395,10 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut emitter = RawEmitter::new(&mut buf);
-            emitter.emit(&StreamEvent::TextDelta {
+            emitter.emit(&Event::Text {
                 text: "end".into(),
             });
-            emitter.emit(&StreamEvent::Done {
+            emitter.emit(&Event::Done {
                 usage: RunSummary::default(),
             });
         }

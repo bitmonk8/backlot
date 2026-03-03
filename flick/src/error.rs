@@ -38,9 +38,7 @@ impl FlickError {
                 ProviderError::AuthFailed => "auth_failed",
                 ProviderError::Api { .. } => "api_error",
                 ProviderError::Http(_) => "provider_http_error",
-                ProviderError::SseParse(_) => "provider_sse_error",
-                ProviderError::StreamTimeout(_) => "stream_timeout",
-                ProviderError::StreamError(_) => "stream_error",
+                ProviderError::ResponseParse(_) => "response_parse_error",
             },
             Self::Config(_) => "config_error",
             Self::Credential(_) => "credential_error",
@@ -83,20 +81,14 @@ pub enum ProviderError {
     #[error("API error ({status}): {message}")]
     Api { status: u16, message: String },
 
-    #[error("SSE parse error: {0}")]
-    SseParse(String),
+    #[error("response parse error: {0}")]
+    ResponseParse(String),
 
     #[error("rate limited{}", .retry_after_ms.as_ref().map_or_else(String::new, |ms| format!(" (retry after {ms}ms)")))]
     RateLimited { retry_after_ms: Option<u64> },
 
     #[error("authentication failed")]
     AuthFailed,
-
-    #[error("SSE stream idle timeout ({0}s without data)")]
-    StreamTimeout(u64),
-
-    #[error("stream error: {0}")]
-    StreamError(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -145,8 +137,8 @@ mod tests {
         let api = ProviderError::Api { status: 500, message: "internal".into() };
         assert_eq!(api.to_string(), "API error (500): internal");
 
-        let sse = ProviderError::SseParse("bad data".into());
-        assert_eq!(sse.to_string(), "SSE parse error: bad data");
+        let rp = ProviderError::ResponseParse("bad data".into());
+        assert_eq!(rp.to_string(), "response parse error: bad data");
 
         let rl_with = ProviderError::RateLimited { retry_after_ms: Some(3000) };
         assert!(rl_with.to_string().contains("3000ms"));
@@ -155,9 +147,6 @@ mod tests {
         assert_eq!(rl_without.to_string(), "rate limited");
 
         assert_eq!(ProviderError::AuthFailed.to_string(), "authentication failed");
-
-        let st = ProviderError::StreamTimeout(300);
-        assert!(st.to_string().contains("300s"));
     }
 
     #[test]
@@ -221,15 +210,9 @@ mod tests {
     }
 
     #[test]
-    fn code_provider_sse_parse() {
-        let e = FlickError::Provider(ProviderError::SseParse("bad".into()));
-        assert_eq!(e.code(), "provider_sse_error");
-    }
-
-    #[test]
-    fn code_stream_timeout() {
-        let e = FlickError::Provider(ProviderError::StreamTimeout(300));
-        assert_eq!(e.code(), "stream_timeout");
+    fn code_response_parse() {
+        let e = FlickError::Provider(ProviderError::ResponseParse("bad".into()));
+        assert_eq!(e.code(), "response_parse_error");
     }
 
     #[test]

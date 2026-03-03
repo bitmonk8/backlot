@@ -4,7 +4,7 @@
 
 Flick is an ultra-small, ultra-fast command-line tool written in Rust. It replaces ZeroClaw as the agent primitive for [Epic](../../../epic/).
 
-Flick takes a TOML config and a query, sends the query to an LLM, streams typed events to stdout, and executes tools internally via an agent loop.
+Flick takes a TOML config and a query, sends the query to an LLM, emits typed events to stdout, and executes tools internally via an agent loop.
 
 ## Relationship to Epic
 
@@ -13,7 +13,7 @@ Epic invokes Flick as a subprocess. Flick handles a single agent session (query 
 | Project | Role |
 |---------|------|
 | Epic | Orchestrator — recursive task decomposition, state management, TUI |
-| Flick | Agent primitive — LLM call with tools, streaming output, agent loop |
+| Flick | Agent primitive — LLM call with tools, JSON-lines output, agent loop |
 
 ## CLI Interface
 
@@ -29,16 +29,14 @@ flick setup <provider>
 - `--raw`: plain text output instead of JSON-lines
 - `--dry-run`: dump API request as JSON, no model call
 
-## Streaming Output (JSON-lines, default)
+## Output Format (JSON-lines, default)
 
 ```json
-{"type":"text_delta","text":"Hello "}
-{"type":"thinking_delta","text":"..."}
-{"type":"tool_call_start","call_id":"tc_1","tool_name":"read_file"}
-{"type":"tool_call_delta","call_id":"tc_1","arguments_delta":"..."}
-{"type":"tool_call_end","call_id":"tc_1","arguments":"{...}"}
-{"type":"tool_result","call_id":"tc_1","success":true,"output":"..."}
+{"type":"text","text":"Hello, world!"}
+{"type":"thinking","text":"..."}
 {"type":"thinking_signature","signature":"sig_..."}
+{"type":"tool_call","call_id":"tc_1","tool_name":"read_file","arguments":"{...}"}
+{"type":"tool_result","call_id":"tc_1","success":true,"output":"..."}
 {"type":"usage","input_tokens":1200,"output_tokens":340,"cache_creation_input_tokens":800,"cache_read_input_tokens":400}
 {"type":"done","usage":{"input_tokens":1200,"output_tokens":340,"cost_usd":0.0087,"iterations":2}}
 {"type":"error","message":"...","code":"rate_limit","fatal":true}
@@ -49,7 +47,7 @@ The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` 
 ## Agent Loop
 
 1. Call provider with message history
-2. Stream events to stdout, accumulate text + tool calls
+2. Emit response events to stdout (text, thinking, tool calls, usage)
 3. Append assistant message to history
 4. If no tool calls → emit `done`, exit
 5. Execute tool calls, emit `tool_result` events

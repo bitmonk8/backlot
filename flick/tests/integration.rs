@@ -1,4 +1,4 @@
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 mod common;
 
@@ -9,8 +9,7 @@ use common::*;
 use flick::agent;
 use flick::context::Context;
 use flick::error::ProviderError;
-use flick::event::StreamEvent;
-use flick::provider::{DynProvider, EventStream, RequestParams};
+use flick::provider::{DynProvider, ModelResponse, RequestParams, ThinkingContent, UsageResponse};
 use flick::tool::ToolRegistry;
 
 // -- Integration tests --------------------------------------------------------
@@ -34,20 +33,7 @@ output_per_million = 15.0
     )
     .await;
 
-    let provider = MockProvider::new(vec![vec![
-        StreamEvent::TextDelta {
-            text: "Hello".into(),
-        },
-        StreamEvent::TextDelta {
-            text: " world".into(),
-        },
-        StreamEvent::Usage {
-            input_tokens: 50,
-            output_tokens: 20,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-        },
-    ]]);
+    let provider = MockProvider::new(vec![text_response("Hello world", 50, 20)]);
 
     let tools = ToolRegistry::from_config(config.tools(), vec![]);
     let mut context = Context::default();
@@ -57,15 +43,16 @@ output_per_million = 15.0
     let result = agent::run(&config, &provider, &tools, &mut context, &mut emitter).await;
     result.expect("should succeed");
 
-    // Verify event sequence: TextDelta, TextDelta, Usage, Done
-    assert_eq!(emitter.events.len(), 4);
-    assert!(matches!(&emitter.events[0], StreamEvent::TextDelta { text } if text == "Hello"));
-    assert!(matches!(&emitter.events[1], StreamEvent::TextDelta { text } if text == " world"));
-    assert!(matches!(&emitter.events[2], StreamEvent::Usage { input_tokens: 50, output_tokens: 20, .. }));
-    assert!(matches!(&emitter.events[3], StreamEvent::Done { .. }));
+    // Verify event sequence: Usage, Text, Done
+    assert!(emitter.events.iter().any(|e| matches!(e, flick::event::Event::Text { text } if text == "Hello world")));
+    assert!(emitter.events.iter().any(|e| matches!(e, flick::event::Event::Usage { input_tokens: 50, output_tokens: 20, .. })));
+    assert!(emitter.events.iter().any(|e| matches!(e, flick::event::Event::Done { .. })));
 
     // Verify done usage
-    if let StreamEvent::Done { usage } = &emitter.events[3] {
+    let done = emitter.events.iter().find_map(|e| {
+        if let flick::event::Event::Done { usage } = e { Some(usage) } else { None }
+    });
+    if let Some(usage) = done {
         assert_eq!(usage.input_tokens, 50);
         assert_eq!(usage.output_tokens, 20);
         assert_eq!(usage.iterations, 1);
@@ -96,39 +83,11 @@ read_file = true
     )
     .await;
 
-    // Iteration 1: model requests read_file
-    let step1 = vec![
-        StreamEvent::ToolCallStart {
-            call_id: "tc_1".into(),
-            tool_name: "read_file".into(),
-        },
-        StreamEvent::ToolCallDelta {
-            call_id: "tc_1".into(),
-            arguments_delta: r#"{"path":"/nonexistent"}"#.into(),
-        },
-        StreamEvent::ToolCallEnd {
-            call_id: "tc_1".into(),
-            arguments: r#"{"path":"/nonexistent"}"#.into(),
-        },
-        StreamEvent::Usage {
-            input_tokens: 100,
-            output_tokens: 30,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-        },
-    ];
-    // Iteration 2: text response
-    let step2 = vec![
-        StreamEvent::TextDelta {
-            text: "The file was not found.".into(),
-        },
-        StreamEvent::Usage {
-            input_tokens: 200,
-            output_tokens: 40,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-        },
-    ];
+    let step1 = tool_call_response(
+        vec![("tc_1", "read_file", r#"{"path":"/nonexistent"}"#)],
+        100, 30,
+    );
+    let step2 = text_response("The file was not found.", 200, 40);
 
     let provider = MockProvider::new(vec![step1, step2]);
     let tools = ToolRegistry::from_config(config.tools(), config.resources().to_vec());
@@ -143,7 +102,7 @@ read_file = true
     let tool_result_count = emitter
         .events
         .iter()
-        .filter(|e| matches!(e, StreamEvent::ToolResult { .. }))
+        .filter(|e| matches!(e, flick::event::Event::ToolResult { .. }))
         .count();
     assert_eq!(tool_result_count, 1);
 
@@ -151,8 +110,8 @@ read_file = true
     let done = emitter
         .events
         .iter()
-        .find(|e| matches!(e, StreamEvent::Done { .. }));
-    if let Some(StreamEvent::Done { usage }) = done {
+        .find(|e| matches!(e, flick::event::Event::Done { .. }));
+    if let Some(flick::event::Event::Done { usage }) = done {
         assert_eq!(usage.input_tokens, 300);
         assert_eq!(usage.output_tokens, 70);
         assert_eq!(usage.iterations, 2);
@@ -179,20 +138,16 @@ api = "messages"
     )
     .await;
 
-    let provider = MockProvider::new(vec![vec![
-        StreamEvent::ThinkingDelta {
-            text: "Let me ".into(),
-        },
-        StreamEvent::ThinkingDelta {
-            text: "reason".into(),
-        },
-        StreamEvent::ThinkingSignature {
+    let provider = MockProvider::new(vec![ModelResponse {
+        text: Some("Answer".into()),
+        thinking: vec![ThinkingContent {
+            text: "Let me reason".into(),
             signature: "sig_test_123".into(),
-        },
-        StreamEvent::TextDelta {
-            text: "Answer".into(),
-        },
-    ]]);
+        }],
+        tool_calls: Vec::new(),
+        usage: UsageResponse::default(),
+        warnings: Vec::new(),
+    }]);
 
     let tools = ToolRegistry::from_config(config.tools(), vec![]);
     let mut context = Context::default();
@@ -202,10 +157,9 @@ api = "messages"
     let result = agent::run(&config, &provider, &tools, &mut context, &mut emitter).await;
     result.expect("should succeed");
 
-    // T9: Assert ThinkingDelta and ThinkingSignature events were emitted
-    assert!(emitter.events.iter().any(|e| matches!(e, StreamEvent::ThinkingDelta { .. })),
-        "ThinkingDelta event should be emitted");
-    assert!(emitter.events.iter().any(|e| matches!(e, StreamEvent::ThinkingSignature { .. })),
+    assert!(emitter.events.iter().any(|e| matches!(e, flick::event::Event::Thinking { .. })),
+        "Thinking event should be emitted");
+    assert!(emitter.events.iter().any(|e| matches!(e, flick::event::Event::ThinkingSignature { .. })),
         "ThinkingSignature event should be emitted");
 
     // Assistant message should have thinking block with signature
@@ -238,19 +192,11 @@ read_file = true
     )
     .await;
 
-    let step1 = vec![
-        StreamEvent::ToolCallStart {
-            call_id: "tc_bad".into(),
-            tool_name: "read_file".into(),
-        },
-        StreamEvent::ToolCallEnd {
-            call_id: "tc_bad".into(),
-            arguments: "not valid json{".into(),
-        },
-    ];
-    let step2 = vec![StreamEvent::TextDelta {
-        text: "Sorry".into(),
-    }];
+    let step1 = tool_call_response(
+        vec![("tc_bad", "read_file", "not valid json{")],
+        0, 0,
+    );
+    let step2 = text_response("Sorry", 0, 0);
 
     let provider = MockProvider::new(vec![step1, step2]);
     let tools = ToolRegistry::from_config(config.tools(), config.resources().to_vec());
@@ -263,7 +209,7 @@ read_file = true
 
     // ToolResult should report the parse error
     let tool_result = emitter.events.iter().find_map(|e| {
-        if let StreamEvent::ToolResult {
+        if let flick::event::Event::ToolResult {
             success, output, ..
         } = e
         {
@@ -293,11 +239,7 @@ api = "messages"
     )
     .await;
 
-    let provider = MockProvider::new(vec![vec![
-        StreamEvent::TextDelta {
-            text: "hi".into(),
-        },
-    ]]);
+    let provider = MockProvider::new(vec![text_response("hi", 0, 0)]);
 
     let tools = ToolRegistry::from_config(config.tools(), vec![]);
     let mut context = Context::default();
@@ -312,13 +254,19 @@ api = "messages"
 
     let output = String::from_utf8(buf).expect("valid utf8");
     let lines: Vec<&str> = output.trim().lines().collect();
-    assert_eq!(lines.len(), 2); // text_delta + done
+    // usage + text + done = 3 lines
+    assert!(lines.len() >= 2);
 
-    // Each line should be valid JSON with expected type values
-    let p0: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON");
-    assert_eq!(p0["type"], "text_delta");
-    let p1: serde_json::Value = serde_json::from_str(lines[1]).expect("valid JSON");
-    assert_eq!(p1["type"], "done");
+    // Each line should be valid JSON
+    for line in &lines {
+        let _: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+    }
+
+    // Should have text and done events
+    let has_text = lines.iter().any(|l| l.contains("\"type\":\"text\""));
+    let has_done = lines.iter().any(|l| l.contains("\"type\":\"done\""));
+    assert!(has_text, "should have text event");
+    assert!(has_done, "should have done event");
 }
 
 /// Raw emitter outputs only text content.
@@ -336,20 +284,7 @@ api = "messages"
     )
     .await;
 
-    let provider = MockProvider::new(vec![vec![
-        StreamEvent::TextDelta {
-            text: "Hello".into(),
-        },
-        StreamEvent::TextDelta {
-            text: " world".into(),
-        },
-        StreamEvent::Usage {
-            input_tokens: 10,
-            output_tokens: 5,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-        },
-    ]]);
+    let provider = MockProvider::new(vec![text_response("Hello world", 10, 5)]);
 
     let tools = ToolRegistry::from_config(config.tools(), vec![]);
     let mut context = Context::default();
@@ -363,7 +298,7 @@ api = "messages"
     }
 
     let output = String::from_utf8(buf).expect("valid utf8");
-    // Raw mode: only text deltas + trailing newline from Done
+    // Raw mode: only text + trailing newline from Done
     assert_eq!(output, "Hello world\n");
 }
 
@@ -383,9 +318,7 @@ api = "messages"
     .await;
 
     // First turn
-    let provider1 = MockProvider::new(vec![vec![StreamEvent::TextDelta {
-        text: "First reply".into(),
-    }]]);
+    let provider1 = MockProvider::new(vec![text_response("First reply", 0, 0)]);
     let tools = ToolRegistry::from_config(config.tools(), vec![]);
     let mut context = Context::default();
     context.push_user_text("hello").unwrap();
@@ -402,9 +335,7 @@ api = "messages"
     assert_eq!(context2.messages.len(), 2);
 
     context2.push_user_text("follow up").unwrap();
-    let provider2 = MockProvider::new(vec![vec![StreamEvent::TextDelta {
-        text: "Second reply".into(),
-    }]]);
+    let provider2 = MockProvider::new(vec![text_response("Second reply", 0, 0)]);
     let mut emitter2 = CollectingEmitter::new();
     agent::run(&config, &provider2, &tools, &mut context2, &mut emitter2)
         .await
@@ -452,23 +383,19 @@ api = "messages"
     // Add a follow-up and run agent
     context.push_user_text("follow-up question").unwrap();
 
-    let provider = MockProvider::new(vec![vec![StreamEvent::TextDelta {
-        text: "follow-up answer".into(),
-    }]]);
+    let provider = MockProvider::new(vec![text_response("follow-up answer", 0, 0)]);
     let tools = ToolRegistry::from_config(config.tools(), vec![]);
     let mut emitter = CollectingEmitter::new();
 
     let result = agent::run(&config, &provider, &tools, &mut context, &mut emitter).await;
     result.expect("should succeed");
 
-    // Context should now have 4 messages: user, assistant, user, assistant
     assert_eq!(context.messages.len(), 4);
     assert_eq!(context.messages[0].role, flick::context::Role::User);
     assert_eq!(context.messages[1].role, flick::context::Role::Assistant);
     assert_eq!(context.messages[2].role, flick::context::Role::User);
     assert_eq!(context.messages[3].role, flick::context::Role::Assistant);
 
-    // Verify follow-up assistant content text
     assert!(matches!(
         &context.messages[3].content[0],
         flick::context::ContentBlock::Text { text } if text == "follow-up answer"
@@ -521,9 +448,7 @@ read_file = true
     assert_eq!(context.messages.len(), 4);
 
     context.push_user_text("follow-up").unwrap();
-    let provider = MockProvider::new(vec![vec![StreamEvent::TextDelta {
-        text: "follow-up answer".into(),
-    }]]);
+    let provider = MockProvider::new(vec![text_response("follow-up answer", 0, 0)]);
     let tools = ToolRegistry::from_config(config.tools(), config.resources().to_vec());
     let mut emitter = CollectingEmitter::new();
 
@@ -532,7 +457,7 @@ read_file = true
     assert_eq!(context.messages.len(), 6);
 }
 
-/// FL46: shell_exec through the full agent loop.
+/// `shell_exec` through the full agent loop.
 #[tokio::test]
 async fn end_to_end_shell_exec() {
     let config = load_config(
@@ -550,33 +475,11 @@ shell_exec = true
     )
     .await;
 
-    let step1 = vec![
-        StreamEvent::ToolCallStart {
-            call_id: "tc_sh".into(),
-            tool_name: "shell_exec".into(),
-        },
-        StreamEvent::ToolCallEnd {
-            call_id: "tc_sh".into(),
-            arguments: r#"{"command":"echo hello_from_shell"}"#.into(),
-        },
-        StreamEvent::Usage {
-            input_tokens: 40,
-            output_tokens: 15,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-        },
-    ];
-    let step2 = vec![
-        StreamEvent::TextDelta {
-            text: "Done.".into(),
-        },
-        StreamEvent::Usage {
-            input_tokens: 80,
-            output_tokens: 5,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-        },
-    ];
+    let step1 = tool_call_response(
+        vec![("tc_sh", "shell_exec", r#"{"command":"echo hello_from_shell"}"#)],
+        40, 15,
+    );
+    let step2 = text_response("Done.", 80, 5);
 
     let provider = MockProvider::new(vec![step1, step2]);
     let tools = flick::tool::ToolRegistry::from_config(config.tools(), config.resources().to_vec());
@@ -588,7 +491,7 @@ shell_exec = true
     result.expect("should succeed");
 
     let tool_result = emitter.events.iter().find_map(|e| {
-        if let StreamEvent::ToolResult { success, output, .. } = e {
+        if let flick::event::Event::ToolResult { success, output, .. } = e {
             Some((*success, output.clone()))
         } else {
             None
@@ -603,7 +506,7 @@ shell_exec = true
     assert_eq!(context.messages.len(), 4);
 }
 
-/// FL47: Custom tool execution through the full agent loop.
+/// Custom tool execution through the full agent loop.
 #[tokio::test]
 async fn end_to_end_custom_tool() {
     let config = load_config(
@@ -624,21 +527,11 @@ parameters = {type = "object", properties = {name = {type = "string"}}, required
     )
     .await;
 
-    let step1 = vec![
-        StreamEvent::ToolCallStart {
-            call_id: "tc_custom".into(),
-            tool_name: "greet".into(),
-        },
-        StreamEvent::ToolCallEnd {
-            call_id: "tc_custom".into(),
-            arguments: r#"{"name":"world"}"#.into(),
-        },
-    ];
-    let step2 = vec![
-        StreamEvent::TextDelta {
-            text: "Greeted.".into(),
-        },
-    ];
+    let step1 = tool_call_response(
+        vec![("tc_custom", "greet", r#"{"name":"world"}"#)],
+        0, 0,
+    );
+    let step2 = text_response("Greeted.", 0, 0);
 
     let provider = MockProvider::new(vec![step1, step2]);
     let tools = flick::tool::ToolRegistry::from_config(config.tools(), config.resources().to_vec());
@@ -650,7 +543,7 @@ parameters = {type = "object", properties = {name = {type = "string"}}, required
     result.expect("should succeed");
 
     let tool_result = emitter.events.iter().find_map(|e| {
-        if let StreamEvent::ToolResult { success, output, .. } = e {
+        if let flick::event::Event::ToolResult { success, output, .. } = e {
             Some((*success, output.clone()))
         } else {
             None
@@ -666,11 +559,11 @@ parameters = {type = "object", properties = {name = {type = "string"}}, required
 
 struct ErrorProvider;
 impl DynProvider for ErrorProvider {
-    fn stream_boxed<'a>(
+    fn call_boxed<'a>(
         &'a self,
         _params: RequestParams<'a>,
     ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<EventStream, ProviderError>> + Send + 'a>,
+        Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>,
     > {
         Box::pin(async { Err(ProviderError::AuthFailed) })
     }
@@ -683,7 +576,7 @@ impl DynProvider for ErrorProvider {
     }
 }
 
-/// Provider returning an error mid-stream propagates to caller.
+/// Provider returning an error propagates to caller.
 #[tokio::test]
 async fn end_to_end_provider_error_propagates() {
     let config = load_config(

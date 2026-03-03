@@ -1,4 +1,4 @@
-#![allow(dead_code, clippy::expect_used)]
+#![allow(dead_code, clippy::expect_used, clippy::unwrap_used)]
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,9 +7,11 @@ use std::sync::Mutex;
 use flick::config::Config;
 use flick::context::Message;
 use flick::error::ProviderError;
-use flick::event::{EventEmitter, StreamEvent};
+use flick::event::{EventEmitter, Event};
 use flick::model::ReasoningLevel;
-use flick::provider::{DynProvider, EventStream, RequestParams, ToolDefinition};
+use flick::provider::{
+    DynProvider, ModelResponse, RequestParams, ToolDefinition, UsageResponse,
+};
 
 /// Owned mirror of `RequestParams` for test assertions.
 #[derive(Debug)]
@@ -39,23 +41,23 @@ impl CapturedParams {
     }
 }
 
-/// Mock provider that returns canned events per iteration.
+/// Mock provider that returns canned `ModelResponse` values per iteration.
 pub struct MockProvider {
-    steps: Vec<Vec<StreamEvent>>,
+    steps: Mutex<Vec<Option<ModelResponse>>>,
     call_count: AtomicUsize,
     captured: Mutex<Vec<CapturedParams>>,
 }
 
 impl MockProvider {
-    pub const fn new(steps: Vec<Vec<StreamEvent>>) -> Self {
+    pub fn new(steps: Vec<ModelResponse>) -> Self {
         Self {
-            steps,
+            steps: Mutex::new(steps.into_iter().map(Some).collect()),
             call_count: AtomicUsize::new(0),
             captured: Mutex::new(Vec::new()),
         }
     }
 
-    /// Returns all captured `RequestParams` from `stream_boxed` calls.
+    /// Returns all captured `RequestParams` from `call_boxed` calls.
     pub fn captured_params(&self) -> Vec<CapturedParams> {
         let mut guard = self.captured.lock().expect("captured mutex poisoned");
         std::mem::take(&mut *guard)
@@ -63,29 +65,29 @@ impl MockProvider {
 }
 
 impl DynProvider for MockProvider {
-    fn stream_boxed<'a>(
+    fn call_boxed<'a>(
         &'a self,
         params: RequestParams<'a>,
     ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<EventStream, ProviderError>> + Send + 'a>,
+        Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>,
     > {
         self.captured
             .lock()
             .expect("captured mutex poisoned")
             .push(CapturedParams::from_request(&params));
         let idx = self.call_count.fetch_add(1, Ordering::Relaxed);
-        let events = if idx < self.steps.len() {
-            self.steps[idx].clone()
-        } else {
-            panic!(
+        let response = {
+            let mut steps = self.steps.lock().expect("steps mutex poisoned");
+            assert!(
+                idx < steps.len(),
                 "MockProvider called more times than steps provided (call {idx}, only {} steps)",
-                self.steps.len()
+                steps.len()
             );
+            steps[idx]
+                .take()
+                .expect("MockProvider step already consumed")
         };
-        Box::pin(async move {
-            let stream = tokio_stream::iter(events.into_iter().map(Ok));
-            Ok(Box::pin(stream) as EventStream)
-        })
+        Box::pin(async move { Ok(response) })
     }
 
     fn build_request(
@@ -96,9 +98,82 @@ impl DynProvider for MockProvider {
     }
 }
 
+/// Helper to build a text-only `ModelResponse`.
+pub fn text_response(text: &str, input_tokens: u64, output_tokens: u64) -> ModelResponse {
+    ModelResponse {
+        text: Some(text.to_string()),
+        thinking: Vec::new(),
+        tool_calls: Vec::new(),
+        usage: UsageResponse {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        },
+        warnings: Vec::new(),
+    }
+}
+
+/// Helper to build a tool-call `ModelResponse`.
+pub fn tool_call_response(
+    calls: Vec<(&str, &str, &str)>, // (call_id, tool_name, arguments)
+    input_tokens: u64,
+    output_tokens: u64,
+) -> ModelResponse {
+    use flick::provider::ToolCallResponse;
+    ModelResponse {
+        text: None,
+        thinking: Vec::new(),
+        tool_calls: calls
+            .into_iter()
+            .map(|(id, name, args)| ToolCallResponse {
+                call_id: id.to_string(),
+                tool_name: name.to_string(),
+                arguments: args.to_string(),
+            })
+            .collect(),
+        usage: UsageResponse {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        },
+        warnings: Vec::new(),
+    }
+}
+
+/// Helper to build a `ModelResponse` with both text and tool calls.
+pub fn mixed_response(
+    text: &str,
+    calls: Vec<(&str, &str, &str)>,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> ModelResponse {
+    use flick::provider::ToolCallResponse;
+    ModelResponse {
+        text: Some(text.to_string()),
+        thinking: Vec::new(),
+        tool_calls: calls
+            .into_iter()
+            .map(|(id, name, args)| ToolCallResponse {
+                call_id: id.to_string(),
+                tool_name: name.to_string(),
+                arguments: args.to_string(),
+            })
+            .collect(),
+        usage: UsageResponse {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        },
+        warnings: Vec::new(),
+    }
+}
+
 /// Collects emitted events for assertions.
 pub struct CollectingEmitter {
-    pub events: Vec<StreamEvent>,
+    pub events: Vec<Event>,
 }
 
 impl CollectingEmitter {
@@ -108,7 +183,7 @@ impl CollectingEmitter {
 }
 
 impl EventEmitter for CollectingEmitter {
-    fn emit(&mut self, event: &StreamEvent) {
+    fn emit(&mut self, event: &Event) {
         self.events.push(event.clone());
     }
 }

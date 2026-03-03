@@ -99,8 +99,6 @@ pub enum ApiKind {
 pub struct CompatFlags {
     #[serde(default)]
     pub explicit_tool_choice_auto: bool,
-    #[serde(default)]
-    pub skip_stream_options: bool,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -685,26 +683,6 @@ explicit_tool_choice_auto = true
         let provider = config.active_provider().expect("provider should resolve");
         let compat = provider.compat.as_ref().expect("compat should be Some");
         assert!(compat.explicit_tool_choice_auto);
-    }
-
-    #[tokio::test]
-    async fn deserialize_skip_stream_options_flag() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-
-[provider.test]
-api = "chat_completions"
-
-[provider.test.compat]
-skip_stream_options = true
-"#;
-        let f = write_temp_config(toml);
-        let config = Config::load(f.path()).await.expect("should parse");
-        let provider = config.active_provider().expect("provider should resolve");
-        let compat = provider.compat.as_ref().expect("compat should be Some");
-        assert!(compat.skip_stream_options);
     }
 
     #[tokio::test]

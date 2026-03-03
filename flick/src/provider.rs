@@ -1,14 +1,12 @@
 pub mod messages;
 pub mod chat_completions;
-pub mod sse;
+pub mod http;
 
 use std::pin::Pin;
-use tokio_stream::Stream;
 
 use crate::config::ProviderConfig;
 use crate::context::Message;
 use crate::error::ProviderError;
-use crate::event::StreamEvent;
 use crate::model::ReasoningLevel;
 
 /// Parameters for a provider request.
@@ -32,16 +30,50 @@ pub struct ToolDefinition {
     pub input_schema: Option<serde_json::Value>,
 }
 
-pub type EventStream =
-    Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>;
+/// Complete response from a model provider.
+pub struct ModelResponse {
+    pub text: Option<String>,
+    pub thinking: Vec<ThinkingContent>,
+    pub tool_calls: Vec<ToolCallResponse>,
+    pub usage: UsageResponse,
+    pub warnings: Vec<Warning>,
+}
 
-/// Provider trait — two methods: stream and `build_request`.
+/// A single thinking block from the response.
+pub struct ThinkingContent {
+    pub text: String,
+    pub signature: String,
+}
+
+/// A single tool call from the response.
+pub struct ToolCallResponse {
+    pub call_id: String,
+    pub tool_name: String,
+    pub arguments: String,
+}
+
+/// Token usage from a single response.
+#[derive(Default)]
+pub struct UsageResponse {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+}
+
+/// Non-fatal warning from the provider (e.g. `max_tokens` truncation).
+pub struct Warning {
+    pub message: String,
+    pub code: String,
+}
+
+/// Provider trait — two methods: call and `build_request`.
 pub trait Provider: Send + Sync {
-    /// Stream events from the model.
-    fn stream(
+    /// Call the model and return a complete response.
+    fn call(
         &self,
         params: RequestParams<'_>,
-    ) -> impl std::future::Future<Output = Result<EventStream, ProviderError>> + Send;
+    ) -> impl std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send;
 
     /// Build the request body as JSON (for --dry-run).
     fn build_request(
@@ -56,29 +88,26 @@ pub enum ProviderInstance {
     ChatCompletions(chat_completions::ChatCompletionsProvider),
 }
 
-impl ProviderInstance {
-    fn inner(&self) -> &dyn DynProvider {
-        match self {
-            Self::Messages(p) => p,
-            Self::ChatCompletions(p) => p,
-        }
-    }
-}
-
 impl DynProvider for ProviderInstance {
-    fn stream_boxed<'a>(
+    fn call_boxed<'a>(
         &'a self,
         params: RequestParams<'a>,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<EventStream, ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
     {
-        self.inner().stream_boxed(params)
+        match self {
+            Self::Messages(p) => Box::pin(p.call(params)),
+            Self::ChatCompletions(p) => Box::pin(p.call(params)),
+        }
     }
 
     fn build_request(
         &self,
         params: RequestParams<'_>,
     ) -> Result<serde_json::Value, ProviderError> {
-        self.inner().build_request(params)
+        match self {
+            Self::Messages(p) => Provider::build_request(p, params),
+            Self::ChatCompletions(p) => Provider::build_request(p, params),
+        }
     }
 }
 
@@ -126,10 +155,10 @@ pub fn create_provider(
 
 /// Object-safe wrapper for Provider.
 pub trait DynProvider: Send + Sync {
-    fn stream_boxed<'a>(
+    fn call_boxed<'a>(
         &'a self,
         params: RequestParams<'a>,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<EventStream, ProviderError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>;
 
     fn build_request(
         &self,
@@ -138,11 +167,11 @@ pub trait DynProvider: Send + Sync {
 }
 
 impl<T: Provider> DynProvider for T {
-    fn stream_boxed<'a>(
+    fn call_boxed<'a>(
         &'a self,
         params: RequestParams<'a>,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<EventStream, ProviderError>> + Send + 'a>> {
-        Box::pin(self.stream(params))
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>> {
+        Box::pin(self.call(params))
     }
 
     fn build_request(
@@ -158,20 +187,7 @@ pub(crate) mod test_helpers {
     use crate::context::{ContentBlock, Message, Role};
     use crate::provider::ToolDefinition;
 
-    /// Wraps string slices into an SSE-like byte stream (shared by both provider
-    /// test modules).
-    pub fn byte_stream(
-        chunks: Vec<&str>,
-    ) -> impl tokio_stream::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static
-    {
-        let owned: Vec<_> = chunks
-            .into_iter()
-            .map(|s| Ok(bytes::Bytes::from(s.to_owned())))
-            .collect();
-        tokio_stream::iter(owned)
-    }
-
-    /// Single-user-message + empty-tools pair for build_body tests.
+    /// Single-user-message + empty-tools pair for `build_body` tests.
     pub fn minimal_params() -> (Vec<Message>, Vec<ToolDefinition>) {
         let msgs = vec![Message {
             role: Role::User,
@@ -213,7 +229,6 @@ mod tests {
             credential: None,
             compat: Some(CompatFlags {
                 explicit_tool_choice_auto: true,
-                ..CompatFlags::default()
             }),
         };
         let provider = create_provider(&config, "test-key".into());

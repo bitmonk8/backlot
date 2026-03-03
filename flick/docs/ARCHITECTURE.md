@@ -14,9 +14,9 @@ src/
   model.rs             ModelInfo, builtin registry, reasoning level mappings
   provider.rs          Provider trait, DynProvider, RequestParams, ToolDefinition, create_provider()
   provider/
-    messages.rs        Messages API (Anthropic), SSE parsing
-    chat_completions.rs  Chat Completions API, SSE parsing
-    sse.rs             Shared SSE parsing + HTTP retry with exponential backoff
+    messages.rs        Messages API (Anthropic), response parsing
+    chat_completions.rs  Chat Completions API, response parsing
+    http.rs            HTTP retry with exponential backoff
   tool.rs              ToolRegistry, builtin tools, custom tool execution, resource sandboxing
   agent.rs             Agent loop (query → tools → repeat)
 ```
@@ -30,9 +30,8 @@ CLI args
   → ToolRegistry::from_config()
   → Context (from --context file or empty)
   → agent::run()
-      ├─ provider.stream_boxed(params) → EventStream
+      ├─ provider.call_boxed(params) → ModelResponse
       ├─ emit events to stdout via EventEmitter
-      ├─ accumulate tool calls
       ├─ ToolRegistry::execute() for each tool call
       └─ loop until no tool calls or iteration limit
 ```
@@ -40,10 +39,10 @@ CLI args
 ## Provider Abstraction
 
 `Provider` trait with two methods:
-- `stream()` — returns `EventStream` (pinned boxed Stream of `Result<StreamEvent, ProviderError>`)
+- `call()` — returns `Result<ModelResponse, ProviderError>` (complete response)
 - `build_request()` — returns request body as JSON (for `--dry-run`)
 
-`DynProvider` is the object-safe wrapper (`stream_boxed()` adapts the async trait method for object safety). `create_provider()` dispatches by `ApiKind`.
+`DynProvider` is the object-safe wrapper (`call_boxed()` adapts the async trait method for object safety). `create_provider()` dispatches by `ApiKind`.
 
 Provider quirks are handled by `CompatFlags` (boolean fields in config), not by subclassing.
 
@@ -56,13 +55,7 @@ Provider quirks are handled by `CompatFlags` (boolean fields in config), not by 
 
 ## HTTP Retry
 
-Both providers use `sse::send_with_retry()` for the initial HTTP request. Retryable errors (429, 5xx, network errors) trigger exponential backoff. Non-retryable errors (401, 4xx client errors, SSE parse errors) fail immediately. The `Retry-After` header from 429 responses overrides the computed backoff. Defaults: 3 retries, 500ms initial delay, 2x multiplier, 30s cap.
-
-Retry applies only to the initial request/response exchange. Once a 2xx response is received and SSE parsing begins, no further retries are attempted — events have already been emitted to stdout and cannot be retracted.
-
-## Streaming
-
-SSE parsing happens in a spawned tokio task per provider. Events are sent through an mpsc channel and consumed as a `ReceiverStream`. The agent loop forwards events to the `EventEmitter` (JSON-lines or raw text).
+Both providers use `http::send_with_retry()` for HTTP requests. Retryable errors (429, 5xx, network errors) trigger exponential backoff. Non-retryable errors (401, 4xx client errors, response parse errors) fail immediately. The `Retry-After` header from 429 responses overrides the computed backoff. Defaults: 3 retries, 500ms initial delay, 2x multiplier, 30s cap.
 
 ## Tool Execution
 

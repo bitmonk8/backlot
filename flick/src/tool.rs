@@ -161,7 +161,7 @@ impl ToolRegistry {
                 match std::fs::canonicalize(&r.path) {
                     Ok(p) => resolved.push((p, r.access)),
                     Err(e) => {
-                        eprintln!("warning: resource path {:?} could not be resolved: {e}", r.path);
+                        eprintln!("warning: resource path {} could not be resolved: {e}", r.path.display());
                     }
                 }
             }
@@ -373,34 +373,33 @@ async fn check_access(
         }
     }
 
-    let canonical = match tokio::fs::canonicalize(path).await {
-        Ok(p) => p,
-        Err(_) => {
-            // Path doesn't exist yet — walk ancestors until one resolves.
-            // Handles multi-level nonexistent directories (e.g. resource/a/b/c/file.txt).
-            let mut current = path.to_path_buf();
-            let mut suffixes: Vec<std::ffi::OsString> = Vec::new();
-            loop {
-                match current.parent() {
-                    Some(parent) if !parent.as_os_str().is_empty() => {
-                        if let Some(name) = current.file_name() {
-                            suffixes.push(name.to_os_string());
+    let canonical = if let Ok(p) = tokio::fs::canonicalize(path).await {
+        p
+    } else {
+        // Path doesn't exist yet — walk ancestors until one resolves.
+        // Handles multi-level nonexistent directories (e.g. resource/a/b/c/file.txt).
+        let mut current = path.to_path_buf();
+        let mut suffixes: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            match current.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => {
+                    if let Some(name) = current.file_name() {
+                        suffixes.push(name.to_os_string());
+                    }
+                    match tokio::fs::canonicalize(parent).await {
+                        Ok(resolved) => {
+                            let mut result = resolved;
+                            for component in suffixes.into_iter().rev() {
+                                result = result.join(component);
+                            }
+                            break result;
                         }
-                        match tokio::fs::canonicalize(parent).await {
-                            Ok(resolved) => {
-                                let mut result = resolved;
-                                for component in suffixes.into_iter().rev() {
-                                    result = result.join(component);
-                                }
-                                break result;
-                            }
-                            Err(_) => {
-                                current = parent.to_path_buf();
-                            }
+                        Err(_) => {
+                            current = parent.to_path_buf();
                         }
                     }
-                    _ => return Err(ToolError::PathDenied(path.to_path_buf())),
                 }
+                _ => return Err(ToolError::PathDenied(path.to_path_buf())),
             }
         }
     };
@@ -925,6 +924,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let file_path = dir.path().join("large.txt");
         // Create a file just over the 10 MiB limit
+        #[allow(clippy::cast_possible_truncation)]
         let oversized = vec![b'x'; (READ_FILE_MAX_BYTES as usize) + 1];
         tokio::fs::write(&file_path, &oversized).await.expect("write");
         let tools = ToolRegistry::from_config(
@@ -950,6 +950,7 @@ mod tests {
     async fn read_file_at_exact_max_bytes_succeeds() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let file_path = dir.path().join("exact.txt");
+        #[allow(clippy::cast_possible_truncation)]
         let exact = vec![b'x'; READ_FILE_MAX_BYTES as usize];
         tokio::fs::write(&file_path, &exact).await.expect("write");
         let tools = ToolRegistry::from_config(

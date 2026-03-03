@@ -8,7 +8,7 @@ use flick::config::Config;
 use flick::context::Context;
 use flick::credential::CredentialStore;
 use flick::error::FlickError;
-use flick::event::{EventEmitter, JsonLinesEmitter, RawEmitter, StreamEvent};
+use flick::event::{EventEmitter, JsonLinesEmitter, RawEmitter, Event};
 use flick::model::ReasoningLevel;
 use flick::provider::{DynProvider, create_provider};
 use flick::tool::ToolRegistry;
@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Query a model, stream events to stdout
+    /// Query a model, emit events to stdout
     Run {
         /// Path to TOML config file
         #[arg(long)]
@@ -81,7 +81,7 @@ async fn main() {
 
     if let Err(e) = result {
         let stderr = std::io::stderr().lock();
-        let error_event = StreamEvent::Error {
+        let error_event = Event::Error {
             message: e.to_string(),
             code: e.code().to_string(),
             fatal: true,
@@ -364,19 +364,19 @@ mod tests {
 
     // -- cmd_run_core tests --
 
-    use flick::provider::{EventStream, RequestParams};
+    use flick::provider::{ModelResponse, RequestParams};
     use std::pin::Pin;
 
     struct StubProvider;
     impl DynProvider for StubProvider {
-        fn stream_boxed<'a>(
+        fn call_boxed<'a>(
             &'a self,
             _params: RequestParams<'a>,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<EventStream, flick::error::ProviderError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, flick::error::ProviderError>> + Send + 'a>> {
             Box::pin(async { unreachable!() })
         }
         fn build_request(&self, _params: RequestParams<'_>) -> Result<serde_json::Value, flick::error::ProviderError> {
-            Ok(serde_json::json!({"model": "test", "stream": true}))
+            Ok(serde_json::json!({"model": "test"}))
         }
     }
 
