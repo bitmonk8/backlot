@@ -24,6 +24,9 @@ Implementation complete. 241 tests pass (206 lib, 10 bin, 13 agent, 12 integrati
 
 ## Next Work
 
+- Sandboxing Phase 1: Approach A — wrapper prefix config (all platforms)
+- Sandboxing Phase 2: Approach B — native OS primitives (Linux, macOS, Windows)
+- Sandboxing Phase 3: Approach C — container mode (Linux only)
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
 - tokio 1.49.0 + `panic = "abort"` incompatibility on Rust 1.93 (release build)
 - Fix Later items (see `REVIEW_FINDINGS.md`)
@@ -31,6 +34,9 @@ Implementation complete. 241 tests pass (206 lib, 10 bin, 13 agent, 12 integrati
 ## Decisions
 
 | Decision | Rationale |
+| Sandboxing: three-phase plan (A → B → C) | Wrapper prefix first (lowest effort), then native primitives (all platforms), then Linux containers (opt-in). See `SANDBOX.md`. |
+| Windows sandbox: write-only (accepted gap) | Restricted token + job object. No read restriction. AppContainer rejected (high complexity). |
+| Containers Linux-only | macOS/Windows VM round-trip overhead (150+ ms) and I/O penalty make container sandboxing unattractive. |
 |----------|-----------|
 | Rust, edition 2024 | Consistent with Epic; same toolchain |
 | CLI tool, not library | Unix-philosophy: single executable, composable |
