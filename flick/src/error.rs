@@ -28,6 +28,9 @@ pub enum FlickError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error("sandbox error: {0}")]
+    Sandbox(String),
 }
 
 impl FlickError {
@@ -48,6 +51,7 @@ impl FlickError {
             Self::NoQuery => "no_query",
             Self::ContextParse(_) => "context_parse_error",
             Self::Io(_) => "io_error",
+            Self::Sandbox(_) => "sandbox_error",
         }
     }
 }
@@ -71,6 +75,9 @@ pub enum ConfigError {
 
     #[error("invalid model config: {0}")]
     InvalidModelConfig(String),
+
+    #[error("invalid sandbox config: {0}")]
+    InvalidSandboxConfig(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -162,6 +169,9 @@ mod tests {
 
         let imc = ConfigError::InvalidModelConfig("zero".into());
         assert!(imc.to_string().contains("zero"));
+
+        let isc = ConfigError::InvalidSandboxConfig("bad wrapper".into());
+        assert!(isc.to_string().contains("bad wrapper"));
     }
 
     #[test]
@@ -249,6 +259,13 @@ mod tests {
     fn code_io() {
         let e = FlickError::Io(std::io::Error::other("x"));
         assert_eq!(e.code(), "io_error");
+    }
+
+    #[test]
+    fn code_sandbox() {
+        let e = FlickError::Sandbox("wrapper not found".into());
+        assert_eq!(e.code(), "sandbox_error");
+        assert!(e.to_string().contains("wrapper not found"));
     }
 
     #[tokio::test]

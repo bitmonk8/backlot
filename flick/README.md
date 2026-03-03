@@ -117,7 +117,7 @@ docker run --rm -i \
   flick run --config /workspace/config.toml --query "..."
 ```
 
-OS-level per-tool sandboxing (Landlock on Linux, Seatbelt on macOS) is planned as a built-in enforcement layer for `[[resources]]` but is not yet implemented. See `docs/SANDBOX.md`.
+For a middle ground between in-process checks and full containerization, Flick supports an operator-configured **sandbox wrapper prefix**. When `[sandbox]` is set in the config, every subprocess invocation is prefixed with the wrapper command, allowing tools like bubblewrap, firejail, sandbox-exec, or Sandboxie-Plus to enforce OS-level constraints. See the `[sandbox]` configuration section below and `docs/SANDBOX.md` for details.
 
 ---
 
@@ -266,6 +266,39 @@ Exactly one of `command` or `executable` is required.
 
 Restricts builtin file tool access (`read_file`, `write_file`, `list_directory`). Path traversal (`..`) is denied. If no resources are defined, all paths are allowed. Does not apply to `shell_exec` or custom `command` tools. See [Tool Permissions and Safety](#tool-permissions-and-safety).
 
+### `[sandbox]`
+
+Optional. When present, every tool subprocess invocation is prefixed with the wrapper command. Flick performs mechanical string expansion only — it has no knowledge of any specific sandbox tool.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `wrapper` | string[] | yes | — | Base wrapper command, prepended to every subprocess |
+| `read_args` | string[] | no | `[]` | Appended once per `[[resources]]` entry with `access = "read"` |
+| `read_write_args` | string[] | no | `[]` | Appended once per `[[resources]]` entry with `access = "read_write"` |
+| `suffix` | string[] | no | `[]` | Appended once at the end, before the target command |
+| `policy_file` | string | no | — | Path for generated policy file (requires `policy_template`) |
+| `policy_template` | string | no | — | Template for policy file content (requires `policy_file`) |
+| `policy_read_rule` | string | no | — | Per-resource line for read entries in policy file |
+| `policy_read_write_rule` | string | no | — | Per-resource line for read_write entries in policy file |
+
+**Placeholders:** `{cwd}` (working directory), `{path}` (resource path, in `read_args`/`read_write_args`/rules only), `{policy_file}` (generated policy path), `{pid}` (process ID, all fields).
+
+**Command assembly:** `[wrapper] [read_args per read resource] [read_write_args per rw resource] [suffix] <original command>`
+
+**Startup behavior:** If `wrapper[0]` is not found in PATH, Flick exits with an error. If `policy_file` and `policy_template` are both set, the policy file is written once at startup.
+
+Example (bubblewrap on Linux):
+
+```toml
+[sandbox]
+wrapper = ["bwrap", "--die-with-parent", "--new-session"]
+read_args = ["--ro-bind", "{path}", "{path}"]
+read_write_args = ["--bind", "{path}", "{path}"]
+suffix = ["--"]
+```
+
+See `docs/SANDBOX.md` for additional platform examples (firejail, sandbox-exec, Sandboxie-Plus).
+
 ### `[pricing]`
 
 | Field | Type | Required | Description |
@@ -362,7 +395,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-241 tests (206 lib, 10 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
+273 tests (238 lib, 10 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
 
 ## License
 

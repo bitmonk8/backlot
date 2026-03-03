@@ -84,4 +84,4 @@ The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` 
 | [STATUS.md](STATUS.md) | Current phase, milestones, blockers |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Module descriptions and data flow |
 | [CONFIGURATION.md](CONFIGURATION.md) | Full config reference |
-| [SANDBOX.md](SANDBOX.md) | Future sandboxing approaches |
+| [SANDBOX.md](SANDBOX.md) | Sandboxing design (wrapper prefix, native, containers) |

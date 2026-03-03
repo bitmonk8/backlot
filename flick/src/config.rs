@@ -30,6 +30,9 @@ pub struct Config {
 
     #[serde(default)]
     pricing: Option<PricingConfig>,
+
+    #[serde(default)]
+    sandbox: Option<SandboxConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,6 +152,63 @@ pub struct PricingConfig {
     pub output_per_million: f64,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SandboxConfig {
+    wrapper: Vec<String>,
+    #[serde(default)]
+    read_args: Vec<String>,
+    #[serde(default)]
+    read_write_args: Vec<String>,
+    #[serde(default)]
+    suffix: Vec<String>,
+    #[serde(default)]
+    policy_file: Option<String>,
+    #[serde(default)]
+    policy_template: Option<String>,
+    #[serde(default)]
+    policy_read_rule: Option<String>,
+    #[serde(default)]
+    policy_read_write_rule: Option<String>,
+}
+
+impl SandboxConfig {
+    pub fn is_enabled(&self) -> bool {
+        !self.wrapper.is_empty()
+    }
+
+    pub fn wrapper(&self) -> &[String] {
+        &self.wrapper
+    }
+
+    pub fn read_args(&self) -> &[String] {
+        &self.read_args
+    }
+
+    pub fn read_write_args(&self) -> &[String] {
+        &self.read_write_args
+    }
+
+    pub fn suffix(&self) -> &[String] {
+        &self.suffix
+    }
+
+    pub fn policy_file(&self) -> Option<&str> {
+        self.policy_file.as_deref()
+    }
+
+    pub fn policy_template(&self) -> Option<&str> {
+        self.policy_template.as_deref()
+    }
+
+    pub fn policy_read_rule(&self) -> Option<&str> {
+        self.policy_read_rule.as_deref()
+    }
+
+    pub fn policy_read_write_rule(&self) -> Option<&str> {
+        self.policy_read_write_rule.as_deref()
+    }
+}
+
 const fn default_max_tokens() -> u32 {
     8192
 }
@@ -192,6 +252,10 @@ impl Config {
 
     pub fn resources(&self) -> &[ResourceConfig] {
         &self.resources
+    }
+
+    pub const fn sandbox(&self) -> Option<&SandboxConfig> {
+        self.sandbox.as_ref()
     }
 
     // -- CLI override methods (re-validate after mutation) --
@@ -300,6 +364,11 @@ impl Config {
             }
         }
 
+        // Validate sandbox config
+        if let Some(sandbox) = &self.sandbox {
+            Self::validate_sandbox(sandbox)?;
+        }
+
         // Validate provider reference
         let provider = self.active_provider()?;
 
@@ -329,6 +398,58 @@ impl Config {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_sandbox(sandbox: &SandboxConfig) -> Result<(), ConfigError> {
+        if sandbox.wrapper.is_empty() {
+            return Err(ConfigError::InvalidSandboxConfig(
+                "wrapper must not be empty".into(),
+            ));
+        }
+        if sandbox.wrapper[0].trim().is_empty() {
+            return Err(ConfigError::InvalidSandboxConfig(
+                "wrapper[0] must not be blank".into(),
+            ));
+        }
+        match (&sandbox.policy_template, &sandbox.policy_file) {
+            (Some(_), None) => {
+                return Err(ConfigError::InvalidSandboxConfig(
+                    "policy_template requires policy_file".into(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(ConfigError::InvalidSandboxConfig(
+                    "policy_file requires policy_template".into(),
+                ));
+            }
+            _ => {}
+        }
+        if sandbox.policy_template.is_none() {
+            if sandbox.policy_read_rule.is_some() {
+                return Err(ConfigError::InvalidSandboxConfig(
+                    "policy_read_rule requires policy_template".into(),
+                ));
+            }
+            if sandbox.policy_read_write_rule.is_some() {
+                return Err(ConfigError::InvalidSandboxConfig(
+                    "policy_read_write_rule requires policy_template".into(),
+                ));
+            }
+        }
+        if sandbox.policy_file.is_none() {
+            let references_policy_file = sandbox
+                .wrapper
+                .iter()
+                .chain(sandbox.suffix.iter())
+                .any(|s| s.contains("{policy_file}"));
+            if references_policy_file {
+                return Err(ConfigError::InvalidSandboxConfig(
+                    "wrapper/suffix references {policy_file} but policy_file is not configured"
+                        .into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1048,5 +1169,225 @@ api = "messages"
         let result = config.override_reasoning(super::ReasoningConfig { level: crate::model::ReasoningLevel::High });
         assert!(result.is_err());
         assert!(config.model().reasoning().is_none(), "should revert to None");
+    }
+
+    // -- Sandbox config tests --
+
+    #[tokio::test]
+    async fn sandbox_minimal_wrapper_only() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = ["bwrap", "--die-with-parent"]
+"#;
+        let f = write_temp_config(toml);
+        let config = Config::load(f.path()).await.expect("should parse");
+        let sandbox = config.sandbox().expect("sandbox should be Some");
+        assert!(sandbox.is_enabled());
+        assert_eq!(sandbox.wrapper(), &["bwrap", "--die-with-parent"]);
+        assert!(sandbox.read_args().is_empty());
+        assert!(sandbox.suffix().is_empty());
+        assert!(sandbox.policy_file().is_none());
+    }
+
+    #[tokio::test]
+    async fn sandbox_full_config() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = ["bwrap"]
+read_args = ["--ro-bind", "{path}", "{path}"]
+read_write_args = ["--bind", "{path}", "{path}"]
+suffix = ["--"]
+policy_file = "/tmp/flick-{pid}.sb"
+policy_template = "(version 1)\n{read_rules}\n{read_write_rules}"
+policy_read_rule = "(allow file-read* (subpath \"{path}\"))"
+policy_read_write_rule = "(allow file-read* file-write* (subpath \"{path}\"))"
+"#;
+        let f = write_temp_config(toml);
+        let config = Config::load(f.path()).await.expect("should parse");
+        let sandbox = config.sandbox().expect("sandbox should be Some");
+        assert_eq!(sandbox.read_args(), &["--ro-bind", "{path}", "{path}"]);
+        assert_eq!(sandbox.suffix(), &["--"]);
+        assert!(sandbox.policy_file().is_some());
+        assert!(sandbox.policy_template().is_some());
+        assert!(sandbox.policy_read_rule().is_some());
+        assert!(sandbox.policy_read_write_rule().is_some());
+    }
+
+    #[tokio::test]
+    async fn sandbox_empty_wrapper_rejected() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = []
+"#;
+        let f = write_temp_config(toml);
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::InvalidSandboxConfig(msg)) if msg.contains("wrapper")));
+    }
+
+    #[tokio::test]
+    async fn sandbox_blank_wrapper_zero_rejected() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = [""]
+"#;
+        let f = write_temp_config(toml);
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::InvalidSandboxConfig(msg)) if msg.contains("wrapper[0] must not be blank")));
+    }
+
+    #[tokio::test]
+    async fn sandbox_policy_file_without_template_rejected() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = ["bwrap"]
+policy_file = "/tmp/policy.sb"
+"#;
+        let f = write_temp_config(toml);
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::InvalidSandboxConfig(msg)) if msg.contains("policy_file requires policy_template")));
+    }
+
+    #[tokio::test]
+    async fn sandbox_policy_template_without_file_rejected() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = ["bwrap"]
+policy_template = "(version 1)"
+"#;
+        let f = write_temp_config(toml);
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::InvalidSandboxConfig(msg)) if msg.contains("policy_template requires policy_file")));
+    }
+
+    #[tokio::test]
+    async fn sandbox_policy_read_rule_without_template_rejected() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = ["bwrap"]
+policy_read_rule = "(allow file-read*)"
+"#;
+        let f = write_temp_config(toml);
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::InvalidSandboxConfig(msg)) if msg.contains("policy_read_rule requires policy_template")));
+    }
+
+    #[tokio::test]
+    async fn sandbox_policy_read_write_rule_without_template_rejected() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = ["bwrap"]
+policy_read_write_rule = "(allow file-write*)"
+"#;
+        let f = write_temp_config(toml);
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::InvalidSandboxConfig(msg)) if msg.contains("policy_read_write_rule requires policy_template")));
+    }
+
+    #[tokio::test]
+    async fn sandbox_absent_parses_normally() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+"#;
+        let f = write_temp_config(toml);
+        let config = Config::load(f.path()).await.expect("should parse");
+        assert!(config.sandbox().is_none());
+    }
+
+    #[tokio::test]
+    async fn sandbox_wrapper_references_policy_file_without_config_rejected() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = ["sandbox-exec", "-f", "{policy_file}"]
+"#;
+        let f = write_temp_config(toml);
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::InvalidSandboxConfig(msg)) if msg.contains("{policy_file}") && msg.contains("not configured")));
+    }
+
+    #[tokio::test]
+    async fn sandbox_suffix_references_policy_file_without_config_rejected() {
+        let toml = r#"
+[model]
+provider = "test"
+name = "test-model"
+
+[provider.test]
+api = "messages"
+
+[sandbox]
+wrapper = ["bwrap"]
+suffix = ["--profile", "{policy_file}"]
+"#;
+        let f = write_temp_config(toml);
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::InvalidSandboxConfig(msg)) if msg.contains("{policy_file}") && msg.contains("not configured")));
     }
 }

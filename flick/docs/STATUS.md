@@ -2,7 +2,7 @@
 
 ## Current State
 
-Implementation complete. 241 tests pass (206 lib, 10 bin, 13 agent, 12 integration).
+Implementation complete. 273 tests pass (238 lib, 10 bin, 13 agent, 12 integration).
 
 ## Module Summary
 
@@ -20,11 +20,12 @@ Implementation complete. 241 tests pass (206 lib, 10 bin, 13 agent, 12 integrati
 | `provider/messages.rs` | Messages API (Anthropic), non-streaming response parsing |
 | `provider/chat_completions.rs` | Chat Completions API, non-streaming response parsing |
 | `tool.rs` | Builtin + custom tool execution (shell-escape, timeout, sandbox) |
+| `sandbox.rs` | Wrapper prefix sandboxing: placeholder expansion, prefix building, policy generation, `SandboxCommandRunner` |
 | `agent.rs` | Agent loop (public build_params) |
 
 ## Next Work
 
-- Sandboxing Phase 1: Approach A — wrapper prefix config (all platforms)
+- ~~Sandboxing Phase 1: Approach A — wrapper prefix config (all platforms)~~ (done)
 - Sandboxing Phase 2: Approach B — native OS primitives (Linux, macOS, Windows)
 - Sandboxing Phase 3: Approach C — container mode (Linux only)
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
@@ -36,7 +37,6 @@ Implementation complete. 241 tests pass (206 lib, 10 bin, 13 agent, 12 integrati
 | Sandboxing: three-phase plan (A → B → C) | Wrapper prefix first (lowest effort), then native primitives (all platforms), then Linux containers (opt-in). See `SANDBOX.md`. |
 | Windows sandbox: write-only (accepted gap) | Restricted token + job object. No read restriction. AppContainer rejected (high complexity). |
 | Containers Linux-only | macOS/Windows VM round-trip overhead (150+ ms) and I/O penalty make container sandboxing unattractive. |
-|----------|-----------|
 | Rust, edition 2024 | Consistent with Epic; same toolchain |
 | CLI tool, not library | Unix-philosophy: single executable, composable |
 | Messages API first-class, Chat Completions for breadth | Two provider implementations cover all targets |

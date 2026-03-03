@@ -11,6 +11,7 @@ use flick::error::FlickError;
 use flick::event::{EventEmitter, JsonLinesEmitter, RawEmitter, Event};
 use flick::model::ReasoningLevel;
 use flick::provider::{DynProvider, create_provider};
+use flick::sandbox;
 use flick::tool::ToolRegistry;
 
 #[derive(Parser)]
@@ -126,7 +127,50 @@ async fn cmd_run(
     let api_key = cred_store.get(cred_name).await?;
     let provider = create_provider(provider_config, api_key);
 
-    let tools = ToolRegistry::from_config(config.tools(), config.resources().to_vec());
+    let mut policy_file_path = String::new();
+    let tools = match config.sandbox() {
+        Some(sandbox_cfg) => {
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .map_err(|e| FlickError::Sandbox(format!("cannot determine working directory: {e}")))?;
+
+            if let Some(pf) = sandbox_cfg.policy_file() {
+                policy_file_path = sandbox::expand_placeholders(pf, &cwd, "", "");
+            }
+
+            let expanded_wrapper0 = sandbox::expand_placeholders(
+                &sandbox_cfg.wrapper()[0], &cwd, "", &policy_file_path,
+            );
+            sandbox::validate_wrapper(&expanded_wrapper0)
+                .map_err(FlickError::Sandbox)?;
+
+            if let (Some(_), Some(pt)) = (sandbox_cfg.policy_file(), sandbox_cfg.policy_template()) {
+                let content = sandbox::generate_policy_content(
+                    pt,
+                    sandbox_cfg.policy_read_rule(),
+                    sandbox_cfg.policy_read_write_rule(),
+                    config.resources(),
+                    &cwd,
+                    &policy_file_path,
+                );
+                sandbox::write_policy_file(std::path::Path::new(&policy_file_path), &content)
+                    .map_err(|e| FlickError::Sandbox(format!("failed to write policy file: {e}")))?;
+            }
+            let prefix = sandbox::build_prefix(
+                sandbox_cfg,
+                config.resources(),
+                &cwd,
+                &policy_file_path,
+            );
+            let runner = sandbox::SandboxCommandRunner::new(prefix);
+            ToolRegistry::from_config_with_runner(
+                config.tools(),
+                config.resources().to_vec(),
+                Box::new(runner),
+            )
+        }
+        _ => ToolRegistry::from_config(config.tools(), config.resources().to_vec()),
+    };
 
     let context = if let Some(ctx_path) = context_path {
         Context::load_from_file(&ctx_path).await?
@@ -151,7 +195,11 @@ async fn cmd_run(
     // stdout lock held across async agent loop — safe on current_thread runtime
     // only; would need restructuring if runtime flavor changes.
     let stdout = std::io::stdout().lock();
-    cmd_run_core(&config, &provider, &tools, context, &query_text, mode, stdout).await
+    let result = cmd_run_core(&config, &provider, &tools, context, &query_text, mode, stdout).await;
+    if !policy_file_path.is_empty() {
+        let _ = std::fs::remove_file(&policy_file_path);
+    }
+    result
 }
 
 enum RunMode {

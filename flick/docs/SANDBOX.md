@@ -78,7 +78,7 @@ policy_read_write_rule = "(allow file-read* file-write* (subpath \"{path}\"))"
 | `{cwd}` | Working directory (absolute) | all fields |
 | `{path}` | Resource absolute path | `read_args`, `read_write_args`, `policy_read_rule`, `policy_read_write_rule` |
 | `{policy_file}` | Path to generated policy file | `wrapper`, `suffix` |
-| `{pid}` | Flick's process ID | `policy_file` |
+| `{pid}` | Flick's process ID | all fields |
 
 ### Command assembly
 
@@ -91,6 +91,8 @@ Final command for each subprocess:
 - If `[sandbox]` is absent → no wrapping
 - If `read_args` / `read_write_args` are absent → no per-resource expansion (tools like Sandboxie-Plus manage policy externally)
 - If `policy_file` + `policy_template` are set → write policy file once at startup
+
+**Working directory:** Flick sets `current_dir` on the child process, but sandbox tools that create new mount or PID namespaces (e.g., bubblewrap) do not inherit the working directory from the parent. The operator must include an explicit `--chdir {cwd}` (or equivalent) in the wrapper args.
 
 ### Startup behavior
 
