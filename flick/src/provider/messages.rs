@@ -21,7 +21,7 @@ pub struct MessagesProvider {
 
 impl MessagesProvider {
     #[allow(clippy::expect_used)] // Client::new() panics on same failure
-    pub fn new(base_url: String, api_key: String) -> Self {
+    pub fn new(base_url: &str, api_key: String) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
@@ -328,7 +328,7 @@ mod tests {
     use super::super::test_helpers::minimal_params;
 
     fn make_provider() -> MessagesProvider {
-        MessagesProvider::new(DEFAULT_BASE_URL.to_string(), "test-key".into())
+        MessagesProvider::new(DEFAULT_BASE_URL, "test-key".into())
     }
 
     #[test]

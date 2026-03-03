@@ -4,6 +4,7 @@ pub mod context;
 pub mod credential;
 pub mod error;
 pub mod event;
+pub mod history;
 pub mod model;
 pub mod model_list;
 pub mod prompter;

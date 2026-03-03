@@ -2,7 +2,7 @@
 
 ## Current State
 
-Implementation complete. 330 tests pass (266 lib, 39 bin, 13 agent, 12 integration).
+Implementation complete. 344 tests pass (280 lib, 39 bin, 13 agent, 12 integration).
 
 ## Module Summary
 
@@ -22,6 +22,7 @@ Implementation complete. 330 tests pass (266 lib, 39 bin, 13 agent, 12 integrati
 | `tool.rs` | Builtin + custom tool execution (shell-escape, timeout, sandbox) |
 | `sandbox.rs` | Wrapper prefix sandboxing: placeholder expansion, prefix building, policy generation, `SandboxCommandRunner` |
 | `agent.rs` | Agent loop (public build_params) |
+| `history.rs` | Run history logging and content-addressable context storage (xxh3-128) |
 | `model_list.rs` | Model fetching from provider APIs (HttpModelFetcher, MockModelFetcher) |
 | `prompter.rs` | Prompter trait + TerminalPrompter (dialoguer) + MockPrompter (tests) |
 
@@ -29,6 +30,7 @@ Implementation complete. 330 tests pass (266 lib, 39 bin, 13 agent, 12 integrati
 
 - ~~`flick init` interactive config generator (INIT_COMMAND.md steps 1–10)~~ (done)
 - ~~Sandboxing Phase 1: Approach A — wrapper prefix config (all platforms)~~ (done)
+- ~~Run history & context storage (`~/.flick/history.jsonl`, `~/.flick/contexts/`)~~ (done)
 - Sandboxing Phase 2: Approach B — native OS primitives (Linux, macOS, Windows)
 - Sandboxing Phase 3: Approach C — container mode (Linux only)
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
@@ -47,7 +49,7 @@ Implementation complete. 330 tests pass (266 lib, 39 bin, 13 agent, 12 integrati
 | Compat flags over subclasses | Provider quirks via configuration |
 | ChaCha20-Poly1305 credential encryption | Same scheme as ZeroClaw, proven |
 | JSON-lines output default | Machine-readable, one event per line |
-| 14 crate dependencies (+1 Windows-only) | Minimal footprint; no anyhow, async_trait, tracing |
+| 15 crate dependencies (+1 Windows-only) | Minimal footprint; no anyhow, async_trait, tracing |
 | DynProvider trait | Required for object-safe async dispatch |
 | `toml` crate (not `basic-toml`) | `basic-toml` has compiler bug with edition 2024 |
 | `expect_used = "deny"` lint | Prevents `.expect()` in production code; test modules `#[allow]` |

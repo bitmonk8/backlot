@@ -9,7 +9,8 @@ use flick::config::Config;
 use flick::context::Context;
 use flick::credential::CredentialStore;
 use flick::error::FlickError;
-use flick::event::{EventEmitter, JsonLinesEmitter, RawEmitter, Event};
+use flick::event::{EventEmitter, JsonLinesEmitter, RawEmitter, Event, RunSummary};
+use flick::history;
 use flick::model::ReasoningLevel;
 use flick::model_list::{self, ModelFetcher};
 use flick::prompter::{Prompter, TerminalPrompter};
@@ -185,14 +186,14 @@ async fn cmd_run(
         _ => ToolRegistry::from_config(config.tools(), config.resources().to_vec()),
     };
 
-    let context = if let Some(ctx_path) = context_path {
-        Context::load_from_file(&ctx_path).await?
+    let mut context = if let Some(ref ctx_path) = context_path {
+        Context::load_from_file(ctx_path).await?
     } else {
         Context::default()
     };
 
-    let query_text = match query {
-        Some(q) => q,
+    let query_text = match &query {
+        Some(q) => q.clone(),
         None => read_stdin().await?,
     };
 
@@ -208,11 +209,29 @@ async fn cmd_run(
     // stdout lock held across async agent loop — safe on current_thread runtime
     // only; would need restructuring if runtime flavor changes.
     let stdout = std::io::stdout().lock();
-    let result = cmd_run_core(&config, &provider, &tools, context, &query_text, mode, stdout).await;
+    let result = cmd_run_core(&config, &provider, &tools, &mut context, &query_text, mode, stdout).await;
     if !policy_file_path.is_empty() {
         let _ = std::fs::remove_file(&policy_file_path);
     }
-    result
+
+    if let Ok(Some(ref summary)) = result {
+        let invocation = history::Invocation {
+            config_path: config_path.clone(),
+            model: config.model().name().to_string(),
+            provider: config.model().provider().to_string(),
+            query: query_text,
+            raw,
+            reasoning: config.model().reasoning().map(|r| r.level),
+            context_path,
+        };
+        if let Ok(flick_dir) = flick::credential::flick_dir() {
+            if let Err(e) = history::record(invocation, summary, &context, &flick_dir).await {
+                eprintln!("warning: failed to write history: {e}");
+            }
+        }
+    }
+
+    result.map(|_| ())
 }
 
 enum RunMode {
@@ -222,15 +241,17 @@ enum RunMode {
 }
 
 /// Testable core: all dependencies injected, no direct I/O.
+///
+/// Returns `None` for dry-run, `Some(summary)` for real runs.
 async fn cmd_run_core(
     config: &Config,
     provider: &dyn DynProvider,
     tools: &ToolRegistry,
-    mut context: Context,
+    context: &mut Context,
     query: &str,
     mode: RunMode,
     output: impl Write,
-) -> Result<(), FlickError> {
+) -> Result<Option<RunSummary>, FlickError> {
     if query.is_empty() {
         return Err(FlickError::NoQuery);
     }
@@ -244,7 +265,7 @@ async fn cmd_run_core(
         let json_str = serde_json::to_string_pretty(&request_json)
             .map_err(|e| FlickError::Io(std::io::Error::other(e)))?;
         writeln!(out, "{json_str}").map_err(FlickError::Io)?;
-        return Ok(());
+        return Ok(None);
     }
 
     let mut emitter: Box<dyn EventEmitter> = if matches!(mode, RunMode::Raw) {
@@ -253,7 +274,8 @@ async fn cmd_run_core(
         Box::new(JsonLinesEmitter::new(output))
     };
 
-    agent::run(config, provider, tools, &mut context, emitter.as_mut()).await
+    let summary = agent::run(config, provider, tools, context, emitter.as_mut()).await?;
+    Ok(Some(summary))
 }
 
 /// Thin wrapper: uses real stdout and credential store.
@@ -346,6 +368,8 @@ async fn cmd_init(output: PathBuf) -> Result<(), FlickError> {
         let stdout = std::io::stdout().lock();
         cmd_init_core("-", &prompter, &store, &fetcher, stdout).await
     } else {
+        use tokio::io::AsyncWriteExt;
+
         let mut buf = Vec::new();
         cmd_init_core(&output_str, &prompter, &store, &fetcher, &mut buf).await?;
         // Use create_new for atomic fail-if-exists (closes TOCTOU race window
@@ -365,7 +389,6 @@ async fn cmd_init(output: PathBuf) -> Result<(), FlickError> {
                     FlickError::Io(e)
                 }
             })?;
-        use tokio::io::AsyncWriteExt;
         file.write_all(&buf).await.map_err(FlickError::Io)
     }
 }
@@ -547,6 +570,7 @@ fn parse_max_tokens(input: &str) -> Result<u32, FlickError> {
     Ok(v)
 }
 
+#[allow(clippy::struct_excessive_bools)] // tool flags are genuinely independent booleans
 struct ConfigGenParams<'a> {
     provider_name: &'a str,
     model_name: &'a str,
@@ -931,7 +955,7 @@ api = "messages"
         let tools = ToolRegistry::from_config(config.tools(), vec![]);
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&config, &StubProvider, &tools, Context::default(), "", RunMode::Json, &mut output).await;
+        let result = cmd_run_core(&config, &StubProvider, &tools, &mut Context::default(), "", RunMode::Json, &mut output).await;
         assert!(matches!(result, Err(FlickError::NoQuery)));
     }
 
@@ -941,8 +965,9 @@ api = "messages"
         let tools = ToolRegistry::from_config(config.tools(), vec![]);
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&config, &StubProvider, &tools, Context::default(), "hello", RunMode::DryRun, &mut output).await;
-        result.expect("should succeed");
+        let result = cmd_run_core(&config, &StubProvider, &tools, &mut Context::default(), "hello", RunMode::DryRun, &mut output).await;
+        let summary = result.expect("should succeed");
+        assert!(summary.is_none(), "dry-run should return None");
 
         let output_str = String::from_utf8(output).expect("utf8");
         let parsed: serde_json::Value = serde_json::from_str(output_str.trim()).expect("valid JSON");

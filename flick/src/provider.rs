@@ -136,12 +136,12 @@ pub fn create_provider(
 ) -> ProviderInstance {
     match provider_config.api {
         crate::ApiKind::Messages => {
-            ProviderInstance::Messages(messages::MessagesProvider::new(base_url.to_string(), api_key))
+            ProviderInstance::Messages(messages::MessagesProvider::new(base_url, api_key))
         }
         crate::ApiKind::ChatCompletions => {
             let compat = provider_config.compat.clone().unwrap_or_default();
             ProviderInstance::ChatCompletions(chat_completions::ChatCompletionsProvider::new(
-                base_url.to_string(), api_key, compat,
+                base_url, api_key, compat,
             ))
         }
     }

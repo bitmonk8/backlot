@@ -22,7 +22,7 @@ pub struct ChatCompletionsProvider {
 
 impl ChatCompletionsProvider {
     #[allow(clippy::expect_used)] // Client::new() panics on same failure
-    pub fn new(base_url: String, api_key: String, compat: CompatFlags) -> Self {
+    pub fn new(base_url: &str, api_key: String, compat: CompatFlags) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
@@ -439,7 +439,7 @@ mod tests {
 
     fn make_provider() -> ChatCompletionsProvider {
         ChatCompletionsProvider::new(
-            "https://api.example.com".into(),
+            "https://api.example.com",
             "test-key".into(),
             CompatFlags::default(),
         )
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn build_body_with_tools_and_explicit_choice() {
         let provider = ChatCompletionsProvider::new(
-            "https://api.example.com".into(),
+            "https://api.example.com",
             "test-key".into(),
             CompatFlags {
                 explicit_tool_choice_auto: true,

@@ -53,6 +53,8 @@ pub struct RunSummary {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub iterations: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_hash: Option<String>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if requires &T
@@ -222,6 +224,7 @@ mod tests {
                     output_tokens: 50,
                     cost_usd: 0.005,
                     iterations: 2,
+                    context_hash: None,
                 },
             });
         }

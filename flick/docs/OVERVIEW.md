@@ -60,7 +60,7 @@ The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` 
 
 ## Design Principles
 
-- **Ultra-small.** Minimal binary, minimal dependencies (14 runtime crates (+1 Windows-only)).
+- **Ultra-small.** Minimal binary, minimal dependencies (15 runtime crates (+1 Windows-only)).
 - **Ultra-fast.** Negligible startup overhead. Time-to-first-token is the bottleneck.
 - **Unix-philosophy.** Takes input, produces output, composes via stdin/stdout.
 - **No framework.** Single executable, not an SDK or library.
@@ -73,6 +73,15 @@ The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` 
 |----------|-----------|
 | **Messages API** (native) | Anthropic (Claude) |
 | **Chat Completions** | OpenAI, OpenRouter, Groq, Mistral, Ollama, DeepSeek, etc. |
+
+## Run History
+
+After each successful (non-dry-run) invocation, Flick records:
+
+- **`~/.flick/history.jsonl`** — one JSON object per line capturing timestamp, invocation args, token stats, and a context hash.
+- **`~/.flick/contexts/{hash}.json`** — serialized conversation context, keyed by xxh3-128 hash (content-addressable dedup).
+
+History writes are non-fatal — failures produce a stderr warning without affecting the exit code.
 
 ## Language & Toolchain
 

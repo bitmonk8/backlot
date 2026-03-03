@@ -319,6 +319,15 @@ See `docs/SANDBOX.md` for additional platform examples (firejail, sandbox-exec, 
 
 Optional. Overrides the builtin model registry pricing. Cost is reported in the `done` event.
 
+## Run History
+
+After each successful (non-dry-run) invocation, Flick records:
+
+- **`~/.flick/history.jsonl`** — one JSON object per line capturing timestamp, invocation args, token usage, cost, and a context hash.
+- **`~/.flick/contexts/{hash}.json`** — the full conversation context, keyed by its xxh3-128 hash (content-addressable dedup — identical contexts are stored once).
+
+History writes are non-fatal. Failures produce a stderr warning without affecting the exit code or output.
+
 ## Context File
 
 Resume a conversation by passing `--context` with a JSON file:
@@ -406,7 +415,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-330 tests (266 lib, 39 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
+344 tests (280 lib, 39 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
 
 ## License
 

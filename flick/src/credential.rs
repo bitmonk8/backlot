@@ -41,7 +41,7 @@ pub struct CredentialStore {
 
 impl CredentialStore {
     pub fn new() -> Result<Self, CredentialError> {
-        let dir = dirs_path()?;
+        let dir = flick_dir()?;
         Ok(Self { dir })
     }
 
@@ -241,14 +241,14 @@ impl CredentialStore {
     }
 }
 
-fn dirs_path() -> Result<PathBuf, CredentialError> {
+pub fn flick_dir() -> Result<PathBuf, CredentialError> {
     let home = home_dir().ok_or_else(|| {
         CredentialError::InvalidFormat("HOME/USERPROFILE not set".into())
     })?;
     Ok(home.join(".flick"))
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         std::env::var_os("USERPROFILE").map(PathBuf::from)

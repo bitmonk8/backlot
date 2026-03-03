@@ -11,6 +11,7 @@ src/
   credential.rs        Encrypted credential store (ChaCha20-Poly1305)
   error.rs             FlickError, ProviderError, CredentialError, ToolError, ConfigError
   event.rs             StreamEvent enum, Usage, EventEmitter trait, JsonLines/Raw emitters
+  history.rs           Run history logging and content-addressable context storage (xxh3-128)
   model.rs             ModelInfo, builtin registry, reasoning level mappings
   provider.rs          Provider trait, DynProvider, RequestParams, ToolDefinition, create_provider()
   provider/

@@ -1,4 +1,5 @@
 use futures_util::future::join_all;
+use xxhash_rust::xxh3::xxh3_128;
 
 use crate::config::Config;
 use crate::context::{ContentBlock, Context};
@@ -18,7 +19,7 @@ pub async fn run(
     tools: &ToolRegistry,
     context: &mut Context,
     emitter: &mut dyn EventEmitter,
-) -> Result<(), FlickError> {
+) -> Result<RunSummary, FlickError> {
     let tool_defs = tools.definitions();
     let max_iterations = DEFAULT_MAX_ITERATIONS;
     let mut total_input_tokens: u64 = 0;
@@ -39,8 +40,9 @@ pub async fn run(
         }
 
         if response.tool_calls.is_empty() {
-            emit_done(emitter, config, total_input_tokens, total_output_tokens, iteration);
-            return Ok(());
+            let context_hash = context_hash(context);
+            let summary = emit_done(emitter, config, total_input_tokens, total_output_tokens, iteration, context_hash);
+            return Ok(summary);
         }
 
         let tool_results = execute_tools(&response, tools, emitter).await;
@@ -154,20 +156,31 @@ async fn execute_tools(
     tool_results
 }
 
+/// Compute xxh3-128 hash of serialized context. Returns `None` if
+/// serialization fails (should not happen for valid Context).
+fn context_hash(context: &Context) -> Option<String> {
+    let bytes = serde_json::to_vec(context).ok()?;
+    let hash = xxh3_128(&bytes);
+    Some(format!("{hash:032x}"))
+}
+
 fn emit_done(
     emitter: &mut dyn EventEmitter,
     config: &Config,
     input_tokens: u64,
     output_tokens: u64,
     iterations: u32,
-) {
+    context_hash: Option<String>,
+) -> RunSummary {
     let usage = RunSummary {
         input_tokens,
         output_tokens,
         cost_usd: config.compute_cost(input_tokens, output_tokens),
         iterations,
+        context_hash,
     };
-    emitter.emit(&Event::Done { usage });
+    emitter.emit(&Event::Done { usage: usage.clone() });
+    usage
 }
 
 pub fn build_params<'a>(

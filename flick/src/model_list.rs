@@ -158,13 +158,13 @@ pub struct MockModelFetcher {
 }
 
 impl MockModelFetcher {
-    pub fn with_models(models: Vec<FetchedModel>) -> Self {
+    pub const fn with_models(models: Vec<FetchedModel>) -> Self {
         Self {
             result: std::sync::Mutex::new(Some(Ok(models))),
         }
     }
 
-    pub fn with_error(err: FlickError) -> Self {
+    pub const fn with_error(err: FlickError) -> Self {
         Self {
             result: std::sync::Mutex::new(Some(Err(err))),
         }
