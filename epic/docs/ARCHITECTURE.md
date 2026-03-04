@@ -17,11 +17,11 @@
 │   → verify, leaf/branch paths)              │
 ├────────────────┬────────────────────────────┤
 │  Services      │  Agent Layer               │
-│  - Research    │  - All calls via ZeroClaw   │
-│  - Verification│    AgentBuilder API         │
-│  - Document    │  - Per-call model selection │
-│    Store       │  - Per-call tool scoping    │
-│                │  - Prompt assembly          │
+│  - Research    │  - All calls via Flick CLI  │
+│  - Verification│  - Per-call model selection │
+│  - Document    │  - Per-call tool scoping    │
+│    Store       │  - Prompt assembly          │
+│                │                            │
 ├────────────────┴────────────────────────────┤
 │  Infrastructure                             │
 │  (git operations, state persistence,        │
@@ -36,7 +36,7 @@
 | Async runtime | tokio | `tokio` |
 | Error handling | thiserror at module boundaries, anyhow for propagation | `thiserror`, `anyhow` |
 | Serialization | serde ecosystem | `serde`, `serde_json`, `toml` |
-| Agent runtime | ZeroClaw fork (library, `AgentBuilder` API) | `zeroclaw` (path dep at `deps/zeroclaw/`) |
+| Agent runtime | Flick (external executable, subprocess invocation) | None (no crate dependency) |
 | TUI | ratatui + crossterm, read-only monitoring for v1 | `ratatui`, `crossterm` |
 | Config format | TOML | `toml` |
 
@@ -54,14 +54,13 @@ src/
 │   └── verify.rs            # Verification (leaf and branch variants)
 ├── agent/
 │   ├── mod.rs               # Agent abstraction
-│   ├── zeroclaw.rs          # ZeroClaw integration
 │   ├── tools.rs             # Tool access flags
 │   ├── models.rs            # Model selection and escalation
 │   └── prompts.rs           # Prompt templates and assembly
 ├── services/
 │   ├── research.rs          # Research service (DocumentStore + exploration)
 │   ├── verification.rs      # Build/lint/test execution
-│   └── document_store.rs    # File-based (markdown) knowledge store; librarian via ZeroClaw agent
+│   └── document_store.rs    # File-based (markdown) knowledge store; librarian via Flick agent
 ├── tui/
 │   ├── mod.rs               # TUI application (read-only monitoring for v1)
 │   ├── task_tree.rs         # Task tree widget
@@ -111,7 +110,7 @@ For each subtask (DFS preorder):
 All major components receive their dependencies explicitly. No globals, statics, or singletons. The entry point constructs the dependency graph and threads it through.
 
 Key dependency types:
-- `AgentContext` — bundles ZeroClaw `AgentBuilder` factory, document store, verification config. Each agent call constructs a new `Agent` (stateless per-call).
+- `AgentContext` — bundles Flick subprocess configuration, document store, verification config. Each agent call spawns a new Flick process (stateless per-call).
 - `EventEmitter` — trait object for logging/TUI events
 - `ProjectConfig` — verification steps, paths, model preferences (loaded from TOML)
 - `EpicState` — task tree and session state (owned by orchestrator)

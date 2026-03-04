@@ -12,14 +12,14 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 |---|---|---|
 | Language | Python | Rust |
 | Task model | Six task types (GROUP, RESEARCH, DESIGN, PLAN, IMPLEMENTATION, VERIFY) transitioning to recursive solver | Recursive problem-solver exclusively (EPIC_DESIGN2) |
-| Agent sandboxing | Custom command filtering, per-session config isolation | ZeroClaw as agent host (native sandboxing) |
+| Agent sandboxing | Custom command filtering, per-session config isolation | Flick as agent host (external executable) |
 | Project scope | Hardcoded for fds2 (build/lint/test via `please.py`) | Generalized — configurable verification for any project |
 | TUI | Python Textual | Rust TUI (ratatui or similar) |
 
 ## Key Design Decisions
 
 1. **Recursive problem-solver only** — No legacy task types. Every task follows: assess → execute (leaf or branch) → verify. See [Task Model](TASK_MODEL.md).
-2. **ZeroClaw as agent host** — Agent sandboxing, filesystem scoping, and process isolation delegated to ZeroClaw rather than reimplemented. See [ZeroClaw Integration](ZEROCLAW_INTEGRATION.md).
+2. **Flick as agent host** — Agent execution delegated to Flick external executable. No library dependency — subprocess invocation only. See [Flick Integration](FLICK_INTEGRATION.md).
 3. **Configurable verification** — Build/lint/test commands specified per-project via configuration, not hardcoded. See [Configuration](CONFIGURATION.md).
 4. **Rust for performance and type safety** — CLI/TUI responsiveness, strong static typing for orchestration correctness, and better agent SDK ergonomics.
 
@@ -30,27 +30,23 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 | [Architecture](ARCHITECTURE.md) | System layers, module structure, data flow |
 | [Task Model](TASK_MODEL.md) | Recursive problem-solver: assessment, leaf/branch paths, verification, recovery |
 | [Agent Design](AGENT_DESIGN.md) | Agent orchestration, model selection, tool access, prompt design |
-| [ZeroClaw Integration](ZEROCLAW_INTEGRATION.md) | Sandboxing, agent hosting, capability scoping via ZeroClaw |
+| [Flick Integration](FLICK_INTEGRATION.md) | Agent hosting via Flick external executable |
 | [Document Store](DOCUMENT_STORE.md) | Centralized knowledge management, research service |
 | [Verification](VERIFICATION.md) | Build/lint/test gates, review types, fix loops |
 | [Configuration](CONFIGURATION.md) | Project-agnostic configuration: verification steps, model preferences, paths |
 | [TUI Design](TUI_DESIGN.md) | Terminal interface: task tree, worklog, progress display |
-| [Open Questions](OPEN_QUESTIONS.md) | Unresolved design decisions requiring investigation |
-| [ZeroClaw Audit Plan](ZEROCLAW_AUDIT_PLAN.md) | Security audit plan: 14 audit units covering all ZeroClaw modules |
-| [Audit Summary](audit/SUMMARY.md) | Security audit results: CONDITIONAL PASS, no backdoors found |
+| [Open Questions](OPEN_QUESTIONS.md) | Design decisions record (all resolved) |
 | [Status](STATUS.md) | Current phase, milestones, next work candidates, decisions log |
 
 ## Repository
 
 - **Epic:** [github.com/bitmonk8/epic](https://github.com/bitmonk8/epic)
-- **ZeroClaw fork:** [github.com/bitmonk8/zeroclaw-fork](https://github.com/bitmonk8/zeroclaw-fork) (submodule at `deps/zeroclaw/`)
+- **Flick:** [github.com/bitmonk8/flick](https://github.com/bitmonk8/flick) (external executable, not a crate dependency)
 
 ## Reference Material
 
 - `C:\UnitySrc\fds2\EPIC_DESIGN2.md` — The recursive problem-solver design document (authoritative design source)
 - `C:\UnitySrc\fds2\tools\epic\` — fds2_epic Python implementation (reference implementation)
-- [ZeroClaw upstream](https://github.com/zeroclaw-labs/zeroclaw) — Agent hosting platform (forked, not used directly)
-
 ## Status
 
-**Phase: Implementation** — Design complete, Rust project scaffolded with module structure per ARCHITECTURE.md. Next: core orchestrator loop and agent call wiring.
+**Phase: Implementation** — Design complete, Rust project scaffolded, core orchestrator loop complete. Next: agent call wiring via Flick subprocess.

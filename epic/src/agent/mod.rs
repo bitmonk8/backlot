@@ -1,9 +1,8 @@
-// Agent abstraction over ZeroClaw AgentBuilder API.
+// Agent abstraction over Flick agent runtime (external executable).
 
 mod models;
 mod prompts;
 mod tools;
-mod zeroclaw;
 
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};

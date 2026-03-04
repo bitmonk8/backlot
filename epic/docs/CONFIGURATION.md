@@ -65,13 +65,12 @@ root = "."                    # Project root (default: config file location)
 epic_dir = ".epic"            # Epic working directory
 ```
 
-### Agent Hosting
+### Agent Runtime
 
 ```toml
-[zeroclaw]
-runtime = "native"            # "native" or "docker"
-# Epic owns all config — no separate ZeroClaw config file.
-# All ZeroClaw settings are passed programmatically via AgentBuilder.
+[agent]
+runtime = "flick"             # Agent runtime executable
+flick_path = "flick"          # Path to Flick binary (default: on PATH)
 ```
 
 ## Depth and Budget Configuration
@@ -136,4 +135,4 @@ User-level defaults (`~/.config/epic/config.toml`) are loaded first and overridd
 
 - ~~Config format: TOML vs YAML vs RON?~~ — **Decided: TOML.**
 - ~~Should `epic init` generate a starter config file?~~ — **Decided: Yes, agent-driven interactive init.** See Init section below.
-- ~~How much ZeroClaw config belongs in epic's config vs ZeroClaw's own config?~~ — **Decided: Epic owns all config.** No separate ZeroClaw config file. The `[zeroclaw]` section in `epic.toml` exposes any ZeroClaw-specific knobs.
+- ~~How much agent runtime config belongs in epic's config?~~ — **Decided: Epic owns all config.** The `[agent]` section in `epic.toml` exposes Flick-specific knobs.

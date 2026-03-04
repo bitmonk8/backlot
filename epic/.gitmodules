@@ -1,4 +1,0 @@
-[submodule "deps/zeroclaw"]
-	path = deps/zeroclaw
-	url = git@github.com:bitmonk8/zeroclaw-fork.git
-	branch = epic/hardening
