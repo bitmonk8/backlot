@@ -3,9 +3,8 @@
 ## Summary
 
 `flick init` interactively creates a new configuration file. It guides the user
-through provider selection, model selection, tool enablement, and optional
-settings, then writes a commented TOML file ready for use or further
-customization.
+through provider selection, model selection, max output tokens, and system prompt,
+then writes a commented TOML file ready for use or further customization.
 
 ## Prerequisites
 
@@ -23,7 +22,6 @@ prompts in both `flick setup` and `flick init`.
 | Select from list | `Select` |
 | Text input with default | `Input` with `.default()` |
 | Yes/no confirmation | `Confirm` |
-| Multi-select (tools) | `MultiSelect` |
 
 #### Testability
 
@@ -50,10 +48,6 @@ pub trait Prompter {
 
     /// Display a yes/no confirmation. Returns true for yes.
     fn confirm(&self, prompt: &str, default: bool) -> Result<bool, FlickError>;
-
-    /// Display a multi-select list. Returns indices of selected items.
-    fn multi_select(&self, prompt: &str, items: &[String], defaults: &[bool])
-        -> Result<Vec<usize>, FlickError>;
 
     /// Print a message to the user (stderr).
     fn message(&self, msg: &str) -> Result<(), FlickError>;
@@ -332,7 +326,7 @@ Headers:
 ```
 
 Response: `{"data": [{"id": "claude-sonnet-4-20250514", ...}, ...]}`.
-Anthropic paginates with `has_more` + `first_id`/`last_id`; fetch all pages.
+Anthropic paginates with `has_more` + `first_id`/`last_id`; fetch first page only.
 
 **Chat Completions API:**
 ```
@@ -414,23 +408,7 @@ or clear (enter a single space or `none` to omit).
 If the value contains newlines or quotes, use a TOML multi-line literal
 string (`'''`).
 
-### Step 5 — Builtin Tools (`MultiSelect`)
-
-```
-? Enable builtin tools:
-  [ ] read_file
-  [ ] write_file
-  [ ] list_directory
-  [ ] shell_exec (unrestricted system access)
-```
-
-If `shell_exec` is selected, follow up with a `Confirm`:
-
-```
-? shell_exec grants the model unrestricted system access. Enable? [y/N]:
-```
-
-### Step 6 — Write File
+### Step 5 — Write File
 
 Show the output path and write the file:
 ```
@@ -442,7 +420,7 @@ If `--output -`, write to stdout and skip the status message.
 ## Output Format
 
 The generated TOML file includes section comments explaining each block.
-Example output (anthropic provider, claude-sonnet, with read_file enabled):
+Example output (anthropic provider, claude-sonnet):
 
 ```toml
 # Flick configuration
@@ -482,42 +460,19 @@ api = "messages"
 # [provider.anthropic.compat]
 # explicit_tool_choice_auto = false
 
-# ── Builtin Tools ───────────────────────────────────────────────────
-# shell_exec and custom tools bypass resource restrictions.
-[tools]
-read_file = true
-write_file = false
-list_directory = false
-shell_exec = false
-
-# ── Custom Tools (optional) ─────────────────────────────────────────
-# [[tools.custom]]
-# name = "my_tool"
-# description = "What the tool does"
-# parameters = { type = "object", properties = { arg = { type = "string" } } }
-# command = "echo {{arg}}"       # shell command (OR executable, not both)
-# executable = "./tools/my_tool" # receives JSON on stdin
-
-# ── Resources (optional) ────────────────────────────────────────────
-# Restricts builtin tool access. If omitted, all paths allowed.
-# Does NOT restrict shell_exec or custom tools.
-# [[resources]]
-# path = "src/"
-# access = "read_write"
+# ── Tools (optional) ────────────────────────────────────────────────
+# Tool definitions declared to the model. Flick does not execute tools;
+# the caller handles execution and supplies results via --tool-results.
+# [[tools]]
+# name = "tool_name"
+# description = "What this tool does"
+# parameters = { type = "object", properties = { arg = { type = "string" } }, required = ["arg"] }
 
 # ── Pricing (optional) ──────────────────────────────────────────────
 # Overrides builtin model pricing. Omit to use registry defaults.
 # [pricing]
 # input_per_million = 3.0
 # output_per_million = 15.0
-
-# ── Sandbox (optional) ──────────────────────────────────────────────
-# Wrapper prefix for sandboxed tool execution. See docs/SANDBOX.md.
-# [sandbox]
-# wrapper = ["bwrap", "--die-with-parent"]
-# read_args = ["--ro-bind", "{path}", "{path}"]
-# read_write_args = ["--bind", "{path}", "{path}"]
-# suffix = ["--"]
 ```
 
 ### Generated Provider Section Rules
@@ -531,8 +486,7 @@ shell_exec = false
 - Optional sections that the user did not configure are included as
   commented-out examples.
 - Active sections have uncommented key-value pairs.
-- Security warnings are included inline where relevant (shell_exec, custom
-  tools, resources).
+- The tools section explains that Flick does not execute tools.
 
 ## Errors
 
@@ -562,9 +516,6 @@ shell_exec = false
   - Max tokens hardcoded fallback (8192)
   - Max tokens `none` for Chat Completions
   - System prompt with special characters
-  - Tool selection via `MultiSelect`
-  - shell_exec `Confirm` rejection
-  - shell_exec `Confirm` acceptance
   - Output file exists → error
   - No providers → error
   - `--output -` writes to provided writer
@@ -589,9 +540,7 @@ shell_exec = false
 These are intentionally omitted from v1:
 
 - Editing an existing config file (future: `flick init --edit`)
-- Custom tool creation during init
-- Resource path configuration during init
-- Sandbox configuration during init
+- Tool definition creation during init (commented-out template is sufficient)
 - Reasoning level selection (commented-out example is sufficient)
 - Output schema configuration
 - `--force` flag to overwrite existing files

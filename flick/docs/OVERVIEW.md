@@ -4,59 +4,82 @@
 
 Flick is an ultra-small, ultra-fast command-line tool written in Rust. It replaces ZeroClaw as the agent primitive for [Epic](../../../epic/).
 
-Flick takes a TOML config and a query, sends the query to an LLM, emits typed events to stdout, and executes tools internally via an agent loop.
+Flick takes a TOML config and a query, sends the query to an LLM, and returns a single JSON result to stdout. Flick declares tool definitions to the model but never executes tools. The caller drives the agent loop externally.
 
 ## Relationship to Epic
 
-Epic invokes Flick as a subprocess. Flick handles a single agent session (query → model → tools → response). Epic handles orchestration, task decomposition, and state management.
+Epic invokes Flick as a subprocess in a driver loop. Flick makes a single model call per invocation and returns. When the model requests tool calls, Flick yields control back to Epic, which executes tools and re-invokes Flick with results. Epic handles orchestration, task decomposition, tool execution, and state management.
 
 | Project | Role |
 |---------|------|
-| Epic | Orchestrator — recursive task decomposition, state management, TUI |
-| Flick | Agent primitive — LLM call with tools, JSON-lines output, agent loop |
+| Epic | Orchestrator — recursive task decomposition, tool execution, state management, TUI |
+| Flick | Agent primitive — single-shot LLM call, tool declaration (not execution), JSON result output |
 
 ## CLI Interface
 
 ```
-flick run --config <toml> [--query <text>] [--context <json>] [--raw] [--dry-run] [--model <id>] [--reasoning <level>]
+flick run --config <toml> [--query <text>] [--resume <hash>] [--tool-results <json>] [--dry-run] [--model <id>] [--reasoning <level>]
 flick setup <provider>
 flick init [--output <path>]
 flick list
 ```
 
-- `run`: query the model, stream events to stdout
+- `run`: make a single model call, write JSON result to stdout
 - `setup`: interactive credential onboarding per provider
 - `init`: interactive config generator (writes `flick.toml` by default; `--output` to change path)
 - `list`: show onboarded providers with API type and base URL
-- Query from `--query` or stdin
-- `--context`: JSON file with prior message history
-- `--raw`: plain text output instead of JSON-lines
+- Query from `--query` or stdin (new session)
+- `--resume <hash>`: load prior context by hash, continue a session
+- `--tool-results <json>`: tool results file for resumed session (required with `--resume`)
 - `--dry-run`: dump API request as JSON, no model call
+- `--query` and `--resume` are mutually exclusive
 
-## Output Format (JSON-lines, default)
+## Output Format (single JSON result)
 
+Each invocation writes one JSON object to stdout. The `status` field tells the caller what to do next.
+
+**Tool calls pending** (caller must execute tools and resume):
 ```json
-{"type":"text","text":"Hello, world!"}
-{"type":"thinking","text":"..."}
-{"type":"thinking_signature","signature":"sig_..."}
-{"type":"tool_call","call_id":"tc_1","tool_name":"read_file","arguments":"{...}"}
-{"type":"tool_result","call_id":"tc_1","success":true,"output":"..."}
-{"type":"usage","input_tokens":1200,"output_tokens":340,"cache_creation_input_tokens":800,"cache_read_input_tokens":400}
-{"type":"done","usage":{"input_tokens":1200,"output_tokens":340,"cost_usd":0.0087,"iterations":2,"context_hash":"00a1b2c3d4e5f67890abcdef12345678"}}
-{"type":"error","message":"...","code":"rate_limit","fatal":true}
+{
+  "status": "tool_calls_pending",
+  "content": [
+    {"type": "text", "text": "I'll read that file."},
+    {"type": "tool_use", "id": "tc_1", "name": "read_file", "input": {"path": "src/main.rs"}}
+  ],
+  "usage": {"input_tokens": 1200, "output_tokens": 340, "cache_creation_input_tokens": 800, "cache_read_input_tokens": 400, "cost_usd": 0.0087},
+  "context_hash": "00a1b2c3d4e5f67890abcdef12345678"
+}
 ```
 
-The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` fields are omitted when zero.
+**Complete** (no further action):
+```json
+{
+  "status": "complete",
+  "content": [{"type": "text", "text": "Done."}],
+  "usage": {"input_tokens": 2400, "output_tokens": 50, "cost_usd": 0.0032},
+  "context_hash": "11b2c3d4e5f67890abcdef1234567899"
+}
+```
 
-## Agent Loop
+**Error:**
+```json
+{"status": "error", "error": {"message": "Rate limit exceeded", "code": "rate_limit"}}
+```
 
-1. Call provider with message history
-2. Emit response events to stdout (text, thinking, tool calls, usage)
-3. Append assistant message to history
-4. If no tool calls → emit `done`, exit
-5. Execute tool calls, emit `tool_result` events
-6. Append tool results to history
-7. Goto 1 (cap at 25 iterations)
+The `usage` fields `cache_creation_input_tokens` and `cache_read_input_tokens` are omitted when zero.
+
+## Invocation Model (single-shot)
+
+Each `flick run` makes exactly one model call and returns. The caller drives the loop.
+
+1. Build request (tools from config, messages from context)
+2. Call provider
+3. Append assistant message to context
+4. Write context file, compute hash
+5. Return JSON result with `status`:
+   - `tool_calls_pending` → caller executes tools, resumes with `--resume <hash> --tool-results <file>`
+   - `complete` → session finished
+   - `error` → invocation failed
 
 ## Design Principles
 
@@ -66,6 +89,8 @@ The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` 
 - **No framework.** Single executable, not an SDK or library.
 - **Tool-calling models only.** No capability-checking fallbacks.
 - **Compatibility-by-configuration.** Provider quirks via flags, not subclasses.
+- **Separation of concerns.** Flick is a pure LLM interface: config in, model call, result out. Tool execution is the caller's responsibility.
+- **Monadic / single-shot.** One invocation = one model call = one JSON result. The caller composes invocations into an agent loop.
 
 ## Provider Support
 
@@ -97,5 +122,6 @@ History writes are non-fatal — failures produce a stderr warning without affec
 | [STATUS.md](STATUS.md) | Current phase, milestones, blockers |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Module descriptions and data flow |
 | [CONFIGURATION.md](CONFIGURATION.md) | Full config reference |
-| [SANDBOX.md](SANDBOX.md) | Sandboxing design (wrapper prefix, native, containers) |
 | [INIT_COMMAND.md](INIT_COMMAND.md) | `flick init` interactive config generator spec |
+| [REVIEW_FINDINGS.md](REVIEW_FINDINGS.md) | Open issues and fix-later items |
+| [MONADIC_TOOLS.md](MONADIC_TOOLS.md) | Monadic architecture design spec |

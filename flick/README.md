@@ -1,6 +1,6 @@
 # Flick
 
-Ultra-small, ultra-fast command-line LLM agent written in Rust. Takes a TOML config and a query, emits typed events to stdout, and executes tools via an agent loop.
+Ultra-small, ultra-fast command-line tool written in Rust. Takes a TOML config and a query, makes a single LLM call, and returns a JSON result to stdout. Flick declares tool definitions to the model but never executes tools. The caller drives the agent loop externally.
 
 ## Requirements
 
@@ -57,15 +57,19 @@ flick list
 |------|-------------|
 | `--config <path>` | Path to TOML config file (required) |
 | `--query <text>` | Query text; reads from stdin if omitted |
-| `--context <path>` | JSON file with prior message history |
-| `--raw` | Plain text output instead of JSON-lines |
+| `--resume <hash>` | Resume a previous session by context hash |
+| `--tool-results <path>` | JSON file containing tool results for resumed session |
 | `--dry-run` | Dump API request as JSON without calling the model |
 | `--model <id>` | Override model ID from config |
 | `--reasoning <level>` | Override reasoning level (`minimal`, `low`, `medium`, `high`) |
 
+Validation:
+- `--resume` and `--tool-results` must both be present or both absent.
+- `--query` and `--resume` are mutually exclusive.
+
 ### `flick init`
 
-Interactive config generator. Walks through provider selection, model, tools, and writes a commented TOML config file.
+Interactive config generator. Walks through provider selection, model, max output tokens, and system prompt, then writes a commented TOML config file.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -81,61 +85,49 @@ Lists onboarded providers in tab-separated columns (name, API type, base URL), s
 
 ## Output Format
 
-By default, Flick emits one JSON object per line to stdout:
+Each invocation writes one JSON object to stdout. The `status` field tells the caller what to do next.
 
-```jsonl
-{"type":"text","text":"Hello, world!"}
-{"type":"thinking","text":"..."}
-{"type":"thinking_signature","signature":"sig_..."}
-{"type":"tool_call","call_id":"tc_1","tool_name":"read_file","arguments":"{...}"}
-{"type":"tool_result","call_id":"tc_1","success":true,"output":"..."}
-{"type":"usage","input_tokens":1200,"output_tokens":340,"cache_creation_input_tokens":800,"cache_read_input_tokens":400}
-{"type":"done","usage":{"input_tokens":1200,"output_tokens":340,"cost_usd":0.0087,"iterations":2,"context_hash":"00a1b2c3d4e5f67890abcdef12345678"}}
-{"type":"error","message":"...","code":"rate_limit"}
+**Tool calls pending** (caller must execute tools and resume):
+```json
+{
+  "status": "tool_calls_pending",
+  "content": [
+    {"type": "text", "text": "I'll read that file."},
+    {"type": "tool_use", "id": "tc_1", "name": "read_file", "input": {"path": "src/main.rs"}}
+  ],
+  "usage": {"input_tokens": 1200, "output_tokens": 340, "cache_creation_input_tokens": 800, "cache_read_input_tokens": 400, "cost_usd": 0.0087},
+  "context_hash": "00a1b2c3d4e5f67890abcdef12345678"
+}
 ```
 
-The `usage` event's `cache_creation_input_tokens` and `cache_read_input_tokens` fields are omitted when zero.
+**Complete** (no further action):
+```json
+{
+  "status": "complete",
+  "content": [{"type": "text", "text": "Done."}],
+  "usage": {"input_tokens": 2400, "output_tokens": 50, "cost_usd": 0.0032},
+  "context_hash": "11b2c3d4e5f67890abcdef1234567899"
+}
+```
 
-The `done` event's `context_hash` is the xxh3-128 hex digest of the serialized context. Callers can resume the conversation via `--context ~/.flick/contexts/{context_hash}.json`.
+**Error:**
+```json
+{"status": "error", "error": {"message": "Rate limit exceeded", "code": "rate_limit"}}
+```
 
-With `--raw`, only text content is printed as plain text. Errors go to stderr.
+The `usage` fields `cache_creation_input_tokens` and `cache_read_input_tokens` are omitted when zero.
 
-## Agent Loop
+## Invocation Model
+
+Each `flick run` makes exactly one model call and returns. The caller drives the loop:
 
 1. Call provider with message history
-2. Emit response events to stdout (text, thinking, tool calls, usage)
-3. Append assistant message to history
-4. If no tool calls, emit `done` and exit
-5. Execute tool calls, emit `tool_result` events
-6. Append tool results to history
-7. Goto 1 (capped at 25 iterations)
-
-## Tool Permissions and Safety
-
-`[[resources]]` declares which paths builtin file tools (`read_file`, `write_file`, `list_directory`) may access. This is an in-process intent guardrail — it stops accidental out-of-scope access and makes the operator's declared policy visible.
-
-It is not a security boundary:
-
-- `shell_exec = true` gives the model full shell access as the process user. `[[resources]]` does not apply to shell commands.
-- Custom `command` tools receive model-controlled arguments substituted into shell templates and are not restricted by `[[resources]]`.
-
-The right mental model is the same as Claude Code's permission system: permissions reduce accidental overreach and express what the agent is supposed to do. They do not prevent a model from doing anything the process user can do.
-
-**For hard isolation, run Flick inside a container or VM** with only the required paths mounted. That is the only way to enforce a genuine boundary on what the agent can access. A minimal Docker invocation:
-
-```sh
-docker run --rm -i \
-  --cap-drop ALL \
-  --network none \
-  --read-only \
-  -v "$(pwd)/workspace:/workspace" \
-  my-flick-image \
-  flick run --config /workspace/config.toml --query "..."
-```
-
-For a middle ground between in-process checks and full containerization, Flick supports an operator-configured **sandbox wrapper prefix**. When `[sandbox]` is set in the config, every subprocess invocation is prefixed with the wrapper command, allowing tools like bubblewrap, firejail, sandbox-exec, or Sandboxie-Plus to enforce OS-level constraints. See the `[sandbox]` configuration section below and `docs/SANDBOX.md` for details.
-
----
+2. Append assistant message to context
+3. Write context file, compute hash
+4. Return JSON result with `status`:
+   - `tool_calls_pending` — caller executes tools, resumes with `--resume <hash> --tool-results <file>`
+   - `complete` — session finished
+   - `error` — invocation failed
 
 ## Configuration
 
@@ -166,30 +158,15 @@ credential = "openrouter"
 [provider.openrouter.compat]
 explicit_tool_choice_auto = true
 
-[tools]
-read_file = true
-write_file = true
-list_directory = true
-shell_exec = true
+[[tools]]
+name = "read_file"
+description = "Read a file's contents"
+parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
 
-[[tools.custom]]
-name = "search_codebase"
-description = "Search files for a pattern"
-parameters = { type = "object", properties = { pattern = { type = "string" } } }
-command = "rg --json {{pattern}} {{path}}"
-
-[[tools.custom]]
-name = "code_search"
-description = "Semantic code search"
-parameters = { type = "object", properties = { query = { type = "string" } } }
-executable = "./tools/code_search"
-
-[[resources]]
-path = "src/"
-access = "read_write"
-[[resources]]
-path = "docs/"
-access = "read"
+[[tools]]
+name = "grep_project"
+description = "Search for a pattern"
+parameters = { type = "object", properties = { pattern = { type = "string" } }, required = ["pattern"] }
 
 [pricing]
 input_per_million = 3.0
@@ -247,70 +224,15 @@ Compatibility flags for Chat Completions providers:
 |-------|------|---------|-------------|
 | `explicit_tool_choice_auto` | bool | false | Send `tool_choice: "auto"` explicitly |
 
-### `[tools]`
+### `[[tools]]`
 
-Builtin tools (all default to `false`):
-
-| Tool | Description |
-|------|-------------|
-| `read_file` | Read file contents |
-| `write_file` | Write file contents |
-| `list_directory` | List directory entries (capped at 10,000) |
-| `shell_exec` | Execute shell commands (120s timeout) |
-
-### `[[tools.custom]]`
+Declare tool schemas. Flick includes these in the model request but never executes tools — the caller handles execution.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | yes | Tool name (must be unique, no collision with builtins) |
+| `name` | string | yes | Tool name (must be unique) |
 | `description` | string | yes | Description sent to the model |
 | `parameters` | JSON value | no | JSON Schema for tool parameters |
-| `command` | string | one of | Shell command with `{{param}}` substitution (shell-escaped) |
-| `executable` | string | one of | Path to executable (receives JSON on stdin) |
-
-Exactly one of `command` or `executable` is required.
-
-### `[[resources]]`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Path to file or directory |
-| `access` | string | yes | `"read"` or `"read_write"` |
-
-Restricts builtin file tool access (`read_file`, `write_file`, `list_directory`). Path traversal (`..`) is denied. If no resources are defined, all paths are allowed. Does not apply to `shell_exec` or custom `command` tools. See [Tool Permissions and Safety](#tool-permissions-and-safety).
-
-### `[sandbox]`
-
-Optional. When present, every tool subprocess invocation is prefixed with the wrapper command. Flick performs mechanical string expansion only — it has no knowledge of any specific sandbox tool.
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `wrapper` | string[] | yes | — | Base wrapper command, prepended to every subprocess |
-| `read_args` | string[] | no | `[]` | Appended once per `[[resources]]` entry with `access = "read"` |
-| `read_write_args` | string[] | no | `[]` | Appended once per `[[resources]]` entry with `access = "read_write"` |
-| `suffix` | string[] | no | `[]` | Appended once at the end, before the target command |
-| `policy_file` | string | no | — | Path for generated policy file (requires `policy_template`) |
-| `policy_template` | string | no | — | Template for policy file content (requires `policy_file`) |
-| `policy_read_rule` | string | no | — | Per-resource line for read entries in policy file |
-| `policy_read_write_rule` | string | no | — | Per-resource line for read_write entries in policy file |
-
-**Placeholders:** `{cwd}` (working directory), `{path}` (resource path, in `read_args`/`read_write_args`/rules only), `{policy_file}` (generated policy path), `{pid}` (process ID, all fields).
-
-**Command assembly:** `[wrapper] [read_args per read resource] [read_write_args per rw resource] [suffix] <original command>`
-
-**Startup behavior:** If `wrapper[0]` is not found in PATH, Flick exits with an error. If `policy_file` and `policy_template` are both set, the policy file is written once at startup.
-
-Example (bubblewrap on Linux):
-
-```toml
-[sandbox]
-wrapper = ["bwrap", "--die-with-parent", "--new-session"]
-read_args = ["--ro-bind", "{path}", "{path}"]
-read_write_args = ["--bind", "{path}", "{path}"]
-suffix = ["--"]
-```
-
-See `docs/SANDBOX.md` for additional platform examples (firejail, sandbox-exec, Sandboxie-Plus).
 
 ### `[pricing]`
 
@@ -319,7 +241,7 @@ See `docs/SANDBOX.md` for additional platform examples (firejail, sandbox-exec, 
 | `input_per_million` | f64 | yes | Cost per million input tokens (USD, non-negative) |
 | `output_per_million` | f64 | yes | Cost per million output tokens (USD, non-negative) |
 
-Optional. Overrides the builtin model registry pricing. Cost is reported in the `done` event.
+Optional. Overrides the builtin model registry pricing. Cost is reported in the `usage` field of the result.
 
 ## Run History
 
@@ -330,20 +252,22 @@ After each successful (non-dry-run) invocation, Flick records:
 
 History writes are non-fatal. Failures produce a stderr warning without affecting the exit code or output.
 
-## Context File
+## Context Resumption
 
-Resume a conversation by passing `--context` with a JSON file:
+Resume a session by passing `--resume` with the context hash and `--tool-results` with a JSON file:
 
-```json
-{
-  "messages": [
-    {"role": "user", "content": [{"type": "text", "text": "hello"}]},
-    {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
-  ]
-}
+```sh
+flick run --config config.toml --resume 00a1b2c3d4e5f67890abcdef12345678 --tool-results results.json
 ```
 
-Content blocks support types: `text`, `tool_use`, `tool_result`, `thinking`.
+The tool results file contains an array of results:
+
+```json
+[
+  {"tool_use_id": "tc_1", "content": "file contents here", "is_error": false},
+  {"tool_use_id": "tc_2", "content": "command not found", "is_error": true}
+]
+```
 
 ## Provider Support
 
@@ -417,7 +341,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-344 tests (280 lib, 39 bin, 13 agent, 12 integration). One additional Unix-only test for file permissions.
+274 tests (206 lib, 48 bin, 12 runner, 8 integration). One additional Unix-only test for file permissions.
 
 ## License
 

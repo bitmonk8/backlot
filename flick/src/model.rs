@@ -16,7 +16,6 @@ pub struct ModelInfo {
     pub id: &'static str,
     pub input_per_million: f64,
     pub output_per_million: f64,
-    pub context_window: Option<u32>,
     pub max_output_tokens: Option<u32>,
 }
 
@@ -67,21 +66,18 @@ static BUILTIN_MODELS: [ModelInfo; 14] = [
         id: "claude-opus-4-6",
         input_per_million: 5.0,
         output_per_million: 25.0,
-        context_window: Some(200_000),
         max_output_tokens: Some(128_000),
     },
     ModelInfo {
         id: "claude-sonnet-4-6",
         input_per_million: 3.0,
         output_per_million: 15.0,
-        context_window: Some(200_000),
         max_output_tokens: Some(64_000),
     },
     ModelInfo {
         id: "claude-haiku-4-5",
         input_per_million: 1.0,
         output_per_million: 5.0,
-        context_window: Some(200_000),
         max_output_tokens: Some(64_000),
     },
     // Claude 4.5
@@ -89,14 +85,12 @@ static BUILTIN_MODELS: [ModelInfo; 14] = [
         id: "claude-opus-4-5",
         input_per_million: 5.0,
         output_per_million: 25.0,
-        context_window: Some(200_000),
         max_output_tokens: Some(64_000),
     },
     ModelInfo {
         id: "claude-sonnet-4-5",
         input_per_million: 3.0,
         output_per_million: 15.0,
-        context_window: Some(200_000),
         max_output_tokens: Some(64_000),
     },
     // Claude 4.1
@@ -104,7 +98,6 @@ static BUILTIN_MODELS: [ModelInfo; 14] = [
         id: "claude-opus-4-1",
         input_per_million: 15.0,
         output_per_million: 75.0,
-        context_window: Some(200_000),
         max_output_tokens: Some(32_000),
     },
     // Claude 4.0
@@ -112,14 +105,12 @@ static BUILTIN_MODELS: [ModelInfo; 14] = [
         id: "claude-sonnet-4-20250514",
         input_per_million: 3.0,
         output_per_million: 15.0,
-        context_window: Some(200_000),
         max_output_tokens: Some(64_000),
     },
     ModelInfo {
         id: "claude-opus-4-20250514",
         input_per_million: 15.0,
         output_per_million: 75.0,
-        context_window: Some(200_000),
         max_output_tokens: Some(32_000),
     },
     // Claude 3.x
@@ -127,42 +118,36 @@ static BUILTIN_MODELS: [ModelInfo; 14] = [
         id: "claude-3-5-haiku-20241022",
         input_per_million: 0.80,
         output_per_million: 4.0,
-        context_window: Some(200_000),
         max_output_tokens: Some(8_192),
     },
     ModelInfo {
         id: "gpt-4o",
         input_per_million: 2.50,
         output_per_million: 10.0,
-        context_window: Some(128_000),
         max_output_tokens: Some(16_384),
     },
     ModelInfo {
         id: "gpt-4o-mini",
         input_per_million: 0.15,
         output_per_million: 0.60,
-        context_window: Some(128_000),
         max_output_tokens: Some(16_384),
     },
     ModelInfo {
         id: "o3-mini",
         input_per_million: 1.10,
         output_per_million: 4.40,
-        context_window: Some(200_000),
         max_output_tokens: Some(100_000),
     },
     ModelInfo {
         id: "deepseek-chat",
         input_per_million: 0.27,
         output_per_million: 1.10,
-        context_window: Some(64_000),
         max_output_tokens: Some(8_192),
     },
     ModelInfo {
         id: "deepseek-reasoner",
         input_per_million: 0.55,
         output_per_million: 2.19,
-        context_window: Some(64_000),
         max_output_tokens: Some(8_192),
     },
 ];
@@ -204,7 +189,6 @@ mod tests {
     #[test]
     fn resolve_model_has_token_fields() {
         let info = resolve_model("claude-sonnet-4-6").expect("known model");
-        assert_eq!(info.context_window, Some(200_000));
         assert_eq!(info.max_output_tokens, Some(64_000));
     }
 

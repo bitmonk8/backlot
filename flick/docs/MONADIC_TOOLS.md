@@ -11,10 +11,10 @@ Additionally: Flick's output changes from streaming JSON-lines events to a singl
 1. **Sandboxing complexity.** The current sandbox system (wrapper prefix, policy generation, platform-specific logic) adds significant complexity for limited value. Moving tool execution out of Flick eliminates this entirely.
 2. **Builtin tools are generic.** `read_file`, `write_file`, `list_directory`, `shell_exec` are not LLM-specific. The caller (Epic) already has better implementations with richer policy controls.
 3. **Custom tool plumbing.** Template expansion, executable piping, command injection guards, timeout management — all removed from Flick.
-4. **Separation of concerns.** Flick becomes a pure LLM interface: config in, model call, events out. Tool execution is the caller's responsibility.
+4. **Separation of concerns.** Flick becomes a pure LLM interface: config in, model call, result out. Tool execution is the caller's responsibility.
 5. **Composability.** The caller can implement any tool execution strategy (sandboxed, remote, mocked, cached) without Flick needing to know.
 
-## Current Architecture (Before)
+## Previous Architecture
 
 ```
 Caller → flick run --config f.toml --query "do X"
@@ -31,7 +31,7 @@ Caller → flick run --config f.toml --query "do X"
 
 Flick owns the full agent loop, tool execution, sandboxing, resource access control, and result collection.
 
-## Proposed Architecture (After)
+## Current Architecture
 
 ```
 Caller → flick run --config f.toml --query "do X"
@@ -133,7 +133,7 @@ Validation:
 |-----------|---------|-------|
 | `src/tool.rs` | 1,320 lines — builtin tools, custom tool execution, resource access control, command runner | **Deleted entirely** |
 | `src/sandbox.rs` | 320 lines — wrapper prefix, policy generation, placeholder expansion | **Deleted entirely** |
-| `src/agent.rs` agent loop | 25-iteration loop with tool execution | **Single model call, return** |
+| `src/runner.rs` agent loop | 25-iteration loop with tool execution | **Single model call, return** |
 | `src/config.rs` sandbox config | `SandboxConfig`, validation, resource access levels | **Deleted** |
 | `src/config.rs` tool execution config | `command`, `executable` fields on custom tools | **Deleted** |
 | `src/config.rs` builtin tool toggles | `read_file`, `write_file`, `list_directory`, `shell_exec` booleans | **Deleted** |
@@ -177,7 +177,7 @@ All tools are uniform: a name, a description, and a JSON schema. No distinction 
 ### Agent module
 
 **Before:** Loop calling model → execute tools → call model → ...
-**After:** Single model call. Build params, call provider, emit events, write context, return.
+**After:** Single model call. Build params, call provider, return result, write context, return.
 
 The module may be renamed or inlined since it no longer manages a loop.
 
@@ -194,9 +194,9 @@ The entire event/emitter system (`event.rs`) is replaced by a single result stru
 Example output:
 ```toml
 [model]
-id = "claude-sonnet-4-20250514"
+name = "claude-sonnet-4-20250514"
 provider = "anthropic"
-max_output_tokens = 16384
+max_tokens = 16384
 
 # [[tools]]
 # name = "tool_name"
@@ -233,9 +233,9 @@ loop:
         handle error
         break
     tool_results = []
-    for block in result.content where block.type == "tool_call":
-        output = execute(block.tool_name, block.arguments)
-        tool_results.append({tool_use_id: block.call_id, content: output, is_error: false})
+    for block in result.content where block.type == "tool_use":
+        output = execute(block.name, block.input)
+        tool_results.append({tool_use_id: block.id, content: output, is_error: false})
     write tool_results to results.json
 ```
 
@@ -243,13 +243,15 @@ This is a net gain for Epic — it gains full control over tool execution, sandb
 
 ## Estimated Scope
 
-**Deletions:** ~1,700 lines (tool.rs, sandbox.rs, related config/tests)
-**Modifications:** ~300 lines (agent.rs simplification, config.rs tool schema, event.rs cleanup, main.rs CLI flags, init command)
+**Deletions:** ~1,320 lines (tool.rs, sandbox.rs, related config/tests)
+**Modifications:** ~300 lines (runner.rs simplification, config.rs tool schema, event.rs cleanup, main.rs CLI flags, init command)
 **Net:** Significant reduction in code and complexity.
 
 ## Output Schema Reference
 
 Flick writes a single JSON object to stdout. One invocation = one object.
+
+> **Implementation note:** The original design spec used `tool_call`/`call_id`/`tool_name`/`arguments` (string) for tool-use content blocks. The implementation kept the existing `tool_use`/`id`/`name`/`input` (JSON object) naming from the Messages API. The schema below reflects the implemented format.
 
 ### Success result
 
@@ -259,8 +261,8 @@ Flick writes a single JSON object to stdout. One invocation = one object.
   "content": [
     {"type": "thinking", "text": "...", "signature": "..."},
     {"type": "text", "text": "Here's what I'll do..."},
-    {"type": "tool_call", "call_id": "tc_1", "tool_name": "read_file", "arguments": "{\"path\":\"src/main.rs\"}"},
-    {"type": "tool_call", "call_id": "tc_2", "tool_name": "shell_exec", "arguments": "{\"command\":\"ls\"}"}
+    {"type": "tool_use", "id": "tc_1", "name": "read_file", "input": {"path": "src/main.rs"}},
+    {"type": "tool_use", "id": "tc_2", "name": "shell_exec", "input": {"command": "ls"}}
   ],
   "usage": {
     "input_tokens": 1200,
@@ -308,7 +310,10 @@ Flick writes a single JSON object to stdout. One invocation = one object.
 |-------|------|-------------|
 | `status` | `"complete"` \| `"tool_calls_pending"` \| `"error"` | Outcome of this invocation |
 | `content` | array | Ordered content blocks from the model response |
-| `content[].type` | `"text"` \| `"thinking"` \| `"tool_call"` | Block type |
+| `content[].type` | `"text"` \| `"thinking"` \| `"tool_use"` | Block type |
+| `content[].id` | string | Tool use ID (only for `tool_use` blocks) |
+| `content[].name` | string | Tool name (only for `tool_use` blocks) |
+| `content[].input` | object | Tool input as JSON object (only for `tool_use` blocks) |
 | `usage` | object | Token counts and cost (omitted on error) |
 | `usage.cache_creation_input_tokens` | number | Omitted when zero |
 | `usage.cache_read_input_tokens` | number | Omitted when zero |
@@ -319,6 +324,8 @@ Flick writes a single JSON object to stdout. One invocation = one object.
 ---
 
 ## Implementation Plan
+
+> **Status:** Implementation complete. The plan below is retained for historical reference.
 
 ### Strategy
 
@@ -446,13 +453,13 @@ Remove all sandbox/resource getters and config sections: `sandbox()`, `resources
 
 **Files:** Edit `src/config.rs`. Heavy deletions.
 
-**What breaks:** `src/tool.rs`, `src/sandbox.rs`, `src/agent.rs`, `src/main.rs` — all reference removed types.
+**What breaks:** `src/tool.rs`, `src/sandbox.rs`, `src/runner.rs`, `src/main.rs` — all reference removed types.
 
 ### Step 4: Delete `src/tool.rs` and `src/sandbox.rs`
 
 Delete both files entirely. Remove `pub mod tool;` and `pub mod sandbox;` from `src/lib.rs`.
 
-**Files:** Delete `src/tool.rs` (1,320 lines), delete `src/sandbox.rs` (701 lines). Edit `src/lib.rs`.
+**Files:** Delete `src/tool.rs` (1,320 lines), delete `src/sandbox.rs` (320 lines). Edit `src/lib.rs`.
 
 ### Step 5: Delete `src/event.rs`
 
@@ -460,7 +467,7 @@ Delete the file. Remove `pub mod event;` from `src/lib.rs`.
 
 **Files:** Delete `src/event.rs` (412 lines). Edit `src/lib.rs`.
 
-### Step 6: Rewrite `src/agent.rs` — single model call
+### Step 6: Rewrite `src/runner.rs` — single model call
 
 Replace the 25-iteration loop with a single model call that returns `FlickResult`.
 
@@ -490,7 +497,7 @@ The `ToolRegistry` parameter is gone. Tool definitions come from `config.tools()
 
 The `EventEmitter` parameter is gone. No events to emit.
 
-**Files:** Edit `src/agent.rs`. Rewrite from ~206 lines to ~80 lines.
+**Files:** Edit `src/runner.rs`. Rewrite from ~206 lines to ~80 lines.
 
 ### Step 7: Rewrite `src/main.rs` run path
 
@@ -591,7 +598,7 @@ Update `record()` call sites in `main.rs`.
 | `src/main.rs` init tests (21) | Test builtin tool selection, shell_exec confirm, config generation with tools | Remove tool selection tests, update config generation assertions |
 | `src/main.rs` run tests (2) | Test dry-run with `ToolRegistry`, emitter construction | Rewrite for new `FlickResult` output, no registry |
 | `src/config.rs` tests | Test `ToolsConfig` with builtins, `CustomToolConfig` validation, `SandboxConfig` validation | Rewrite for `Vec<ToolConfig>` parsing, remove sandbox tests |
-| `tests/agent.rs` (12) | Test agent loop with mock provider and `ToolRegistry` | Rewrite for single-call agent, no tool execution |
+| `tests/runner.rs` (12) | Test agent loop with mock provider and `ToolRegistry` | Rewrite for single-call agent, no tool execution |
 | `tests/integration.rs` (12) | Test end-to-end with tool execution, JSON-lines output | Rewrite for single JSON output, no tool execution |
 | `tests/common/mod.rs` | Helper functions for mock tools | Remove tool-related helpers |
 
@@ -601,7 +608,7 @@ Update `record()` call sites in `main.rs`.
 |----------|------|
 | `src/result.rs` | `FlickResult` serialization: complete, tool_calls_pending, error variants; `UsageSummary` zero-field omission |
 | `src/context.rs` | `load_tool_results()`: valid input, missing fields, empty array, malformed JSON |
-| `src/agent.rs` | Single call returning complete; single call returning tool_calls_pending; provider error propagation |
+| `src/runner.rs` | Single call returning complete; single call returning tool_calls_pending; provider error propagation |
 | `src/main.rs` | Resume validation (--resume without --tool-results, --query with --resume); new session end-to-end; resume end-to-end |
 | `src/config.rs` | `[[tools]]` array parsing; `ToolConfig::to_definition()` conversion; empty tools array; duplicate name rejection |
 
@@ -610,31 +617,31 @@ Update `record()` call sites in `main.rs`.
 | File | Action | Lines removed (approx) | Lines added (approx) |
 |------|--------|----------------------|---------------------|
 | `src/tool.rs` | Delete | 1,320 | 0 |
-| `src/sandbox.rs` | Delete | 701 | 0 |
+| `src/sandbox.rs` | Delete | 320 | 0 |
 | `src/event.rs` | Delete | 412 | 0 |
 | `src/result.rs` | Create | 0 | 80 |
-| `src/agent.rs` | Rewrite | 180 | 70 |
+| `src/runner.rs` | Rewrite | 180 | 70 |
 | `src/config.rs` | Heavy edit | 500 | 40 |
 | `src/main.rs` | Heavy edit | 600 | 200 |
 | `src/context.rs` | Edit | 0 | 40 |
 | `src/history.rs` | Edit | 10 | 10 |
 | `src/lib.rs` | Edit | 3 | 1 |
-| `tests/agent.rs` | Rewrite | 200 | 80 |
+| `tests/runner.rs` | Rewrite | 200 | 80 |
 | `tests/integration.rs` | Rewrite | 200 | 80 |
 | `tests/common/mod.rs` | Edit | 50 | 10 |
-| **Total** | | **~4,176** | **~611** |
+| **Total** | | **~3,795** | **~611** |
 
-**Net reduction: ~3,565 lines.**
+**Net reduction: ~3,184 lines.**
 
 ### Execution Order Constraints
 
 ```
 Step 1 (result.rs)        — independent, additive
 Step 2 (context.rs)       — independent, additive
-Step 3 (config.rs)        — breaks tool.rs, sandbox.rs, agent.rs, main.rs
+Step 3 (config.rs)        — breaks tool.rs, sandbox.rs, runner.rs, main.rs
 Step 4 (delete tool+sandbox) — requires step 3
 Step 5 (delete event.rs)  — requires step 7 (main.rs must stop importing events first)
-Step 6 (agent.rs)         — requires steps 1, 3, 4
+Step 6 (runner.rs)         — requires steps 1, 3, 4
 Step 7 (main.rs run)      — requires steps 1, 2, 3, 4, 6
 Step 8 (main.rs init)     — requires step 3
 Step 9 (history.rs)       — requires step 7
@@ -651,5 +658,5 @@ Steps 1 and 2 can be done in parallel. Steps 5 and 8 can be done in parallel (af
 - `docs/STATUS.md` — module summary, next work, test counts
 - `docs/ARCHITECTURE.md` — module descriptions, data flow
 - `docs/CONFIGURATION.md` — tool config reference, remove sandbox/resource sections
-- `docs/SANDBOX.md` — mark phases B and C as cancelled; note phase A removed
+- ~~docs/SANDBOX.md~~ — deleted (sandbox system removed)
 - `docs/INIT_COMMAND.md` — remove tool selection and sandbox steps

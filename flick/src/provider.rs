@@ -23,11 +23,10 @@ pub struct RequestParams<'a> {
 }
 
 /// Tool definition sent to the model.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_schema: Option<serde_json::Value>,
 }
 
@@ -37,7 +36,6 @@ pub struct ModelResponse {
     pub thinking: Vec<ThinkingContent>,
     pub tool_calls: Vec<ToolCallResponse>,
     pub usage: UsageResponse,
-    pub warnings: Vec<Warning>,
 }
 
 /// A single thinking block from the response.
@@ -60,12 +58,6 @@ pub struct UsageResponse {
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,
     pub cache_read_input_tokens: u64,
-}
-
-/// Non-fatal warning from the provider (e.g. `max_tokens` truncation).
-pub struct Warning {
-    pub message: String,
-    pub code: String,
 }
 
 /// Provider trait — two methods: call and `build_request`.

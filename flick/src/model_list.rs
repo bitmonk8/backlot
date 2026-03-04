@@ -7,7 +7,6 @@ use crate::error::FlickError;
 pub struct FetchedModel {
     pub id: String,
     pub max_completion_tokens: Option<u32>,
-    pub context_length: Option<u32>,
 }
 
 /// Trait for fetching available models from a provider. Object-safe.
@@ -58,14 +57,9 @@ fn parse_model_response(body: &serde_json::Value) -> Result<Vec<FetchedModel>, F
                 .and_then(|tp| tp.get("max_completion_tokens"))
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|v| u32::try_from(v).ok());
-            let context_length = item
-                .get("context_length")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|v| u32::try_from(v).ok());
             models.push(FetchedModel {
                 id: id.to_string(),
                 max_completion_tokens,
-                context_length,
             });
         }
     }
@@ -204,12 +198,10 @@ mod tests {
             FetchedModel {
                 id: "model-a".into(),
                 max_completion_tokens: Some(4096),
-                context_length: Some(128_000),
             },
             FetchedModel {
                 id: "model-b".into(),
                 max_completion_tokens: None,
-                context_length: None,
             },
         ];
         let fetcher = MockModelFetcher::with_models(models);
@@ -295,7 +287,6 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-4o");
         assert_eq!(models[0].max_completion_tokens, Some(16_384));
-        assert_eq!(models[0].context_length, Some(128_000));
     }
 
     #[tokio::test]

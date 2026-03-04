@@ -11,14 +11,14 @@ pub enum FlickError {
     #[error(transparent)]
     Credential(#[from] CredentialError),
 
-    #[error(transparent)]
-    Tool(#[from] ToolError),
+    #[error("invalid arguments: {0}")]
+    InvalidArguments(String),
+
+    #[error("invalid tool results: {0}")]
+    InvalidToolResults(String),
 
     #[error("context message limit exceeded ({0})")]
     ContextOverflow(usize),
-
-    #[error("iteration limit reached ({0})")]
-    IterationLimit(u32),
 
     #[error("no query provided (use --query or pipe to stdin)")]
     NoQuery,
@@ -29,8 +29,8 @@ pub enum FlickError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    #[error("sandbox error: {0}")]
-    Sandbox(String),
+    #[error("tool result parse error: {0}")]
+    ToolResultParse(String),
 }
 
 impl FlickError {
@@ -45,13 +45,13 @@ impl FlickError {
             },
             Self::Config(_) => "config_error",
             Self::Credential(_) => "credential_error",
-            Self::Tool(_) => "tool_error",
+            Self::InvalidArguments(_) => "invalid_arguments",
+            Self::InvalidToolResults(_) => "invalid_tool_results",
             Self::ContextOverflow(_) => "context_overflow",
-            Self::IterationLimit(_) => "iteration_limit",
             Self::NoQuery => "no_query",
             Self::ContextParse(_) => "context_parse_error",
             Self::Io(_) => "io_error",
-            Self::Sandbox(_) => "sandbox_error",
+            Self::ToolResultParse(_) => "tool_result_parse_error",
         }
     }
 }
@@ -76,8 +76,6 @@ pub enum ConfigError {
     #[error("invalid model config: {0}")]
     InvalidModelConfig(String),
 
-    #[error("invalid sandbox config: {0}")]
-    InvalidSandboxConfig(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,23 +114,6 @@ pub enum CredentialError {
     InvalidFormat(String),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ToolError {
-    #[error("tool not found: {0}")]
-    NotFound(String),
-
-    #[error("tool execution failed: {0}")]
-    ExecutionFailed(String),
-
-    #[error("path outside allowed resources: {0}")]
-    PathDenied(PathBuf),
-
-    #[error("tool I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("tool timeout after {0}s")]
-    Timeout(u64),
-}
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
@@ -169,9 +150,6 @@ mod tests {
 
         let imc = ConfigError::InvalidModelConfig("zero".into());
         assert!(imc.to_string().contains("zero"));
-
-        let isc = ConfigError::InvalidSandboxConfig("bad wrapper".into());
-        assert!(isc.to_string().contains("bad wrapper"));
     }
 
     #[test]
@@ -183,17 +161,10 @@ mod tests {
     }
 
     #[test]
-    fn display_tool_error_variants() {
-        assert!(ToolError::NotFound("foo".into()).to_string().contains("foo"));
-        assert!(ToolError::ExecutionFailed("crash".into()).to_string().contains("crash"));
-        assert!(ToolError::PathDenied(PathBuf::from("/secret")).to_string().contains("/secret"));
-        assert!(ToolError::Timeout(30).to_string().contains("30"));
-    }
-
-    #[test]
     fn display_flick_error_variants() {
-        assert!(FlickError::IterationLimit(5).to_string().contains('5'));
         assert!(FlickError::NoQuery.to_string().contains("no query"));
+        assert!(FlickError::InvalidArguments("bad".into()).to_string().contains("bad"));
+        assert!(FlickError::InvalidToolResults("empty".into()).to_string().contains("empty"));
     }
 
     #[test]
@@ -238,15 +209,15 @@ mod tests {
     }
 
     #[test]
-    fn code_tool() {
-        let e = FlickError::Tool(ToolError::NotFound("t".into()));
-        assert_eq!(e.code(), "tool_error");
+    fn code_invalid_arguments() {
+        let e = FlickError::InvalidArguments("bad".into());
+        assert_eq!(e.code(), "invalid_arguments");
     }
 
     #[test]
-    fn code_iteration_limit() {
-        let e = FlickError::IterationLimit(25);
-        assert_eq!(e.code(), "iteration_limit");
+    fn code_invalid_tool_results() {
+        let e = FlickError::InvalidToolResults("empty".into());
+        assert_eq!(e.code(), "invalid_tool_results");
     }
 
     #[test]
@@ -259,13 +230,6 @@ mod tests {
     fn code_io() {
         let e = FlickError::Io(std::io::Error::other("x"));
         assert_eq!(e.code(), "io_error");
-    }
-
-    #[test]
-    fn code_sandbox() {
-        let e = FlickError::Sandbox("wrapper not found".into());
-        assert_eq!(e.code(), "sandbox_error");
-        assert!(e.to_string().contains("wrapper not found"));
     }
 
     #[tokio::test]
@@ -285,12 +249,21 @@ mod tests {
     }
 
     #[test]
+    fn code_tool_result_parse() {
+        let e = FlickError::ToolResultParse("bad".into());
+        assert_eq!(e.code(), "tool_result_parse_error");
+    }
+
+    #[test]
+    fn code_context_overflow() {
+        let e = FlickError::ContextOverflow(1024);
+        assert_eq!(e.code(), "context_overflow");
+    }
+
+    #[test]
     fn from_conversions() {
         let ce: FlickError = CredentialError::NotFound("x".into()).into();
         assert!(matches!(ce, FlickError::Credential(_)));
-
-        let te: FlickError = ToolError::NotFound("y".into()).into();
-        assert!(matches!(te, FlickError::Tool(_)));
 
         let cfe: FlickError = ConfigError::UnknownProvider("z".into()).into();
         assert!(matches!(cfe, FlickError::Config(_)));

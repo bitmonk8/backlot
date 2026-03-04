@@ -3,23 +3,22 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use xxhash_rust::xxh3::xxh3_128;
 
-use flick::agent;
+use flick::runner;
 use flick::config::Config;
 use flick::context::Context;
 use flick::credential::CredentialStore;
 use flick::error::FlickError;
-use flick::event::{EventEmitter, JsonLinesEmitter, RawEmitter, Event, RunSummary};
 use flick::history;
 use flick::model::ReasoningLevel;
 use flick::model_list::{self, ModelFetcher};
 use flick::prompter::{Prompter, TerminalPrompter};
 use flick::provider::{DynProvider, create_provider};
-use flick::sandbox;
-use flick::tool::ToolRegistry;
+use flick::result::{FlickResult, ResultError, ResultStatus, UsageSummary};
 
 #[derive(Parser)]
-#[command(name = "flick", version, about = "Ultra-small LLM agent CLI")]
+#[command(name = "flick", version, about = "Ultra-small LLM runner CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -27,7 +26,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Query a model, emit events to stdout
+    /// Query a model, return single JSON result to stdout
     Run {
         /// Path to TOML config file
         #[arg(long)]
@@ -37,13 +36,13 @@ enum Commands {
         #[arg(long)]
         query: Option<String>,
 
-        /// Path to JSON context file with prior messages
+        /// Resume a previous session by context hash
         #[arg(long)]
-        context: Option<PathBuf>,
+        resume: Option<String>,
 
-        /// Plain text output instead of JSON-lines
+        /// Path to JSON file containing tool results for resumed session
         #[arg(long)]
-        raw: bool,
+        tool_results: Option<PathBuf>,
 
         /// Dump API request as JSON, no model call
         #[arg(long)]
@@ -76,40 +75,52 @@ enum Commands {
 async fn main() {
     let cli = Cli::parse();
 
-    let (result, raw) = match cli.command {
+    match cli.command {
         Commands::Run {
             config,
             query,
-            context,
-            raw,
+            resume,
+            tool_results,
             dry_run,
             model,
             reasoning,
         } => {
-            let r = cmd_run(config, query, context, raw, dry_run, model, reasoning).await;
-            (r, raw)
+            if let Err(e) = cmd_run(config, query, resume, tool_results, dry_run, model, reasoning).await {
+                let error_result = FlickResult {
+                    status: ResultStatus::Error,
+                    content: vec![],
+                    usage: None,
+                    context_hash: None,
+                    error: Some(ResultError {
+                        message: e.to_string(),
+                        code: e.code().to_string(),
+                    }),
+                };
+                if let Ok(json) = serde_json::to_string(&error_result) {
+                    println!("{json}");
+                }
+                std::process::exit(1);
+            }
         }
-        Commands::Setup { provider } => (cmd_setup(&provider).await, false),
-        Commands::List => (cmd_list().await, false),
-        Commands::Init { output } => (cmd_init(output).await, false),
+        Commands::Setup { provider } => {
+            if let Err(e) = cmd_setup(&provider).await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::List => {
+            if let Err(e) = cmd_list().await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Init { output } => {
+            if let Err(e) = cmd_init(output).await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
     };
-
-    if let Err(e) = result {
-        let stderr = std::io::stderr().lock();
-        let error_event = Event::Error {
-            message: e.to_string(),
-            code: e.code().to_string(),
-            fatal: true,
-        };
-        if raw {
-            let mut emitter = RawEmitter::new(stderr);
-            emitter.emit(&error_event);
-        } else {
-            let mut emitter = JsonLinesEmitter::new(stderr);
-            emitter.emit(&error_event);
-        }
-        std::process::exit(1);
-    }
 }
 
 /// Thin wrapper: loads config, credentials, context from filesystem and stdin,
@@ -117,12 +128,15 @@ async fn main() {
 async fn cmd_run(
     config_path: PathBuf,
     query: Option<String>,
-    context_path: Option<PathBuf>,
-    raw: bool,
+    resume: Option<String>,
+    tool_results_path: Option<PathBuf>,
     dry_run: bool,
     model_override: Option<String>,
     reasoning_override: Option<ReasoningLevel>,
 ) -> Result<(), FlickError> {
+    // Validate CLI argument combinations
+    validate_run_args(&query, &resume, &tool_results_path)?;
+
     let mut config = Config::load(&config_path).await?;
 
     if let Some(m) = model_override {
@@ -141,141 +155,157 @@ async fn cmd_run(
     let cred_entry = cred_store.get(cred_name).await?;
     let provider = create_provider(provider_config, cred_entry.key, &cred_entry.base_url);
 
-    let mut policy_file_path = String::new();
-    let tools = match config.sandbox() {
-        Some(sandbox_cfg) => {
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .map_err(|e| FlickError::Sandbox(format!("cannot determine working directory: {e}")))?;
 
-            if let Some(pf) = sandbox_cfg.policy_file() {
-                policy_file_path = sandbox::expand_placeholders(pf, &cwd, "", "");
-            }
+    let mut context;
+    let query_text;
 
-            let expanded_wrapper0 = sandbox::expand_placeholders(
-                &sandbox_cfg.wrapper()[0], &cwd, "", &policy_file_path,
-            );
-            sandbox::validate_wrapper(&expanded_wrapper0)
-                .map_err(FlickError::Sandbox)?;
+    if let Some(ref hash) = resume {
+        // Resume session
+        let flick_dir = flick::credential::flick_dir()?;
+        let context_file = flick_dir.join("contexts").join(format!("{hash}.json"));
+        context = Context::load_from_file(&context_file).await?;
 
-            if let (Some(_), Some(pt)) = (sandbox_cfg.policy_file(), sandbox_cfg.policy_template()) {
-                let content = sandbox::generate_policy_content(
-                    pt,
-                    sandbox_cfg.policy_read_rule(),
-                    sandbox_cfg.policy_read_write_rule(),
-                    config.resources(),
-                    &cwd,
-                    &policy_file_path,
-                );
-                sandbox::write_policy_file(std::path::Path::new(&policy_file_path), &content)
-                    .map_err(|e| FlickError::Sandbox(format!("failed to write policy file: {e}")))?;
-            }
-            let prefix = sandbox::build_prefix(
-                sandbox_cfg,
-                config.resources(),
-                &cwd,
-                &policy_file_path,
-            );
-            let runner = sandbox::SandboxCommandRunner::new(prefix);
-            ToolRegistry::from_config_with_runner(
-                config.tools(),
-                config.resources().to_vec(),
-                Box::new(runner),
-            )
-        }
-        _ => ToolRegistry::from_config(config.tools(), config.resources().to_vec()),
-    };
-
-    let mut context = if let Some(ref ctx_path) = context_path {
-        Context::load_from_file(ctx_path).await?
+        let tool_results_file = tool_results_path.as_ref().ok_or_else(|| {
+            FlickError::InvalidArguments("--resume requires --tool-results".into())
+        })?;
+        let tool_results = flick::context::load_tool_results(tool_results_file).await?;
+        context.push_tool_results(tool_results)?;
+        query_text = String::new(); // no user query on resume
     } else {
-        Context::default()
-    };
-
-    let query_text = match &query {
-        Some(q) => q.clone(),
-        None => read_stdin().await?,
-    };
-
-    let mode = match (raw, dry_run) {
-        (true, true) => {
-            eprintln!("warning: --dry-run overrides --raw");
-            RunMode::DryRun
-        }
-        (_, true) => RunMode::DryRun,
-        (true, false) => RunMode::Raw,
-        (false, false) => RunMode::Json,
-    };
-    // stdout lock held across async agent loop — safe on current_thread runtime
-    // only; would need restructuring if runtime flavor changes.
-    let stdout = std::io::stdout().lock();
-    let result = cmd_run_core(&config, &provider, &tools, &mut context, &query_text, mode, stdout).await;
-    if !policy_file_path.is_empty() {
-        let _ = std::fs::remove_file(&policy_file_path);
+        // New session
+        context = Context::default();
+        query_text = match &query {
+            Some(q) => q.clone(),
+            None => read_stdin().await?,
+        };
     }
 
-    if let Ok(Some(ref summary)) = result {
+    let mut stdout = std::io::stdout().lock();
+    let flick_result = cmd_run_core(
+        &config, &provider, &mut context, &query_text, dry_run, &mut stdout,
+    ).await?;
+
+    // For non-dry-run runs, compute context hash, write context file, output result
+    if let Some(mut result) = flick_result {
+        let flick_dir = flick::credential::flick_dir()?;
+        let context_bytes = serde_json::to_vec(&context)
+            .map_err(|e| FlickError::Io(std::io::Error::other(e)))?;
+        let hash = xxh3_128(&context_bytes);
+        let hash_hex = format!("{hash:032x}");
+
+        // Write context file
+        let contexts_dir = flick_dir.join("contexts");
+        tokio::fs::create_dir_all(&contexts_dir).await?;
+        let context_file = contexts_dir.join(format!("{hash_hex}.json"));
+        if !tokio::fs::try_exists(&context_file).await.unwrap_or(false) {
+            tokio::fs::write(&context_file, &context_bytes).await?;
+        }
+
+        result.context_hash = Some(hash_hex.clone());
+
+        let json = serde_json::to_string(&result)
+            .map_err(|e| FlickError::Io(std::io::Error::other(e)))?;
+        writeln!(stdout, "{json}").map_err(FlickError::Io)?;
+
+        // Record history
+        let usage = result.usage.unwrap_or(UsageSummary {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost_usd: 0.0,
+        });
         let invocation = history::Invocation {
             config_path: config_path.clone(),
             model: config.model().name().to_string(),
             provider: config.model().provider().to_string(),
             query: query_text,
-            raw,
             reasoning: config.model().reasoning().map(|r| r.level),
-            context_path,
+            resume_hash: resume.clone(),
         };
-        if let Ok(flick_dir) = flick::credential::flick_dir() {
-            if let Err(e) = history::record(invocation, summary, &context, &flick_dir).await {
-                eprintln!("warning: failed to write history: {e}");
-            }
+        if let Err(e) = history::record(invocation, &usage, &hash_hex, &flick_dir).await {
+            eprintln!("warning: failed to write history: {e}");
         }
     }
 
-    result.map(|_| ())
+    Ok(())
 }
 
-enum RunMode {
-    Json,
-    Raw,
-    DryRun,
+/// Validate `flick run` argument combinations.
+///
+/// - `--resume` and `--tool-results` must both be present or both absent.
+/// - `--query` and `--resume` are mutually exclusive.
+fn validate_run_args(
+    query: &Option<String>,
+    resume: &Option<String>,
+    tool_results_path: &Option<PathBuf>,
+) -> Result<(), FlickError> {
+    if let Some(hash) = resume {
+        if hash.len() != 32
+            || !hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err(FlickError::InvalidArguments(
+                "--resume hash must be exactly 32 lowercase hex characters".into(),
+            ));
+        }
+    }
+    match (resume, tool_results_path) {
+        (Some(_), None) => {
+            return Err(FlickError::InvalidArguments(
+                "--resume requires --tool-results".into(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(FlickError::InvalidArguments(
+                "--tool-results requires --resume".into(),
+            ));
+        }
+        _ => {}
+    }
+    if query.is_some() && resume.is_some() {
+        return Err(FlickError::InvalidArguments(
+            "--query and --resume are mutually exclusive".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Testable core: all dependencies injected, no direct I/O.
 ///
-/// Returns `None` for dry-run, `Some(summary)` for real runs.
+/// Returns `None` for dry-run, `Some(FlickResult)` for real runs.
 async fn cmd_run_core(
     config: &Config,
     provider: &dyn DynProvider,
-    tools: &ToolRegistry,
     context: &mut Context,
     query: &str,
-    mode: RunMode,
-    output: impl Write,
-) -> Result<Option<RunSummary>, FlickError> {
-    if query.is_empty() {
+    dry_run: bool,
+    output: &mut impl Write,
+) -> Result<Option<FlickResult>, FlickError> {
+    // Push user query only for new sessions (non-empty query)
+    if !query.is_empty() {
+        context.push_user_text(query)?;
+    } else if context.messages.is_empty() {
         return Err(FlickError::NoQuery);
     }
-    context.push_user_text(query)?;
 
-    if matches!(mode, RunMode::DryRun) {
-        let tool_defs = tools.definitions();
-        let params = agent::build_params(config, &context.messages, tool_defs);
+    if dry_run {
+        let tool_defs: Vec<flick::provider::ToolDefinition> = config
+            .tools()
+            .iter()
+            .map(|t| t.to_definition())
+            .collect();
+        let params = runner::build_params(config, &context.messages, &tool_defs);
         let request_json = provider.build_request(params)?;
-        let mut out = output;
         let json_str = serde_json::to_string_pretty(&request_json)
             .map_err(|e| FlickError::Io(std::io::Error::other(e)))?;
-        writeln!(out, "{json_str}").map_err(FlickError::Io)?;
+        writeln!(output, "{json_str}").map_err(FlickError::Io)?;
         return Ok(None);
     }
 
-    let mut emitter: Box<dyn EventEmitter> = if matches!(mode, RunMode::Raw) {
-        Box::new(RawEmitter::new(output))
-    } else {
-        Box::new(JsonLinesEmitter::new(output))
-    };
-
-    let summary = agent::run(config, provider, tools, context, emitter.as_mut()).await?;
-    Ok(Some(summary))
+    let result = runner::run(config, provider, context).await?;
+    Ok(Some(result))
 }
 
 /// Thin wrapper: uses real stdout and credential store.
@@ -394,7 +424,6 @@ async fn cmd_init(output: PathBuf) -> Result<(), FlickError> {
 }
 
 /// Testable core: all dependencies injected.
-#[allow(clippy::too_many_lines)]
 async fn cmd_init_core(
     output_path: &str,
     prompter: &dyn Prompter,
@@ -499,41 +528,13 @@ async fn cmd_init_core(
         }
     };
 
-    // Step 5 — Tools
-    let tool_items = vec![
-        "read_file".to_string(),
-        "write_file".to_string(),
-        "list_directory".to_string(),
-        "shell_exec (unrestricted system access)".to_string(),
-    ];
-    let tool_defaults = [false, false, false, false];
-    let selected_tools = prompter.multi_select("Enable builtin tools", &tool_items, &tool_defaults)?;
-
-    let read_file = selected_tools.contains(&0);
-    let write_file = selected_tools.contains(&1);
-    let list_directory = selected_tools.contains(&2);
-    let mut shell_exec = selected_tools.contains(&3);
-
-    if shell_exec
-        && !prompter.confirm(
-            "shell_exec grants the model unrestricted system access. Enable?",
-            false,
-        )?
-    {
-        shell_exec = false;
-    }
-
-    // Step 6 — Write
+    // Step 5 — Write
     let params = ConfigGenParams {
         provider_name,
         model_name: &model_name,
         max_tokens,
         system_prompt: system_prompt.as_deref(),
         api,
-        tool_read_file: read_file,
-        tool_write_file: write_file,
-        tool_list_directory: list_directory,
-        tool_shell_exec: shell_exec,
     };
     let toml_output = generate_config_toml(&params);
 
@@ -570,17 +571,12 @@ fn parse_max_tokens(input: &str) -> Result<u32, FlickError> {
     Ok(v)
 }
 
-#[allow(clippy::struct_excessive_bools)] // tool flags are genuinely independent booleans
 struct ConfigGenParams<'a> {
     provider_name: &'a str,
     model_name: &'a str,
     max_tokens: Option<u32>,
     system_prompt: Option<&'a str>,
     api: flick::ApiKind,
-    tool_read_file: bool,
-    tool_write_file: bool,
-    tool_list_directory: bool,
-    tool_shell_exec: bool,
 }
 
 /// Escape a string for use inside a TOML basic string (`"..."`).
@@ -672,14 +668,14 @@ fn generate_config_toml(p: &ConfigGenParams<'_>) -> String {
     out.push_str("# explicit_tool_choice_auto = false\n");
     out.push('\n');
 
-    // Tools section
-    out.push_str("# ── Builtin Tools ───────────────────────────────────────────────────\n");
-    out.push_str("# shell_exec and custom tools bypass resource restrictions.\n");
-    out.push_str("[tools]\n");
-    let _ = writeln!(out, "read_file = {}", p.tool_read_file);
-    let _ = writeln!(out, "write_file = {}", p.tool_write_file);
-    let _ = writeln!(out, "list_directory = {}", p.tool_list_directory);
-    let _ = writeln!(out, "shell_exec = {}", p.tool_shell_exec);
+    // Tools section (commented-out template)
+    out.push_str("# ── Tools (optional) ────────────────────────────────────────────────\n");
+    out.push_str("# Declare tool schemas. Flick sends these to the model but does not\n");
+    out.push_str("# execute tools — the caller handles execution.\n");
+    out.push_str("# [[tools]]\n");
+    out.push_str("# name = \"tool_name\"\n");
+    out.push_str("# description = \"What this tool does\"\n");
+    out.push_str("# parameters = { type = \"object\", properties = { arg = { type = \"string\" } }, required = [\"arg\"] }\n");
     out.push('\n');
 
     write_commented_sections(&mut out);
@@ -688,41 +684,12 @@ fn generate_config_toml(p: &ConfigGenParams<'_>) -> String {
 }
 
 fn write_commented_sections(out: &mut String) {
-    // Custom tools
-    out.push_str("# ── Custom Tools (optional) ─────────────────────────────────────────\n");
-    out.push_str("# [[tools.custom]]\n");
-    out.push_str("# name = \"my_tool\"\n");
-    out.push_str("# description = \"What the tool does\"\n");
-    out.push_str("# parameters = { type = \"object\", properties = { arg = { type = \"string\" } } }\n");
-    out.push_str("# command = \"echo {{arg}}\"       # shell command (OR executable, not both)\n");
-    out.push_str("# executable = \"./tools/my_tool\" # receives JSON on stdin\n");
-    out.push('\n');
-
-    // Resources
-    out.push_str("# ── Resources (optional) ────────────────────────────────────────────\n");
-    out.push_str("# Restricts builtin tool access. If omitted, all paths allowed.\n");
-    out.push_str("# Does NOT restrict shell_exec or custom tools.\n");
-    out.push_str("# [[resources]]\n");
-    out.push_str("# path = \"src/\"\n");
-    out.push_str("# access = \"read_write\"\n");
-    out.push('\n');
-
     // Pricing
     out.push_str("# ── Pricing (optional) ──────────────────────────────────────────────\n");
     out.push_str("# Overrides builtin model pricing. Omit to use registry defaults.\n");
     out.push_str("# [pricing]\n");
     out.push_str("# input_per_million = 3.0\n");
     out.push_str("# output_per_million = 15.0\n");
-    out.push('\n');
-
-    // Sandbox
-    out.push_str("# ── Sandbox (optional) ──────────────────────────────────────────────\n");
-    out.push_str("# Wrapper prefix for sandboxed tool execution. See docs/SANDBOX.md.\n");
-    out.push_str("# [sandbox]\n");
-    out.push_str("# wrapper = [\"bwrap\", \"--die-with-parent\"]\n");
-    out.push_str("# read_args = [\"--ro-bind\", \"{path}\", \"{path}\"]\n");
-    out.push_str("# read_write_args = [\"--bind\", \"{path}\", \"{path}\"]\n");
-    out.push_str("# suffix = [\"--\"]\n");
 }
 
 async fn read_stdin() -> Result<String, FlickError> {
@@ -744,6 +711,133 @@ async fn read_stdin() -> Result<String, FlickError> {
 mod tests {
     use super::*;
     use flick::prompter::MockPrompter;
+
+    // -- validate_run_args tests --
+
+    #[test]
+    fn validate_resume_without_tool_results_rejected() {
+        let result = validate_run_args(
+            &None,
+            &Some("a1b2c3d4e5f60718a1b2c3d4e5f60718".into()),
+            &None,
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, FlickError::InvalidArguments(_)));
+        assert!(err.to_string().contains("--resume requires --tool-results"));
+    }
+
+    #[test]
+    fn validate_tool_results_without_resume_rejected() {
+        let result = validate_run_args(
+            &None,
+            &None,
+            &Some(PathBuf::from("results.json")),
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, FlickError::InvalidArguments(_)));
+        assert!(err.to_string().contains("--tool-results requires --resume"));
+    }
+
+    #[test]
+    fn validate_query_with_resume_rejected() {
+        let result = validate_run_args(
+            &Some("hello".into()),
+            &Some("a1b2c3d4e5f60718a1b2c3d4e5f60718".into()),
+            &Some(PathBuf::from("results.json")),
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, FlickError::InvalidArguments(_)));
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn validate_new_session_accepted() {
+        validate_run_args(&Some("hello".into()), &None, &None).unwrap();
+    }
+
+    #[test]
+    fn validate_resume_session_accepted() {
+        validate_run_args(
+            &None,
+            &Some("a1b2c3d4e5f60718a1b2c3d4e5f60718".into()),
+            &Some(PathBuf::from("results.json")),
+        ).unwrap();
+    }
+
+    #[test]
+    fn validate_no_args_accepted() {
+        validate_run_args(&None, &None, &None).unwrap();
+    }
+
+    #[test]
+    fn validate_resume_hash_valid_accepted() {
+        validate_run_args(
+            &None,
+            &Some("00112233445566778899aabbccddeeff".into()),
+            &Some(PathBuf::from("results.json")),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_resume_hash_path_traversal_rejected() {
+        let result = validate_run_args(
+            &None,
+            &Some("../../../etc/passwd".into()),
+            &Some(PathBuf::from("results.json")),
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, FlickError::InvalidArguments(_)));
+        assert!(err.to_string().contains("32 lowercase hex"));
+    }
+
+    #[test]
+    fn validate_resume_hash_uppercase_rejected() {
+        let result = validate_run_args(
+            &None,
+            &Some("00112233445566778899AABBCCDDEEFF".into()),
+            &Some(PathBuf::from("results.json")),
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, FlickError::InvalidArguments(_)));
+        assert!(err.to_string().contains("32 lowercase hex"));
+    }
+
+    #[test]
+    fn validate_resume_hash_too_short_rejected() {
+        let result = validate_run_args(
+            &None,
+            &Some("abcdef01".into()),
+            &Some(PathBuf::from("results.json")),
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, FlickError::InvalidArguments(_)));
+        assert!(err.to_string().contains("32 lowercase hex"));
+    }
+
+    #[test]
+    fn validate_resume_hash_too_long_rejected() {
+        let result = validate_run_args(
+            &None,
+            &Some("00112233445566778899aabbccddeeff00".into()),
+            &Some(PathBuf::from("results.json")),
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, FlickError::InvalidArguments(_)));
+        assert!(err.to_string().contains("32 lowercase hex"));
+    }
+
+    #[test]
+    fn validate_resume_hash_non_hex_rejected() {
+        let result = validate_run_args(
+            &None,
+            &Some("00112233445566778899aabbccddeefg".into()),
+            &Some(PathBuf::from("results.json")),
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, FlickError::InvalidArguments(_)));
+        assert!(err.to_string().contains("32 lowercase hex"));
+    }
 
     // -- cmd_setup_core tests --
 
@@ -921,8 +1015,11 @@ mod tests {
 
     // -- cmd_run_core tests --
 
-    use flick::provider::{ModelResponse, RequestParams};
+    use flick::context::ContentBlock;
+    use flick::provider::{ModelResponse, RequestParams, ToolCallResponse, UsageResponse};
+    use flick::result::ResultStatus;
     use std::pin::Pin;
+    use std::sync::Mutex;
 
     struct StubProvider;
     impl DynProvider for StubProvider {
@@ -933,6 +1030,57 @@ mod tests {
             Box::pin(async { unreachable!() })
         }
         fn build_request(&self, _params: RequestParams<'_>) -> Result<serde_json::Value, flick::error::ProviderError> {
+            Ok(serde_json::json!({"model": "test"}))
+        }
+    }
+
+    /// Provider that returns a single canned response, for cmd_run_core tests.
+    struct InlineTestProvider {
+        response: Mutex<Option<ModelResponse>>,
+    }
+
+    impl InlineTestProvider {
+        fn with_text(text: &str) -> Self {
+            Self {
+                response: Mutex::new(Some(ModelResponse {
+                    text: Some(text.to_string()),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: UsageResponse::default(),
+                })),
+            }
+        }
+
+        fn with_tool_calls(calls: Vec<ToolCallResponse>) -> Self {
+            Self {
+                response: Mutex::new(Some(ModelResponse {
+                    text: None,
+                    thinking: Vec::new(),
+                    tool_calls: calls,
+                    usage: UsageResponse::default(),
+                })),
+            }
+        }
+    }
+
+    impl DynProvider for InlineTestProvider {
+        fn call_boxed<'a>(
+            &'a self,
+            _params: RequestParams<'a>,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, flick::error::ProviderError>> + Send + 'a>> {
+            let response = self
+                .response
+                .lock()
+                .expect("mutex poisoned")
+                .take()
+                .expect("InlineTestProvider called more than once");
+            Box::pin(async move { Ok(response) })
+        }
+
+        fn build_request(
+            &self,
+            _params: RequestParams<'_>,
+        ) -> Result<serde_json::Value, flick::error::ProviderError> {
             Ok(serde_json::json!({"model": "test"}))
         }
     }
@@ -952,26 +1100,143 @@ api = "messages"
     #[tokio::test]
     async fn run_core_empty_query_returns_no_query() {
         let config = stub_config();
-        let tools = ToolRegistry::from_config(config.tools(), vec![]);
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&config, &StubProvider, &tools, &mut Context::default(), "", RunMode::Json, &mut output).await;
+        let result = cmd_run_core(&config, &StubProvider, &mut Context::default(), "", false, &mut output).await;
         assert!(matches!(result, Err(FlickError::NoQuery)));
     }
 
     #[tokio::test]
     async fn run_core_dry_run_writes_json() {
         let config = stub_config();
-        let tools = ToolRegistry::from_config(config.tools(), vec![]);
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&config, &StubProvider, &tools, &mut Context::default(), "hello", RunMode::DryRun, &mut output).await;
-        let summary = result.expect("should succeed");
-        assert!(summary.is_none(), "dry-run should return None");
+        let result = cmd_run_core(&config, &StubProvider, &mut Context::default(), "hello", true, &mut output).await;
+        let flick_result = result.expect("should succeed");
+        assert!(flick_result.is_none(), "dry-run should return None");
 
         let output_str = String::from_utf8(output).expect("utf8");
         let parsed: serde_json::Value = serde_json::from_str(output_str.trim()).expect("valid JSON");
         assert_eq!(parsed["model"], "test");
+    }
+
+    #[tokio::test]
+    async fn run_core_non_dry_run_text_response() {
+        let config = stub_config();
+        let provider = InlineTestProvider::with_text("Hello from model");
+        let mut context = Context::default();
+        let mut output = Vec::new();
+
+        let result = cmd_run_core(
+            &config, &provider, &mut context, "say hello", false, &mut output,
+        )
+        .await
+        .expect("should succeed");
+
+        let flick_result = result.expect("non-dry-run should return Some");
+        assert_eq!(flick_result.status, ResultStatus::Complete);
+        assert!(flick_result.content.iter().any(
+            |b| matches!(b, ContentBlock::Text { text } if text == "Hello from model")
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_core_non_dry_run_tool_calls() {
+        let config = Config::parse(
+            r#"
+[model]
+provider = "test"
+name = "test-model"
+max_tokens = 1024
+
+[provider.test]
+api = "messages"
+
+[[tools]]
+name = "read_file"
+description = "Read a file"
+parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
+"#,
+        )
+        .expect("config should parse");
+
+        let provider = InlineTestProvider::with_tool_calls(vec![ToolCallResponse {
+            call_id: "tc_1".into(),
+            tool_name: "read_file".into(),
+            arguments: r#"{"path":"/tmp/test"}"#.into(),
+        }]);
+        let mut context = Context::default();
+        let mut output = Vec::new();
+
+        let result = cmd_run_core(
+            &config, &provider, &mut context, "read the file", false, &mut output,
+        )
+        .await
+        .expect("should succeed");
+
+        let flick_result = result.expect("non-dry-run should return Some");
+        assert_eq!(flick_result.status, ResultStatus::ToolCallsPending);
+        let tool_uses: Vec<_> = flick_result
+            .content
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            .collect();
+        assert_eq!(tool_uses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_core_resume_path() {
+        let config = Config::parse(
+            r#"
+[model]
+provider = "test"
+name = "test-model"
+max_tokens = 1024
+
+[provider.test]
+api = "messages"
+
+[[tools]]
+name = "read_file"
+description = "Read a file"
+parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
+"#,
+        )
+        .expect("config should parse");
+
+        // Build a context as if a previous run returned tool calls and
+        // the caller already pushed tool results (simulating --resume).
+        let mut context = Context::default();
+        context.push_user_text("read the file").expect("push user");
+        context
+            .push_assistant(vec![ContentBlock::ToolUse {
+                id: "tc_1".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({"path": "/tmp/test"}),
+            }])
+            .expect("push assistant");
+        context
+            .push_tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: "tc_1".into(),
+                content: "file contents here".into(),
+                is_error: false,
+            }])
+            .expect("push tool results");
+
+        let provider = InlineTestProvider::with_text("The file contains data.");
+        let mut output = Vec::new();
+
+        // Empty query simulates resume path (tool results already pushed).
+        let result = cmd_run_core(
+            &config, &provider, &mut context, "", false, &mut output,
+        )
+        .await
+        .expect("should succeed");
+
+        let flick_result = result.expect("non-dry-run should return Some");
+        assert_eq!(flick_result.status, ResultStatus::Complete);
+        // Context should now have 4 messages: user, assistant(tool_use), user(tool_result), assistant(text)
+        assert_eq!(context.messages.len(), 4);
     }
 
     // -- cmd_init_core tests --
@@ -1009,16 +1274,14 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         // Prompts in order:
         // select provider (0), select model (0), input max_tokens ("64000"),
-        // input system_prompt (default), multi_select tools ([]),
+        // input system_prompt (default)
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1030,10 +1293,9 @@ api = "messages"
         assert!(text.contains("name = \"claude-sonnet-4-20250514\""));
         assert!(text.contains("max_tokens = 64000"));
         assert!(text.contains("api = \"messages\""));
-        assert!(text.contains("read_file = false"));
-        assert!(text.contains("write_file = false"));
-        assert!(text.contains("list_directory = false"));
-        assert!(text.contains("shell_exec = false"));
+        // Tool section should be a commented-out template
+        assert!(text.contains("# [[tools]]"));
+        assert!(text.contains("# name = \"tool_name\""));
     }
 
     #[tokio::test]
@@ -1046,15 +1308,13 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "gpt-4o".into(),
             max_completion_tokens: Some(16_384),
-            context_length: Some(128_000),
         }]);
 
         // Select second provider (index 1 = openai), select model (0),
-        // input max_tokens, input system prompt, multi_select tools
+        // input max_tokens, input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![1, 0])
-            .with_inputs(vec!["16384".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["16384".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1074,11 +1334,10 @@ api = "messages"
             FlickError::Io(std::io::Error::other("network error")),
         );
 
-        // select provider (0), input model name, input max_tokens, input system prompt, multi_select tools
+        // select provider (0), input model name, input max_tokens, input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0])
-            .with_inputs(vec!["custom-model".into(), "8192".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["custom-model".into(), "8192".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1098,15 +1357,13 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         // select provider (0), select model (1 = "(custom)"), input model name,
-        // input max_tokens, input system prompt, multi_select tools
+        // input max_tokens, input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 1])
-            .with_inputs(vec!["my-model".into(), "8192".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["my-model".into(), "8192".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1124,7 +1381,6 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         // select provider (0), select model (1 = "(custom)"), input empty model name
@@ -1146,15 +1402,13 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(32_000),
-            context_length: Some(200_000),
         }]);
 
         // select provider (0), select model (0), input max_tokens ("32000"),
-        // input system prompt, multi_select tools
+        // input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["32000".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["32000".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1173,16 +1427,14 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: None,
-            context_length: Some(200_000),
         }]);
 
         // Registry default for claude-sonnet-4-20250514 is 64000
         // select provider (0), select model (0), input max_tokens ("64000"),
-        // input system prompt, multi_select tools
+        // input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1201,16 +1453,14 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "unknown-model-xyz".into(),
             max_completion_tokens: None,
-            context_length: None,
         }]);
 
         // Hardcoded fallback is 8192
         // select provider (0), select model (0), input max_tokens ("8192"),
-        // input system prompt, multi_select tools
+        // input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["8192".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["8192".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1230,15 +1480,13 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "gpt-4o".into(),
             max_completion_tokens: Some(16_384),
-            context_length: Some(128_000),
         }]);
 
         // select provider (0), select model (0), input "none",
-        // input system prompt, multi_select tools
+        // input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["none".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["none".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1257,18 +1505,16 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         // select provider (0), select model (0), input max_tokens,
-        // input system prompt with quotes, multi_select tools
+        // input system prompt with quotes
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
             .with_inputs(vec![
                 "64000".into(),
                 "You are \"Flick\", a fast runner.".into(),
-            ])
-            .with_multi_selects(vec![vec![]]);
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1286,15 +1532,13 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         // select provider (0), select model (0), input max_tokens,
-        // input "none" for system prompt, multi_select tools
+        // input "none" for system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "none".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["64000".into(), "none".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1304,89 +1548,6 @@ api = "messages"
         let text = String::from_utf8(output).expect("utf8");
         assert!(text.contains("# system_prompt = "));
         assert!(!text.contains("\nsystem_prompt = "));
-    }
-
-    #[tokio::test]
-    async fn init_core_tool_selection() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let store = init_store_with_anthropic(dir.path()).await;
-        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
-            id: "claude-sonnet-4-20250514".into(),
-            max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
-        }]);
-
-        // select provider (0), select model (0), input max_tokens,
-        // input system prompt, multi_select tools [0, 2] = read_file + list_directory
-        let prompter = MockPrompter::new()
-            .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![0, 2]]);
-
-        let mut output = Vec::new();
-        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
-            .await
-            .expect("init_core");
-
-        let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("read_file = true"));
-        assert!(text.contains("write_file = false"));
-        assert!(text.contains("list_directory = true"));
-        assert!(text.contains("shell_exec = false"));
-    }
-
-    #[tokio::test]
-    async fn init_core_shell_exec_confirmed() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let store = init_store_with_anthropic(dir.path()).await;
-        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
-            id: "claude-sonnet-4-20250514".into(),
-            max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
-        }]);
-
-        // select provider (0), select model (0), input max_tokens,
-        // input system prompt, multi_select tools [3] = shell_exec, confirm true
-        let prompter = MockPrompter::new()
-            .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![3]])
-            .with_confirms(vec![true]);
-
-        let mut output = Vec::new();
-        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
-            .await
-            .expect("init_core");
-
-        let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("shell_exec = true"));
-    }
-
-    #[tokio::test]
-    async fn init_core_shell_exec_rejected() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let store = init_store_with_anthropic(dir.path()).await;
-        let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
-            id: "claude-sonnet-4-20250514".into(),
-            max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
-        }]);
-
-        // select provider (0), select model (0), input max_tokens,
-        // input system prompt, multi_select tools [3] = shell_exec, confirm false
-        let prompter = MockPrompter::new()
-            .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![3]])
-            .with_confirms(vec![false]);
-
-        let mut output = Vec::new();
-        cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
-            .await
-            .expect("init_core");
-
-        let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("shell_exec = false"));
     }
 
     #[tokio::test]
@@ -1421,13 +1582,11 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1453,13 +1612,11 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1478,22 +1635,17 @@ api = "messages"
             max_tokens: Some(64_000),
             system_prompt: Some("You are Flick, a fast LLM runner."),
             api: flick::ApiKind::Messages,
-            tool_read_file: true,
-            tool_write_file: false,
-            tool_list_directory: true,
-            tool_shell_exec: false,
         };
         let toml_str = generate_config_toml(&params);
         assert!(!toml_str.contains("base_url"), "base_url should not appear in generated TOML");
-        let config = Config::parse(&toml_str).expect("generated TOML should parse");
-        assert_eq!(config.model().provider(), "anthropic");
-        assert_eq!(config.model().name(), "claude-sonnet-4-20250514");
-        assert_eq!(config.model().max_tokens(), Some(64_000));
-        assert_eq!(config.system_prompt(), Some("You are Flick, a fast LLM runner."));
-        assert!(config.tools().read_file);
-        assert!(!config.tools().write_file);
-        assert!(config.tools().list_directory);
-        assert!(!config.tools().shell_exec);
+        assert!(toml_str.contains("provider = \"anthropic\""));
+        assert!(toml_str.contains("name = \"claude-sonnet-4-20250514\""));
+        assert!(toml_str.contains("max_tokens = 64000"));
+        // Tool section should be commented-out template
+        assert!(toml_str.contains("# [[tools]]"));
+        assert!(toml_str.contains("# name = \"tool_name\""));
+        // Round-trip: generated TOML should parse with new config.rs
+        let _config = Config::parse(&toml_str).expect("generated TOML should parse");
     }
 
     #[tokio::test]
@@ -1503,13 +1655,11 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()])
-            .with_multi_selects(vec![vec![]]);
+            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1529,7 +1679,6 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         let prompter = MockPrompter::new()
@@ -1537,8 +1686,7 @@ api = "messages"
             .with_inputs(vec![
                 "64000".into(),
                 "Line one\nLine two\nLine three".into(),
-            ])
-            .with_multi_selects(vec![vec![]]);
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1548,9 +1696,6 @@ api = "messages"
         let text = String::from_utf8(output).expect("utf8");
         // Multi-line prompt should use ''' literal string
         assert!(text.contains("system_prompt = '''\nLine one\nLine two\nLine three'''"));
-        // Verify it round-trips through TOML parsing
-        let config = Config::parse(&text).expect("generated TOML should parse");
-        assert_eq!(config.system_prompt(), Some("Line one\nLine two\nLine three"));
     }
 
     // -- Test gap #12: system prompt containing ''' --
@@ -1562,7 +1707,6 @@ api = "messages"
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
             max_completion_tokens: Some(64_000),
-            context_length: Some(200_000),
         }]);
 
         let prompter = MockPrompter::new()
@@ -1570,8 +1714,7 @@ api = "messages"
             .with_inputs(vec![
                 "64000".into(),
                 "Use '''triple quotes''' carefully".into(),
-            ])
-            .with_multi_selects(vec![vec![]]);
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1582,9 +1725,6 @@ api = "messages"
         // Contains ''', so must fall through to escaped basic string
         assert!(text.contains("system_prompt = \"Use \\'\\'\\'triple quotes\\'\\'\\' carefully\"")
             || text.contains("system_prompt = \"Use '''triple quotes''' carefully\""));
-        // Verify it round-trips through TOML parsing
-        let config = Config::parse(&text).expect("generated TOML should parse");
-        assert_eq!(config.system_prompt(), Some("Use '''triple quotes''' carefully"));
     }
 
     // -- Test gap #13: max_tokens = 0 rejection --
@@ -1620,10 +1760,6 @@ api = "messages"
             max_tokens: None,
             system_prompt: Some("You are Flick, a fast LLM runner."),
             api: flick::ApiKind::ChatCompletions,
-            tool_read_file: false,
-            tool_write_file: false,
-            tool_list_directory: false,
-            tool_shell_exec: false,
         };
         let toml_str = generate_config_toml(&params);
         // Verify the commented-out max_tokens line is present
@@ -1633,10 +1769,9 @@ api = "messages"
             let trimmed = l.trim();
             trimmed.starts_with("max_tokens") && !trimmed.starts_with('#')
         }), "max_tokens should only appear as a comment");
-        // Verify the generated TOML parses successfully
-        let config = Config::parse(&toml_str).expect("generated TOML with commented max_tokens should parse");
-        assert_eq!(config.model().provider(), "openai");
-        assert_eq!(config.model().name(), "gpt-4o");
-        assert!(config.model().max_tokens().is_none());
+        assert!(toml_str.contains("provider = \"openai\""));
+        assert!(toml_str.contains("name = \"gpt-4o\""));
+        // Round-trip: generated TOML should parse with new config.rs
+        let _config = Config::parse(&toml_str).expect("generated TOML should parse");
     }
 }

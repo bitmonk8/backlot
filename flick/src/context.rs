@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Maximum messages in a context before push methods refuse to add more.
-/// Prevents OOM from malicious or runaway context growth. The agent loop
-/// runs at most 25 iterations × 2 messages each = 50 messages per session,
-/// plus the initial user message and any loaded history.
+/// Prevents OOM from runaway context growth across resumed sessions.
 const MAX_CONTEXT_MESSAGES: usize = 1024;
 
-/// Serializable conversation history. Epic writes this between Flick
+/// Serializable conversation history. The caller writes this between Flick
 /// invocations to maintain multi-turn context.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Context {
@@ -88,17 +87,13 @@ impl Context {
             return Err(crate::error::FlickError::ContextOverflow(MAX_CONTEXT_MESSAGES));
         }
         if results.is_empty() {
-            return Err(crate::error::FlickError::Tool(
-                crate::error::ToolError::ExecutionFailed(
-                    "push_tool_results called with empty results".into(),
-                ),
+            return Err(crate::error::FlickError::InvalidToolResults(
+                "push_tool_results called with empty results".into(),
             ));
         }
         if !results.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })) {
-            return Err(crate::error::FlickError::Tool(
-                crate::error::ToolError::ExecutionFailed(
-                    "push_tool_results called with non-ToolResult blocks".into(),
-                ),
+            return Err(crate::error::FlickError::InvalidToolResults(
+                "push_tool_results called with non-ToolResult blocks".into(),
             ));
         }
         self.messages.push(Message {
@@ -107,6 +102,57 @@ impl Context {
         });
         Ok(())
     }
+}
+
+/// Reads a JSON file containing an array of tool results and converts them
+/// to `ContentBlock::ToolResult` variants. The file format matches the
+/// `--tool-results` CLI input described in the monadic tools spec.
+pub async fn load_tool_results(path: &Path) -> Result<Vec<ContentBlock>, crate::error::FlickError> {
+    let data = tokio::fs::read_to_string(path).await?;
+
+    // Deserialize into raw JSON values first so we can produce specific
+    // validation errors instead of opaque serde messages.
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+
+    if entries.is_empty() {
+        return Err(crate::error::FlickError::ToolResultParse(
+            "tool results array is empty".into(),
+        ));
+    }
+
+    let mut results = Vec::with_capacity(entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        let tool_use_id = entry
+            .get("tool_use_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::error::FlickError::ToolResultParse(format!(
+                    "entry {i}: missing or non-string \"tool_use_id\""
+                ))
+            })?;
+
+        let content = entry
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::error::FlickError::ToolResultParse(format!(
+                    "entry {i}: missing or non-string \"content\""
+                ))
+            })?;
+
+        let is_error = entry
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        results.push(ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.to_owned(),
+            content: content.to_owned(),
+            is_error,
+        });
+    }
+
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -299,6 +345,160 @@ mod tests {
         assert!(matches!(
             result,
             Err(crate::error::FlickError::ContextOverflow(1024))
+        ));
+    }
+
+    #[test]
+    fn push_tool_results_rejects_empty_vec() {
+        let mut ctx = Context::default();
+        let result = ctx.push_tool_results(vec![]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::InvalidToolResults(_))
+        ));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("empty"));
+    }
+
+    #[test]
+    fn push_tool_results_rejects_non_tool_result_blocks() {
+        let mut ctx = Context::default();
+        let result = ctx.push_tool_results(vec![ContentBlock::Text {
+            text: "hello".into(),
+        }]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::InvalidToolResults(_))
+        ));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("non-ToolResult"));
+    }
+
+    // --- load_tool_results tests ---
+
+    fn write_temp_file(content: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("create temp file");
+        f.write_all(content).expect("write temp file");
+        f
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_valid_input() {
+        let json = br#"[
+            {"tool_use_id": "tc_1", "content": "file contents", "is_error": false},
+            {"tool_use_id": "tc_2", "content": "command failed", "is_error": true}
+        ]"#;
+        let f = write_temp_file(json);
+        let results = load_tool_results(f.path()).await.unwrap();
+        assert_eq!(results.len(), 2);
+
+        match &results[0] {
+            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                assert_eq!(tool_use_id, "tc_1");
+                assert_eq!(content, "file contents");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+
+        match &results[1] {
+            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                assert_eq!(tool_use_id, "tc_2");
+                assert_eq!(content, "command failed");
+                assert!(*is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_is_error_defaults_false() {
+        let json = br#"[{"tool_use_id": "tc_1", "content": "ok"}]"#;
+        let f = write_temp_file(json);
+        let results = load_tool_results(f.path()).await.unwrap();
+        match &results[0] {
+            ContentBlock::ToolResult { is_error, .. } => assert!(!is_error),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_missing_tool_use_id() {
+        let json = br#"[{"content": "data", "is_error": false}]"#;
+        let f = write_temp_file(json);
+        let err = load_tool_results(f.path()).await.unwrap_err();
+        assert!(matches!(err, crate::error::FlickError::ToolResultParse(_)));
+        assert!(err.to_string().contains("tool_use_id"));
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_missing_content() {
+        let json = br#"[{"tool_use_id": "tc_1", "is_error": false}]"#;
+        let f = write_temp_file(json);
+        let err = load_tool_results(f.path()).await.unwrap_err();
+        assert!(matches!(err, crate::error::FlickError::ToolResultParse(_)));
+        assert!(err.to_string().contains("content"));
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_empty_array() {
+        let json = b"[]";
+        let f = write_temp_file(json);
+        let err = load_tool_results(f.path()).await.unwrap_err();
+        assert!(matches!(err, crate::error::FlickError::ToolResultParse(_)));
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_malformed_json() {
+        let f = write_temp_file(b"not json at all");
+        let err = load_tool_results(f.path()).await.unwrap_err();
+        assert!(matches!(err, crate::error::FlickError::ContextParse(_)));
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_nonexistent_file() {
+        let err = load_tool_results(Path::new("/nonexistent/results.json")).await.unwrap_err();
+        assert!(matches!(err, crate::error::FlickError::Io(_)));
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_not_an_array() {
+        let json = br#"{"tool_use_id": "tc_1", "content": "data"}"#;
+        let f = write_temp_file(json);
+        let err = load_tool_results(f.path()).await.unwrap_err();
+        // A JSON object instead of array fails at the Vec<Value> parse step
+        assert!(matches!(err, crate::error::FlickError::ContextParse(_)));
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_non_boolean_is_error_defaults_false() {
+        let json = br#"[{"tool_use_id": "tc_1", "content": "ok", "is_error": "true"}]"#;
+        let f = write_temp_file(json);
+        let results = load_tool_results(f.path()).await.unwrap();
+        match &results[0] {
+            ContentBlock::ToolResult { is_error, .. } => assert!(!is_error),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_tool_results_integrates_with_push() {
+        let json = br#"[{"tool_use_id": "tc_1", "content": "output", "is_error": false}]"#;
+        let f = write_temp_file(json);
+        let results = load_tool_results(f.path()).await.unwrap();
+        let mut ctx = Context::default();
+        ctx.push_tool_results(results).unwrap();
+        assert_eq!(ctx.messages.len(), 1);
+        assert_eq!(ctx.messages[0].role, Role::User);
+        assert!(matches!(
+            &ctx.messages[0].content[0],
+            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc_1"
         ));
     }
 }

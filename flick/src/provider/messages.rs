@@ -7,7 +7,6 @@ use crate::error::ProviderError;
 use crate::model::anthropic_budget_tokens;
 use crate::provider::{
     ModelResponse, Provider, RequestParams, ThinkingContent, ToolCallResponse, UsageResponse,
-    Warning,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -134,7 +133,6 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
     let mut text = String::new();
     let mut thinking = Vec::new();
     let mut tool_calls = Vec::new();
-    let mut warnings = Vec::new();
 
     if let Some(content) = json["content"].as_array() {
         for block in content {
@@ -185,14 +183,6 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
         .unwrap_or(0);
     let cache_read = usage_obj["cache_read_input_tokens"].as_u64().unwrap_or(0);
 
-    // Truncation warning
-    if json["stop_reason"].as_str() == Some("max_tokens") {
-        warnings.push(Warning {
-            message: "model response truncated (max tokens exceeded)".into(),
-            code: "max_tokens".into(),
-        });
-    }
-
     Ok(ModelResponse {
         text: if text.is_empty() { None } else { Some(text) },
         thinking,
@@ -203,7 +193,6 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
             cache_creation_input_tokens: cache_creation,
             cache_read_input_tokens: cache_read,
         },
-        warnings,
     })
 }
 
@@ -469,7 +458,6 @@ mod tests {
         assert!(resp.thinking.is_empty());
         assert_eq!(resp.usage.input_tokens, 100);
         assert_eq!(resp.usage.output_tokens, 50);
-        assert!(resp.warnings.is_empty());
     }
 
     #[test]
@@ -505,18 +493,6 @@ mod tests {
         assert_eq!(resp.thinking[0].text, "Let me reason");
         assert_eq!(resp.thinking[0].signature, "sig_abc");
         assert_eq!(resp.text.as_deref(), Some("Answer"));
-    }
-
-    #[test]
-    fn parse_response_max_tokens_warning() {
-        let json = serde_json::json!({
-            "content": [{"type": "text", "text": "partial"}],
-            "usage": {"input_tokens": 10, "output_tokens": 1024},
-            "stop_reason": "max_tokens"
-        });
-        let resp = parse_response(&json).expect("should parse");
-        assert_eq!(resp.warnings.len(), 1);
-        assert_eq!(resp.warnings[0].code, "max_tokens");
     }
 
     #[test]

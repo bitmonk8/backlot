@@ -17,10 +17,6 @@ pub trait Prompter {
     /// Display a yes/no confirmation. Returns true for yes.
     fn confirm(&self, prompt: &str, default: bool) -> Result<bool, FlickError>;
 
-    /// Display a multi-select list. Returns indices of selected items.
-    fn multi_select(&self, prompt: &str, items: &[String], defaults: &[bool])
-        -> Result<Vec<usize>, FlickError>;
-
     /// Print a message to the user (stderr).
     fn message(&self, msg: &str) -> Result<(), FlickError>;
 }
@@ -114,20 +110,6 @@ impl Prompter for TerminalPrompter {
             .map_err(|e| FlickError::Io(std::io::Error::other(e)))
     }
 
-    fn multi_select(
-        &self,
-        prompt: &str,
-        items: &[String],
-        defaults: &[bool],
-    ) -> Result<Vec<usize>, FlickError> {
-        dialoguer::MultiSelect::new()
-            .with_prompt(prompt)
-            .items(items)
-            .defaults(defaults)
-            .interact_on(&self.term)
-            .map_err(|e| FlickError::Io(std::io::Error::other(e)))
-    }
-
     fn message(&self, msg: &str) -> Result<(), FlickError> {
         self.term
             .write_line(msg)
@@ -141,7 +123,6 @@ pub struct MockPrompter {
     selects: std::sync::Mutex<std::collections::VecDeque<usize>>,
     inputs: std::sync::Mutex<std::collections::VecDeque<String>>,
     confirms: std::sync::Mutex<std::collections::VecDeque<bool>>,
-    multi_selects: std::sync::Mutex<std::collections::VecDeque<Vec<usize>>>,
     messages: std::sync::Mutex<Vec<String>>,
 }
 
@@ -158,7 +139,6 @@ impl MockPrompter {
             selects: std::sync::Mutex::new(std::collections::VecDeque::new()),
             inputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
             confirms: std::sync::Mutex::new(std::collections::VecDeque::new()),
-            multi_selects: std::sync::Mutex::new(std::collections::VecDeque::new()),
             messages: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -188,13 +168,6 @@ impl MockPrompter {
     pub fn with_confirms(self, confirms: Vec<bool>) -> Self {
         *self.confirms.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             confirms.into_iter().collect();
-        self
-    }
-
-    #[must_use]
-    pub fn with_multi_selects(self, multi_selects: Vec<Vec<usize>>) -> Self {
-        *self.multi_selects.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-            multi_selects.into_iter().collect();
         self
     }
 
@@ -244,15 +217,6 @@ impl Prompter for MockPrompter {
         pop_response(&self.confirms, "confirm")
     }
 
-    fn multi_select(
-        &self,
-        _prompt: &str,
-        _items: &[String],
-        _defaults: &[bool],
-    ) -> Result<Vec<usize>, FlickError> {
-        pop_response(&self.multi_selects, "multi_select")
-    }
-
     fn message(&self, msg: &str) -> Result<(), FlickError> {
         self.messages
             .lock()
@@ -273,8 +237,7 @@ mod tests {
             .with_passwords(vec!["pass1".into(), "pass2".into()])
             .with_selects(vec![0, 2])
             .with_inputs(vec!["input1".into()])
-            .with_confirms(vec![true, false])
-            .with_multi_selects(vec![vec![0, 1]]);
+            .with_confirms(vec![true, false]);
 
         assert_eq!(mock.password("p").expect("p1"), "pass1");
         assert_eq!(mock.password("p").expect("p2"), "pass2");
@@ -283,7 +246,6 @@ mod tests {
         assert_eq!(mock.input("i", None).expect("i1"), "input1");
         assert!(mock.confirm("c", false).expect("c1"));
         assert!(!mock.confirm("c", false).expect("c2"));
-        assert_eq!(mock.multi_select("m", &[], &[]).expect("m1"), vec![0, 1]);
     }
 
     #[test]
@@ -293,7 +255,6 @@ mod tests {
         assert!(mock.select("s", &[], 0).is_err());
         assert!(mock.input("i", None).is_err());
         assert!(mock.confirm("c", false).is_err());
-        assert!(mock.multi_select("m", &[], &[]).is_err());
     }
 
     #[test]

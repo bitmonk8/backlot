@@ -28,30 +28,15 @@ credential = "openrouter"
 [provider.openrouter.compat]
 explicit_tool_choice_auto = true
 
-[tools]
-read_file = true
-write_file = true
-list_directory = true
-shell_exec = true
+[[tools]]
+name = "read_file"
+description = "Read a file's contents"
+parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
 
-[[tools.custom]]
+[[tools]]
 name = "search_codebase"
 description = "Search files for a pattern"
-parameters = { type = "object", properties = { pattern = { type = "string" } } }
-command = "rg --json {{pattern}} {{path}}"
-
-[[tools.custom]]
-name = "code_search"
-description = "Semantic code search"
-parameters = { type = "object", properties = { query = { type = "string" } } }
-executable = "./tools/code_search"
-
-[[resources]]
-path = "src/"
-access = "read_write"
-[[resources]]
-path = "docs/"
-access = "read"
+parameters = { type = "object", properties = { pattern = { type = "string" } }, required = ["pattern"] }
 
 [pricing]
 input_per_million = 3.0
@@ -98,39 +83,17 @@ Top-level string. Optional system prompt sent to the model.
 |-------|------|---------|-------------|
 | `explicit_tool_choice_auto` | bool | false | Send `tool_choice: "auto"` explicitly |
 
-### `[tools]`
+### `[[tools]]`
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `read_file` | bool | false | Enable read_file builtin |
-| `write_file` | bool | false | Enable write_file builtin |
-| `list_directory` | bool | false | Enable list_directory builtin |
-| `shell_exec` | bool | false | Enable shell_exec builtin |
-
-> **Security: `shell_exec` bypasses resource restrictions.** When `shell_exec = true`, the model can execute arbitrary shell commands with no resource access validation. The `[[resources]]` sandbox applies only to `read_file`, `write_file`, and `list_directory`. A model can use `shell_exec` to read, write, or delete any file the process user can access, regardless of configured resources. Treat `shell_exec = true` as granting the model unrestricted system access.
-
-### `[[tools.custom]]`
+Tool definitions declared to the model. Flick includes these in the model request but never executes tools — the caller handles execution externally.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | yes | Tool name sent to model |
+| `name` | string | yes | Tool name sent to model (must be unique, non-empty) |
 | `description` | string | yes | Tool description sent to model |
 | `parameters` | JSON value | no | JSON Schema for tool parameters |
-| `command` | string | no* | Shell command template (`{{param}}` substitution) |
-| `executable` | string | no* | Path to executable (receives JSON on stdin) |
 
-*Exactly one of `command` or `executable` is required (not both). Tool names must be unique and cannot collide with builtin tool names.
-
-> **Security: command-mode custom tools bypass resource restrictions.** Custom tools using `command` execute shell commands with model-supplied parameter values substituted into the template. These commands run outside the `[[resources]]` sandbox. Model-controlled parameters can reference arbitrary paths. Treat command-mode custom tools as having the same unrestricted access as `shell_exec`.
-
-### `[[resources]]`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `path` | string | yes | Path to file or directory |
-| `access` | string | yes | `"read"` or `"read_write"` |
-
-If no resources are defined, all paths are allowed.
+All tools are uniform: a name, a description, and an optional JSON schema.
 
 ### `[pricing]`
 
@@ -141,15 +104,16 @@ If no resources are defined, all paths are allowed.
 
 Optional. Overrides the builtin model registry pricing. If omitted, pricing is looked up by model name.
 
-## Context File (`--context`)
+## Context Resumption (`--resume`)
 
-JSON file with prior message history:
+Prior context is loaded by hash from `~/.flick/contexts/{hash}.json`. Use `--resume <hash>` with `--tool-results <file>` to continue a session after executing tool calls.
 
+Tool results file format:
 ```json
-{"messages": [
-  {"role": "user", "content": [{"type": "text", "text": "hello"}]},
-  {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
-]}
+[
+  {"tool_use_id": "tc_1", "content": "file contents here", "is_error": false},
+  {"tool_use_id": "tc_2", "content": "command not found", "is_error": true}
+]
 ```
 
 ## Credential Store

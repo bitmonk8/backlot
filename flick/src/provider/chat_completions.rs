@@ -8,7 +8,6 @@ use crate::error::ProviderError;
 use crate::model::openai_reasoning_effort;
 use crate::provider::{
     ModelResponse, Provider, RequestParams, ToolCallResponse, ToolDefinition, UsageResponse,
-    Warning,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
@@ -270,7 +269,6 @@ fn convert_tool(tool: &ToolDefinition) -> serde_json::Value {
 fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderError> {
     let mut text = None;
     let mut tool_calls = Vec::new();
-    let mut warnings = Vec::new();
 
     // Extract from choices[0].message
     if let Some(choices) = json["choices"].as_array() {
@@ -305,23 +303,6 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
                     });
                 }
             }
-
-            // Finish reason warnings
-            match choice["finish_reason"].as_str() {
-                Some("length") => {
-                    warnings.push(Warning {
-                        message: "model response truncated (max tokens exceeded)".into(),
-                        code: "max_tokens".into(),
-                    });
-                }
-                Some("content_filter") => {
-                    warnings.push(Warning {
-                        message: "response blocked by content filter".into(),
-                        code: "content_filter".into(),
-                    });
-                }
-                _ => {}
-            }
         }
     }
 
@@ -349,7 +330,6 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: cached,
         },
-        warnings,
     })
 }
 
@@ -622,7 +602,6 @@ mod tests {
         assert!(resp.tool_calls.is_empty());
         assert_eq!(resp.usage.input_tokens, 100);
         assert_eq!(resp.usage.output_tokens, 50);
-        assert!(resp.warnings.is_empty());
     }
 
     #[test]
@@ -646,28 +625,6 @@ mod tests {
         assert_eq!(resp.tool_calls[0].call_id, "call_1");
         assert_eq!(resp.tool_calls[0].tool_name, "read_file");
         assert_eq!(resp.tool_calls[0].arguments, r#"{"path":"/tmp"}"#);
-    }
-
-    #[test]
-    fn parse_response_length_warning() {
-        let json = serde_json::json!({
-            "choices": [{"message": {"content": "partial"}, "finish_reason": "length"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 1024}
-        });
-        let resp = parse_response(&json).expect("should parse");
-        assert_eq!(resp.warnings.len(), 1);
-        assert_eq!(resp.warnings[0].code, "max_tokens");
-    }
-
-    #[test]
-    fn parse_response_content_filter_warning() {
-        let json = serde_json::json!({
-            "choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 0}
-        });
-        let resp = parse_response(&json).expect("should parse");
-        assert_eq!(resp.warnings.len(), 1);
-        assert_eq!(resp.warnings[0].code, "content_filter");
     }
 
     #[test]

@@ -4,37 +4,53 @@
 
 ```
 src/
-  lib.rs               Library entry point, re-exports all public modules
-  main.rs              CLI parsing (clap), dispatch to run/setup
-  config.rs            TOML config parsing, Config struct
-  context.rs           Context, Message, ContentBlock, Role
+  lib.rs               Library entry point, re-exports all public modules, ApiKind enum
+  main.rs              CLI parsing (clap), dispatch to run/setup/init, JSON result output
+  config.rs            TOML config parsing, Config struct, ToolConfig (declaration-only)
+  context.rs           Context, Message, ContentBlock, Role, tool result loading
   credential.rs        Encrypted credential store (ChaCha20-Poly1305)
-  error.rs             FlickError, ProviderError, CredentialError, ToolError, ConfigError
-  event.rs             StreamEvent enum, Usage, EventEmitter trait, JsonLines/Raw emitters
+  error.rs             FlickError, ProviderError, CredentialError, ConfigError
+  result.rs            FlickResult, ResultStatus, UsageSummary, ResultError
   history.rs           Run history logging and content-addressable context storage (xxh3-128)
   model.rs             ModelInfo, builtin registry, reasoning level mappings
+  model_list.rs        Model fetching from provider APIs (HttpModelFetcher, MockModelFetcher)
+  prompter.rs          Prompter trait + TerminalPrompter (dialoguer) + MockPrompter (tests)
   provider.rs          Provider trait, DynProvider, RequestParams, ToolDefinition, create_provider()
   provider/
     messages.rs        Messages API (Anthropic), response parsing
     chat_completions.rs  Chat Completions API, response parsing
     http.rs            HTTP retry with exponential backoff
-  tool.rs              ToolRegistry, builtin tools, custom tool execution, resource sandboxing
-  agent.rs             Agent loop (query → tools → repeat)
+  runner.rs            Single model call, returns FlickResult
 ```
 
 ## Data Flow
 
+**New session** (`--query`):
 ```
 CLI args
   → Config::load() + CredentialStore::get()
   → create_provider() → Box<dyn DynProvider>
-  → ToolRegistry::from_config()
-  → Context (from --context file or empty)
-  → agent::run()
+  → Context (empty) + user query
+  → runner::run()  [single model call]
+      ├─ config.tools() → Vec<ToolDefinition>
       ├─ provider.call_boxed(params) → ModelResponse
-      ├─ emit events to stdout via EventEmitter
-      ├─ ToolRegistry::execute() for each tool call
-      └─ loop until no tool calls or iteration limit
+      ├─ append assistant message to context
+      └─ return FlickResult (status: complete | tool_calls_pending)
+  → write context file, set context_hash
+  → serialize FlickResult as JSON to stdout
+```
+
+**Resume session** (`--resume <hash>` + `--tool-results <file>`):
+```
+CLI args
+  → Config::load() + CredentialStore::get()
+  → create_provider() → Box<dyn DynProvider>
+  → Context (loaded from ~/.flick/contexts/{hash}.json)
+  → load tool results from --tool-results file
+  → append tool results as user message to context
+  → runner::run()  [single model call]
+  → write context file, set context_hash
+  → serialize FlickResult as JSON to stdout
 ```
 
 ## Provider Abstraction
@@ -58,13 +74,9 @@ Provider quirks are handled by `CompatFlags` (boolean fields in config), not by 
 
 Both providers use `http::send_with_retry()` for HTTP requests. Retryable errors (429, 5xx, network errors) trigger exponential backoff. Non-retryable errors (401, 4xx client errors, response parse errors) fail immediately. The `Retry-After` header from 429 responses overrides the computed backoff. Defaults: 3 retries, 500ms initial delay, 2x multiplier, 30s cap.
 
-## Tool Execution
+## Tool Declarations
 
-Four builtin tools: `read_file`, `write_file`, `list_directory`, `shell_exec`. All gated by config flags and resource access lists.
-
-Custom tools support two modes:
-- `command` — shell command template with `{{param}}` substitution
-- `executable` — receives JSON on stdin, returns output on stdout
+Tools are declared in config as `[[tools]]` entries with name, description, and JSON schema parameters. Flick includes these definitions in the model request but never executes tools. When the model returns tool-use blocks, the result status is `tool_calls_pending` and the caller handles execution externally.
 
 ## Reasoning Levels
 

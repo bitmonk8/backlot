@@ -7,7 +7,6 @@ use std::sync::Mutex;
 use flick::config::Config;
 use flick::context::Message;
 use flick::error::ProviderError;
-use flick::event::{EventEmitter, Event};
 use flick::model::ReasoningLevel;
 use flick::provider::{
     DynProvider, ModelResponse, RequestParams, ToolDefinition, UsageResponse,
@@ -41,7 +40,7 @@ impl CapturedParams {
     }
 }
 
-/// Mock provider that returns canned `ModelResponse` values per iteration.
+/// Mock provider that returns canned `ModelResponse` values per call.
 pub struct MockProvider {
     steps: Mutex<Vec<Option<ModelResponse>>>,
     call_count: AtomicUsize,
@@ -110,7 +109,6 @@ pub fn text_response(text: &str, input_tokens: u64, output_tokens: u64) -> Model
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
         },
-        warnings: Vec::new(),
     }
 }
 
@@ -138,7 +136,6 @@ pub fn tool_call_response(
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
         },
-        warnings: Vec::new(),
     }
 }
 
@@ -167,32 +164,70 @@ pub fn mixed_response(
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
         },
-        warnings: Vec::new(),
     }
 }
 
-/// Collects emitted events for assertions.
-pub struct CollectingEmitter {
-    pub events: Vec<Event>,
-}
-
-impl CollectingEmitter {
-    pub const fn new() -> Self {
-        Self { events: Vec::new() }
-    }
-}
-
-impl EventEmitter for CollectingEmitter {
-    fn emit(&mut self, event: &Event) {
-        self.events.push(event.clone());
-    }
-}
-
-pub fn write_temp_config(content: &str) -> tempfile::NamedTempFile {
+fn write_temp_config(content: &str) -> tempfile::NamedTempFile {
     use std::io::Write;
     let mut f = tempfile::NamedTempFile::new().expect("create temp file");
     f.write_all(content.as_bytes()).expect("write temp file");
     f
+}
+
+/// Helper to build a text-only `ModelResponse` with custom cache token values.
+pub fn text_response_with_cache(
+    text: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
+) -> ModelResponse {
+    ModelResponse {
+        text: Some(text.to_string()),
+        thinking: Vec::new(),
+        tool_calls: Vec::new(),
+        usage: UsageResponse {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        },
+    }
+}
+
+/// Helper to build a `ModelResponse` with thinking, text, and tool calls.
+pub fn full_response(
+    thinking: Vec<(&str, &str)>, // (text, signature)
+    text: Option<&str>,
+    calls: Vec<(&str, &str, &str)>,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> ModelResponse {
+    use flick::provider::{ThinkingContent, ToolCallResponse};
+    ModelResponse {
+        text: text.map(str::to_string),
+        thinking: thinking
+            .into_iter()
+            .map(|(t, s)| ThinkingContent {
+                text: t.to_string(),
+                signature: s.to_string(),
+            })
+            .collect(),
+        tool_calls: calls
+            .into_iter()
+            .map(|(id, name, args)| ToolCallResponse {
+                call_id: id.to_string(),
+                tool_name: name.to_string(),
+                arguments: args.to_string(),
+            })
+            .collect(),
+        usage: UsageResponse {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        },
+    }
 }
 
 pub async fn load_config(toml: &str) -> Config {
