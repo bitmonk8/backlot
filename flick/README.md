@@ -1,6 +1,6 @@
 # Flick
 
-Ultra-small, ultra-fast command-line tool written in Rust. Takes a TOML config and a query, makes a single LLM call, and returns a JSON result to stdout. Flick declares tool definitions to the model but never executes tools. The caller drives the agent loop externally.
+Ultra-small, ultra-fast command-line tool written in Rust. Takes a YAML (or JSON) config and a query, makes a single LLM call, and returns a JSON result to stdout. Flick declares tool definitions to the model but never executes tools. The caller drives the agent loop externally.
 
 ## Relationship to Epic
 
@@ -40,30 +40,31 @@ The release binary is optimized with LTO, single codegen unit, and symbol stripp
 flick setup anthropic
 ```
 
-2. Create a config file (`config.toml`):
+2. Create a config file (`config.yaml`):
 
-```toml
-[model]
-provider = "anthropic"
-name = "claude-sonnet-4-20250514"
-max_tokens = 8192
+```yaml
+model:
+  provider: anthropic
+  name: claude-sonnet-4-20250514
+  max_tokens: 8192
 
-system_prompt = "You are a helpful assistant."
+system_prompt: "You are a helpful assistant."
 
-[provider.anthropic]
-api = "messages"
+provider:
+  anthropic:
+    api: messages
 ```
 
 3. Run a query:
 
 ```sh
-flick run --config config.toml --query "What is Rust?"
+flick run --config config.yaml --query "What is Rust?"
 ```
 
 ## CLI Reference
 
 ```
-flick run --config <toml> [OPTIONS]
+flick run --config <file> [OPTIONS]
 flick setup <provider>
 flick init [--output <path>]
 flick list
@@ -73,7 +74,7 @@ flick list
 
 | Flag | Description |
 |------|-------------|
-| `--config <path>` | Path to TOML config file (required) |
+| `--config <path>` | Path to config file (.yaml, .yml, or .json) (required) |
 | `--query <text>` | Query text; reads from stdin if omitted |
 | `--resume <hash>` | Resume a previous session by context hash |
 | `--tool-results <path>` | JSON file containing tool results for resumed session |
@@ -87,11 +88,11 @@ Validation:
 
 ### `flick init`
 
-Interactive config generator. Walks through provider selection, model, max output tokens, and system prompt, then writes a commented TOML config file.
+Interactive config generator. Walks through provider selection, model, max output tokens, and system prompt, then writes a commented YAML config file.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--output <path>` | `flick.toml` | Output file path |
+| `--output <path>` | `flick.yaml` | Output file path (use `-` for stdout) |
 
 ### `flick setup`
 
@@ -149,58 +150,72 @@ Each `flick run` makes exactly one model call and returns. The caller drives the
 
 ## Configuration
 
-Flick is configured via a TOML file. Full example:
+Flick is configured via a YAML file (or JSON for machine-generated configs). Format is detected by file extension (`.yaml`, `.yml`, `.json`).
 
-```toml
-[model]
-provider = "anthropic"
-name = "claude-sonnet-4-20250514"
-max_tokens = 8192
-temperature = 0.0
+Full example:
 
-[model.reasoning]
-level = "medium"
+```yaml
+model:
+  provider: anthropic
+  name: claude-sonnet-4-20250514
+  max_tokens: 8192
+  temperature: 0.0
+  reasoning:
+    level: medium
 
-system_prompt = "You are a code assistant."
+system_prompt: "You are a code assistant."
 
-[output_schema]
-schema = { type = "object", properties = { answer = { type = "string" } } }
+output_schema:
+  schema:
+    type: object
+    properties:
+      answer:
+        type: string
 
-[provider.anthropic]
-api = "messages"
-credential = "anthropic"
+provider:
+  anthropic:
+    api: messages
+    credential: anthropic
 
-[provider.openrouter]
-api = "chat_completions"
-credential = "openrouter"
-[provider.openrouter.compat]
-explicit_tool_choice_auto = true
+  openrouter:
+    api: chat_completions
+    credential: openrouter
+    compat:
+      explicit_tool_choice_auto: true
 
-[[tools]]
-name = "read_file"
-description = "Read a file's contents"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
+tools:
+  - name: read_file
+    description: "Read a file's contents"
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
+  - name: grep_project
+    description: Search for a pattern
+    parameters:
+      type: object
+      properties:
+        pattern:
+          type: string
+      required: [pattern]
 
-[[tools]]
-name = "grep_project"
-description = "Search for a pattern"
-parameters = { type = "object", properties = { pattern = { type = "string" } }, required = ["pattern"] }
-
-[pricing]
-input_per_million = 3.0
-output_per_million = 15.0
+pricing:
+  input_per_million: 3.0
+  output_per_million: 15.0
 ```
 
-### `[model]`
+### `model`
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `provider` | string | yes | — | Must match a key in `[provider.*]` |
+| `provider` | string | yes | — | Must match a key under `provider:` |
 | `name` | string | yes | — | Model identifier |
-| `max_tokens` | u32 | no | 8192 | Maximum output tokens (must be > 0) |
-| `temperature` | f32 | no | none | Sampling temperature (0.0–2.0); omitted for reasoning models |
+| `max_tokens` | u32 | no | none | Maximum output tokens (must be > 0); omitted = provider default |
+| `temperature` | f32 | no | none | Sampling temperature; omitted for reasoning models. Messages API: 0.0–1.0, Chat Completions: 0.0–2.0 |
 
-### `[model.reasoning]`
+### `model.reasoning`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -215,26 +230,26 @@ Reasoning levels are mapped per-provider:
 | medium | 10000 | medium |
 | high | 32000 | high |
 
-For Anthropic, `budget_tokens` must be less than `max_tokens` (validated at config load).
+For Anthropic, `budget_tokens` must be less than `max_tokens`. When `max_tokens` is omitted, the model's default max output tokens is used (fallback: 8192). Validated at config load.
 
 ### `system_prompt`
 
 Top-level string. Optional system prompt sent to the model.
 
-### `[output_schema]`
+### `output_schema`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `schema` | JSON value | yes | JSON Schema for structured output (Anthropic only) |
 
-### `[provider.<name>]`
+### `provider.<name>`
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `api` | string | yes | — | `"messages"` or `"chat_completions"` |
+| `api` | string | yes | — | `messages` or `chat_completions` |
 | `credential` | string | no | provider name | Key name in credential store |
 
-### `[provider.<name>.compat]`
+### `provider.<name>.compat`
 
 Compatibility flags for Chat Completions providers:
 
@@ -242,7 +257,7 @@ Compatibility flags for Chat Completions providers:
 |-------|------|---------|-------------|
 | `explicit_tool_choice_auto` | bool | false | Send `tool_choice: "auto"` explicitly |
 
-### `[[tools]]`
+### `tools`
 
 Declare tool schemas. Flick includes these in the model request but never executes tools — the caller handles execution.
 
@@ -252,7 +267,7 @@ Declare tool schemas. Flick includes these in the model request but never execut
 | `description` | string | yes | Description sent to the model |
 | `parameters` | JSON value | no | JSON Schema for tool parameters |
 
-### `[pricing]`
+### `pricing`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -275,7 +290,7 @@ History writes are non-fatal. Failures produce a stderr warning without affectin
 Resume a session by passing `--resume` with the context hash and `--tool-results` with a JSON file:
 
 ```sh
-flick run --config config.toml --resume 00a1b2c3d4e5f67890abcdef12345678 --tool-results results.json
+flick run --config config.yaml --resume 00a1b2c3d4e5f67890abcdef12345678 --tool-results results.json
 ```
 
 The tool results file contains an array of results:
@@ -298,37 +313,41 @@ The tool results file contains an array of results:
 
 Anthropic:
 
-```toml
-[provider.anthropic]
-api = "messages"
+```yaml
+provider:
+  anthropic:
+    api: messages
 ```
 
 OpenAI:
 
-```toml
-[provider.openai]
-api = "chat_completions"
+```yaml
+provider:
+  openai:
+    api: chat_completions
 ```
 
 OpenRouter:
 
-```toml
-[provider.openrouter]
-api = "chat_completions"
-[provider.openrouter.compat]
-explicit_tool_choice_auto = true
+```yaml
+provider:
+  openrouter:
+    api: chat_completions
+    compat:
+      explicit_tool_choice_auto: true
 ```
 
 Ollama (local):
 
-```toml
-[provider.ollama]
-api = "chat_completions"
+```yaml
+provider:
+  ollama:
+    api: chat_completions
 ```
 
 ## Credential Store
 
-Credentials are stored at `~/.flick/credentials` (TOML, encrypted with ChaCha20-Poly1305). A 256-bit secret key is generated on first use and stored at `~/.flick/.secret_key` with restrictive file permissions.
+Credentials are stored at `~/.flick/credentials` (encrypted with ChaCha20-Poly1305). A 256-bit secret key is generated on first use and stored at `~/.flick/.secret_key` with restrictive file permissions.
 
 ```sh
 # Store a credential
@@ -337,9 +356,10 @@ flick setup anthropic
 # List stored credentials
 flick list
 
-# Credentials are referenced by name in config
-[provider.anthropic]
-credential = "anthropic"   # matches the name passed to `flick setup`
+# Credentials are referenced by name in config:
+# provider:
+#   anthropic:
+#     credential: anthropic   # matches the name passed to `flick setup`
 ```
 
 ## HTTP Retry
@@ -359,7 +379,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-274 tests (206 lib, 48 bin, 12 runner, 8 integration). One additional Unix-only test for file permissions.
+290 tests (215 lib, 51 bin, 13 runner, 11 integration). One additional Unix-only test for file permissions.
 
 ## License
 

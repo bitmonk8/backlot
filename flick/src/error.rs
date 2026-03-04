@@ -62,7 +62,10 @@ pub enum ConfigError {
     NotFound(PathBuf),
 
     #[error("config parse error: {0}")]
-    Parse(#[from] toml::de::Error),
+    Parse(String),
+
+    #[error("unsupported config format: {0} (expected .yaml, .yml, or .json)")]
+    UnsupportedFormat(String),
 
     #[error("config I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -141,6 +144,13 @@ mod tests {
     fn display_config_error_variants() {
         let nf = ConfigError::NotFound(PathBuf::from("/missing"));
         assert!(nf.to_string().contains("/missing"));
+
+        let pe = ConfigError::Parse("bad syntax".into());
+        assert!(pe.to_string().contains("bad syntax"));
+
+        let uf = ConfigError::UnsupportedFormat("foo.toml".into());
+        assert!(uf.to_string().contains("foo.toml"));
+        assert!(uf.to_string().contains(".yaml"));
 
         let up = ConfigError::UnknownProvider("acme".into());
         assert!(up.to_string().contains("acme"));

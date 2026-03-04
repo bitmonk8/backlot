@@ -14,49 +14,56 @@ use flick::provider::{DynProvider, ModelResponse, RequestParams, UsageResponse};
 use flick::result::ResultStatus;
 
 fn test_config() -> Config {
-    Config::parse(
-        r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 1024
+    Config::parse_yaml(
+        r"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 1024
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[pricing]
-input_per_million = 1.0
-output_per_million = 2.0
-"#,
+pricing:
+  input_per_million: 1.0
+  output_per_million: 2.0
+",
     )
     .expect("test config should parse")
 }
 
 fn test_config_with_tools() -> Config {
-    Config::parse(
-        r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 1024
+    Config::parse_yaml(
+        r"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 1024
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[[tools]]
-name = "read_file"
-description = "Read a file"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
+tools:
+  - name: read_file
+    description: Read a file
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
 
-[pricing]
-input_per_million = 1.0
-output_per_million = 2.0
-"#,
+pricing:
+  input_per_million: 1.0
+  output_per_million: 2.0
+",
     )
     .expect("test config should parse")
 }
 
-/// Single call returning Complete — model returns text, no tool_use.
+/// Single call returning Complete — model returns text, no `tool_use`.
 #[tokio::test]
 async fn run_single_call_complete() {
     let provider = MockProvider::new(vec![text_response("done", 100, 50)]);
@@ -77,7 +84,7 @@ async fn run_single_call_complete() {
     assert_eq!(usage.output_tokens, 50);
 }
 
-/// Single call returning ToolCallsPending — model returns tool_use blocks.
+/// Single call returning `ToolCallsPending` — model returns `tool_use` blocks.
 #[tokio::test]
 async fn run_single_call_tool_calls_pending() {
     let provider = MockProvider::new(vec![tool_call_response(
@@ -143,25 +150,28 @@ async fn run_provider_error_propagates() {
     ));
 }
 
-/// build_params maps all config fields correctly.
+/// `build_params` maps all config fields correctly.
 #[test]
 fn build_params_maps_config_fields() {
-    let config = Config::parse(
+    let config = Config::parse_yaml(
         r#"
-system_prompt = "Be helpful"
+system_prompt: "Be helpful"
 
-[model]
-provider = "test"
-name = "test-model-123"
-max_tokens = 2048
-temperature = 0.7
-reasoning = {level = "high"}
+model:
+  provider: test
+  name: test-model-123
+  max_tokens: 2048
+  temperature: 0.7
+  reasoning:
+    level: high
 
-[provider.test]
-api = "chat_completions"
+provider:
+  test:
+    api: chat_completions
 
-[output_schema]
-schema = {"type" = "object"}
+output_schema:
+  schema:
+    type: object
 "#,
     )
     .expect("test config should parse");
@@ -237,7 +247,7 @@ async fn run_empty_assistant_response() {
     assert_eq!(context.messages.len(), 1);
 }
 
-/// Mixed text and tool calls returns ToolCallsPending with both blocks.
+/// Mixed text and tool calls returns `ToolCallsPending` with both blocks.
 #[tokio::test]
 async fn run_mixed_text_and_tool_calls() {
     let provider = MockProvider::new(vec![mixed_response(
@@ -280,27 +290,33 @@ async fn run_mixed_text_and_tool_calls() {
 /// Provider params are forwarded correctly from config.
 #[tokio::test]
 async fn run_forwards_correct_params_to_provider() {
-    let config = Config::parse(
+    let config = Config::parse_yaml(
         r#"
-system_prompt = "Test system prompt"
+system_prompt: "Test system prompt"
 
-[model]
-provider = "test"
-name = "test-model-456"
-max_tokens = 4096
-temperature = 0.5
+model:
+  provider: test
+  name: test-model-456
+  max_tokens: 4096
+  temperature: 0.5
 
-[provider.test]
-api = "chat_completions"
+provider:
+  test:
+    api: chat_completions
 
-[[tools]]
-name = "read_file"
-description = "Read a file"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
+tools:
+  - name: read_file
+    description: Read a file
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
 
-[pricing]
-input_per_million = 1.0
-output_per_million = 2.0
+pricing:
+  input_per_million: 1.0
+  output_per_million: 2.0
 "#,
     )
     .expect("test config should parse");
@@ -344,12 +360,12 @@ async fn run_multiple_tool_calls() {
     let result = runner::run(&config, &provider, &mut context).await.unwrap();
 
     assert_eq!(result.status, ResultStatus::ToolCallsPending);
-    let tool_uses: Vec<_> = result
+    let tool_use_count = result
         .content
         .iter()
         .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
-        .collect();
-    assert_eq!(tool_uses.len(), 2);
+        .count();
+    assert_eq!(tool_use_count, 2);
 }
 
 /// Malformed tool call arguments return an error.
@@ -370,7 +386,7 @@ async fn run_malformed_tool_arguments_error() {
     assert!(msg.contains("read_file"), "should mention tool name: {msg}");
 }
 
-/// Non-zero cache tokens flow through runner::run into the result usage.
+/// Non-zero cache tokens flow through `runner::run` into the result usage.
 #[tokio::test]
 async fn run_cache_tokens_forwarded() {
     let provider = MockProvider::new(vec![text_response_with_cache(
@@ -389,7 +405,7 @@ async fn run_cache_tokens_forwarded() {
     assert_eq!(usage.output_tokens, 500);
 }
 
-/// Context overflow from push_assistant propagates as Err from runner::run.
+/// Context overflow from `push_assistant` propagates as Err from `runner::run`.
 #[tokio::test]
 async fn run_context_overflow_propagates() {
     let provider = MockProvider::new(vec![text_response("done", 10, 5)]);
@@ -416,7 +432,7 @@ async fn run_context_overflow_propagates() {
     ));
 }
 
-/// build_content preserves ordering: thinking, then text, then tool_use.
+/// `build_content` preserves ordering: thinking, then text, then `tool_use`.
 #[tokio::test]
 async fn run_content_block_ordering() {
     let provider = MockProvider::new(vec![full_response(

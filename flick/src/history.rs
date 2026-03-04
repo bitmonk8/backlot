@@ -139,7 +139,7 @@ mod tests {
 
     fn test_invocation() -> Invocation {
         Invocation {
-            config_path: PathBuf::from("test.toml"),
+            config_path: PathBuf::from("test.yaml"),
             model: "test-model".into(),
             provider: "test-provider".into(),
             query: "hello".into(),
@@ -186,7 +186,7 @@ mod tests {
         let flick_dir = dir.path();
 
         let invocation = Invocation {
-            config_path: PathBuf::from("test.toml"),
+            config_path: PathBuf::from("test.yaml"),
             model: "test-model".into(),
             provider: "test-provider".into(),
             query: "continue".into(),

@@ -19,18 +19,19 @@ use xxhash_rust::xxh3::xxh3_128;
 #[tokio::test]
 async fn end_to_end_text_only() {
     let config = load_config(
-        r#"
-[model]
-provider = "test"
-name = "mock-model"
+        r"
+model:
+  provider: test
+  name: mock-model
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[pricing]
-input_per_million = 3.0
-output_per_million = 15.0
-"#,
+pricing:
+  input_per_million: 3.0
+  output_per_million: 15.0
+",
     )
     .await;
 
@@ -60,22 +61,28 @@ output_per_million = 15.0
     assert_eq!(context.messages[1].role, flick::context::Role::Assistant);
 }
 
-/// Model returns tool calls: result is ToolCallsPending, caller handles execution.
+/// Model returns tool calls: result is `ToolCallsPending`, caller handles execution.
 #[tokio::test]
 async fn end_to_end_tool_calls_pending() {
     let config = load_config(
         r#"
-[model]
-provider = "test"
-name = "mock-model"
+model:
+  provider: test
+  name: mock-model
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[[tools]]
-name = "read_file"
-description = "Read a file's contents"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
+tools:
+  - name: read_file
+    description: "Read a file's contents"
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
 "#,
     )
     .await;
@@ -94,12 +101,12 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
         .expect("should succeed");
 
     assert_eq!(result.status, ResultStatus::ToolCallsPending);
-    let tool_uses: Vec<_> = result
+    let tool_use_count = result
         .content
         .iter()
         .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
-        .collect();
-    assert_eq!(tool_uses.len(), 1);
+        .count();
+    assert_eq!(tool_use_count, 1);
 
     // Context: user + assistant (with tool_use)
     assert_eq!(context.messages.len(), 2);
@@ -109,14 +116,15 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
 #[tokio::test]
 async fn end_to_end_thinking_blocks() {
     let config = load_config(
-        r#"
-[model]
-provider = "test"
-name = "mock-model"
+        r"
+model:
+  provider: test
+  name: mock-model
 
-[provider.test]
-api = "messages"
-"#,
+provider:
+  test:
+    api: messages
+",
     )
     .await;
 
@@ -173,14 +181,15 @@ api = "messages"
 #[tokio::test]
 async fn end_to_end_context_persistence() {
     let config = load_config(
-        r#"
-[model]
-provider = "test"
-name = "mock-model"
+        r"
+model:
+  provider: test
+  name: mock-model
 
-[provider.test]
-api = "messages"
-"#,
+provider:
+  test:
+    api: messages
+",
     )
     .await;
 
@@ -212,14 +221,15 @@ api = "messages"
 #[tokio::test]
 async fn end_to_end_context_file_loading() {
     let config = load_config(
-        r#"
-[model]
-provider = "test"
-name = "mock-model"
+        r"
+model:
+  provider: test
+  name: mock-model
 
-[provider.test]
-api = "messages"
-"#,
+provider:
+  test:
+    api: messages
+",
     )
     .await;
 
@@ -276,19 +286,25 @@ api = "messages"
 #[tokio::test]
 async fn end_to_end_context_with_tool_history() {
     let config = load_config(
-        r#"
-[model]
-provider = "test"
-name = "mock-model"
+        r"
+model:
+  provider: test
+  name: mock-model
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[[tools]]
-name = "read_file"
-description = "Read a file"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
-"#,
+tools:
+  - name: read_file
+    description: Read a file
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
+",
     )
     .await;
 
@@ -361,14 +377,15 @@ impl DynProvider for ErrorProvider {
 #[tokio::test]
 async fn end_to_end_provider_error_propagates() {
     let config = load_config(
-        r#"
-[model]
-provider = "test"
-name = "mock-model"
+        r"
+model:
+  provider: test
+  name: mock-model
 
-[provider.test]
-api = "messages"
-"#,
+provider:
+  test:
+    api: messages
+",
     )
     .await;
 
@@ -388,24 +405,30 @@ api = "messages"
     );
 }
 
-/// Simulated resume flow: first call returns ToolCallsPending, then tool results
+/// Simulated resume flow: first call returns `ToolCallsPending`, then tool results
 /// are pushed to context, second call returns Complete.
 #[tokio::test]
 async fn end_to_end_resume_flow() {
     let config = load_config(
-        r#"
-[model]
-provider = "test"
-name = "mock-model"
+        r"
+model:
+  provider: test
+  name: mock-model
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[[tools]]
-name = "read_file"
-description = "Read a file"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
-"#,
+tools:
+  - name: read_file
+    description: Read a file
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
+",
     )
     .await;
 
@@ -443,7 +466,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
     assert_eq!(context.messages.len(), 4);
 }
 
-/// FlickResult error construction produces valid JSON with expected fields.
+/// `FlickResult` error construction produces valid JSON with expected fields.
 #[test]
 fn error_result_json_output_format() {
     let error = FlickError::NoQuery;
@@ -473,7 +496,7 @@ fn error_result_json_output_format() {
     assert!(parsed.get("context_hash").is_none());
 }
 
-/// FlickResult with usage produces valid JSON with cost field.
+/// `FlickResult` with usage produces valid JSON with cost field.
 #[test]
 fn complete_result_json_output_format() {
     let result = FlickResult {
@@ -505,22 +528,23 @@ fn complete_result_json_output_format() {
 }
 
 /// Context hash: serialized context bytes produce a deterministic 32-char
-/// lowercase hex hash via xxh3_128.
+/// lowercase hex hash via `xxh3_128`.
 #[tokio::test]
 async fn context_hash_deterministic() {
     let config = load_config(
-        r#"
-[model]
-provider = "test"
-name = "mock-model"
+        r"
+model:
+  provider: test
+  name: mock-model
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[pricing]
-input_per_million = 3.0
-output_per_million = 15.0
-"#,
+pricing:
+  input_per_million: 3.0
+  output_per_million: 15.0
+",
     )
     .await;
 

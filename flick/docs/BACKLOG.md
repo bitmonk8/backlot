@@ -67,7 +67,7 @@ On the Unix code path in `load_or_create_secret_key`, if `file.write_all(hex_key
 
 ### L21. `output_schema` silently ignored by Messages provider — `provider/messages.rs:96-101`
 
-When `params.output_schema` is `Some`, the Messages provider discards it without emitting a warning. A user who configures `[output_schema]` and targets the Anthropic Messages API receives unstructured output with no diagnostic. The Chat Completions provider honours the field via `response_format`.
+When `params.output_schema` is `Some`, the Messages provider discards it without emitting a warning. A user who configures `output_schema` and targets the Anthropic Messages API receives unstructured output with no diagnostic. The Chat Completions provider honours the field via `response_format`.
 
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Trivial
 - **Category:** UX
@@ -188,7 +188,7 @@ Validation rejects exactly `"."` and `".."` but permits `.hidden`, `...`, `..foo
 
 ### T43. Zero cost reported without warning for unknown models — `config.rs`
 
-When neither a `[pricing]` config section nor a builtin registry entry exists for the model, `compute_cost` returns `0.0`. The result reports `cost_usd: 0.0`, which misleads the caller into thinking the call was free.
+When neither a `pricing` config section nor a builtin registry entry exists for the model, `compute_cost` returns `0.0`. The result reports `cost_usd: 0.0`, which misleads the caller into thinking the call was free.
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Low
 
@@ -290,7 +290,7 @@ Anthropic publishes aliases like `claude-sonnet-4` -> `claude-sonnet-4-20250514`
 
 ### T74. `BUILTIN_MODELS` missing new models — `model.rs`
 
-Models available as of the current knowledge cutoff that are absent: OpenAI `o3`, `gpt-4.1`, and Anthropic `claude-haiku-4`. Users of these models get `cost_usd: 0.0` without a config `[pricing]` override.
+Models available as of the current knowledge cutoff that are absent: OpenAI `o3`, `gpt-4.1`, and Anthropic `claude-haiku-4`. Users of these models get `cost_usd: 0.0` without a config `pricing` override.
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 

@@ -7,7 +7,7 @@ use crate::error::ConfigError;
 use crate::model::{anthropic_budget_tokens, ReasoningLevel};
 use crate::provider::ToolDefinition;
 
-/// Top-level TOML configuration.
+/// Top-level configuration.
 ///
 /// Fields are private to enforce validation invariants. Use getter methods
 /// for read access and `override_*` methods for CLI flag overrides.
@@ -92,7 +92,7 @@ pub struct CompatFlags {
     pub explicit_tool_choice_auto: bool,
 }
 
-/// A tool definition from the `[[tools]]` array in config.
+/// A tool definition from the tools list in config.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolConfig {
     name: String,
@@ -110,7 +110,7 @@ impl ToolConfig {
         &self.description
     }
 
-    pub fn parameters(&self) -> Option<&serde_json::Value> {
+    pub const fn parameters(&self) -> Option<&serde_json::Value> {
         self.parameters.as_ref()
     }
 
@@ -132,6 +132,21 @@ pub struct PricingConfig {
 
 impl Config {
     pub async fn load(path: &Path) -> Result<Self, ConfigError> {
+        let ext = path.extension().and_then(|e| e.to_str());
+        // Validate extension before reading the file.
+        match ext {
+            Some("yaml" | "yml" | "json") => {}
+            Some(_) => {
+                return Err(ConfigError::UnsupportedFormat(
+                    path.display().to_string(),
+                ));
+            }
+            None => {
+                return Err(ConfigError::UnsupportedFormat(
+                    path.display().to_string(),
+                ));
+            }
+        }
         let text = tokio::fs::read_to_string(path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ConfigError::NotFound(path.to_path_buf())
@@ -139,12 +154,25 @@ impl Config {
                 ConfigError::from(e)
             }
         })?;
-        Self::parse(&text)
+        match ext {
+            Some("json") => {
+                let config: Self =
+                    serde_json::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
+                config.validate()?;
+                Ok(config)
+            }
+            _ => {
+                let config: Self =
+                    serde_yml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
+                config.validate()?;
+                Ok(config)
+            }
+        }
     }
 
-    /// Parse and validate a TOML config string.
-    pub fn parse(toml_str: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(toml_str)?;
+    /// Parse and validate a YAML config string.
+    pub fn parse_yaml(s: &str) -> Result<Self, ConfigError> {
+        let config: Self = serde_yml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
         config.validate()?;
         Ok(config)
     }
@@ -312,28 +340,36 @@ impl Config {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::io::Write;
 
-    fn write_temp_config(content: &str) -> tempfile::NamedTempFile {
-        let mut f = tempfile::NamedTempFile::new().expect("create temp file");
+    fn write_temp_config_ext(content: &str, ext: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::Builder::new()
+            .suffix(ext)
+            .tempfile()
+            .expect("create temp file");
         f.write_all(content.as_bytes()).expect("write temp file");
         f
     }
 
+    fn write_temp_config(content: &str) -> tempfile::NamedTempFile {
+        write_temp_config_ext(content, ".yaml")
+    }
+
     #[tokio::test]
     async fn load_valid_minimal_config() {
-        let toml = r#"
-[model]
-provider = "anthropic"
-name = "claude-sonnet-4-20250514"
+        let yaml = r"
+model:
+  provider: anthropic
+  name: claude-sonnet-4-20250514
 
-[provider.anthropic]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+provider:
+  anthropic:
+    api: messages
+";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         assert_eq!(config.model.name, "claude-sonnet-4-20250514");
         assert!(config.model.max_tokens.is_none());
@@ -341,28 +377,66 @@ api = "messages"
 
     #[tokio::test]
     async fn load_not_found_returns_not_found() {
-        let result = Config::load(Path::new("/nonexistent/path/config.toml")).await;
+        let result = Config::load(Path::new("/nonexistent/path/config.yaml")).await;
         assert!(matches!(result, Err(ConfigError::NotFound(_))));
     }
 
     #[tokio::test]
-    async fn load_invalid_toml_returns_parse_error() {
-        let f = write_temp_config("this is not valid toml [[[");
+    async fn load_invalid_yaml_returns_parse_error() {
+        let f = write_temp_config("{{{{not valid yaml");
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[tokio::test]
+    async fn load_unsupported_extension_rejected() {
+        let mut f = tempfile::Builder::new()
+            .suffix(".toml")
+            .tempfile()
+            .expect("create temp file");
+        f.write_all(b"dummy").expect("write");
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::UnsupportedFormat(_))));
+    }
+
+    #[tokio::test]
+    async fn load_json_config() {
+        let json = r#"{
+            "model": { "provider": "anthropic", "name": "claude-sonnet-4-20250514" },
+            "provider": { "anthropic": { "api": "messages" } }
+        }"#;
+        let f = write_temp_config_ext(json, ".json");
+        let config = Config::load(f.path()).await.expect("should parse JSON");
+        assert_eq!(config.model.name, "claude-sonnet-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn load_yml_extension() {
+        let yaml = "model:\n  provider: anthropic\n  name: claude-sonnet-4-20250514\nprovider:\n  anthropic:\n    api: messages\n";
+        let f = write_temp_config_ext(yaml, ".yml");
+        let config = Config::load(f.path()).await.expect("should parse .yml");
+        assert_eq!(config.model.name, "claude-sonnet-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn load_invalid_json_returns_parse_error() {
+        let f = write_temp_config_ext("{not valid json", ".json");
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     #[tokio::test]
     async fn active_provider_valid() {
-        let toml = r#"
-[model]
-provider = "anthropic"
-name = "test-model"
+        let yaml = r"
+model:
+  provider: anthropic
+  name: test-model
 
-[provider.anthropic]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+provider:
+  anthropic:
+    api: messages
+";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let p = config.active_provider();
         p.expect("should resolve");
@@ -370,42 +444,44 @@ api = "messages"
 
     #[tokio::test]
     async fn active_provider_missing_with_providers_defined() {
-        let toml = r#"
-[model]
-provider = "nonexistent"
-name = "test-model"
+        let yaml = r"
+model:
+  provider: nonexistent
+  name: test-model
 
-[provider.anthropic]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+provider:
+  anthropic:
+    api: messages
+";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::UnknownProvider(_))));
     }
 
     #[tokio::test]
     async fn validate_provider_reference_no_providers_defined() {
-        let toml = r#"
-[model]
-provider = "anthropic"
-name = "test-model"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = r"
+model:
+  provider: anthropic
+  name: test-model
+";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::UnknownProvider(_))));
     }
 
     #[tokio::test]
     async fn pricing_from_builtin_registry() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "claude-sonnet-4-20250514"
+        let yaml = r"
+model:
+  provider: test
+  name: claude-sonnet-4-20250514
 
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+provider:
+  test:
+    api: messages
+";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let (inp, out) = config.pricing();
         assert!(inp > 0.0);
@@ -414,15 +490,16 @@ api = "messages"
 
     #[tokio::test]
     async fn pricing_unknown_model_returns_zero() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "totally-unknown-model-xyz"
+        let yaml = r"
+model:
+  provider: test
+  name: totally-unknown-model-xyz
 
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+provider:
+  test:
+    api: messages
+";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let (inp, out) = config.pricing();
         assert!((inp - 0.0).abs() < f64::EPSILON);
@@ -431,19 +508,20 @@ api = "messages"
 
     #[tokio::test]
     async fn compute_cost_basic() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "unknown-model"
+        let yaml = r"
+model:
+  provider: test
+  name: unknown-model
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[pricing]
-input_per_million = 3.0
-output_per_million = 15.0
-"#;
-        let f = write_temp_config(toml);
+pricing:
+  input_per_million: 3.0
+  output_per_million: 15.0
+";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let cost = config.compute_cost(1_000_000, 1_000_000);
         assert!((cost - 18.0).abs() < 0.001);
@@ -451,17 +529,19 @@ output_per_million = 15.0
 
     #[tokio::test]
     async fn deserialize_reasoning_config() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 64000
-reasoning = {level = "high"}
+        let yaml = r"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 64000
+  reasoning:
+    level: high
 
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+provider:
+  test:
+    api: messages
+";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let reasoning = config.model.reasoning.expect("reasoning should be Some");
         assert!(matches!(reasoning.level, crate::model::ReasoningLevel::High));
@@ -469,18 +549,23 @@ api = "messages"
 
     #[tokio::test]
     async fn deserialize_output_schema() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
+        let yaml = r"
+model:
+  provider: test
+  name: test-model
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[output_schema]
-schema = {"type" = "object", "properties" = {"answer" = {"type" = "string"}}}
-"#;
-        let f = write_temp_config(toml);
+output_schema:
+  schema:
+    type: object
+    properties:
+      answer:
+        type: string
+";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let schema = config.output_schema.expect("output_schema should be Some");
         assert_eq!(schema.schema["type"], "object");
@@ -488,18 +573,18 @@ schema = {"type" = "object", "properties" = {"answer" = {"type" = "string"}}}
 
     #[tokio::test]
     async fn deserialize_provider_compat_flags() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
+        let yaml = r"
+model:
+  provider: test
+  name: test-model
 
-[provider.test]
-api = "chat_completions"
-
-[provider.test.compat]
-explicit_tool_choice_auto = true
-"#;
-        let f = write_temp_config(toml);
+provider:
+  test:
+    api: chat_completions
+    compat:
+      explicit_tool_choice_auto: true
+";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let provider = config.active_provider().expect("provider should resolve");
         let compat = provider.compat.as_ref().expect("compat should be Some");
@@ -508,215 +593,104 @@ explicit_tool_choice_auto = true
 
     #[tokio::test]
     async fn validate_empty_provider_name() {
-        let toml = r#"
-[model]
-provider = ""
-name = "test-model"
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: \"\"\n  name: test-model\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::UnknownProvider(_))));
     }
 
     #[tokio::test]
     async fn validate_max_tokens_zero_rejected() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 0
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  max_tokens: 0\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("max_tokens")));
     }
 
     #[tokio::test]
     async fn max_tokens_none_when_omitted() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         assert!(config.model().max_tokens().is_none());
     }
 
     #[tokio::test]
     async fn max_tokens_some_when_set() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 4096
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  max_tokens: 4096\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         assert_eq!(config.model().max_tokens(), Some(4096));
     }
 
     #[tokio::test]
     async fn validate_temperature_out_of_range_rejected() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-temperature = 2.5
-
-[provider.test]
-api = "chat_completions"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: 2.5\nprovider:\n  test:\n    api: chat_completions\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("temperature")));
     }
 
     #[tokio::test]
     async fn validate_temperature_zero_accepted() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-temperature = 0.0
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: 0.0\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await;
         config.expect("should parse");
     }
 
     #[tokio::test]
     async fn validate_temperature_two_accepted_openai() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-temperature = 2.0
-
-[provider.test]
-api = "chat_completions"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: 2.0\nprovider:\n  test:\n    api: chat_completions\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await;
         config.expect("should parse");
     }
 
     #[tokio::test]
     async fn validate_temperature_one_accepted_anthropic() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-temperature = 1.0
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: 1.0\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await;
         config.expect("should parse");
     }
 
     #[tokio::test]
     async fn validate_temperature_above_one_rejected_anthropic() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-temperature = 1.5
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: 1.5\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("temperature")));
     }
 
     #[tokio::test]
     async fn validate_temperature_above_one_accepted_openai() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-temperature = 1.5
-
-[provider.test]
-api = "chat_completions"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: 1.5\nprovider:\n  test:\n    api: chat_completions\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await;
         config.expect("should parse");
     }
 
     #[tokio::test]
     async fn validate_negative_input_pricing_rejected() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-
-[provider.test]
-api = "messages"
-
-[pricing]
-input_per_million = -1.0
-output_per_million = 5.0
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\npricing:\n  input_per_million: -1.0\n  output_per_million: 5.0\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("input_per_million")));
     }
 
     #[tokio::test]
     async fn validate_negative_output_pricing_rejected() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-
-[provider.test]
-api = "messages"
-
-[pricing]
-input_per_million = 3.0
-output_per_million = -2.0
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\npricing:\n  input_per_million: 3.0\n  output_per_million: -2.0\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("output_per_million")));
     }
 
     #[tokio::test]
     async fn explicit_pricing_overrides_builtin() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "claude-sonnet-4-20250514"
-
-[provider.test]
-api = "messages"
-
-[pricing]
-input_per_million = 99.0
-output_per_million = 199.0
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: claude-sonnet-4-20250514\nprovider:\n  test:\n    api: messages\npricing:\n  input_per_million: 99.0\n  output_per_million: 199.0\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let (inp, out) = config.pricing();
         assert!((inp - 99.0).abs() < f64::EPSILON);
@@ -725,19 +699,8 @@ output_per_million = 199.0
 
     #[tokio::test]
     async fn compute_cost_zero_tokens() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "unknown-model"
-
-[provider.test]
-api = "messages"
-
-[pricing]
-input_per_million = 3.0
-output_per_million = 15.0
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: unknown-model\nprovider:\n  test:\n    api: messages\npricing:\n  input_per_million: 3.0\n  output_per_million: 15.0\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let cost = config.compute_cost(0, 0);
         assert!((cost - 0.0).abs() < 1e-15);
@@ -745,33 +708,16 @@ output_per_million = 15.0
 
     #[tokio::test]
     async fn validate_negative_temperature_rejected() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-temperature = -0.5
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: -0.5\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("non-negative")));
     }
 
     #[tokio::test]
     async fn validate_budget_tokens_exceeds_max_tokens_rejected() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "claude-sonnet-4-20250514"
-max_tokens = 1024
-reasoning = {level = "high"}
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: claude-sonnet-4-20250514\n  max_tokens: 1024\n  reasoning:\n    level: high\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         // High = 32000, max_tokens = 1024 -> rejected
         assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("budget_tokens")));
@@ -779,49 +725,24 @@ api = "messages"
 
     #[tokio::test]
     async fn validate_budget_tokens_within_max_tokens_accepted() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "claude-sonnet-4-20250514"
-max_tokens = 64000
-reasoning = {level = "high"}
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: claude-sonnet-4-20250514\n  max_tokens: 64000\n  reasoning:\n    level: high\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await;
         config.expect("should parse");
     }
 
     #[tokio::test]
     async fn validate_budget_tokens_not_checked_for_chat_completions() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "o3-mini"
-reasoning = {level = "high"}
-
-[provider.test]
-api = "chat_completions"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: o3-mini\n  reasoning:\n    level: high\nprovider:\n  test:\n    api: chat_completions\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await;
-        // OpenAI uses reasoning_effort, not budget_tokens -- no validation needed
         config.expect("should parse");
     }
 
     #[tokio::test]
     async fn override_model_name_success() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "original-model"
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: original-model\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let mut config = Config::load(f.path()).await.expect("should parse");
         assert_eq!(config.model().name(), "original-model");
         config.override_model_name("new-model".into()).expect("override should succeed");
@@ -830,15 +751,8 @@ api = "messages"
 
     #[tokio::test]
     async fn override_model_name_reverts_on_failure() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "original-model"
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: original-model\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let mut config = Config::load(f.path()).await.expect("should parse");
         let result = config.override_model_name(String::new());
         assert!(result.is_err());
@@ -847,16 +761,8 @@ api = "messages"
 
     #[tokio::test]
     async fn override_reasoning_success() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 64000
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  max_tokens: 64000\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let mut config = Config::load(f.path()).await.expect("should parse");
         assert!(config.model().reasoning().is_none());
         config.override_reasoning(super::ReasoningConfig { level: crate::model::ReasoningLevel::Medium }).expect("override should succeed");
@@ -865,19 +771,10 @@ api = "messages"
 
     #[tokio::test]
     async fn override_reasoning_reverts_on_failure() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 1024
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\n  max_tokens: 1024\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let mut config = Config::load(f.path()).await.expect("should parse");
         assert!(config.model().reasoning().is_none());
-        // High level has budget_tokens=32000 which exceeds max_tokens=1024
         let result = config.override_reasoning(super::ReasoningConfig { level: crate::model::ReasoningLevel::High });
         assert!(result.is_err());
         assert!(config.model().reasoning().is_none(), "should revert to None");
@@ -885,42 +782,39 @@ api = "messages"
 
     #[tokio::test]
     async fn unknown_fields_in_provider_section_ignored() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-
-[provider.test]
-api = "messages"
-base_url = "https://stale.example.com"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\n    base_url: https://stale.example.com\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse despite unknown base_url field");
         assert_eq!(config.active_provider().expect("provider").api, ApiKind::Messages);
     }
 
-    // -- [[tools]] array tests --
+    // -- tools list tests --
 
     #[tokio::test]
     async fn tools_array_parsing() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
+        let yaml = r#"
+model:
+  provider: test
+  name: test-model
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[[tools]]
-name = "read_file"
-description = "Read a file's contents"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
-
-[[tools]]
-name = "grep_project"
-description = "Search for a pattern"
+tools:
+  - name: read_file
+    description: "Read a file's contents"
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required:
+        - path
+  - name: grep_project
+    description: Search for a pattern
 "#;
-        let f = write_temp_config(toml);
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         assert_eq!(config.tools().len(), 2);
         assert_eq!(config.tools()[0].name(), "read_file");
@@ -932,57 +826,24 @@ description = "Search for a pattern"
 
     #[tokio::test]
     async fn tools_empty_array() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-
-[provider.test]
-api = "messages"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\n";
+        let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         assert!(config.tools().is_empty());
     }
 
     #[tokio::test]
     async fn tools_empty_name_rejected() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-
-[provider.test]
-api = "messages"
-
-[[tools]]
-name = ""
-description = "empty name"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: \"\"\n    description: empty name\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("empty")));
     }
 
     #[tokio::test]
     async fn tools_duplicate_name_rejected() {
-        let toml = r#"
-[model]
-provider = "test"
-name = "test-model"
-
-[provider.test]
-api = "messages"
-
-[[tools]]
-name = "my_tool"
-description = "first"
-
-[[tools]]
-name = "my_tool"
-description = "duplicate"
-"#;
-        let f = write_temp_config(toml);
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: first\n  - name: my_tool\n    description: duplicate\n";
+        let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("duplicate")));
     }
@@ -1018,5 +879,84 @@ description = "duplicate"
         assert_eq!(def.name, "simple_tool");
         assert_eq!(def.description, "No params");
         assert!(def.input_schema.is_none());
+    }
+
+    #[test]
+    fn cross_format_yaml_json_equivalence() {
+        let yaml = r#"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 2048
+
+system_prompt: "Be helpful"
+
+provider:
+  test:
+    api: messages
+
+tools:
+  - name: read_file
+    description: "Read a file"
+
+pricing:
+  input_per_million: 3.0
+  output_per_million: 15.0
+"#;
+        let json = r#"{
+            "model": { "provider": "test", "name": "test-model", "max_tokens": 2048 },
+            "system_prompt": "Be helpful",
+            "provider": { "test": { "api": "messages" } },
+            "tools": [{ "name": "read_file", "description": "Read a file" }],
+            "pricing": { "input_per_million": 3.0, "output_per_million": 15.0 }
+        }"#;
+        let from_yaml = Config::parse_yaml(yaml).expect("yaml");
+        let from_json: Config =
+            serde_json::from_str(json).map_err(|e| ConfigError::Parse(e.to_string())).expect("json");
+        from_json.validate().expect("json validate");
+
+        assert_eq!(from_yaml.model.name, from_json.model.name);
+        assert_eq!(from_yaml.model.provider, from_json.model.provider);
+        assert_eq!(from_yaml.model.max_tokens, from_json.model.max_tokens);
+        assert_eq!(from_yaml.system_prompt(), from_json.system_prompt());
+        assert_eq!(from_yaml.tools().len(), from_json.tools().len());
+        assert_eq!(from_yaml.tools()[0].name(), from_json.tools()[0].name());
+        assert_eq!(from_yaml.pricing(), from_json.pricing());
+    }
+
+    #[test]
+    fn valid_yaml_wrong_schema_returns_parse_error() {
+        let result = Config::parse_yaml("model: \"a string\"");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn empty_file_returns_parse_error() {
+        let result = Config::parse_yaml("");
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[tokio::test]
+    async fn no_file_extension_returns_unsupported_format() {
+        let mut f = tempfile::Builder::new()
+            .prefix("config")
+            .suffix("")
+            .tempfile()
+            .expect("create temp file");
+        f.write_all(b"dummy").expect("write");
+        // Strip any extension by renaming — suffix("") may still have no dot
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::UnsupportedFormat(_))));
+    }
+
+    #[test]
+    fn json_trailing_comma_returns_parse_error() {
+        let bad_json = r#"{
+            "model": { "provider": "test", "name": "m" },
+            "provider": { "test": { "api": "messages" } },
+        }"#;
+        let result: Result<Config, _> =
+            serde_json::from_str(bad_json).map_err(|e| ConfigError::Parse(e.to_string()));
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 }

@@ -169,7 +169,10 @@ pub fn mixed_response(
 
 fn write_temp_config(content: &str) -> tempfile::NamedTempFile {
     use std::io::Write;
-    let mut f = tempfile::NamedTempFile::new().expect("create temp file");
+    let mut f = tempfile::Builder::new()
+        .suffix(".yaml")
+        .tempfile()
+        .expect("create temp file");
     f.write_all(content.as_bytes()).expect("write temp file");
     f
 }
@@ -230,7 +233,7 @@ pub fn full_response(
     }
 }
 
-pub async fn load_config(toml: &str) -> Config {
-    let f = write_temp_config(toml);
+pub async fn load_config(yaml: &str) -> Config {
+    let f = write_temp_config(yaml);
     Config::load(f.path()).await.expect("config should parse")
 }

@@ -104,9 +104,10 @@ impl Context {
     }
 }
 
-/// Reads a JSON file containing an array of tool results and converts them
-/// to `ContentBlock::ToolResult` variants. The file format matches the
-/// `--tool-results` CLI input described in the monadic tools spec.
+/// Reads a JSON file of tool results into `ContentBlock::ToolResult` variants.
+///
+/// The file format matches the `--tool-results` CLI input described in the
+/// monadic tools spec.
 pub async fn load_tool_results(path: &Path) -> Result<Vec<ContentBlock>, crate::error::FlickError> {
     let data = tokio::fs::read_to_string(path).await?;
 
@@ -142,7 +143,7 @@ pub async fn load_tool_results(path: &Path) -> Result<Vec<ContentBlock>, crate::
 
         let is_error = entry
             .get("is_error")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
         results.push(ContentBlock::ToolResult {

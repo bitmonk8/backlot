@@ -28,7 +28,7 @@ struct Cli {
 enum Commands {
     /// Query a model, return single JSON result to stdout
     Run {
-        /// Path to TOML config file
+        /// Path to config file (.yaml, .yml, or .json)
         #[arg(long)]
         config: PathBuf,
 
@@ -66,7 +66,7 @@ enum Commands {
     /// Interactive config file generator
     Init {
         /// Output file path (use '-' for stdout)
-        #[arg(long, default_value = "flick.toml")]
+        #[arg(long, default_value = "flick.yaml")]
         output: PathBuf,
     },
 }
@@ -120,7 +120,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-    };
+    }
 }
 
 /// Thin wrapper: loads config, credentials, context from filesystem and stdin,
@@ -135,7 +135,7 @@ async fn cmd_run(
     reasoning_override: Option<ReasoningLevel>,
 ) -> Result<(), FlickError> {
     // Validate CLI argument combinations
-    validate_run_args(&query, &resume, &tool_results_path)?;
+    validate_run_args(query.as_deref(), resume.as_deref(), tool_results_path.as_deref())?;
 
     let mut config = Config::load(&config_path).await?;
 
@@ -156,29 +156,25 @@ async fn cmd_run(
     let provider = create_provider(provider_config, cred_entry.key, &cred_entry.base_url);
 
 
-    let mut context;
-    let query_text;
-
-    if let Some(ref hash) = resume {
+    let (mut context, query_text) = if let Some(ref hash) = resume {
         // Resume session
         let flick_dir = flick::credential::flick_dir()?;
         let context_file = flick_dir.join("contexts").join(format!("{hash}.json"));
-        context = Context::load_from_file(&context_file).await?;
+        let mut ctx = Context::load_from_file(&context_file).await?;
 
-        let tool_results_file = tool_results_path.as_ref().ok_or_else(|| {
-            FlickError::InvalidArguments("--resume requires --tool-results".into())
-        })?;
-        let tool_results = flick::context::load_tool_results(tool_results_file).await?;
-        context.push_tool_results(tool_results)?;
-        query_text = String::new(); // no user query on resume
+        // tool_results_path guaranteed by validate_run_args
+        let tool_results =
+            flick::context::load_tool_results(tool_results_path.as_ref().unwrap()).await?;
+        ctx.push_tool_results(tool_results)?;
+        (ctx, String::new()) // no user query on resume
     } else {
         // New session
-        context = Context::default();
-        query_text = match &query {
+        let qt = match &query {
             Some(q) => q.clone(),
             None => read_stdin().await?,
         };
-    }
+        (Context::default(), qt)
+    };
 
     let mut stdout = std::io::stdout().lock();
     let flick_result = cmd_run_core(
@@ -236,9 +232,9 @@ async fn cmd_run(
 /// - `--resume` and `--tool-results` must both be present or both absent.
 /// - `--query` and `--resume` are mutually exclusive.
 fn validate_run_args(
-    query: &Option<String>,
-    resume: &Option<String>,
-    tool_results_path: &Option<PathBuf>,
+    query: Option<&str>,
+    resume: Option<&str>,
+    tool_results_path: Option<&std::path::Path>,
 ) -> Result<(), FlickError> {
     if let Some(hash) = resume {
         if hash.len() != 32
@@ -294,7 +290,7 @@ async fn cmd_run_core(
         let tool_defs: Vec<flick::provider::ToolDefinition> = config
             .tools()
             .iter()
-            .map(|t| t.to_definition())
+            .map(flick::config::ToolConfig::to_definition)
             .collect();
         let params = runner::build_params(config, &context.messages, &tool_defs);
         let request_json = provider.build_request(params)?;
@@ -536,12 +532,12 @@ async fn cmd_init_core(
         system_prompt: system_prompt.as_deref(),
         api,
     };
-    let toml_output = generate_config_toml(&params);
+    let yaml_output = generate_config_yaml(&params);
 
     if output_path != "-" {
         prompter.message(&format!("Writing config to {output_path}"))?;
     }
-    writer.write_all(toml_output.as_bytes()).map_err(FlickError::Io)?;
+    writer.write_all(yaml_output.as_bytes()).map_err(FlickError::Io)?;
 
     Ok(())
 }
@@ -579,31 +575,7 @@ struct ConfigGenParams<'a> {
     api: flick::ApiKind,
 }
 
-/// Escape a string for use inside a TOML basic string (`"..."`).
-///
-/// Escapes backslash, double-quote, and all control characters forbidden by
-/// the TOML spec (U+0000–U+001F except U+0009 TAB, plus U+007F DEL).
-fn toml_escape_basic(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\t' => out.push('\t'),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\u{0008}' => out.push_str("\\b"),
-            '\u{000C}' => out.push_str("\\f"),
-            '\u{0000}'..='\u{001F}' | '\u{007F}' => {
-                let _ = write!(out, "\\u{:04X}", c as u32);
-            }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-fn generate_config_toml(p: &ConfigGenParams<'_>) -> String {
+fn generate_config_yaml(p: &ConfigGenParams<'_>) -> String {
     let mut out = String::new();
 
     // Header
@@ -612,84 +584,92 @@ fn generate_config_toml(p: &ConfigGenParams<'_>) -> String {
     out.push_str("# Reference: docs/CONFIGURATION.md\n");
     out.push('\n');
 
-    // System prompt — top-level key, must appear before any table header
+    // System prompt
     out.push_str("# ── System Prompt (optional) ────────────────────────────────────────\n");
     match p.system_prompt {
-        Some(sp) if (sp.contains('\n') || sp.contains('"')) && !sp.contains("'''") => {
-            let _ = writeln!(out, "system_prompt = '''\n{sp}'''");
-        }
         Some(sp) => {
-            let _ = writeln!(out, "system_prompt = \"{}\"", toml_escape_basic(sp));
+            let _ = writeln!(out, "system_prompt: \"{}\"", yaml_escape(sp));
         }
         None => {
-            out.push_str("# system_prompt = \"You are Flick, a fast LLM runner.\"\n");
+            out.push_str("# system_prompt: \"You are Flick, a fast LLM runner.\"\n");
         }
     }
     out.push('\n');
 
     // Model section
     out.push_str("# ── Model ────────────────────────────────────────────────────────────\n");
-    out.push_str("# provider: must match a [provider.*] section below\n");
+    out.push_str("# provider: must match a key under `provider:` below\n");
     out.push_str("# name:     model identifier\n");
     out.push_str("# max_tokens: maximum output tokens (omit to use model default, Chat\n");
     out.push_str("#   Completions only; Messages API requires a value)\n");
     out.push_str("# temperature: sampling temperature (optional)\n");
     out.push_str("#   Messages API: 0.0–1.0 | Chat Completions: 0.0–2.0\n");
-    out.push_str("[model]\n");
-    let _ = writeln!(out, "provider = \"{}\"", toml_escape_basic(p.provider_name));
-    let _ = writeln!(out, "name = \"{}\"", toml_escape_basic(p.model_name));
+    out.push_str("model:\n");
+    let _ = writeln!(out, "  provider: \"{}\"", yaml_escape(p.provider_name));
+    let _ = writeln!(out, "  name: \"{}\"", yaml_escape(p.model_name));
     match p.max_tokens {
-        Some(v) => { let _ = writeln!(out, "max_tokens = {v}"); }
-        None => out.push_str("# max_tokens = 8192\n"),
+        Some(v) => { let _ = writeln!(out, "  max_tokens: {v}"); }
+        None => out.push_str("  # max_tokens: 8192\n"),
     }
-    out.push_str("# temperature = 0.0\n");
-    out.push('\n');
-
-    // Reasoning section
-    out.push_str("# ── Reasoning (optional) ────────────────────────────────────────────\n");
-    out.push_str("# level: minimal (1k tokens), low (4k), medium (10k), high (32k)\n");
-    out.push_str("# For Messages API: budget must be < max_tokens\n");
-    out.push_str("# [model.reasoning]\n");
-    out.push_str("# level = \"medium\"\n");
+    out.push_str("  # temperature: 0.0\n");
+    out.push_str("  # reasoning:\n");
+    out.push_str("  #   level: medium  # minimal (1k), low (4k), medium (10k), high (32k)\n");
     out.push('\n');
 
     // Provider section
     out.push_str("# ── Provider ─────────────────────────────────────────────────────────\n");
-    out.push_str("# api: \"messages\" (Anthropic) or \"chat_completions\" (OpenAI-compatible)\n");
+    out.push_str("# api: messages (Anthropic) or chat_completions (OpenAI-compatible)\n");
     out.push_str("# credential: credential store key (defaults to provider name)\n");
-    let _ = writeln!(out, "[provider.{}]", p.provider_name);
-    let _ = writeln!(out, "api = \"{}\"", p.api);
-    let _ = writeln!(out, "# credential = \"{}\"", toml_escape_basic(p.provider_name));
-    out.push('\n');
-
-    // Compat flags
-    out.push_str("# ── Compatibility Flags (optional) ──────────────────────────────────\n");
-    let _ = writeln!(out, "# [provider.{}.compat]", p.provider_name);
-    out.push_str("# explicit_tool_choice_auto = false\n");
+    out.push_str("provider:\n");
+    let _ = writeln!(out, "  \"{}\":", yaml_escape(p.provider_name));
+    let _ = writeln!(out, "    api: \"{}\"", yaml_escape(&p.api.to_string()));
+    let _ = writeln!(out, "    # credential: \"{}\"", yaml_escape(p.provider_name));
+    out.push_str("    # compat:\n");
+    out.push_str("    #   explicit_tool_choice_auto: false\n");
     out.push('\n');
 
     // Tools section (commented-out template)
     out.push_str("# ── Tools (optional) ────────────────────────────────────────────────\n");
     out.push_str("# Declare tool schemas. Flick sends these to the model but does not\n");
     out.push_str("# execute tools — the caller handles execution.\n");
-    out.push_str("# [[tools]]\n");
-    out.push_str("# name = \"tool_name\"\n");
-    out.push_str("# description = \"What this tool does\"\n");
-    out.push_str("# parameters = { type = \"object\", properties = { arg = { type = \"string\" } }, required = [\"arg\"] }\n");
+    out.push_str("# tools:\n");
+    out.push_str("#   - name: tool_name\n");
+    out.push_str("#     description: \"What this tool does\"\n");
+    out.push_str("#     parameters:\n");
+    out.push_str("#       type: object\n");
+    out.push_str("#       properties:\n");
+    out.push_str("#         arg:\n");
+    out.push_str("#           type: string\n");
+    out.push_str("#       required: [arg]\n");
     out.push('\n');
 
-    write_commented_sections(&mut out);
+    // Pricing
+    out.push_str("# ── Pricing (optional) ──────────────────────────────────────────────\n");
+    out.push_str("# Overrides builtin model pricing. Omit to use registry defaults.\n");
+    out.push_str("# pricing:\n");
+    out.push_str("#   input_per_million: 3.0\n");
+    out.push_str("#   output_per_million: 15.0\n");
 
     out
 }
 
-fn write_commented_sections(out: &mut String) {
-    // Pricing
-    out.push_str("# ── Pricing (optional) ──────────────────────────────────────────────\n");
-    out.push_str("# Overrides builtin model pricing. Omit to use registry defaults.\n");
-    out.push_str("# [pricing]\n");
-    out.push_str("# input_per_million = 3.0\n");
-    out.push_str("# output_per_million = 15.0\n");
+/// Escape a string for use inside a YAML double-quoted scalar.
+fn yaml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x00'..='\x08' | '\x0B'..='\x0C' | '\x0E'..='\x1F' | '\x7F' => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 async fn read_stdin() -> Result<String, FlickError> {
@@ -707,7 +687,7 @@ async fn read_stdin() -> Result<String, FlickError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use flick::prompter::MockPrompter;
@@ -717,9 +697,9 @@ mod tests {
     #[test]
     fn validate_resume_without_tool_results_rejected() {
         let result = validate_run_args(
-            &None,
-            &Some("a1b2c3d4e5f60718a1b2c3d4e5f60718".into()),
-            &None,
+            None,
+            Some("a1b2c3d4e5f60718a1b2c3d4e5f60718"),
+            None,
         );
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
@@ -729,9 +709,9 @@ mod tests {
     #[test]
     fn validate_tool_results_without_resume_rejected() {
         let result = validate_run_args(
-            &None,
-            &None,
-            &Some(PathBuf::from("results.json")),
+            None,
+            None,
+            Some(std::path::Path::new("results.json")),
         );
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
@@ -741,9 +721,9 @@ mod tests {
     #[test]
     fn validate_query_with_resume_rejected() {
         let result = validate_run_args(
-            &Some("hello".into()),
-            &Some("a1b2c3d4e5f60718a1b2c3d4e5f60718".into()),
-            &Some(PathBuf::from("results.json")),
+            Some("hello"),
+            Some("a1b2c3d4e5f60718a1b2c3d4e5f60718"),
+            Some(std::path::Path::new("results.json")),
         );
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
@@ -752,29 +732,29 @@ mod tests {
 
     #[test]
     fn validate_new_session_accepted() {
-        validate_run_args(&Some("hello".into()), &None, &None).unwrap();
+        validate_run_args(Some("hello"), None, None).unwrap();
     }
 
     #[test]
     fn validate_resume_session_accepted() {
         validate_run_args(
-            &None,
-            &Some("a1b2c3d4e5f60718a1b2c3d4e5f60718".into()),
-            &Some(PathBuf::from("results.json")),
+            None,
+            Some("a1b2c3d4e5f60718a1b2c3d4e5f60718"),
+            Some(std::path::Path::new("results.json")),
         ).unwrap();
     }
 
     #[test]
     fn validate_no_args_accepted() {
-        validate_run_args(&None, &None, &None).unwrap();
+        validate_run_args(None, None, None).unwrap();
     }
 
     #[test]
     fn validate_resume_hash_valid_accepted() {
         validate_run_args(
-            &None,
-            &Some("00112233445566778899aabbccddeeff".into()),
-            &Some(PathBuf::from("results.json")),
+            None,
+            Some("00112233445566778899aabbccddeeff"),
+            Some(std::path::Path::new("results.json")),
         )
         .unwrap();
     }
@@ -782,9 +762,9 @@ mod tests {
     #[test]
     fn validate_resume_hash_path_traversal_rejected() {
         let result = validate_run_args(
-            &None,
-            &Some("../../../etc/passwd".into()),
-            &Some(PathBuf::from("results.json")),
+            None,
+            Some("../../../etc/passwd"),
+            Some(std::path::Path::new("results.json")),
         );
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
@@ -794,9 +774,9 @@ mod tests {
     #[test]
     fn validate_resume_hash_uppercase_rejected() {
         let result = validate_run_args(
-            &None,
-            &Some("00112233445566778899AABBCCDDEEFF".into()),
-            &Some(PathBuf::from("results.json")),
+            None,
+            Some("00112233445566778899AABBCCDDEEFF"),
+            Some(std::path::Path::new("results.json")),
         );
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
@@ -806,9 +786,9 @@ mod tests {
     #[test]
     fn validate_resume_hash_too_short_rejected() {
         let result = validate_run_args(
-            &None,
-            &Some("abcdef01".into()),
-            &Some(PathBuf::from("results.json")),
+            None,
+            Some("abcdef01"),
+            Some(std::path::Path::new("results.json")),
         );
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
@@ -818,9 +798,9 @@ mod tests {
     #[test]
     fn validate_resume_hash_too_long_rejected() {
         let result = validate_run_args(
-            &None,
-            &Some("00112233445566778899aabbccddeeff00".into()),
-            &Some(PathBuf::from("results.json")),
+            None,
+            Some("00112233445566778899aabbccddeeff00"),
+            Some(std::path::Path::new("results.json")),
         );
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
@@ -830,9 +810,9 @@ mod tests {
     #[test]
     fn validate_resume_hash_non_hex_rejected() {
         let result = validate_run_args(
-            &None,
-            &Some("00112233445566778899aabbccddeefg".into()),
-            &Some(PathBuf::from("results.json")),
+            None,
+            Some("00112233445566778899aabbccddeefg"),
+            Some(std::path::Path::new("results.json")),
         );
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
@@ -1034,7 +1014,7 @@ mod tests {
         }
     }
 
-    /// Provider that returns a single canned response, for cmd_run_core tests.
+    /// Provider that returns a single canned response, for `cmd_run_core` tests.
     struct InlineTestProvider {
         response: Mutex<Option<ModelResponse>>,
     }
@@ -1086,15 +1066,16 @@ mod tests {
     }
 
     fn stub_config() -> Config {
-        Config::parse(r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 1024
+        Config::parse_yaml(r"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 1024
 
-[provider.test]
-api = "messages"
-"#).expect("stub config should parse")
+provider:
+  test:
+    api: messages
+").expect("stub config should parse")
     }
 
     #[tokio::test]
@@ -1142,21 +1123,27 @@ api = "messages"
 
     #[tokio::test]
     async fn run_core_non_dry_run_tool_calls() {
-        let config = Config::parse(
-            r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 1024
+        let config = Config::parse_yaml(
+            r"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 1024
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[[tools]]
-name = "read_file"
-description = "Read a file"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
-"#,
+tools:
+  - name: read_file
+    description: Read a file
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
+",
         )
         .expect("config should parse");
 
@@ -1176,31 +1163,37 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
 
         let flick_result = result.expect("non-dry-run should return Some");
         assert_eq!(flick_result.status, ResultStatus::ToolCallsPending);
-        let tool_uses: Vec<_> = flick_result
+        let tool_use_count = flick_result
             .content
             .iter()
             .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
-            .collect();
-        assert_eq!(tool_uses.len(), 1);
+            .count();
+        assert_eq!(tool_use_count, 1);
     }
 
     #[tokio::test]
     async fn run_core_resume_path() {
-        let config = Config::parse(
-            r#"
-[model]
-provider = "test"
-name = "test-model"
-max_tokens = 1024
+        let config = Config::parse_yaml(
+            r"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 1024
 
-[provider.test]
-api = "messages"
+provider:
+  test:
+    api: messages
 
-[[tools]]
-name = "read_file"
-description = "Read a file"
-parameters = { type = "object", properties = { path = { type = "string" } }, required = ["path"] }
-"#,
+tools:
+  - name: read_file
+    description: Read a file
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
+",
         )
         .expect("config should parse");
 
@@ -1289,13 +1282,13 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("provider = \"anthropic\""));
-        assert!(text.contains("name = \"claude-sonnet-4-20250514\""));
-        assert!(text.contains("max_tokens = 64000"));
-        assert!(text.contains("api = \"messages\""));
+        assert!(text.contains("provider: \"anthropic\""));
+        assert!(text.contains("name: \"claude-sonnet-4-20250514\""));
+        assert!(text.contains("max_tokens: 64000"));
+        assert!(text.contains("api: \"messages\""));
         // Tool section should be a commented-out template
-        assert!(text.contains("# [[tools]]"));
-        assert!(text.contains("# name = \"tool_name\""));
+        assert!(text.contains("# tools:"));
+        assert!(text.contains("#   - name: tool_name"));
     }
 
     #[tokio::test]
@@ -1322,8 +1315,8 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("provider = \"openai\""));
-        assert!(text.contains("api = \"chat_completions\""));
+        assert!(text.contains("provider: \"openai\""));
+        assert!(text.contains("api: \"chat_completions\""));
     }
 
     #[tokio::test]
@@ -1345,7 +1338,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("name = \"custom-model\""));
+        assert!(text.contains("name: \"custom-model\""));
         let messages = prompter.collected_messages();
         assert!(messages.iter().any(|m| m.contains("Could not fetch models")));
     }
@@ -1371,7 +1364,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("name = \"my-model\""));
+        assert!(text.contains("name: \"my-model\""));
     }
 
     #[tokio::test]
@@ -1416,7 +1409,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("max_tokens = 32000"));
+        assert!(text.contains("max_tokens: 32000"));
     }
 
     #[tokio::test]
@@ -1442,7 +1435,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("max_tokens = 64000"));
+        assert!(text.contains("max_tokens: 64000"));
     }
 
     #[tokio::test]
@@ -1468,7 +1461,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("max_tokens = 8192"));
+        assert!(text.contains("max_tokens: 8192"));
     }
 
     #[tokio::test]
@@ -1494,8 +1487,8 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("# max_tokens = 8192"));
-        assert!(!text.contains("\nmax_tokens ="));
+        assert!(text.contains("# max_tokens: 8192"));
+        assert!(!text.contains("\n  max_tokens:"));
     }
 
     #[tokio::test]
@@ -1522,7 +1515,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("system_prompt = '''\nYou are \"Flick\", a fast runner.'''"));
+        assert!(text.contains("system_prompt: \"You are \\\"Flick\\\", a fast runner.\""));
     }
 
     #[tokio::test]
@@ -1546,8 +1539,8 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(text.contains("# system_prompt = "));
-        assert!(!text.contains("\nsystem_prompt = "));
+        assert!(text.contains("# system_prompt: "));
+        assert!(!text.contains("\nsystem_prompt: "));
     }
 
     #[tokio::test]
@@ -1557,7 +1550,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
         let fetcher = MockModelFetcher::with_models(vec![]);
         let prompter = MockPrompter::new();
 
-        let existing_file = dir.path().join("flick.toml");
+        let existing_file = dir.path().join("flick.yaml");
         std::fs::write(&existing_file, "existing").expect("write file");
 
         let mut output = Vec::new();
@@ -1600,11 +1593,11 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
         // Verify output was written
         let text = String::from_utf8(output).expect("utf8");
         assert!(!text.is_empty());
-        assert!(text.contains("[model]"));
+        assert!(text.contains("model:"));
     }
 
     #[tokio::test]
-    async fn init_core_nondefault_base_url_absent_from_toml() {
+    async fn init_core_nondefault_base_url_absent_from_yaml() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
         store.set("litellm", "sk-key", flick::ApiKind::Messages, "http://custom:4000").await.expect("set");
@@ -1624,11 +1617,11 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(!text.contains("base_url"), "base_url should not appear in generated TOML");
+        assert!(!text.contains("base_url"), "base_url should not appear in generated config");
     }
 
     #[test]
-    fn generate_config_toml_round_trip_messages() {
+    fn generate_config_yaml_round_trip_messages() {
         let params = ConfigGenParams {
             provider_name: "anthropic",
             model_name: "claude-sonnet-4-20250514",
@@ -1636,20 +1629,20 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             system_prompt: Some("You are Flick, a fast LLM runner."),
             api: flick::ApiKind::Messages,
         };
-        let toml_str = generate_config_toml(&params);
-        assert!(!toml_str.contains("base_url"), "base_url should not appear in generated TOML");
-        assert!(toml_str.contains("provider = \"anthropic\""));
-        assert!(toml_str.contains("name = \"claude-sonnet-4-20250514\""));
-        assert!(toml_str.contains("max_tokens = 64000"));
+        let yaml_str = generate_config_yaml(&params);
+        assert!(!yaml_str.contains("base_url"), "base_url should not appear in generated config");
+        assert!(yaml_str.contains("provider: \"anthropic\""));
+        assert!(yaml_str.contains("name: \"claude-sonnet-4-20250514\""));
+        assert!(yaml_str.contains("max_tokens: 64000"));
         // Tool section should be commented-out template
-        assert!(toml_str.contains("# [[tools]]"));
-        assert!(toml_str.contains("# name = \"tool_name\""));
-        // Round-trip: generated TOML should parse with new config.rs
-        let _config = Config::parse(&toml_str).expect("generated TOML should parse");
+        assert!(yaml_str.contains("# tools:"));
+        assert!(yaml_str.contains("#   - name: tool_name"));
+        // Round-trip: generated YAML should parse
+        let _config = Config::parse_yaml(&yaml_str).expect("generated YAML should parse");
     }
 
     #[tokio::test]
-    async fn init_core_default_base_url_absent_from_toml() {
+    async fn init_core_default_base_url_absent_from_yaml() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = init_store_with_anthropic(dir.path()).await;
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
@@ -1667,7 +1660,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(!text.contains("base_url"), "base_url should not appear in generated TOML");
+        assert!(!text.contains("base_url"), "base_url should not appear in generated config");
     }
 
     // -- Test gap #11: system prompt with newlines --
@@ -1694,8 +1687,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        // Multi-line prompt should use ''' literal string
-        assert!(text.contains("system_prompt = '''\nLine one\nLine two\nLine three'''"));
+        assert!(text.contains("system_prompt: \"Line one\\nLine two\\nLine three\""));
     }
 
     // -- Test gap #12: system prompt containing ''' --
@@ -1722,9 +1714,8 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        // Contains ''', so must fall through to escaped basic string
-        assert!(text.contains("system_prompt = \"Use \\'\\'\\'triple quotes\\'\\'\\' carefully\"")
-            || text.contains("system_prompt = \"Use '''triple quotes''' carefully\""));
+        // Single quotes don't need escaping in YAML double-quoted strings
+        assert!(text.contains("system_prompt: \"Use '''triple quotes''' carefully\""));
     }
 
     // -- Test gap #13: max_tokens = 0 rejection --
@@ -1753,7 +1744,7 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
     // -- C2: round-trip test for Chat Completions with max_tokens = None --
 
     #[test]
-    fn generate_config_toml_round_trip_chat_completions_no_max_tokens() {
+    fn generate_config_yaml_round_trip_chat_completions_no_max_tokens() {
         let params = ConfigGenParams {
             provider_name: "openai",
             model_name: "gpt-4o",
@@ -1761,17 +1752,17 @@ parameters = { type = "object", properties = { path = { type = "string" } }, req
             system_prompt: Some("You are Flick, a fast LLM runner."),
             api: flick::ApiKind::ChatCompletions,
         };
-        let toml_str = generate_config_toml(&params);
+        let yaml_str = generate_config_yaml(&params);
         // Verify the commented-out max_tokens line is present
-        assert!(toml_str.contains("# max_tokens ="), "expected commented-out max_tokens line");
+        assert!(yaml_str.contains("# max_tokens:"), "expected commented-out max_tokens line");
         // Verify no active max_tokens line
-        assert!(!toml_str.lines().any(|l| {
+        assert!(!yaml_str.lines().any(|l| {
             let trimmed = l.trim();
-            trimmed.starts_with("max_tokens") && !trimmed.starts_with('#')
+            trimmed.starts_with("max_tokens:") && !trimmed.starts_with('#')
         }), "max_tokens should only appear as a comment");
-        assert!(toml_str.contains("provider = \"openai\""));
-        assert!(toml_str.contains("name = \"gpt-4o\""));
-        // Round-trip: generated TOML should parse with new config.rs
-        let _config = Config::parse(&toml_str).expect("generated TOML should parse");
+        assert!(yaml_str.contains("provider: \"openai\""));
+        assert!(yaml_str.contains("name: \"gpt-4o\""));
+        // Round-trip: generated YAML should parse
+        let _config = Config::parse_yaml(&yaml_str).expect("generated YAML should parse");
     }
 }

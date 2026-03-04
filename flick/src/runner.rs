@@ -17,19 +17,19 @@ pub async fn run(
     let tool_defs: Vec<ToolDefinition> = config
         .tools()
         .iter()
-        .map(|t| t.to_definition())
+        .map(super::config::ToolConfig::to_definition)
         .collect();
 
     let params = build_params(config, &context.messages, &tool_defs);
     let response = provider.call_boxed(params).await?;
 
-    let content = build_content(&response)?;
+    let blocks = build_content(&response)?;
 
-    if !content.is_empty() {
-        context.push_assistant(content.clone())?;
+    if !blocks.is_empty() {
+        context.push_assistant(blocks.clone())?;
     }
 
-    let has_tool_use = content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+    let has_tool_use = blocks.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }));
     let status = if has_tool_use {
         ResultStatus::ToolCallsPending
     } else {
@@ -43,7 +43,7 @@ pub async fn run(
 
     Ok(FlickResult {
         status,
-        content,
+        content: blocks,
         usage: Some(UsageSummary {
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
