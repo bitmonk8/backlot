@@ -2,7 +2,7 @@
 
 ## Current State
 
-Monadic architecture implemented. Flick makes a single model call per invocation and returns a JSON result. The caller drives the agent loop. 290 tests pass (215 lib, 51 bin, 13 runner, 11 integration).
+Monadic architecture implemented. Flick makes a single model call per invocation and returns a JSON result. The caller drives the agent loop. Two-step structured output for Chat Completions providers (tools + output_schema) implemented in the runner.
 
 ## Next Work
 

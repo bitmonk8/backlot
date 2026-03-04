@@ -146,7 +146,6 @@ impl CredentialStore {
         // a window where the file exists with default (world-readable) permissions.
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             use tokio::io::AsyncWriteExt;
             let file_result = tokio::fs::OpenOptions::new()
                 .write(true)

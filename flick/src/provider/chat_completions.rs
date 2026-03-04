@@ -106,23 +106,11 @@ impl ChatCompletionsProvider {
     }
 }
 
-/// Reject requests that specify both tools and `output_schema`, which are mutually
-/// exclusive in the `OpenAI` API.
-fn validate_params(params: &RequestParams<'_>) -> Result<(), ProviderError> {
-    if !params.tools.is_empty() && params.output_schema.is_some() {
-        return Err(ProviderError::ResponseParse(
-            "tools and output_schema cannot be used together".into(),
-        ));
-    }
-    Ok(())
-}
-
 impl Provider for ChatCompletionsProvider {
     async fn call(
         &self,
         params: RequestParams<'_>,
     ) -> Result<ModelResponse, ProviderError> {
-        validate_params(&params)?;
         let body = self.build_body(&params);
         let url = format!("{}/v1/chat/completions", self.base_url);
 
@@ -142,7 +130,6 @@ impl Provider for ChatCompletionsProvider {
         &self,
         params: RequestParams<'_>,
     ) -> Result<serde_json::Value, ProviderError> {
-        validate_params(&params)?;
         Ok(self.build_body(&params))
     }
 }
@@ -662,26 +649,4 @@ mod tests {
         assert_eq!(resp.tool_calls[1].call_id, "call_b");
     }
 
-    #[test]
-    fn validate_params_rejects_tools_with_schema() {
-        let (msgs, _) = minimal_params();
-        let tools = vec![ToolDefinition {
-            name: "test".into(),
-            description: "test".into(),
-            input_schema: None,
-        }];
-        let schema = serde_json::json!({"type": "object"});
-        let params = RequestParams {
-            model: "gpt-4o",
-            max_tokens: Some(1024),
-            temperature: None,
-            system_prompt: None,
-            messages: &msgs,
-            tools: &tools,
-            reasoning: None,
-            output_schema: Some(&schema),
-        };
-        let result = validate_params(&params);
-        assert!(matches!(result, Err(ProviderError::ResponseParse(_))));
-    }
 }

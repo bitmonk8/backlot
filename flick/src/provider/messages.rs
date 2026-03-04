@@ -93,8 +93,14 @@ impl MessagesProvider {
             }
         }
 
-        // Anthropic API does not support output_schema at the top level.
-        // Structured output should use forced tool choice pattern instead.
+        if let Some(schema) = params.output_schema {
+            body["output_config"] = serde_json::json!({
+                "format": {
+                    "type": "json_schema",
+                    "schema": schema,
+                }
+            });
+        }
 
         body
     }
@@ -526,6 +532,53 @@ mod tests {
         assert_eq!(resp.tool_calls.len(), 2);
         assert_eq!(resp.tool_calls[0].call_id, "tc_1");
         assert_eq!(resp.tool_calls[1].call_id, "tc_2");
+    }
+
+    #[test]
+    fn build_body_with_output_schema() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            reasoning: None,
+            output_schema: Some(&schema),
+        };
+        let body = provider.build_body(&params);
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
+        assert_eq!(
+            body["output_config"]["format"]["schema"]["properties"]["answer"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn build_body_without_output_schema_omits_output_config() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params);
+        assert!(body.get("output_config").is_none());
     }
 
     #[test]

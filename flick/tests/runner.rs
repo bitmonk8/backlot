@@ -465,3 +465,232 @@ async fn run_content_block_ordering() {
         result.content[2]
     );
 }
+
+// -- Two-step structured output tests --
+
+/// Config with tools + output_schema on a chat_completions provider.
+fn test_config_chat_completions_with_schema() -> Config {
+    Config::parse_yaml(
+        r#"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 1024
+
+provider:
+  test:
+    api: chat_completions
+
+tools:
+  - name: read_file
+    description: Read a file
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
+
+output_schema:
+  schema:
+    type: object
+    properties:
+      answer:
+        type: string
+    required: [answer]
+
+pricing:
+  input_per_million: 1.0
+  output_per_million: 2.0
+"#,
+    )
+    .expect("test config should parse")
+}
+
+/// Two-step: chat_completions + tools + schema triggers two provider calls
+/// when the first call completes without tool use.
+#[tokio::test]
+async fn run_two_step_structured_output() {
+    let provider = MockProvider::new(vec![
+        // First call: model completes with text (no tools used)
+        text_response("thinking aloud", 100, 50),
+        // Second call: structured output
+        text_response(r#"{"answer":"42"}"#, 80, 30),
+    ]);
+    let config = test_config_chat_completions_with_schema();
+    let mut context = Context::default();
+    context.push_user_text("what is the answer?").unwrap();
+
+    let result = runner::run(&config, &provider, &mut context).await.unwrap();
+
+    assert_eq!(result.status, ResultStatus::Complete);
+    // Content should be from the second call (structured output)
+    assert_eq!(result.content.len(), 1);
+    assert!(matches!(
+        &result.content[0],
+        ContentBlock::Text { text } if text == r#"{"answer":"42"}"#
+    ));
+
+    // Usage should be summed from both calls
+    let usage = result.usage.unwrap();
+    assert_eq!(usage.input_tokens, 180);
+    assert_eq!(usage.output_tokens, 80);
+
+    // Provider should have been called twice
+    let captured = provider.captured_params();
+    assert_eq!(captured.len(), 2);
+    // First call: has tools, no schema
+    assert!(!captured[0].tools.is_empty());
+    assert!(captured[0].output_schema.is_none());
+    // Second call: no tools, has schema
+    assert!(captured[1].tools.is_empty());
+    assert!(captured[1].output_schema.is_some());
+}
+
+/// Two-step: when the first call returns tool calls, skip the second call.
+#[tokio::test]
+async fn run_two_step_skipped_when_tool_calls_pending() {
+    let provider = MockProvider::new(vec![
+        // First call: model wants to use a tool
+        tool_call_response(
+            vec![("tc_1", "read_file", r#"{"path":"/tmp/test"}"#)],
+            100,
+            50,
+        ),
+    ]);
+    let config = test_config_chat_completions_with_schema();
+    let mut context = Context::default();
+    context.push_user_text("read a file").unwrap();
+
+    let result = runner::run(&config, &provider, &mut context).await.unwrap();
+
+    assert_eq!(result.status, ResultStatus::ToolCallsPending);
+    // Only one provider call
+    let captured = provider.captured_params();
+    assert_eq!(captured.len(), 1);
+}
+
+/// Messages API with tools + schema does NOT trigger two-step.
+#[tokio::test]
+async fn run_no_two_step_for_messages_api() {
+    let config = Config::parse_yaml(
+        r#"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 1024
+
+provider:
+  test:
+    api: messages
+
+tools:
+  - name: read_file
+    description: Read a file
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
+
+output_schema:
+  schema:
+    type: object
+    properties:
+      answer:
+        type: string
+    required: [answer]
+
+pricing:
+  input_per_million: 1.0
+  output_per_million: 2.0
+"#,
+    )
+    .expect("test config should parse");
+
+    let provider = MockProvider::new(vec![
+        text_response(r#"{"answer":"42"}"#, 100, 50),
+    ]);
+    let mut context = Context::default();
+    context.push_user_text("test").unwrap();
+
+    let result = runner::run(&config, &provider, &mut context).await.unwrap();
+
+    assert_eq!(result.status, ResultStatus::Complete);
+    // Only one call — no two-step for messages API
+    let captured = provider.captured_params();
+    assert_eq!(captured.len(), 1);
+    // Schema was passed through directly
+    assert!(captured[0].output_schema.is_some());
+}
+
+/// Two-step: chat_completions with schema but no tools does NOT trigger two-step.
+#[tokio::test]
+async fn run_no_two_step_without_tools() {
+    let config = Config::parse_yaml(
+        r#"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 1024
+
+provider:
+  test:
+    api: chat_completions
+
+output_schema:
+  schema:
+    type: object
+    properties:
+      answer:
+        type: string
+    required: [answer]
+
+pricing:
+  input_per_million: 1.0
+  output_per_million: 2.0
+"#,
+    )
+    .expect("test config should parse");
+
+    let provider = MockProvider::new(vec![
+        text_response(r#"{"answer":"42"}"#, 100, 50),
+    ]);
+    let mut context = Context::default();
+    context.push_user_text("test").unwrap();
+
+    let result = runner::run(&config, &provider, &mut context).await.unwrap();
+
+    assert_eq!(result.status, ResultStatus::Complete);
+    let captured = provider.captured_params();
+    assert_eq!(captured.len(), 1);
+    // Schema passed through directly since no tools
+    assert!(captured[0].output_schema.is_some());
+}
+
+/// Two-step: usage cost is computed from summed tokens.
+#[tokio::test]
+async fn run_two_step_cost_summed() {
+    let provider = MockProvider::new(vec![
+        text_response("step1", 1000, 500),
+        text_response(r#"{"answer":"done"}"#, 2000, 300),
+    ]);
+    let config = test_config_chat_completions_with_schema();
+    let mut context = Context::default();
+    context.push_user_text("test").unwrap();
+
+    let result = runner::run(&config, &provider, &mut context).await.unwrap();
+
+    let usage = result.usage.unwrap();
+    assert_eq!(usage.input_tokens, 3000);
+    assert_eq!(usage.output_tokens, 800);
+    // pricing: 1.0/million input + 2.0/million output
+    let expected_cost = config.compute_cost(3000, 800);
+    assert!(
+        (usage.cost_usd - expected_cost).abs() < 1e-10,
+        "cost_usd ({}) should match compute_cost ({})",
+        usage.cost_usd,
+        expected_cost
+    );
+}

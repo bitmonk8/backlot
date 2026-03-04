@@ -240,7 +240,14 @@ Top-level string. Optional system prompt sent to the model.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `schema` | JSON value | yes | JSON Schema for structured output (Anthropic only) |
+| `schema` | JSON value | yes | JSON Schema for structured output |
+
+Both provider types support structured output. Messages providers send the schema as
+`output_config.format` (native `json_schema` mode). Chat Completions providers send
+it as `response_format`. When using a Chat Completions provider with both `tools` and
+`output_schema`, Flick automatically performs a two-step call: the first request
+includes tools (no schema), and if the model completes without tool calls, a second
+request applies the schema (no tools). Usage from both calls is summed.
 
 ### `provider.<name>`
 
