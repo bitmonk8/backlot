@@ -1,6 +1,6 @@
 # Flick — Backlog
 
-## Fix Later (13)
+## Fix Later (12)
 
 ### L1. No `deny_unknown_fields` — config typos silently ignored — `config.rs`
 
@@ -16,9 +16,9 @@ Misspelled config fields (e.g., `temprature`) are silently discarded. A user who
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Security
 
-### L3. Decrypted API keys not zeroized — `credential.rs:30-37`
+### L3. Credential plaintext not zeroized — `credential.rs`
 
-`get()` returns `String` (not `Zeroizing<String>`). Plaintext API key persists in heap memory after drop. The key also exists in HTTP request headers during provider calls, so the benefit is marginal for a short-lived CLI process, but it is a gap in the defense-in-depth model.
+Multiple sites: `get()` returns `String` (not `Zeroizing<String>`), `encrypt()` receives `&str` without zeroizing intermediates, and `decrypt()` leaves plaintext bytes in heap allocations. The key also exists in HTTP request headers during provider calls, so the benefit is marginal for a short-lived CLI process, but it is a gap in the defense-in-depth model.
 
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Security
@@ -37,19 +37,19 @@ OpenAI models can return a `refusal` field in `choices[0].message` instead of `c
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Bug
 
+### L6. Cache token cost not computed — `config.rs`
+
+`compute_cost` uses only `input_tokens`/`output_tokens`. Cache tokens (`cache_creation_input_tokens`, `cache_read_input_tokens`) are tracked in `UsageSummary` but not factored into cost. Cost will be inaccurate for cached Anthropic conversations.
+
+- **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
+- **Category:** Robustness
+
 ### L7. `ContentBlock` has no unknown-variant fallback — `context.rs:29-55`
 
 Deserialization of an unknown `type` field (e.g., `{"type":"image"}`) produces a hard error. If a future provider or persisted context file contains an unfamiliar content block type, `Context::load_from_file` fails entirely.
 
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Robustness
-
-### L12. No test for `build_request` / dry-run path — `tests/`
-
-The `--dry-run` code path that calls `build_request` is completely untested at the integration level. `MockProvider::build_request` returns `Ok(json!({}))` always.
-
-- **Severity:** Medium — **Fix Risk:** None — **Effort:** Low
-- **Category:** Test Coverage
 
 ### L17. No test for `ProviderError::RateLimited` propagation — `tests/`
 
@@ -86,16 +86,9 @@ When the provider returns thinking content with an empty signature (e.g., Chat C
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
 - **Category:** Bug
 
-### L6. Cache token cost not computed — `config.rs`
-
-`compute_cost` uses only `input_tokens`/`output_tokens`. Cache tokens (`cache_creation_input_tokens`, `cache_read_input_tokens`) are tracked in `UsageSummary` but not factored into cost. Cost will be inaccurate for cached Anthropic conversations.
-
-- **Severity:** Medium — **Fix Risk:** Low — **Effort:** Low
-- **Category:** Robustness
-
 ---
 
-## Fix When Touched (37)
+## Fix When Touched (34)
 
 ### T1. `read_stdin` accepts unlimited input size — `main.rs`
 
@@ -118,12 +111,6 @@ No length cap or control character check on the API key value.
 ### T4. Empty tool description accepted — `config.rs`
 
 `description = ""` passes validation. Functionally useless to the model.
-
-- **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
-
-### T6. `encrypt` does not zeroize intermediate plaintext bytes — `credential.rs`
-
-The `plaintext` parameter is a `&str` from the caller. Same root cause as L3 from the caller side.
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
@@ -157,9 +144,9 @@ Thinking-only messages produce empty `"content": ""`. OpenAI accepts this but it
 
 - **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
 
-### T17. Redundant `content-type` header — `chat_completions.rs`
+### T17. Redundant `content-type` header — `chat_completions.rs`, `messages.rs`
 
-`.header("content-type", "application/json")` is redundant with `.json(&body)` which sets it automatically.
+`.header("content-type", "application/json")` is redundant with `.json(&body)` which sets it automatically. Present in both providers.
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
@@ -217,12 +204,6 @@ When `--query ""` is passed explicitly, `cmd_run` loads config, decrypts credent
 
 - **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
-### T47. `decrypt` internals not zeroized — `credential.rs`
-
-Inside `decrypt`, the `combined` Vec (nonce + ciphertext) and the `plaintext` Vec returned by `cipher.decrypt()` are plain allocations. The plaintext bytes survive in heap memory after drop.
-
-- **Severity:** Low — **Fix Risk:** Low — **Effort:** Low
-
 ### T48. Temp credentials file not cleaned up on `rename` failure — `credential.rs`
 
 If `tokio::fs::rename` fails (e.g., destination locked on Windows), the `.tmp` file containing all credentials is left on disk. It will be overwritten on the next `set()` call so there is no data-loss, but it is a robustness gap.
@@ -246,12 +227,6 @@ All `get()` tests create a key via `set()` first. There is no test verifying tha
 Neither the Unix nor Windows path calls `sync_all()` after writing the key file. A power failure between `write_all` and OS flush leaves the file empty or truncated.
 
 - **Severity:** Low — **Fix Risk:** Low — **Effort:** Trivial
-
-### T52. Redundant `content-type` header in Messages provider — `messages.rs`
-
-`.header("content-type", "application/json")` is redundant because `.json(&body)` sets it automatically.
-
-- **Severity:** Low — **Fix Risk:** None — **Effort:** Trivial
 
 ### T54. System prompt serialised as plain string, blocking prompt caching — `messages.rs`
 
