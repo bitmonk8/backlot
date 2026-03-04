@@ -104,18 +104,3 @@ All tools are uniform: a name, a description, and an optional JSON schema.
 
 Optional. Overrides the builtin model registry pricing. If omitted, pricing is looked up by model name.
 
-## Context Resumption (`--resume`)
-
-Prior context is loaded by hash from `~/.flick/contexts/{hash}.json`. Use `--resume <hash>` with `--tool-results <file>` to continue a session after executing tool calls.
-
-Tool results file format:
-```json
-[
-  {"tool_use_id": "tc_1", "content": "file contents here", "is_error": false},
-  {"tool_use_id": "tc_2", "content": "command not found", "is_error": true}
-]
-```
-
-## Credential Store
-
-Credentials are stored at `~/.flick/credentials` (TOML, encrypted). Use `flick setup <provider>` to add credentials interactively.

@@ -2,6 +2,24 @@
 
 Ultra-small, ultra-fast command-line tool written in Rust. Takes a TOML config and a query, makes a single LLM call, and returns a JSON result to stdout. Flick declares tool definitions to the model but never executes tools. The caller drives the agent loop externally.
 
+## Relationship to Epic
+
+| Project | Role |
+|---------|------|
+| Epic | Orchestrator — recursive task decomposition, tool execution, state management, TUI |
+| Flick | Agent primitive — single-shot LLM call, tool declaration (not execution), JSON result output |
+
+## Design Principles
+
+- **Ultra-small.** Minimal binary, minimal dependencies (15 runtime crates (+1 Windows-only)).
+- **Ultra-fast.** Negligible startup overhead. Time-to-first-token is the bottleneck.
+- **Unix-philosophy.** Takes input, produces output, composes via stdin/stdout.
+- **No framework.** Single executable, not an SDK or library.
+- **Tool-calling models only.** No capability-checking fallbacks.
+- **Compatibility-by-configuration.** Provider quirks via flags, not subclasses.
+- **Separation of concerns.** Flick is a pure LLM interface: config in, model call, result out. Tool execution is the caller's responsibility.
+- **Monadic / single-shot.** One invocation = one model call = one JSON result. The caller composes invocations into an agent loop.
+
 ## Requirements
 
 - Rust 1.85+ (edition 2024)
