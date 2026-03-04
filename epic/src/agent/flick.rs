@@ -219,18 +219,22 @@ impl FlickAgent {
             }
 
             let tool_calls = extract_tool_calls(&output)?;
-            let results: Vec<ToolResultEntry> = tool_calls
-                .iter()
-                .map(|(id, name, input)| {
-                    let result =
-                        tools::execute_tool(id.clone(), name, input, &self.project_root, grant);
-                    ToolResultEntry {
-                        tool_use_id: result.tool_use_id,
-                        content: result.content,
-                        is_error: result.is_error,
-                    }
-                })
-                .collect();
+            let mut results = Vec::with_capacity(tool_calls.len());
+            for (id, name, input) in &tool_calls {
+                let r = tools::execute_tool(
+                    id.clone(),
+                    name,
+                    input,
+                    &self.project_root,
+                    grant,
+                )
+                .await;
+                results.push(ToolResultEntry {
+                    tool_use_id: r.tool_use_id,
+                    content: r.content,
+                    is_error: r.is_error,
+                });
+            }
 
             // Write tool results to a temp file
             let results_filename = format!("{task_id}_{method}_tools_{round}.json");

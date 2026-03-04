@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator and agent wiring complete. Tool execution and state persistence next.
+**Implementation** — Core orchestrator, agent wiring, and tool execution complete. State persistence next.
 
 ## Milestones
 
@@ -11,13 +11,12 @@
 - [x] Core orchestrator loop — task types, events, state, AgentService trait, DFS loop with retry/escalation, 6 tests passing
 - [x] Agent runtime selected — ZeroClaw evaluated, audited, forked, then replaced by [Flick](https://github.com/bitmonk8/flick) (external executable, no crate dependency). Dependency count reduced from ~771 to ~104 packages.
 - [x] Agent call wiring — `FlickAgent` implements `AgentService` via Flick subprocess invocation. Config generation (YAML), structured output schemas, wire format types with `TryFrom` conversions, prompt assembly, tool loop with resume. 38 tests passing.
-- [ ] Tool execution — `execute_tool()` currently stubbed; wire real implementations for `read_file`, `glob`, `grep`, `write_file`, `edit_file`, `bash`
+- [x] Tool execution — All 6 tools implemented: `read_file`, `glob`, `grep`, `write_file`, `edit_file`, `bash`. Path sandboxing, size limits, timeout handling. 15 new tests (53 total).
 - [ ] State persistence integration — Wire `EpicState::save`/`load` into the main run loop for session resume
 
 ## Next Work Candidates
 
-1. **Tool execution** — Implement real tool backends behind `execute_tool()`. Currently all tools return a stub error. This is the remaining blocker for end-to-end runs.
-2. **State persistence integration** — Wire `EpicState::save`/`load` into the main run loop for session resume.
+1. **State persistence integration** — Wire `EpicState::save`/`load` into the main run loop for session resume.
 3. **TUI event consumer** — Connect `EventReceiver` to ratatui task tree and worklog panels.
 4. **Discoveries propagation** — `TaskOutcomeWire.discoveries` is parsed but dropped during `TryFrom` conversion. Requires `AgentService` trait signature change to carry discoveries alongside `TaskOutcome`.
 
@@ -72,3 +71,15 @@
 **Tests:** 32 new unit tests (38 total). 0 clippy warnings.
 
 **Deferred:** Tool execution (stubbed), discoveries propagation (requires trait change).
+
+### 2026-03-04: Tool execution implemented
+
+**Scope:** All 6 tools implemented in `tools.rs`: `read_file`, `glob`, `grep`, `write_file`, `edit_file`, `bash`. `flick.rs` call site updated from sync to async.
+
+**Security:** Path sandboxing via `safe_path()` (canonicalization + containment check), `verify_ancestors_within_root()` for write_file, symlink guard on `allow_new_file` paths, `follow_links(false)` on directory walks.
+
+**Resource limits:** `read_file` streams first 256 KiB only (no full-file load), `grep` skips files >10 MiB, `glob` caps at 1000 results, `grep` caps output at 64 KiB, `bash` output capped at 64 KiB with char-boundary-safe truncation, bash timeout clamped to 600s max.
+
+**Async:** `glob`/`grep` use `spawn_blocking` to avoid blocking the tokio runtime with sync `WalkDir`/`std::fs` I/O.
+
+**Tests:** 15 new tests (53 total). 0 clippy warnings.
