@@ -12,6 +12,7 @@ pub struct EpicState {
     next_id: u64,
 }
 
+#[allow(dead_code)] // Methods used in tests and future main wiring.
 impl EpicState {
     pub fn new() -> Self {
         Self::default()

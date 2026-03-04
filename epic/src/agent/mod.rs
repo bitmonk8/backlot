@@ -1,8 +1,10 @@
 // Agent abstraction over Flick agent runtime (external executable).
 
+mod config_gen;
+pub mod flick;
 mod models;
 mod prompts;
-mod tools;
+pub mod tools;
 
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
@@ -11,7 +13,7 @@ use crate::task::{Model, Task, TaskId, TaskOutcome};
 
 /// Summary of a completed sibling task, provided as context to agent calls.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields read by real AgentService impl (not yet wired).
+#[allow(dead_code)] // `id` field used in prompt formatting and tests.
 pub struct SiblingSummary {
     pub id: TaskId,
     pub goal: String,
@@ -21,7 +23,6 @@ pub struct SiblingSummary {
 
 /// Context bundle passed to every agent call.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields read by real AgentService impl (not yet wired).
 pub struct TaskContext {
     pub task: Task,
     pub parent_goal: Option<String>,

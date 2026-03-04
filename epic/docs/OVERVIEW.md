@@ -49,4 +49,4 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 - `C:\UnitySrc\fds2\tools\epic\` — fds2_epic Python implementation (reference implementation)
 ## Status
 
-**Phase: Implementation** — Design complete, Rust project scaffolded, core orchestrator loop complete. Next: agent call wiring via Flick subprocess.
+**Phase: Implementation** — Design complete, Rust project scaffolded, core orchestrator loop and agent wiring complete. Next: tool execution, state persistence, TUI.
