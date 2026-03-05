@@ -117,7 +117,6 @@ impl DynProvider for MessagesProvider {
                     .post(&url)
                     .header("x-api-key", &self.api_key)
                     .header("anthropic-version", API_VERSION)
-                    .header("content-type", "application/json")
                     .json(&body)
             })
             .await?;

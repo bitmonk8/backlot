@@ -1,6 +1,6 @@
 # Flick — Backlog
 
-39 items in 8 active clusters (1 resolved), ordered by value (highest first).
+31 items in 7 active clusters (2 resolved), ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
@@ -12,57 +12,9 @@ All 7 items fixed: `deny_unknown_fields` on all config structs (L1), reasoning +
 
 ---
 
-## 2. Provider Correctness — Chat Completions (8 items)
+## ~~2. Provider Correctness — Chat Completions~~ — RESOLVED
 
-OpenAI refusal handling, thinking block issues, tool strictness, double-prefixed errors, 408 retry. Primarily `chat_completions.rs` and `http.rs`.
-
-### L5. No handling of `refusal` field for OpenAI models — `chat_completions.rs:267-351`
-
-OpenAI models can return a `refusal` field in `choices[0].message` instead of `content`. The `parse_response` function silently ignores it. A refusal produces an empty response with no error — the user sees nothing.
-
-- **M** — Fix Risk: Low — Effort: Low
-
-### T14. `convert_message` drops Thinking blocks silently for Chat Completions — `chat_completions.rs`
-
-Thinking-only messages produce empty `"content": ""`. OpenAI accepts this but it is noise in the context window.
-
-- **L** — Fix Risk: Low — Effort: Low
-
-### T17. Redundant `content-type` header — `chat_completions.rs`, `messages.rs`
-
-`.header("content-type", "application/json")` is redundant with `.json(&body)` which sets it automatically. Present in both providers.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T56. User-role `ToolUse` blocks silently dropped in `convert_message` — `chat_completions.rs`
-
-The `has_tool_use` branch is gated on `role == "assistant"`. A `Message` with `Role::User` containing `ToolUse` blocks falls through to the text-only path, silently dropping the blocks.
-
-- **L** — Fix Risk: Low — Effort: Trivial
-
-### T57. No `"strict": true` on tool function definitions — `chat_completions.rs`
-
-OpenAI supports `"strict": true` on function tool definitions for schema-enforced argument generation. The provider sets `"strict": true` for `response_format` but not for tools, creating an inconsistency.
-
-- **L** — Fix Risk: Medium — Effort: Low
-
-### T59. Tool result `is_error` double-prefixes "Error:" in Chat Completions — `chat_completions.rs`
-
-Error content is wrapped as `format!("Error: {content}")`. If the caller already prefixes "Error:", the API payload becomes `"Error: Error: ..."`.
-
-- **L** — Fix Risk: Low — Effort: Trivial
-
-### T60. `validate_params` does not reject empty messages array — `chat_completions.rs`
-
-An empty `params.messages` would be serialised and rejected by the OpenAI API with an opaque 400 error.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T63. HTTP 408 (Request Timeout) not classified as retryable — `http.rs`
-
-`handle_http_error` maps 408 to `ProviderError::Api`, which `classify_for_retry` treats as non-retryable. RFC 7231 explicitly permits retry on 408.
-
-- **L** — Fix Risk: Low — Effort: Trivial
+All 8 items fixed: OpenAI refusal field handling (L5), thinking-only messages produce empty vec instead of empty content (T14), redundant content-type headers removed (T17), user-role ToolUse blocks guarded with debug_assert (T56), `"strict": true` on tool function definitions (T57), removed double "Error:" prefix on tool results (T59), empty messages array rejected early (T60), HTTP 408 classified as retryable (T63).
 
 ---
 

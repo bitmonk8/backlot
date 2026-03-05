@@ -55,7 +55,7 @@ pub(crate) const fn classify_for_retry(err: &ProviderError) -> RetryVerdict {
         ProviderError::RateLimited { retry_after_ms } => RetryVerdict::Retry {
             delay_ms: *retry_after_ms,
         },
-        ProviderError::Api { status, .. } if *status >= 500 => {
+        ProviderError::Api { status, .. } if *status >= 500 || *status == 408 => {
             RetryVerdict::Retry { delay_ms: None }
         }
         ProviderError::AuthFailed
@@ -276,6 +276,30 @@ mod tests {
     fn classify_response_parse_is_not_retryable() {
         let err = ProviderError::ResponseParse("bad data".into());
         assert!(matches!(classify_for_retry(&err), RetryVerdict::Fail));
+    }
+
+    #[test]
+    fn handle_http_error_408() {
+        let err = handle_http_error(408, "request timeout".into(), None);
+        match err {
+            ProviderError::Api { status, message } => {
+                assert_eq!(status, 408);
+                assert_eq!(message, "request timeout");
+            }
+            _ => panic!("expected Api error"),
+        }
+    }
+
+    #[test]
+    fn classify_request_timeout_is_retryable() {
+        let err = ProviderError::Api {
+            status: 408,
+            message: "request timeout".into(),
+        };
+        assert!(matches!(
+            classify_for_retry(&err),
+            RetryVerdict::Retry { delay_ms: None }
+        ));
     }
 
     // -- send_with_retry tests --

@@ -16,9 +16,9 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - Shared test doubles in `flick/src/test_support.rs` behind `testing` feature
 - `clap` gated behind optional `cli` feature flag
 - Config validation: `deny_unknown_fields` on all structs, reasoning+output_schema mutual exclusion, empty tool description/non-object parameters rejected, whitespace-only query early rejection, unknown-model pricing warning
-- 317 tests passing (232 lib, 56 bin, 18 runner, 11 integration), zero clippy errors
+- 333 tests passing (248 lib, 56 bin, 18 runner, 11 integration), zero clippy errors
 
 ## Next Work
 
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
-- Backlog items (see `BACKLOG.md` — 39 items in 8 active clusters)
+- Backlog items (see `BACKLOG.md` — 31 items in 7 active clusters)
