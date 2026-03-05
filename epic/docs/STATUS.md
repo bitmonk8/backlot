@@ -18,6 +18,66 @@
 - [x] CLI (clap) — Replaced ad-hoc env-var/arg parsing with proper `clap` derive CLI. Subcommands: `epic run <goal>`, `epic resume`, `epic status`. Global options: `--flick-path`, `--credential`, `--no-tui` (all with env-var fallbacks). `status` subcommand prints goal, root phase, and task counts from persisted state. 60 tests passing.
 - [x] `epic init` — Agent-driven interactive configuration scaffolding. Flick agent (Sonnet, read-only tools) scans project for build/test/lint markers. Interactive CLI confirms/edits/skips each step, prompts for model preferences and depth/budget limits. Writes `epic.toml` with atomic write. Declined steps included as TOML comments. `EpicConfig` struct with `VerificationStep`, `ModelConfig`, `LimitsConfig`, `AgentConfig`, `ProjectConfig`. 3 new tests (63 total).
 
+## Deferred Items
+
+Items not implemented in v1, with evaluation of complexity, value, and necessity.
+
+### Fix loop after verification failure
+
+Currently verification failure is terminal — the task fails immediately. The design (EPIC_DESIGN2) envisions up to 3 fix rounds where the branch creates subtasks to address issues, then re-verifies. Root branch gets an additional Opus round.
+
+- **Complexity:** Medium-high. Requires fix subtask creation from verification feedback, re-verify loop with round counter, root-level Opus escalation path. Significant orchestrator changes.
+- **Value:** High. Real-world tasks routinely produce code that fails lint or has minor issues. Without this, a 95%-correct result is treated the same as total failure.
+- **Without it:** Epic is fragile for any task where verification catches fixable issues. Usable only when agents produce clean output on first pass.
+
+### Full recovery re-decomposition
+
+Currently, first child failure terminates the entire branch. The design envisions an Opus recovery agent that can either adjust remaining subtasks (incremental) or re-decompose the branch entirely, with a 2-round recovery limit.
+
+- **Complexity:** High. New Opus recovery agent call, two recovery paths (adjust vs re-decompose), fresh magnitude estimates for recovery subtasks, 2-round limit tracking, significant state management.
+- **Value:** Medium-high. Handles cases where a decomposition strategy turns out to be wrong. Less urgent because leaf retry/escalation (up to 9 attempts) catches most individual task failures before they propagate.
+- **Without it:** Epic cannot adapt when a decomposition approach is fundamentally wrong. One bad subtask kills the branch. Acceptable for simple decompositions, problematic for deep/complex ones.
+
+### Checkpoint adjust/escalate actions
+
+Currently, discoveries from completed subtasks are passed as context to siblings but the plan is never modified. The design envisions a Haiku classification step (proceed / adjust pending subtasks / escalate to Opus recovery) after each subtask with discoveries.
+
+- **Complexity:** Medium. Haiku classification call, three-way branch, ability to modify goals/criteria of pending subtasks or trigger recovery.
+- **Value:** Medium. The current "pass discoveries as context" approach covers the common case where siblings can adapt on their own. Adjust/escalate handles cases where discoveries invalidate the plan structure itself.
+- **Without it:** Epic relies on agents to interpret discovery context and self-adjust. Works when discoveries are informational; fails when discoveries require structural plan changes.
+
+### Leaf retry counter resets on resume
+
+Currently, `retries_at_tier` is not persisted. On resume, a leaf that already used 2 of 3 retries gets a fresh counter — up to 9 extra attempts (bounded overshoot).
+
+- **Complexity:** Low. Persist `retries_at_tier` and current model tier in task state, restore on resume.
+- **Value:** Low. Worst case is extra API spend on resume. No correctness issue.
+- **Without it:** Minor cost inefficiency on crash+resume. Nothing breaks.
+
+### No checkpoint during leaf retry loop
+
+Currently, intermediate retry attempts are not checkpointed. On crash mid-retry, all attempts in the current loop are lost and the leaf restarts from scratch.
+
+- **Complexity:** Low. Add `checkpoint_save()` calls within the retry loop after each attempt.
+- **Value:** Low. The leaf restarts with a fresh retry counter (see above), so it still has bounded attempts. Lost attempts waste some API spend but don't affect correctness.
+- **Without it:** On crash during retry, some API spend is wasted on re-execution. Acceptable.
+
+## Design Choices (not deferred — intentional constraints)
+
+### Sequential execution only
+
+Epic executes subtasks sequentially by design. This is not a deferral — it is a deliberate constraint that will remain until explicitly reconsidered.
+
+**Rationale (EPIC_DESIGN2):** Simplifies implementation, keeps TUI output and logging coherent, and prioritizes cost control and correctness over throughput while the design matures.
+
+### No multi-language special handling
+
+Epic uses generalized prompts that work across languages. No language-specific logic.
+
+### No git hosting integration
+
+No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
+
 ## Next Work Candidates
 
 No remaining work candidates. All planned milestones complete.
@@ -38,7 +98,7 @@ No remaining work candidates. All planned milestones complete.
 
 **Rust-specific:** tokio (ecosystem standard), anyhow + thiserror, serde + serde_json + toml.
 
-**Scope (v1 boundaries):** No parallel execution, no multi-language special handling, no git hosting integration.
+**Scope (v1 boundaries):** Sequential execution (deliberate design choice, not deferral — see "Design Choices" section), no multi-language special handling, no git hosting integration.
 
 **Document Store:** File-based (markdown) for v1. Librarian via Flick agent (Haiku, read-only tools).
 
@@ -52,7 +112,7 @@ No remaining work candidates. All planned milestones complete.
 
 **Tests (6):** single_leaf, two_children, leaf_retry_and_escalation, terminal_failure, depth_cap_forces_leaf, persistence_round_trip.
 
-**Deferred for v1:** Fix loop after verification failure, full recovery re-decomposition, checkpoint adjust/escalate actions.
+**Deferred for v1:** Fix loop after verification failure, full recovery re-decomposition, checkpoint adjust/escalate actions. See "Deferred Items" section for evaluation.
 
 ### 2026-03-04: Replace ZeroClaw with Flick
 
@@ -102,7 +162,7 @@ No remaining work candidates. All planned milestones complete.
 
 **Best-effort checkpoints:** `checkpoint_save()` logs errors to stderr but does not abort the run.
 
-**Deferred for v1:** Leaf retry counter resets on resume (bounded overshoot). No checkpoint during leaf retry loop (intermediate attempts lost on crash).
+**Deferred for v1:** Leaf retry counter resets on resume (bounded overshoot). No checkpoint during leaf retry loop (intermediate attempts lost on crash). See "Deferred Items" section for evaluation.
 
 **Tests:** 5 new tests: `checkpoint_saves_state`, `resume_skips_completed_child`, `resume_skips_decomposition_when_subtasks_exist`, `resume_mid_execution_branch_not_reassessed`, `resume_verifying_skips_execution` (58 total). 0 clippy warnings.
 
