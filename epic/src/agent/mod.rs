@@ -9,7 +9,7 @@ pub mod tools;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
 use crate::task::verify::VerificationResult;
-use crate::task::{Model, Task, TaskId, TaskOutcome};
+use crate::task::{LeafResult, Model, Task, TaskId, TaskOutcome};
 
 /// Summary of a completed sibling task, provided as context to agent calls.
 #[derive(Debug, Clone)]
@@ -47,7 +47,7 @@ pub trait AgentService: Send + Sync {
         &self,
         ctx: &TaskContext,
         model: Model,
-    ) -> impl std::future::Future<Output = anyhow::Result<TaskOutcome>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<LeafResult>> + Send;
 
     /// Design decomposition and produce subtask specs.
     fn design_and_decompose(

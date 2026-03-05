@@ -49,6 +49,10 @@ pub enum Event {
         task_id: TaskId,
         passed: bool,
     },
+    DiscoveriesRecorded {
+        task_id: TaskId,
+        count: usize,
+    },
 }
 
 pub type EventSender = mpsc::UnboundedSender<Event>;

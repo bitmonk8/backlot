@@ -263,6 +263,12 @@ impl TuiApp {
                     ));
                 }
             }
+            Event::DiscoveriesRecorded { task_id, count } => {
+                self.worklog.push(WorklogEntry::info(
+                    format!("{task_id} recorded {count} discovery(ies)"),
+                    self.session_start,
+                ));
+            }
         }
 
         // Evict oldest entries if worklog exceeds cap.

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, and TUI complete. Discoveries propagation and CLI next.
+**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, and discoveries propagation complete. CLI next.
 
 ## Milestones
 
@@ -14,11 +14,11 @@
 - [x] Tool execution — All 6 tools implemented: `read_file`, `glob`, `grep`, `write_file`, `edit_file`, `bash`. Path sandboxing, size limits, timeout handling. 15 new tests (53 total).
 - [x] State persistence integration — `EpicState` saves/loads via `.epic/state.json`. Orchestrator checkpoints after assessment, decomposition, child completion, and verification. `main.rs` resumes from persisted state or creates fresh. Atomic writes (write-rename), resume skips completed/failed/mid-execution tasks correctly, reuses existing decomposition, goal mismatch detection, corrupt state error handling. 5 new tests (58 total).
 - [x] TUI event consumer — `TuiApp` consumes orchestrator events via ratatui + crossterm. Task tree panel (DFS with status indicators ✓/✗/▸/·, current-task cursor), worklog panel (timestamped event stream with follow-tail), metrics panel (toggle), header bar (goal, progress, elapsed). Keyboard controls: q/Ctrl-C quit, t toggle tail, m toggle metrics, ↑↓ scroll. Orchestrator runs in background tokio task, TUI in sync foreground loop. `EPIC_NO_TUI=1` for headless mode. `TaskRegistered` event added for TUI to build task tree from events alone.
+- [x] Discoveries propagation — `AgentService::execute_leaf` returns `LeafResult` (outcome + discoveries). Orchestrator stores discoveries on tasks, emits `DiscoveriesRecorded` event, triggers checkpoint flow. Sibling context includes discoveries in prompt. Failed sibling reason extracted from attempts. 2 new tests (60 total).
 
 ## Next Work Candidates
 
-1. **Discoveries propagation** — `TaskOutcomeWire.discoveries` is parsed but dropped during `TryFrom` conversion. Requires `AgentService` trait signature change to carry discoveries alongside `TaskOutcome`.
-2. **CLI (clap)** — Replace ad-hoc env-var/arg parsing with proper CLI: `epic run <goal>`, `epic resume`, `epic status`.
+1. **CLI (clap)** — Replace ad-hoc env-var/arg parsing with proper CLI: `epic run <goal>`, `epic resume`, `epic status`.
 
 ## Decisions Made
 
@@ -70,7 +70,7 @@
 
 **Tests:** 32 new unit tests (38 total). 0 clippy warnings.
 
-**Deferred:** Tool execution (stubbed), discoveries propagation (requires trait change).
+**Deferred:** Tool execution (stubbed). Discoveries propagation deferred (required trait change) — implemented in later milestone.
 
 ### 2026-03-04: Tool execution implemented
 
@@ -125,3 +125,20 @@
 **Files modified:** `events.rs` (new variant), `orchestrator.rs` (emit `TaskRegistered`, `Copy` cleanup), `main.rs` (TUI/headless mode split, `spawn_blocking`, abort), `task/mod.rs` (`TaskPhase` + `Copy`), `tui/mod.rs`, `tui/task_tree.rs`, `tui/worklog.rs`, `tui/metrics.rs`.
 
 **Tests:** 58 passing (no new tests — TUI is UI code, tested via existing orchestrator event emission tests). 0 clippy warnings.
+
+### 2026-03-05: Discoveries propagation implemented
+
+**Scope:** Leaf execution results now carry discoveries alongside the task outcome. `AgentService::execute_leaf` returns `LeafResult` (outcome + discoveries) instead of bare `TaskOutcome`. Orchestrator stores discoveries on the task and triggers checkpoint flow for sibling coordination.
+
+**Changes:**
+- `task/mod.rs` — Added `LeafResult` struct (outcome + discoveries)
+- `agent/mod.rs` — `execute_leaf` return type changed to `LeafResult`
+- `agent/config_gen.rs` — `TryFrom<TaskOutcomeWire>` now produces `LeafResult`, extracting discoveries from wire format
+- `agent/flick.rs` — `FlickAgent::execute_leaf` returns `LeafResult`
+- `orchestrator.rs` — `execute_leaf` destructures `LeafResult`, stores discoveries on task, emits `DiscoveriesRecorded` event
+- `events.rs` — Added `DiscoveriesRecorded { task_id, count }` variant
+- `tui/mod.rs` — Handles `DiscoveriesRecorded` in worklog
+
+**Data flow:** Agent returns `TaskOutcomeWire` with optional `discoveries` → `TryFrom` extracts into `LeafResult` → orchestrator stores on `Task.discoveries` → `execute_branch` reads child discoveries → calls `checkpoint()` with them → sibling context includes discoveries via `SiblingSummary` → prompt formatting shows discoveries to subsequent tasks.
+
+**Tests:** 2 new tests: `task_outcome_wire_with_discoveries` (wire conversion), `discoveries_propagated_to_checkpoint` (end-to-end: leaf reports discoveries → stored on task → checkpoint called → event emitted). 60 total. 0 clippy warnings.

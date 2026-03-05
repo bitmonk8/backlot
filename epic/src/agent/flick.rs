@@ -10,7 +10,7 @@ use crate::agent::{AgentService, TaskContext};
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
 use crate::task::verify::VerificationResult;
-use crate::task::{Model, TaskOutcome};
+use crate::task::{LeafResult, Model};
 use anyhow::{Context, bail};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -298,7 +298,7 @@ impl AgentService for FlickAgent {
         &self,
         ctx: &TaskContext,
         model: Model,
-    ) -> anyhow::Result<TaskOutcome> {
+    ) -> anyhow::Result<LeafResult> {
         let pair = prompts::build_execute_leaf(ctx);
         let grant = tools::phase_tools(AgentMethod::Execute);
         let config = config_gen::build_execute_leaf_config(
@@ -313,7 +313,7 @@ impl AgentService for FlickAgent {
         let wire: TaskOutcomeWire = self
             .run_with_tools(&config_path, &pair.query, grant, ctx.task.id.0, "execute")
             .await?;
-        TaskOutcome::try_from(wire)
+        LeafResult::try_from(wire)
     }
 
     async fn design_and_decompose(

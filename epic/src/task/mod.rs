@@ -71,6 +71,13 @@ pub enum TaskOutcome {
     Failed { reason: String },
 }
 
+/// Result of a leaf execution: outcome plus any discoveries the agent reported.
+#[derive(Debug, Clone)]
+pub struct LeafResult {
+    pub outcome: TaskOutcome,
+    pub discoveries: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,

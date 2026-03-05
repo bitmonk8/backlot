@@ -5,7 +5,7 @@ use crate::agent::tools::{FlickToolDef, ToolGrant, tool_definitions};
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
 use crate::task::verify::{VerificationOutcome, VerificationResult};
-use crate::task::{MagnitudeEstimate, Model, TaskOutcome, TaskPath};
+use crate::task::{LeafResult, MagnitudeEstimate, Model, TaskOutcome, TaskPath};
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -116,16 +116,20 @@ pub struct TaskOutcomeWire {
     pub discoveries: Option<Vec<String>>,
 }
 
-impl TryFrom<TaskOutcomeWire> for TaskOutcome {
+impl TryFrom<TaskOutcomeWire> for LeafResult {
     type Error = anyhow::Error;
     fn try_from(w: TaskOutcomeWire) -> anyhow::Result<Self> {
-        match w.outcome.as_str() {
-            "success" => Ok(Self::Success),
-            "failed" => Ok(Self::Failed {
+        let outcome = match w.outcome.as_str() {
+            "success" => TaskOutcome::Success,
+            "failed" => TaskOutcome::Failed {
                 reason: w.reason.unwrap_or_else(|| "no reason provided".into()),
-            }),
+            },
             other => bail!("invalid task outcome: {other}"),
-        }
+        };
+        Ok(Self {
+            outcome,
+            discoveries: w.discoveries.unwrap_or_default(),
+        })
     }
 }
 
@@ -448,7 +452,9 @@ mod tests {
             reason: None,
             discoveries: None,
         };
-        assert_eq!(TaskOutcome::try_from(wire).unwrap(), TaskOutcome::Success);
+        let result = LeafResult::try_from(wire).unwrap();
+        assert_eq!(result.outcome, TaskOutcome::Success);
+        assert!(result.discoveries.is_empty());
     }
 
     #[test]
@@ -458,8 +464,20 @@ mod tests {
             reason: Some("broke".into()),
             discoveries: None,
         };
-        let result = TaskOutcome::try_from(wire).unwrap();
-        assert!(matches!(result, TaskOutcome::Failed { reason } if reason == "broke"));
+        let result = LeafResult::try_from(wire).unwrap();
+        assert!(matches!(result.outcome, TaskOutcome::Failed { reason } if reason == "broke"));
+    }
+
+    #[test]
+    fn task_outcome_wire_with_discoveries() {
+        let wire = TaskOutcomeWire {
+            outcome: "success".into(),
+            reason: None,
+            discoveries: Some(vec!["found API v2".into(), "cache layer exists".into()]),
+        };
+        let result = LeafResult::try_from(wire).unwrap();
+        assert_eq!(result.outcome, TaskOutcome::Success);
+        assert_eq!(result.discoveries, vec!["found API v2", "cache layer exists"]);
     }
 
     #[test]

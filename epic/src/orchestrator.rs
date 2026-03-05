@@ -5,7 +5,7 @@ use crate::events::{Event, EventSender};
 use crate::state::EpicState;
 use crate::task::assess::AssessmentResult;
 use crate::task::verify::VerificationOutcome;
-use crate::task::{Attempt, Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
+use crate::task::{Attempt, LeafResult, Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -142,12 +142,16 @@ impl<A: AgentService> Orchestrator<A> {
                                 });
                             }
                             TaskPhase::Failed => {
+                                let reason = sib
+                                    .attempts
+                                    .iter()
+                                    .rev()
+                                    .find_map(|a| a.error.clone())
+                                    .unwrap_or_else(|| "unknown".into());
                                 completed.push(SiblingSummary {
                                     id: sib_id,
                                     goal: sib.goal.clone(),
-                                    outcome: TaskOutcome::Failed {
-                                        reason: "failed".into(),
-                                    },
+                                    outcome: TaskOutcome::Failed { reason },
                                     discoveries: sib.discoveries.clone(),
                                 });
                             }
@@ -343,7 +347,10 @@ impl<A: AgentService> Orchestrator<A> {
                 .unwrap_or(Model::Haiku);
 
             let ctx = self.build_context(id)?;
-            let outcome = self.agent.execute_leaf(&ctx, current_model).await?;
+            let LeafResult {
+                outcome,
+                discoveries,
+            } = self.agent.execute_leaf(&ctx, current_model).await?;
 
             {
                 let task = self
@@ -358,6 +365,17 @@ impl<A: AgentService> Orchestrator<A> {
                         TaskOutcome::Failed { reason } => Some(reason.clone()),
                     },
                 });
+                // Discoveries accumulate across retries without deduplication.
+                // LLM-generated text is unlikely to repeat verbatim; if this
+                // becomes noisy, add a Haiku dedup pass before storing.
+                if !discoveries.is_empty() {
+                    let count = discoveries.len();
+                    task.discoveries.extend(discoveries);
+                    self.emit(Event::DiscoveriesRecorded {
+                        task_id: id,
+                        count,
+                    });
+                }
             }
 
             if outcome == TaskOutcome::Success {
@@ -523,14 +541,14 @@ mod tests {
     use crate::task::assess::AssessmentResult;
     use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
     use crate::task::verify::{VerificationOutcome, VerificationResult};
-    use crate::task::{MagnitudeEstimate, TaskPath};
+    use crate::task::{LeafResult, MagnitudeEstimate, TaskPath};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
     #[allow(clippy::struct_field_names)]
     struct MockAgentService {
         assess_responses: Mutex<VecDeque<AssessmentResult>>,
-        leaf_responses: Mutex<VecDeque<TaskOutcome>>,
+        leaf_responses: Mutex<VecDeque<LeafResult>>,
         decompose_responses: Mutex<VecDeque<DecompositionResult>>,
         verify_responses: Mutex<VecDeque<VerificationResult>>,
         checkpoint_responses: Mutex<VecDeque<CheckpointDecision>>,
@@ -564,7 +582,7 @@ mod tests {
             &self,
             _ctx: &TaskContext,
             _model: Model,
-        ) -> anyhow::Result<TaskOutcome> {
+        ) -> anyhow::Result<LeafResult> {
             Ok(self
                 .leaf_responses
                 .lock()
@@ -647,6 +665,22 @@ mod tests {
         }
     }
 
+    fn leaf_success() -> LeafResult {
+        LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: Vec::new(),
+        }
+    }
+
+    fn leaf_failed(reason: &str) -> LeafResult {
+        LeafResult {
+            outcome: TaskOutcome::Failed {
+                reason: reason.into(),
+            },
+            discoveries: Vec::new(),
+        }
+    }
+
     fn make_orchestrator(
         mock: MockAgentService,
     ) -> (Orchestrator<MockAgentService>, TaskId, EventReceiver) {
@@ -686,7 +720,7 @@ mod tests {
         mock.leaf_responses
             .lock()
             .unwrap()
-            .push_back(TaskOutcome::Success);
+            .push_back(leaf_success());
 
         // Verification: child passes, root passes.
         mock.verify_responses
@@ -750,11 +784,11 @@ mod tests {
         mock.leaf_responses
             .lock()
             .unwrap()
-            .push_back(TaskOutcome::Success);
+            .push_back(leaf_success());
         mock.leaf_responses
             .lock()
             .unwrap()
-            .push_back(TaskOutcome::Success);
+            .push_back(leaf_success());
 
         // Verification: child A, child B, root — all pass.
         for _ in 0..3 {
@@ -790,14 +824,12 @@ mod tests {
             mock.leaf_responses
                 .lock()
                 .unwrap()
-                .push_back(TaskOutcome::Failed {
-                    reason: "haiku failed".into(),
-                });
+                .push_back(leaf_failed("haiku failed"));
         }
         mock.leaf_responses
             .lock()
             .unwrap()
-            .push_back(TaskOutcome::Success);
+            .push_back(leaf_success());
 
         // Verification: child, root.
         mock.verify_responses
@@ -839,9 +871,7 @@ mod tests {
             mock.leaf_responses
                 .lock()
                 .unwrap()
-                .push_back(TaskOutcome::Failed {
-                    reason: "persistent failure".into(),
-                });
+                .push_back(leaf_failed("persistent failure"));
         }
 
         // Recovery assessment called once (budget=2, but branch fails immediately).
@@ -879,7 +909,7 @@ mod tests {
         mock.leaf_responses
             .lock()
             .unwrap()
-            .push_back(TaskOutcome::Success);
+            .push_back(leaf_success());
 
         mock.verify_responses
             .lock()
@@ -933,7 +963,7 @@ mod tests {
         mock.leaf_responses
             .lock()
             .unwrap()
-            .push_back(TaskOutcome::Success);
+            .push_back(leaf_success());
 
         // Verification: pending child passes, root passes.
         mock.verify_responses
@@ -1008,7 +1038,7 @@ mod tests {
         mock.leaf_responses
             .lock()
             .unwrap()
-            .push_back(TaskOutcome::Success);
+            .push_back(leaf_success());
 
         // Verification: child passes, root passes.
         mock.verify_responses
@@ -1063,7 +1093,7 @@ mod tests {
         mock.leaf_responses
             .lock()
             .unwrap()
-            .push_back(TaskOutcome::Success);
+            .push_back(leaf_success());
 
         // Verification: grandchild, middle branch, root — all pass.
         for _ in 0..3 {
@@ -1189,7 +1219,7 @@ mod tests {
         mock.leaf_responses
             .lock()
             .unwrap()
-            .push_back(TaskOutcome::Success);
+            .push_back(leaf_success());
 
         // Verification: child, root.
         mock.verify_responses
@@ -1224,5 +1254,88 @@ mod tests {
         let child = orch.state.get(child_id).unwrap();
         assert_eq!(child.path, Some(TaskPath::Leaf));
         assert_eq!(child.depth, MAX_DEPTH);
+    }
+
+    /// Leaf reports discoveries → stored on task → checkpoint called → sibling sees them.
+    #[tokio::test]
+    async fn discoveries_propagated_to_checkpoint() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "two subtasks".into(),
+            });
+
+        // Both assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child A succeeds with discoveries.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["API uses v2 format".into(), "cache layer found".into()],
+        });
+
+        // Checkpoint after child A's discoveries.
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Proceed);
+
+        // Child B succeeds (no discoveries).
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child A, child B, root — all pass.
+        for _ in 0..3 {
+            mock.verify_responses
+                .lock()
+                .unwrap()
+                .push_back(pass_verification());
+        }
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Child A should have discoveries stored.
+        let child_a_id = orch.state.get(root_id).unwrap().subtask_ids[0];
+        let child_a = orch.state.get(child_a_id).unwrap();
+        assert_eq!(
+            child_a.discoveries,
+            vec!["API uses v2 format", "cache layer found"]
+        );
+
+        // DiscoveriesRecorded event should have been emitted.
+        let mut found_discoveries_event = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::DiscoveriesRecorded { task_id, count } if task_id == child_a_id && count == 2)
+            {
+                found_discoveries_event = true;
+            }
+        }
+        assert!(found_discoveries_event, "DiscoveriesRecorded event not found");
     }
 }
