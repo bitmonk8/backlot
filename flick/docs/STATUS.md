@@ -10,8 +10,11 @@ Library extraction complete (Phases 1–2 of `docs/LIBRARY_EXTRACTION.md`):
 - `resolve_provider()` standalone function for credential resolution
 - `Config::from_str()` with `ConfigFormat` enum for non-file config sources
 - Provider always injected into `FlickClient` — fully testable with mocks
+- `DynProvider` implemented directly on providers (no intermediate `Provider` trait)
+- `TerminalPrompter` and `dialoguer` moved from library to CLI crate
+- Shared test doubles in `flick/src/test_support.rs` behind `testing` feature
 - `clap` gated behind optional `cli` feature flag
-- 303 tests passing (220 lib, 54 bin, 18 runner, 11 integration), zero clippy errors
+- 305 tests passing (222 lib, 54 bin, 18 runner, 11 integration), zero clippy errors
 
 ## Next Work
 
