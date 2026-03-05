@@ -1,12 +1,12 @@
 # Flick — Backlog
 
-52 items in 9 clusters, ordered by value (highest first).
+46 items in 9 clusters, ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
 ---
 
-## 1. Config Validation & Error Quality (8 items)
+## 1. Config Validation & Error Quality (7 items)
 
 Typos silently ignored, invalid combinations not rejected, empty/whitespace inputs not caught early. One pass through `config.rs` and related validation code.
 
@@ -27,12 +27,6 @@ Misspelled config fields (e.g., `temprature`) are silently discarded. A user who
 `description = ""` passes validation. Functionally useless to the model.
 
 - **L** — Fix Risk: None — Effort: Trivial
-
-### T11. Thinking budget silently becomes 0 when `max_tokens` < 2 — `messages.rs`
-
-User requests reasoning but `max_tokens` is too small. Thinking is silently disabled with no warning.
-
-- **L** — Fix Risk: Low — Effort: Low
 
 ### T42. `override_reasoning` uses `take()` instead of `replace()` — `config.rs`
 
@@ -60,19 +54,13 @@ When `--query ""` is passed explicitly, `cmd_run` loads config, decrypts credent
 
 ---
 
-## 2. Provider Correctness — Chat Completions (9 items)
+## 2. Provider Correctness — Chat Completions (8 items)
 
 OpenAI refusal handling, thinking block issues, tool strictness, double-prefixed errors, 408 retry. Primarily `chat_completions.rs` and `http.rs`.
 
 ### L5. No handling of `refusal` field for OpenAI models — `chat_completions.rs:267-351`
 
 OpenAI models can return a `refusal` field in `choices[0].message` instead of `content`. The `parse_response` function silently ignores it. A refusal produces an empty response with no error — the user sees nothing.
-
-- **M** — Fix Risk: Low — Effort: Low
-
-### L22. Empty thinking signature stored in context, breaks next API call — `runner.rs`
-
-When the provider returns thinking content with an empty signature (e.g., Chat Completions provider, or a malformed Anthropic response), a `ContentBlock::Thinking { signature: "" }` is pushed to context. When that context is later replayed to the Anthropic Messages API in a multi-turn session, the empty signature violates the API contract and produces a hard error on the next invocation.
 
 - **M** — Fix Risk: Low — Effort: Low
 
@@ -144,25 +132,19 @@ Anthropic publishes aliases like `claude-sonnet-4` -> `claude-sonnet-4-20250514`
 
 ### T74. `BUILTIN_MODELS` missing new models — `model.rs`
 
-Models available as of the current knowledge cutoff that are absent: OpenAI `o3`, `gpt-4.1`, and Anthropic `claude-haiku-4`. Users of these models get `cost_usd: 0.0` without a config `pricing` override.
+Models available as of the current knowledge cutoff that are absent: OpenAI `gpt-4.1` and Anthropic `claude-haiku-4`. Users of these models get `cost_usd: 0.0` without a config `pricing` override.
 
 - **L** — Fix Risk: None — Effort: Trivial
 
 ---
 
-## 4. Security & Credentials (8 items)
+## 4. Security & Credentials (7 items)
 
 Base URL validation, credential zeroization, secret key write atomicity, temp file cleanup. All touch `credential.rs` or its security surface.
 
 ### L2. Config `base_url` not validated for URL sanity — `config.rs`
 
 `ProviderConfig.base_url` accepts any string. Values like `file:///etc/passwd` would be passed to reqwest (which rejects non-HTTP schemes at request time with an opaque error). An `http://localhost/...` URL could be used for SSRF if flick ever runs as a service.
-
-- **M** — Fix Risk: Low — Effort: Low
-
-### L3. Credential plaintext not zeroized — `credential.rs`
-
-Multiple sites: `get()` returns `String` (not `Zeroizing<String>`), `encrypt()` receives `&str` without zeroizing intermediates, and `decrypt()` leaves plaintext bytes in heap allocations. The key also exists in HTTP request headers during provider calls, so the benefit is marginal for a short-lived CLI process, but it is a gap in the defense-in-depth model.
 
 - **M** — Fix Risk: Low — Effort: Low
 
@@ -300,7 +282,7 @@ The Messages provider always omits `tool_choice`, relying on the Anthropic defau
 
 ---
 
-## 8. CLI Input Handling (5 items)
+## 8. CLI Input Handling (4 items)
 
 Stdin size limits, provider name/key validation, whitespace-only input messages. All in `main.rs`.
 
@@ -328,23 +310,11 @@ No length cap or control character check on the API key value.
 
 - **L** — Fix Risk: None — Effort: Trivial
 
-### T41. Provider name allows dot-prefixed names like `.hidden` — `main.rs`
-
-Validation rejects exactly `"."` and `".."` but permits `.hidden`, `...`, `..foo`, etc. Dot-prefixed credential files are invisible by default on Unix.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
 ---
 
-## 9. Test Coverage Gaps (5 items)
+## 9. Test Coverage Gaps (3 items)
 
-Missing tests for rate limiting, context overflow, credential edge cases, destructive mock reads, integration history verification. Independent items but suitable for a single test-writing session.
-
-### L17. No test for `ProviderError::RateLimited` propagation — `tests/`
-
-No test verifies that a provider returning `RateLimited` propagates correctly through `runner::run` as `FlickError::Provider(ProviderError::RateLimited { .. })`.
-
-- **M** — Fix Risk: None — Effort: Low
+Missing tests for context overflow, credential edge cases, destructive mock reads, integration history verification. Independent items but suitable for a single test-writing session.
 
 ### T35. `MockProvider::captured_params()` is a destructive read — `tests/common/mod.rs`
 
@@ -357,12 +327,6 @@ No test verifies that a provider returning `RateLimited` propagates correctly th
 All `get()` tests create a key via `set()` first. There is no test verifying that `get()` before any `set()` returns `CredentialError::NoSecretKey`.
 
 - **L** — Fix Risk: None — Effort: Trivial
-
-### T82. No test for `ContextOverflow` during `runner::run` — `runner.rs`
-
-`push_assistant` can return `ContextOverflow`. No test pre-loads a context near the 1024-message limit and verifies that `runner::run` propagates `FlickError::ContextOverflow`.
-
-- **M** — Fix Risk: None — Effort: Low
 
 ### T87. Context persistence tests do not verify provider received full history — `tests/integration.rs`
 

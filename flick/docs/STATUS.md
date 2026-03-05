@@ -20,4 +20,4 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 ## Next Work
 
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
-- Backlog items (see `BACKLOG.md`)
+- Backlog items (see `BACKLOG.md` — 46 items in 9 clusters)
