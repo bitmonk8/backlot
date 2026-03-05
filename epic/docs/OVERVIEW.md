@@ -35,6 +35,7 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 | [Verification](VERIFICATION.md) | Build/lint/test gates, review types, fix loops |
 | [Configuration](CONFIGURATION.md) | Project-agnostic configuration: verification steps, model preferences, paths |
 | [TUI Design](TUI_DESIGN.md) | Terminal interface: task tree, worklog, progress display |
+| [Fix Loop Spec](FIX_LOOP_SPEC.md) | Fix loop after verification failure: leaf fix, branch fix, scope circuit breaker |
 | [Open Questions](OPEN_QUESTIONS.md) | Design decisions record (all resolved) |
 | [Status](STATUS.md) | Current phase, milestones, next work candidates, decisions log |
 

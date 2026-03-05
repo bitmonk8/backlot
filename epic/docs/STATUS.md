@@ -26,6 +26,7 @@ Items not implemented in v1, with evaluation of complexity, value, and necessity
 
 Currently verification failure is terminal — the task fails immediately. The design (EPIC_DESIGN2) envisions up to 3 fix rounds where the branch creates subtasks to address issues, then re-verifies. Root branch gets an additional Opus round.
 
+- **Status:** Spec complete. See [FIX_LOOP_SPEC.md](FIX_LOOP_SPEC.md). Promoted to next work candidate.
 - **Complexity:** Medium-high. Requires fix subtask creation from verification feedback, re-verify loop with round counter, root-level Opus escalation path. Significant orchestrator changes.
 - **Value:** High. Real-world tasks routinely produce code that fails lint or has minor issues. Without this, a 95%-correct result is treated the same as total failure.
 - **Without it:** Epic is fragile for any task where verification catches fixable issues. Usable only when agents produce clean output on first pass.
@@ -80,7 +81,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-No remaining work candidates. All planned milestones complete.
+1. **Fix loop after verification failure** — Spec complete ([FIX_LOOP_SPEC.md](FIX_LOOP_SPEC.md)). Phase 1: leaf fix loop (~130-170 lines). Phase 2: branch fix loop (~180-250 lines). Scope circuit breaker included (~35-55 lines). Awaiting implementation approval.
 
 ## Decisions Made
 
