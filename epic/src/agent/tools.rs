@@ -53,7 +53,7 @@ pub fn phase_tools(method: AgentMethod) -> ToolGrant {
 pub struct FlickToolDef {
     pub name: String,
     pub description: String,
-    pub input_schema: JsonValue,
+    pub parameters: JsonValue,
 }
 
 /// Returns tool definitions for all tools permitted by the given grant.
@@ -64,7 +64,7 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
         tools.push(FlickToolDef {
             name: "read_file".into(),
             description: "Read the contents of a file at the given path.".into(),
-            input_schema: serde_json::json!({
+            parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Absolute or project-relative file path" }
@@ -75,7 +75,7 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
         tools.push(FlickToolDef {
             name: "glob".into(),
             description: "Find files matching a glob pattern.".into(),
-            input_schema: serde_json::json!({
+            parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Glob pattern (e.g. **/*.rs)" },
@@ -87,7 +87,7 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
         tools.push(FlickToolDef {
             name: "grep".into(),
             description: "Search file contents for a regex pattern.".into(),
-            input_schema: serde_json::json!({
+            parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Regex pattern to search for" },
@@ -103,7 +103,7 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
         tools.push(FlickToolDef {
             name: "write_file".into(),
             description: "Write content to a file, creating it if necessary.".into(),
-            input_schema: serde_json::json!({
+            parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path to write to" },
@@ -115,7 +115,7 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
         tools.push(FlickToolDef {
             name: "edit_file".into(),
             description: "Replace a specific string in a file with new content.".into(),
-            input_schema: serde_json::json!({
+            parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path to edit" },
@@ -131,7 +131,7 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
         tools.push(FlickToolDef {
             name: "bash".into(),
             description: "Execute a bash command and return its output.".into(),
-            input_schema: serde_json::json!({
+            parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "The command to execute" },

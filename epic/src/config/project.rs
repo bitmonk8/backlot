@@ -53,8 +53,6 @@ pub struct LimitsConfig {
 pub struct AgentConfig {
     #[serde(default = "default_runtime")]
     pub runtime: String,
-    #[serde(default = "default_flick_path")]
-    pub flick_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +74,6 @@ const fn default_max_depth() -> u32 { 8 }
 const fn default_max_recovery_rounds() -> u32 { 2 }
 const fn default_retry_budget() -> u32 { 3 }
 fn default_runtime() -> String { "flick".into() }
-fn default_flick_path() -> String { "flick".into() }
 const fn default_timeout() -> u32 { 300 }
 
 impl Default for ProjectConfig {
@@ -107,7 +104,7 @@ impl Default for LimitsConfig {
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { runtime: default_runtime(), flick_path: default_flick_path() }
+        Self { runtime: default_runtime() }
     }
 }
 

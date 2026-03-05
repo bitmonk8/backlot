@@ -2,21 +2,22 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, and fix loops complete.
+**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, fix loops, and Flick library migration complete.
 
 ## Milestones
 
 - [x] Design documents and open questions resolved (23/23)
 - [x] Scaffold Rust project — module structure, dependencies, Clippy lints configured
 - [x] Core orchestrator loop — task types, events, state, AgentService trait, DFS loop with retry/escalation, 6 tests passing
-- [x] Agent runtime selected — ZeroClaw evaluated, audited, forked, then replaced by [Flick](https://github.com/bitmonk8/flick) (external executable, no crate dependency). Dependency count reduced from ~771 to ~104 packages.
-- [x] Agent call wiring — `FlickAgent` implements `AgentService` via Flick subprocess invocation. Config generation (YAML), structured output schemas, wire format types with `TryFrom` conversions, prompt assembly, tool loop with resume. 38 tests passing.
+- [x] Agent runtime selected — ZeroClaw evaluated, audited, forked, then replaced by [Flick](https://github.com/bitmonk8/flick). Originally as external executable, now as library crate dependency.
+- [x] Agent call wiring — `FlickAgent` implements `AgentService` via Flick library API. Config generation (JSON in-memory), structured output schemas, wire format types with `TryFrom` conversions, prompt assembly, tool loop with resume. 38 tests at milestone.
 - [x] Tool execution — All 6 tools implemented: `read_file`, `glob`, `grep`, `write_file`, `edit_file`, `bash`. Path sandboxing, size limits, timeout handling. 15 new tests (53 total).
 - [x] State persistence integration — `EpicState` saves/loads via `.epic/state.json`. Orchestrator checkpoints after assessment, decomposition, child completion, and verification. `main.rs` resumes from persisted state or creates fresh. Atomic writes (write-rename), resume skips completed/failed/mid-execution tasks correctly, reuses existing decomposition, goal mismatch detection, corrupt state error handling. 5 new tests (58 total).
 - [x] TUI event consumer — `TuiApp` consumes orchestrator events via ratatui + crossterm. Task tree panel (DFS with status indicators ✓/✗/▸/·, current-task cursor), worklog panel (timestamped event stream with follow-tail), metrics panel (toggle), header bar (goal, progress, elapsed). Keyboard controls: q/Ctrl-C quit, t toggle tail, m toggle metrics, ↑↓ scroll. Orchestrator runs in background tokio task, TUI in sync foreground loop. `EPIC_NO_TUI=1` for headless mode. `TaskRegistered` event added for TUI to build task tree from events alone.
 - [x] Discoveries propagation — `AgentService::execute_leaf` returns `LeafResult` (outcome + discoveries). Orchestrator stores discoveries on tasks, emits `DiscoveriesRecorded` event, triggers checkpoint flow. Sibling context includes discoveries in prompt. Failed sibling reason extracted from attempts. 2 new tests (60 total).
-- [x] CLI (clap) — Replaced ad-hoc env-var/arg parsing with proper `clap` derive CLI. Subcommands: `epic run <goal>`, `epic resume`, `epic status`. Global options: `--flick-path`, `--credential`, `--no-tui` (all with env-var fallbacks). `status` subcommand prints goal, root phase, and task counts from persisted state. 60 tests passing.
+- [x] CLI (clap) — Replaced ad-hoc env-var/arg parsing with proper `clap` derive CLI. Subcommands: `epic run <goal>`, `epic resume`, `epic status`. Global options: `--credential`, `--no-tui` (with env-var fallbacks). `status` subcommand prints goal, root phase, and task counts from persisted state. 60 tests at milestone.
 - [x] `epic init` — Agent-driven interactive configuration scaffolding. Flick agent (Sonnet, read-only tools) scans project for build/test/lint markers. Interactive CLI confirms/edits/skips each step, prompts for model preferences and depth/budget limits. Writes `epic.toml` with atomic write. Declined steps included as TOML comments. `EpicConfig` struct with `VerificationStep`, `ModelConfig`, `LimitsConfig`, `AgentConfig`, `ProjectConfig`. 3 new tests (63 total).
+- [x] Flick library migration — Replaced subprocess invocation with direct library calls. `flick` added as git dependency, `serde_yaml` removed. `FlickAgent` uses `FlickClient` API (no process spawning, no config/tool-result file I/O). `--flick-path` CLI option and `AgentConfig.flick_path` removed. Config built as JSON in-memory, parsed via `Config::from_str()`. Review pass added 3 tests, strengthened config test assertions. 81 tests passing.
 - [x] Fix loop after verification failure — Three components: scope circuit breaker (`Magnitude` struct, `git diff --numstat` check, 3x threshold), leaf fix loop (retry/escalate with `fix_leaf` agent call, reuses model tier progression), branch fix loop (3 rounds Sonnet + 1 Opus for root, `design_fix_subtasks` agent call, fix subtasks marked `is_fix_task` to prevent recursive fix chains). Extracted `fail_task`, `complete_task_verified`, `create_subtasks` helpers and `evaluate_scope` pure function. 18 new tests (81 total).
 
 ## Deferred Items
@@ -73,11 +74,28 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Flick library migration** — Replace Flick subprocess invocation with direct library calls. Add `flick` as a git dependency, eliminate config/tool-result file I/O, remove `--flick-path` CLI option. See [Flick Library Migration](FLICK_LIBRARY_MIGRATION.md).
-2. **Full recovery re-decomposition** — When a child fails, allow Opus recovery agent to re-decompose the branch. Currently first child failure terminates the branch.
-3. **Checkpoint adjust/escalate actions** — Haiku classification after child discoveries to modify pending subtasks or escalate.
+1. **Full recovery re-decomposition** — When a child fails, allow Opus recovery agent to re-decompose the branch. Currently first child failure terminates the branch.
+2. **Checkpoint adjust/escalate actions** — Haiku classification after child discoveries to modify pending subtasks or escalate.
 
 ## Decisions Made
+
+### 2026-03-05: Flick library migration implemented
+
+**Scope:** Replaced subprocess invocation with direct library calls. 6 files modified, 0 new files.
+
+**Dependency change:** Added `flick` as git dependency (`flick = { git = "https://github.com/bitmonk8/flick" }`). Removed `serde_yaml`. Net new transitive dependencies: reqwest, serde_yml, chacha20poly1305, zeroize, hex, xxhash-rust.
+
+**FlickAgent rewrite (`flick.rs`):** Removed `FlickOutput`, `ContentBlock`, `UsageSummary`, `FlickError`, `ToolResultEntry` local types — replaced by `flick::FlickResult`, `flick::ContentBlock`, etc. Removed `invoke_flick()` (subprocess spawning), `format_exit_status()`. `FlickAgent` fields: removed `flick_path`, `work_dir`; constructor is now `const fn`, no longer async. New `build_client()` method calls `resolve_provider()` + `FlickClient::new()`. `run_structured()` and `run_with_tools()` use `FlickClient::run()`/`resume()` with `flick::Context`. Tool results passed as `Vec<ContentBlock::ToolResult>` — no file I/O.
+
+**Config generation (`config_gen.rs`):** Removed `FlickConfig`, `FlickModelConfig`, `FlickProviderConfig` structs. Removed `write_config()` async function. New `build_config()` helper builds JSON in-memory, parses via `Config::from_str(json, ConfigFormat::Json)`. Config builder functions return `Result<flick::Config>` instead of `FlickConfig`. Parameters changed from `String` to `&str` (clippy: `needless_pass_by_value`).
+
+**Tools (`tools.rs`):** Renamed `FlickToolDef.input_schema` to `parameters` to match Flick's `ToolConfig` field name.
+
+**CLI (`cli.rs`):** Removed `--flick-path` global option and `EPIC_FLICK_PATH` env var.
+
+**Main (`main.rs`):** Removed `flick_path` and `work_dir` wiring. `FlickAgent::new()` call simplified (3 args instead of 5, no `.await`).
+
+**Tests:** 78 passing (3 subprocess-specific tests removed: `config_serializes_to_yaml`, `write_config_creates_file`, `tool_result_entry_serializes`). 5 new/rewritten tests: `extract_text_from_result`, `extract_text_missing`, `extract_tool_calls_from_result`, `check_error_on_error_status`, `check_error_on_complete`. 0 new clippy warnings.
 
 ### 2026-03-05: Fix loop after verification failure implemented
 
@@ -123,9 +141,9 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ### 2026-03-04: Replace ZeroClaw with Flick
 
-**Decision:** Replace ZeroClaw (library dependency via forked submodule) with [Flick](https://github.com/bitmonk8/flick) (external executable, subprocess invocation).
+**Decision:** Replace ZeroClaw (library dependency via forked submodule) with [Flick](https://github.com/bitmonk8/flick) (initially as external executable, later migrated to library crate — see 2026-03-05 Flick library migration decision).
 
-**Rationale:** ZeroClaw had provenance concerns (star farming, 12-day-old project, crypto fraud ecosystem), heavy transitive dependency tree (~771 packages), fork maintenance burden, and intermittent compiler ICE. Flick as an external executable eliminates the crate dependency entirely.
+**Rationale:** ZeroClaw had provenance concerns (star farming, 12-day-old project, crypto fraud ecosystem), heavy transitive dependency tree (~771 packages), fork maintenance burden, and intermittent compiler ICE.
 
 ### 2026-03-04: Agent call wiring implemented
 

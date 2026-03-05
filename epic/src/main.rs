@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         return print_status(&state_path);
     }
 
-    // Check epic.toml existence before constructing agent (avoids requiring Flick for this error).
+    // Check epic.toml existence before constructing agent (avoids requiring credentials for this error).
     if matches!(&cli.command, Command::Init) {
         let config_path = project_root.join("epic.toml");
         if config_path.exists() {
@@ -51,13 +51,10 @@ async fn main() -> anyhow::Result<()> {
     let timeout = Duration::from_secs(300);
 
     let agent = FlickAgent::new(
-        cli.flick_path,
         project_root.clone(),
-        work_dir,
         cli.credential,
         timeout,
-    )
-    .await?;
+    );
 
     if matches!(&cli.command, Command::Init) {
         return init::run_init(&agent, &project_root).await;

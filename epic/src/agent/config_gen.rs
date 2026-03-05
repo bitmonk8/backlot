@@ -1,4 +1,4 @@
-// Flick configuration generation: YAML config files, wire format types, output schemas.
+// Flick configuration generation: in-memory config, wire format types, output schemas.
 
 use crate::agent::models::{default_max_tokens, flick_model_id};
 use crate::agent::tools::{FlickToolDef, ToolGrant, tool_definitions};
@@ -10,37 +10,6 @@ use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, Model, TaskOutcome, 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::path::{Path, PathBuf};
-
-// ---------------------------------------------------------------------------
-// Flick config structs (serialized to YAML)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize)]
-pub struct FlickConfig {
-    pub system_prompt: String,
-    pub model: FlickModelConfig,
-    pub provider: FlickProviderConfig,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<FlickToolDef>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<JsonValue>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FlickModelConfig {
-    pub provider: String,
-    pub name: String,
-    pub max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FlickProviderConfig {
-    pub name: String,
-    pub credential: String,
-}
 
 // ---------------------------------------------------------------------------
 // Wire format types (LLM-friendly flat JSON ↔ domain types)
@@ -299,112 +268,114 @@ pub fn recovery_schema() -> JsonValue {
 // Config builders (one per AgentService method)
 // ---------------------------------------------------------------------------
 
-fn base_config(
-    system_prompt: String,
+/// Build a JSON config value and parse it into a `flick::Config`.
+fn build_config(
+    system_prompt: &str,
     model: Model,
     credential_name: &str,
-) -> FlickConfig {
-    FlickConfig {
-        system_prompt,
-        model: FlickModelConfig {
-            provider: "anthropic".into(),
-            name: flick_model_id(model).into(),
-            max_tokens: default_max_tokens(model),
-            temperature: Some(0.0),
+    tools: &[FlickToolDef],
+    output_schema: Option<&JsonValue>,
+) -> anyhow::Result<flick::Config> {
+    let mut json = serde_json::json!({
+        "system_prompt": system_prompt,
+        "model": {
+            "provider": "anthropic",
+            "name": flick_model_id(model),
+            "max_tokens": default_max_tokens(model),
+            "temperature": 0.0
         },
-        provider: FlickProviderConfig {
-            name: "anthropic".into(),
-            credential: credential_name.into(),
-        },
-        tools: Vec::new(),
-        output_schema: None,
+        "provider": {
+            "anthropic": {
+                "api": "messages",
+                "credential": credential_name
+            }
+        }
+    });
+
+    if !tools.is_empty() {
+        let tool_array: Vec<JsonValue> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters
+                })
+            })
+            .collect();
+        json["tools"] = JsonValue::Array(tool_array);
     }
+
+    if let Some(schema) = output_schema {
+        json["output_schema"] = serde_json::json!({ "schema": schema });
+    }
+
+    let json_str = serde_json::to_string(&json)
+        .context("failed to serialize config JSON")?;
+    flick::Config::from_str(&json_str, flick::ConfigFormat::Json)
+        .map_err(|e| anyhow::anyhow!("failed to parse flick config: {e}"))
 }
 
 pub fn build_assess_config(
-    system_prompt: String,
+    system_prompt: &str,
     model: Model,
     credential: &str,
     grant: ToolGrant,
-) -> FlickConfig {
-    let mut cfg = base_config(system_prompt, model, credential);
-    cfg.tools = tool_definitions(grant);
-    cfg.output_schema = Some(assessment_schema());
-    cfg
+) -> anyhow::Result<flick::Config> {
+    let tools = tool_definitions(grant);
+    let schema = assessment_schema();
+    build_config(system_prompt, model, credential, &tools, Some(&schema))
 }
 
 pub fn build_execute_leaf_config(
-    system_prompt: String,
+    system_prompt: &str,
     model: Model,
     credential: &str,
     grant: ToolGrant,
-) -> FlickConfig {
-    let mut cfg = base_config(system_prompt, model, credential);
-    cfg.tools = tool_definitions(grant);
-    cfg.output_schema = Some(task_outcome_schema());
-    cfg
+) -> anyhow::Result<flick::Config> {
+    let tools = tool_definitions(grant);
+    let schema = task_outcome_schema();
+    build_config(system_prompt, model, credential, &tools, Some(&schema))
 }
 
 pub fn build_decompose_config(
-    system_prompt: String,
+    system_prompt: &str,
     model: Model,
     credential: &str,
     grant: ToolGrant,
-) -> FlickConfig {
-    let mut cfg = base_config(system_prompt, model, credential);
-    cfg.tools = tool_definitions(grant);
-    cfg.output_schema = Some(decomposition_schema());
-    cfg
+) -> anyhow::Result<flick::Config> {
+    let tools = tool_definitions(grant);
+    let schema = decomposition_schema();
+    build_config(system_prompt, model, credential, &tools, Some(&schema))
 }
 
 pub fn build_verify_config(
-    system_prompt: String,
+    system_prompt: &str,
     model: Model,
     credential: &str,
     grant: ToolGrant,
-) -> FlickConfig {
-    let mut cfg = base_config(system_prompt, model, credential);
-    cfg.tools = tool_definitions(grant);
-    cfg.output_schema = Some(verification_schema());
-    cfg
+) -> anyhow::Result<flick::Config> {
+    let tools = tool_definitions(grant);
+    let schema = verification_schema();
+    build_config(system_prompt, model, credential, &tools, Some(&schema))
 }
 
 pub fn build_checkpoint_config(
-    system_prompt: String,
+    system_prompt: &str,
     model: Model,
     credential: &str,
-) -> FlickConfig {
-    let mut cfg = base_config(system_prompt, model, credential);
-    cfg.output_schema = Some(checkpoint_schema());
-    cfg
+) -> anyhow::Result<flick::Config> {
+    let schema = checkpoint_schema();
+    build_config(system_prompt, model, credential, &[], Some(&schema))
 }
 
 pub fn build_recovery_config(
-    system_prompt: String,
+    system_prompt: &str,
     model: Model,
     credential: &str,
-) -> FlickConfig {
-    let mut cfg = base_config(system_prompt, model, credential);
-    cfg.output_schema = Some(recovery_schema());
-    cfg
-}
-
-// ---------------------------------------------------------------------------
-// Write config to disk
-// ---------------------------------------------------------------------------
-
-/// Writes a Flick config to `{work_dir}/{task_id}_{method}.yaml` and returns the path.
-pub async fn write_config(
-    config: &FlickConfig,
-    work_dir: &Path,
-    task_id: u64,
-    method: &str,
-) -> anyhow::Result<PathBuf> {
-    let filename = format!("{task_id}_{method}.yaml");
-    let path = work_dir.join(filename);
-    let yaml = serde_yaml::to_string(config).context("failed to serialize flick config")?;
-    tokio::fs::write(&path, yaml).await.with_context(|| format!("failed to write config to {}", path.display()))?;
-    Ok(path)
+) -> anyhow::Result<flick::Config> {
+    let schema = recovery_schema();
+    build_config(system_prompt, model, credential, &[], Some(&schema))
 }
 
 // ---------------------------------------------------------------------------
@@ -482,14 +453,13 @@ pub fn init_findings_schema() -> JsonValue {
 }
 
 pub fn build_init_config(
-    system_prompt: String,
+    system_prompt: &str,
     credential: &str,
     grant: ToolGrant,
-) -> FlickConfig {
-    let mut cfg = base_config(system_prompt, Model::Sonnet, credential);
-    cfg.tools = tool_definitions(grant);
-    cfg.output_schema = Some(init_findings_schema());
-    cfg
+) -> anyhow::Result<flick::Config> {
+    let tools = tool_definitions(grant);
+    let schema = init_findings_schema();
+    build_config(system_prompt, Model::Sonnet, credential, &tools, Some(&schema))
 }
 
 // ---------------------------------------------------------------------------
@@ -648,37 +618,62 @@ mod tests {
     }
 
     #[test]
-    fn config_serializes_to_yaml() {
-        let cfg = build_assess_config(
-            "You are an assessor.".into(),
+    fn config_builds_with_correct_content() {
+        let tools = tool_definitions(ToolGrant::READ);
+        let schema = assessment_schema();
+        let json = serde_json::json!({
+            "system_prompt": "You are an assessor.",
+            "model": {
+                "provider": "anthropic",
+                "name": "claude-sonnet-4-6",
+                "max_tokens": 8192,
+                "temperature": 0.0
+            },
+            "provider": {
+                "anthropic": {
+                    "api": "messages",
+                    "credential": "anthropic_key"
+                }
+            },
+            "tools": tools.iter().map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters
+                })
+            }).collect::<Vec<_>>(),
+            "output_schema": { "schema": schema }
+        });
+
+        // Verify the JSON structure matches expectations
+        assert_eq!(json["model"]["name"], "claude-sonnet-4-6");
+        assert_eq!(json["provider"]["anthropic"]["credential"], "anthropic_key");
+        let tool_names: Vec<&str> = json["tools"].as_array().unwrap()
+            .iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(tool_names.contains(&"read_file"));
+        assert!(tool_names.contains(&"glob"));
+        assert!(tool_names.contains(&"grep"));
+        assert!(!tool_names.contains(&"write_file"));
+        assert!(json["output_schema"]["schema"]["properties"]["path"].is_object());
+
+        // Verify Flick accepts it
+        let config = build_assess_config(
+            "You are an assessor.",
             Model::Sonnet,
             "anthropic_key",
             ToolGrant::READ,
         );
-        let yaml = serde_yaml::to_string(&cfg).unwrap();
-        assert!(yaml.contains("claude-sonnet-4-6"));
-        assert!(yaml.contains("anthropic_key"));
-        assert!(yaml.contains("output_schema"));
-        assert!(yaml.contains("read_file"));
+        assert!(config.is_ok());
     }
 
-    #[tokio::test]
-    async fn write_config_creates_file() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let dir = tmp.path();
-
-        let cfg = build_assess_config(
-            "test".into(),
-            Model::Haiku,
+    #[test]
+    fn config_no_tools_no_tools_key() {
+        let config = build_checkpoint_config(
+            "You are a checkpoint agent.",
+            Model::Sonnet,
             "key",
-            ToolGrant::empty(),
         );
-        let path = write_config(&cfg, dir, 42, "assess").await.unwrap();
-        assert!(path.exists());
-        assert!(path.file_name().unwrap().to_str().unwrap().contains("42_assess"));
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("claude-haiku"));
+        assert!(config.is_ok());
     }
 
     #[test]

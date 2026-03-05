@@ -1,5 +1,7 @@
 # Flick Library Migration Spec
 
+**Status: Implemented.** All three phases complete. See [STATUS.md](STATUS.md) for details.
+
 ## Summary
 
 Replace Flick subprocess invocation with direct library calls. Flick exposes a Rust library crate (`flick`) alongside its CLI binary. Epic will depend on the library, eliminating process spawning, YAML config file I/O, and tool result file I/O.

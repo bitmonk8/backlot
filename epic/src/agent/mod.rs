@@ -1,4 +1,4 @@
-// Agent abstraction over Flick agent runtime (external executable).
+// Agent abstraction over Flick agent runtime (library dependency).
 
 pub mod config_gen;
 pub mod flick;

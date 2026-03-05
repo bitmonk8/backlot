@@ -10,8 +10,8 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
 toml = "0.8"
+flick = { git = "https://github.com/bitmonk8/flick" }
 bitflags = "2"
 clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.29"

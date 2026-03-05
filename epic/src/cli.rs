@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -7,10 +5,6 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
-
-    /// Path to the Flick executable.
-    #[arg(long, env = "EPIC_FLICK_PATH", default_value = "flick", global = true)]
-    pub flick_path: PathBuf,
 
     /// Credential name passed to Flick.
     #[arg(long, env = "EPIC_CREDENTIAL", default_value = "anthropic", global = true)]

@@ -12,14 +12,14 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 |---|---|---|
 | Language | Python | Rust |
 | Task model | Six task types (GROUP, RESEARCH, DESIGN, PLAN, IMPLEMENTATION, VERIFY) transitioning to recursive solver | Recursive problem-solver exclusively (EPIC_DESIGN2) |
-| Agent sandboxing | Custom command filtering, per-session config isolation | Flick as agent host (external executable) |
+| Agent sandboxing | Custom command filtering, per-session config isolation | Flick as agent host (library crate) |
 | Project scope | Hardcoded for fds2 (build/lint/test via `please.py`) | Generalized — configurable verification for any project |
 | TUI | Python Textual | Rust TUI (ratatui or similar) |
 
 ## Key Design Decisions
 
 1. **Recursive problem-solver only** — No legacy task types. Every task follows: assess → execute (leaf or branch) → verify. See [Task Model](TASK_MODEL.md).
-2. **Flick as agent host** — Agent execution delegated to Flick external executable. No library dependency — subprocess invocation only. See [Flick Integration](FLICK_INTEGRATION.md).
+2. **Flick as agent host** — Agent execution delegated to Flick library crate. Direct API calls — no subprocess, no file I/O. See [Flick Integration](FLICK_INTEGRATION.md).
 3. **Configurable verification** — Build/lint/test commands specified per-project via configuration, not hardcoded. See [Configuration](CONFIGURATION.md).
 4. **Rust for performance and type safety** — CLI/TUI responsiveness, strong static typing for orchestration correctness, and better agent SDK ergonomics.
 
@@ -30,20 +30,20 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 | [Architecture](ARCHITECTURE.md) | System layers, module structure, data flow |
 | [Task Model](TASK_MODEL.md) | Recursive problem-solver: assessment, leaf/branch paths, verification, recovery |
 | [Agent Design](AGENT_DESIGN.md) | Agent orchestration, model selection, tool access, prompt design |
-| [Flick Integration](FLICK_INTEGRATION.md) | Agent hosting via Flick external executable |
+| [Flick Integration](FLICK_INTEGRATION.md) | Agent hosting via Flick library crate |
 | [Document Store](DOCUMENT_STORE.md) | Centralized knowledge management, research service |
 | [Verification](VERIFICATION.md) | Build/lint/test gates, review types, fix loops |
 | [Configuration](CONFIGURATION.md) | Project-agnostic configuration: verification steps, model preferences, paths |
 | [TUI Design](TUI_DESIGN.md) | Terminal interface: task tree, worklog, progress display |
 | [Fix Loop Spec](FIX_LOOP_SPEC.md) | Fix loop after verification failure: leaf fix, branch fix, scope circuit breaker |
-| [Flick Library Migration](FLICK_LIBRARY_MIGRATION.md) | Spec: replace subprocess invocation with library dependency |
+| [Flick Library Migration](FLICK_LIBRARY_MIGRATION.md) | Spec (implemented): replace subprocess invocation with library dependency |
 | [Open Questions](OPEN_QUESTIONS.md) | Design decisions record (all resolved) |
 | [Status](STATUS.md) | Current phase, milestones, next work candidates, decisions log |
 
 ## Repository
 
 - **Epic:** [github.com/bitmonk8/epic](https://github.com/bitmonk8/epic)
-- **Flick:** [github.com/bitmonk8/flick](https://github.com/bitmonk8/flick) (external executable, not a crate dependency)
+- **Flick:** [github.com/bitmonk8/flick](https://github.com/bitmonk8/flick) (library crate dependency)
 
 ## Reference Material
 
@@ -51,4 +51,4 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 - `C:\UnitySrc\fds2\tools\epic\` — fds2_epic Python implementation (reference implementation)
 ## Status
 
-**Phase: Implementation** — Design complete. Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, and fix loops complete.
+**Phase: Implementation** — Design complete. Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, fix loops, and Flick library migration complete.
