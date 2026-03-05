@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, fix loops, and Flick library migration complete.
+**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, fix loops, Flick library migration, and recovery re-decomposition complete.
 
 ## Milestones
 
@@ -19,18 +19,11 @@
 - [x] `epic init` — Agent-driven interactive configuration scaffolding. Flick agent (Sonnet, read-only tools) scans project for build/test/lint markers. Interactive CLI confirms/edits/skips each step, prompts for model preferences and depth/budget limits. Writes `epic.toml` with atomic write. Declined steps included as TOML comments. `EpicConfig` struct with `VerificationStep`, `ModelConfig`, `LimitsConfig`, `AgentConfig`, `ProjectConfig`. 3 new tests (63 total).
 - [x] Flick library migration — Replaced subprocess invocation with direct library calls. `flick` added as git dependency, `serde_yaml` removed. `FlickAgent` uses `FlickClient` API (no process spawning, no config/tool-result file I/O). `--flick-path` CLI option and `AgentConfig.flick_path` removed. Config built as JSON in-memory, parsed via `Config::from_str()`. Review pass added 3 tests, strengthened config test assertions. 81 tests passing.
 - [x] Fix loop after verification failure — Three components: scope circuit breaker (`Magnitude` struct, `git diff --numstat` check, 3x threshold), leaf fix loop (retry/escalate with `fix_leaf` agent call, reuses model tier progression), branch fix loop (3 rounds Sonnet + 1 Opus for root, `design_fix_subtasks` agent call, fix subtasks marked `is_fix_task` to prevent recursive fix chains). Extracted `fail_task`, `complete_task_verified`, `create_subtasks` helpers and `evaluate_scope` pure function. 18 new tests (81 total).
+- [x] Recovery re-decomposition — When a child fails in a branch, Opus recovery agent creates new subtasks. Two approaches: incremental (preserve completed work, append recovery subtasks) or full (skip remaining pending siblings, replace with recovery subtasks). Max 2 recovery rounds per branch. Fix tasks skip recovery (prevents recursive chains). 10 new tests (91 total).
 
 ## Deferred Items
 
 Items not implemented in v1, with evaluation of complexity, value, and necessity.
-
-### Full recovery re-decomposition
-
-Currently, first child failure terminates the entire branch. The design envisions an Opus recovery agent that can either adjust remaining subtasks (incremental) or re-decompose the branch entirely, with a 2-round recovery limit.
-
-- **Complexity:** High. New Opus recovery agent call, two recovery paths (adjust vs re-decompose), fresh magnitude estimates for recovery subtasks, 2-round limit tracking, significant state management.
-- **Value:** Medium-high. Handles cases where a decomposition strategy turns out to be wrong. Less urgent because leaf retry/escalation (up to 9 attempts) catches most individual task failures before they propagate.
-- **Without it:** Epic cannot adapt when a decomposition approach is fundamentally wrong. One bad subtask kills the branch. Acceptable for simple decompositions, problematic for deep/complex ones.
 
 ### Checkpoint adjust/escalate actions
 
@@ -74,10 +67,35 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Full recovery re-decomposition** — When a child fails, allow Opus recovery agent to re-decompose the branch. Currently first child failure terminates the branch.
-2. **Checkpoint adjust/escalate actions** — Haiku classification after child discoveries to modify pending subtasks or escalate.
+1. **Checkpoint adjust/escalate actions** — Haiku classification after child discoveries to modify pending subtasks or escalate.
 
 ## Decisions Made
+
+### 2026-03-05: Recovery re-decomposition implemented
+
+**Scope:** When a child task fails in a branch, the orchestrator now invokes an Opus recovery agent to create recovery subtasks. 8 files modified, 10 new tests (91 total).
+
+**Two recovery approaches:**
+- **Incremental**: Preserve completed work. Recovery subtasks appended to parent's subtask list. Remaining pending siblings still execute after recovery subtasks.
+- **Full re-decomposition**: Remaining pending siblings marked as Failed ("superseded by recovery re-decomposition"). Only recovery subtasks execute.
+
+**Recovery flow:** Child fails → check recovery budget (max 2 rounds) and not a fix task → `assess_recovery()` (Sonnet, no tools) determines if recoverable and suggests strategy → `design_recovery_subtasks()` (Opus, with tools) creates recovery plan with fresh magnitude estimates → subtasks created and appended → child loop restarts.
+
+**New types:** `RecoveryPlan` (full_redecomposition, subtasks, rationale), `RecoveryPlanWire` with `TryFrom` conversion, `recovery_plan_schema()`, `build_recovery_plan_config()`.
+
+**New trait method:** `AgentService::design_recovery_subtasks(ctx, failure_reason, strategy, recovery_round) → RecoveryPlan`. Uses Opus model with decompose-phase tools.
+
+**New events:** `RecoveryStarted { task_id, round }`, `RecoveryPlanSelected { task_id, approach }`, `RecoverySubtasksCreated { task_id, count, round }`.
+
+**Task changes:** `recovery_rounds: u32` field on `Task` (persisted, default 0).
+
+**Orchestrator changes:** `execute_branch()` rewritten with outer recovery loop. New `attempt_recovery()` method. `create_subtasks_inner()` extracted to separate `mark_fix` from `append` behavior. `MAX_RECOVERY_ROUNDS = 2` constant.
+
+**Guard rails:** Fix tasks (`is_fix_task = true`) skip recovery entirely — prevents recursive recovery chains. Empty recovery plan treated as round failure. Recovery subtasks are NOT marked as fix tasks — they use the full pipeline including fix loops.
+
+**Tests (13 new):** `recovery_incremental_creates_subtasks`, `recovery_full_redecomposition_skips_pending`, `recovery_round_limit_exhausted`, `recovery_not_attempted_for_fix_tasks`, `recovery_not_attempted_when_unrecoverable`, `recovery_rounds_persisted`, `recovery_empty_plan_fails`, `recovery_full_redecomp_preserves_completed_siblings`, `recovery_emits_events`, `recovery_plan_wire_incremental`, `recovery_plan_wire_full`, `recovery_plan_wire_invalid_approach`, `design_recovery_subtasks_prompt_contains_context`.
+
+**Review pass:** Fixed checkpoint ordering (increment `recovery_rounds` before subtask creation to prevent extra round on crash-resume). Agent errors in `assess_recovery`/`design_recovery_subtasks` now treated as failed recovery (logged + returns Failed) instead of aborting the run. Collapsed `create_subtasks`/`create_subtasks_inner` into single method with explicit `(mark_fix, append)` parameters. Extracted shared `parse_subtask_wire()` function to deduplicate magnitude parsing between `DecompositionWire` and `RecoveryPlanWire`. Replaced `From<RecoveryWire> for Option<String>` with `RecoveryWire::into_strategy()`. Added 3 tests, strengthened existing test assertions. 94 tests total.
 
 ### 2026-03-05: Flick library migration implemented
 
@@ -137,7 +155,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 **Tests (6):** single_leaf, two_children, leaf_retry_and_escalation, terminal_failure, depth_cap_forces_leaf, persistence_round_trip.
 
-**Deferred for v1:** Full recovery re-decomposition, checkpoint adjust/escalate actions. (Fix loop: since implemented, see 2026-03-05 decision.) See "Deferred Items" section for evaluation.
+**Deferred for v1:** Checkpoint adjust/escalate actions. (Fix loop: since implemented, see 2026-03-05 decision. Recovery re-decomposition: since implemented, see 2026-03-05 decision.) See "Deferred Items" section for evaluation.
 
 ### 2026-03-04: Replace ZeroClaw with Flick
 

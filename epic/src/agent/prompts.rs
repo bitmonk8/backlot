@@ -280,6 +280,52 @@ Respond with the required JSON schema."
     }
 }
 
+pub fn build_design_recovery_subtasks(
+    ctx: &TaskContext,
+    failure_reason: &str,
+    strategy: &str,
+    recovery_round: u32,
+) -> PromptPair {
+    let system_prompt = "\
+You are an Opus-level recovery agent in a recursive problem-solving system.
+
+A child subtask has failed. You have the full context: the original goal, the decomposition \
+rationale, completed subtask results, and the failure details. Your job is to design recovery \
+subtasks that address the failure.
+
+Choose one of two approaches:
+- **incremental**: Preserve completed work. Create new subtasks that complement what was already \
+done and handle what the failed subtask could not. Remaining pending siblings will still execute \
+after your recovery subtasks.
+- **full**: The decomposition strategy itself is fundamentally wrong. Create a complete new set of \
+subtasks that replaces the original plan. Remaining pending siblings will be skipped.
+
+Guidelines:
+- Each recovery subtask must have a clear goal, verification criteria, and a fresh magnitude estimate.
+- Recovery subtasks operate against the current code state (which includes completed siblings' changes).
+- Prefer incremental when the failure is isolated. Use full only when the approach itself is wrong.
+- Explore the codebase with tools to understand the current state before designing recovery subtasks.
+- Aim for 1-4 recovery subtasks. Fewer is better.
+
+Respond with the required JSON schema."
+        .into();
+
+    let query = format!(
+        "{context}\n\n\
+         ## Recovery Context\n\
+         Recovery round: {recovery_round}\n\
+         Child failure reason: {failure_reason}\n\
+         Recovery strategy: {strategy}\n\n\
+         Design recovery subtasks. Choose incremental or full approach based on the failure nature.",
+        context = format_context(ctx),
+    );
+
+    PromptPair {
+        system_prompt,
+        query,
+    }
+}
+
 pub fn build_assess_recovery(ctx: &TaskContext, failure_reason: &str) -> PromptPair {
     let system_prompt = "\
 You are a recovery assessor in a recursive problem-solving system.
@@ -404,6 +450,19 @@ mod tests {
         assert!(text.contains("None (root task)"));
         assert!(text.contains("Completed:\nNone"));
         assert!(text.contains("Pending:\nNone"));
+    }
+
+    #[test]
+    fn design_recovery_subtasks_prompt_contains_context() {
+        let ctx = test_context();
+        let pair = build_design_recovery_subtasks(&ctx, "child crashed", "retry with fallback", 1);
+        assert!(pair.query.contains("child crashed"));
+        assert!(pair.query.contains("retry with fallback"));
+        assert!(pair.query.contains("1"));
+        assert!(pair.query.contains("implement feature X"));
+        assert!(pair.system_prompt.contains("recovery"));
+        assert!(pair.system_prompt.contains("incremental"));
+        assert!(pair.system_prompt.contains("full"));
     }
 
     #[test]

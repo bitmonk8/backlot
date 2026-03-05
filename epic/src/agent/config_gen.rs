@@ -6,7 +6,7 @@ use crate::config::project::VerificationStep;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
 use crate::task::verify::{VerificationOutcome, VerificationResult};
-use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, Model, TaskOutcome, TaskPath};
+use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, Model, RecoveryPlan, TaskOutcome, TaskPath};
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -64,25 +64,27 @@ pub struct DecompositionWire {
     pub rationale: String,
 }
 
+fn parse_subtask_wire(s: SubtaskWire) -> anyhow::Result<SubtaskSpec> {
+    let magnitude = match s.magnitude.as_str() {
+        "small" => MagnitudeEstimate::Small,
+        "medium" => MagnitudeEstimate::Medium,
+        "large" => MagnitudeEstimate::Large,
+        other => bail!("invalid magnitude: {other}"),
+    };
+    Ok(SubtaskSpec {
+        goal: s.goal,
+        verification_criteria: s.verification_criteria,
+        magnitude_estimate: magnitude,
+    })
+}
+
 impl TryFrom<DecompositionWire> for DecompositionResult {
     type Error = anyhow::Error;
     fn try_from(w: DecompositionWire) -> anyhow::Result<Self> {
         let subtasks = w
             .subtasks
             .into_iter()
-            .map(|s| {
-                let magnitude = match s.magnitude.as_str() {
-                    "small" => MagnitudeEstimate::Small,
-                    "medium" => MagnitudeEstimate::Medium,
-                    "large" => MagnitudeEstimate::Large,
-                    other => bail!("invalid magnitude: {other}"),
-                };
-                Ok(SubtaskSpec {
-                    goal: s.goal,
-                    verification_criteria: s.verification_criteria,
-                    magnitude_estimate: magnitude,
-                })
-            })
+            .map(parse_subtask_wire)
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Self {
             subtasks,
@@ -165,9 +167,37 @@ pub struct RecoveryWire {
     pub strategy: Option<String>,
 }
 
-impl From<RecoveryWire> for Option<String> {
-    fn from(w: RecoveryWire) -> Self {
-        if w.recoverable { Some(w.strategy.unwrap_or_default()) } else { None }
+impl RecoveryWire {
+    pub fn into_strategy(self) -> Option<String> {
+        if self.recoverable { Some(self.strategy.unwrap_or_default()) } else { None }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecoveryPlanWire {
+    pub approach: String,
+    pub subtasks: Vec<SubtaskWire>,
+    pub rationale: String,
+}
+
+impl TryFrom<RecoveryPlanWire> for RecoveryPlan {
+    type Error = anyhow::Error;
+    fn try_from(w: RecoveryPlanWire) -> anyhow::Result<Self> {
+        let full_redecomposition = match w.approach.as_str() {
+            "incremental" => false,
+            "full" => true,
+            other => bail!("invalid recovery approach: {other}"),
+        };
+        let subtasks = w
+            .subtasks
+            .into_iter()
+            .map(parse_subtask_wire)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self {
+            full_redecomposition,
+            subtasks,
+            rationale: w.rationale,
+        })
     }
 }
 
@@ -261,6 +291,32 @@ pub fn recovery_schema() -> JsonValue {
             "strategy": { "type": "string" }
         },
         "required": ["recoverable"]
+    })
+}
+
+pub fn recovery_plan_schema() -> JsonValue {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "approach": { "type": "string", "enum": ["incremental", "full"] },
+            "subtasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "goal": { "type": "string" },
+                        "verification_criteria": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "magnitude": { "type": "string", "enum": ["small", "medium", "large"] }
+                    },
+                    "required": ["goal", "verification_criteria", "magnitude"]
+                }
+            },
+            "rationale": { "type": "string" }
+        },
+        "required": ["approach", "subtasks", "rationale"]
     })
 }
 
@@ -376,6 +432,17 @@ pub fn build_recovery_config(
 ) -> anyhow::Result<flick::Config> {
     let schema = recovery_schema();
     build_config(system_prompt, model, credential, &[], Some(&schema))
+}
+
+pub fn build_recovery_plan_config(
+    system_prompt: &str,
+    model: Model,
+    credential: &str,
+    grant: ToolGrant,
+) -> anyhow::Result<flick::Config> {
+    let tools = tool_definitions(grant);
+    let schema = recovery_plan_schema();
+    build_config(system_prompt, model, credential, &tools, Some(&schema))
 }
 
 // ---------------------------------------------------------------------------
@@ -598,23 +665,20 @@ mod tests {
             recoverable: true,
             strategy: Some("retry with different approach".into()),
         };
-        let result: Option<String> = recoverable.into();
-        assert_eq!(result, Some("retry with different approach".into()));
+        assert_eq!(recoverable.into_strategy(), Some("retry with different approach".into()));
 
         let not_recoverable = RecoveryWire {
             recoverable: false,
             strategy: None,
         };
-        let result: Option<String> = not_recoverable.into();
-        assert!(result.is_none());
+        assert!(not_recoverable.into_strategy().is_none());
 
         // Edge case: recoverable=true but strategy=None should still signal recoverability.
         let recoverable_no_strategy = RecoveryWire {
             recoverable: true,
             strategy: None,
         };
-        let result: Option<String> = recoverable_no_strategy.into();
-        assert_eq!(result, Some(String::new()));
+        assert_eq!(recoverable_no_strategy.into_strategy(), Some(String::new()));
     }
 
     #[test]
@@ -691,6 +755,48 @@ mod tests {
         assert_eq!(mag.max_lines_added, 100);
         assert_eq!(mag.max_lines_modified, 50);
         assert_eq!(mag.max_lines_deleted, 25);
+    }
+
+    #[test]
+    fn recovery_plan_wire_incremental() {
+        let wire = RecoveryPlanWire {
+            approach: "incremental".into(),
+            subtasks: vec![SubtaskWire {
+                goal: "fix thing".into(),
+                verification_criteria: vec!["fixed".into()],
+                magnitude: "small".into(),
+            }],
+            rationale: "targeted fix".into(),
+        };
+        let result = RecoveryPlan::try_from(wire).unwrap();
+        assert!(!result.full_redecomposition);
+        assert_eq!(result.subtasks.len(), 1);
+        assert_eq!(result.subtasks[0].magnitude_estimate, MagnitudeEstimate::Small);
+    }
+
+    #[test]
+    fn recovery_plan_wire_full() {
+        let wire = RecoveryPlanWire {
+            approach: "full".into(),
+            subtasks: vec![SubtaskWire {
+                goal: "redo A".into(),
+                verification_criteria: vec!["works".into()],
+                magnitude: "medium".into(),
+            }],
+            rationale: "wrong approach".into(),
+        };
+        let result = RecoveryPlan::try_from(wire).unwrap();
+        assert!(result.full_redecomposition);
+    }
+
+    #[test]
+    fn recovery_plan_wire_invalid_approach() {
+        let wire = RecoveryPlanWire {
+            approach: "partial".into(),
+            subtasks: vec![],
+            rationale: "x".into(),
+        };
+        assert!(RecoveryPlan::try_from(wire).is_err());
     }
 
     #[test]

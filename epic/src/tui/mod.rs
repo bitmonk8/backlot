@@ -305,6 +305,28 @@ impl TuiApp {
                     self.session_start,
                 ));
             }
+            Event::RecoveryStarted { task_id, round } => {
+                self.worklog.push(WorklogEntry::warn(
+                    format!("{task_id} recovery round {round} started"),
+                    self.session_start,
+                ));
+            }
+            Event::RecoveryPlanSelected { task_id, ref approach } => {
+                self.worklog.push(WorklogEntry::warn(
+                    format!("{task_id} recovery approach: {approach}"),
+                    self.session_start,
+                ));
+            }
+            Event::RecoverySubtasksCreated {
+                task_id,
+                count,
+                round,
+            } => {
+                self.worklog.push(WorklogEntry::info(
+                    format!("{task_id} created {count} recovery subtask(s) (round {round})"),
+                    self.session_start,
+                ));
+            }
         }
 
         // Evict oldest entries if worklog exceeds cap.

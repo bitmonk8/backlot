@@ -16,6 +16,7 @@ const MAX_DEPTH: u32 = 8;
 const RETRIES_PER_TIER: u32 = 3;
 const MAX_BRANCH_FIX_ROUNDS: u32 = 3;
 const MAX_ROOT_FIX_ROUNDS: u32 = 4;
+const MAX_RECOVERY_ROUNDS: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
@@ -184,7 +185,8 @@ impl<A: AgentService> Orchestrator<A> {
         &mut self,
         parent_id: TaskId,
         specs: Vec<SubtaskSpec>,
-        is_fix: bool,
+        mark_fix: bool,
+        append: bool,
     ) -> Result<Vec<TaskId>, OrchestratorError> {
         let parent_depth = self
             .state
@@ -203,7 +205,7 @@ impl<A: AgentService> Orchestrator<A> {
                 parent_depth + 1,
             );
             child.magnitude_estimate = Some(spec.magnitude_estimate);
-            child.is_fix_task = is_fix;
+            child.is_fix_task = mark_fix;
             child_ids.push(child_id);
             self.state.insert(child);
         }
@@ -213,7 +215,7 @@ impl<A: AgentService> Orchestrator<A> {
                 .state
                 .get_mut(parent_id)
                 .ok_or(OrchestratorError::TaskNotFound(parent_id))?;
-            if is_fix {
+            if append {
                 task.subtask_ids.extend_from_slice(&child_ids);
             } else {
                 task.subtask_ids.clone_from(&child_ids);
@@ -714,7 +716,7 @@ impl<A: AgentService> Orchestrator<A> {
                 continue;
             }
 
-            let fix_child_ids = self.create_subtasks(id, decomposition.subtasks, true)?;
+            let fix_child_ids = self.create_subtasks(id, decomposition.subtasks, true, true)?;
             self.emit(Event::FixSubtasksCreated {
                 task_id: id,
                 count: fix_child_ids.len(),
@@ -836,7 +838,7 @@ impl<A: AgentService> Orchestrator<A> {
             .subtask_ids
             .clone();
 
-        let child_ids = if existing_subtasks.is_empty() {
+        if existing_subtasks.is_empty() {
             let ctx = self.build_context(id)?;
             let decomposition = self.agent.design_and_decompose(&ctx).await?;
 
@@ -848,64 +850,223 @@ impl<A: AgentService> Orchestrator<A> {
                 task.decomposition_rationale = Some(decomposition.rationale);
             }
 
-            let new_child_ids = self.create_subtasks(id, decomposition.subtasks, false)?;
+            let new_child_ids = self.create_subtasks(id, decomposition.subtasks, false, false)?;
             self.emit(Event::SubtasksCreated {
                 parent_id: id,
-                child_ids: new_child_ids.clone(),
+                child_ids: new_child_ids,
             });
+        }
 
-            new_child_ids
-        } else {
-            existing_subtasks
-        };
-
-        for &child_id in &child_ids {
-            // Resume: skip children in terminal phases.
-            let child_phase = self
+        // Outer loop: restarts child iteration after recovery creates new subtasks.
+        loop {
+            let child_ids = self
                 .state
-                .get(child_id)
-                .ok_or(OrchestratorError::TaskNotFound(child_id))?
-                .phase;
-
-            match child_phase {
-                TaskPhase::Completed => continue,
-                TaskPhase::Failed => {
-                    let reason = "previously failed".to_string();
-                    let ctx = self.build_context(id)?;
-                    let _recovery = self.agent.assess_recovery(&ctx, &reason).await?;
-                    return Ok(TaskOutcome::Failed { reason });
-                }
-                _ => {}
-            }
-
-            let child_outcome = self.execute_task(child_id).await?;
-
-            // Check for discoveries → checkpoint.
-            let child_discoveries = self
-                .state
-                .get(child_id)
-                .ok_or(OrchestratorError::TaskNotFound(child_id))?
-                .discoveries
+                .get(id)
+                .ok_or(OrchestratorError::TaskNotFound(id))?
+                .subtask_ids
                 .clone();
 
-            if !child_discoveries.is_empty() {
-                let ctx = self.build_context(id)?;
-                let _decision = self.agent.checkpoint(&ctx, &child_discoveries).await?;
-                // Adjust and Escalate not implemented — all treated as Proceed.
+            let mut all_done = true;
+
+            for &child_id in &child_ids {
+                let child_phase = self
+                    .state
+                    .get(child_id)
+                    .ok_or(OrchestratorError::TaskNotFound(child_id))?
+                    .phase;
+
+                match child_phase {
+                    TaskPhase::Completed | TaskPhase::Failed => continue,
+                    _ => {}
+                }
+
+                all_done = false;
+                let child_outcome = self.execute_task(child_id).await?;
+
+                // Check for discoveries → checkpoint.
+                let child_discoveries = self
+                    .state
+                    .get(child_id)
+                    .ok_or(OrchestratorError::TaskNotFound(child_id))?
+                    .discoveries
+                    .clone();
+
+                if !child_discoveries.is_empty() {
+                    let ctx = self.build_context(id)?;
+                    let _decision = self.agent.checkpoint(&ctx, &child_discoveries).await?;
+                    // Checkpoint adjust/escalate deferred; decision treated as Proceed.
+                }
+
+                if let TaskOutcome::Failed { ref reason } = child_outcome {
+                    if let Some(recovery_outcome) =
+                        self.attempt_recovery(id, reason).await?
+                    {
+                        // Recovery failed or not possible — propagate failure.
+                        return Ok(recovery_outcome);
+                    }
+                    // Recovery succeeded: new subtasks created, restart child loop.
+                    break;
+                }
             }
 
-            if let TaskOutcome::Failed { ref reason } = child_outcome {
-                // Structurally present: call assess_recovery but don't act on result yet.
-                // Full re-decomposition not implemented — recovery result unused.
-                let ctx = self.build_context(id)?;
-                let _recovery = self.agent.assess_recovery(&ctx, reason).await?;
-                return Ok(TaskOutcome::Failed {
-                    reason: reason.clone(),
-                });
+            if all_done {
+                break;
             }
         }
 
+        // If the loop exits normally, all unrecovered failures were already
+        // propagated via attempt_recovery. Remaining Failed children are those
+        // whose failures were handled by recovery subtasks.
         Ok(TaskOutcome::Success)
+    }
+
+    /// Attempt recovery after a child failure. Returns `Some(Failed)` if recovery
+    /// is not possible or rounds are exhausted. Returns `None` if recovery subtasks
+    /// were created successfully (caller should restart the child loop).
+    #[allow(clippy::too_many_lines)] // Linear sequence of recovery steps; splitting adds indirection.
+    async fn attempt_recovery(
+        &mut self,
+        parent_id: TaskId,
+        failure_reason: &str,
+    ) -> Result<Option<TaskOutcome>, OrchestratorError> {
+        let task = self
+            .state
+            .get(parent_id)
+            .ok_or(OrchestratorError::TaskNotFound(parent_id))?;
+
+        // No recovery for fix tasks (prevents recursive recovery chains).
+        if task.is_fix_task {
+            return Ok(Some(TaskOutcome::Failed {
+                reason: failure_reason.to_string(),
+            }));
+        }
+
+        // Check recovery round budget.
+        if task.recovery_rounds >= MAX_RECOVERY_ROUNDS {
+            return Ok(Some(TaskOutcome::Failed {
+                reason: format!(
+                    "recovery rounds exhausted ({MAX_RECOVERY_ROUNDS}): {failure_reason}"
+                ),
+            }));
+        }
+
+        let round = task.recovery_rounds + 1;
+
+        // Step 1: assess whether recovery is possible.
+        // Agent errors treated as unrecoverable (avoids aborting the entire run
+        // due to transient errors like rate limits or malformed responses).
+        let ctx = self.build_context(parent_id)?;
+        let strategy = match self.agent.assess_recovery(&ctx, failure_reason).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return Ok(Some(TaskOutcome::Failed {
+                    reason: failure_reason.to_string(),
+                }));
+            }
+            Err(e) => {
+                eprintln!("warning: recovery assessment failed: {e}");
+                return Ok(Some(TaskOutcome::Failed {
+                    reason: failure_reason.to_string(),
+                }));
+            }
+        };
+
+        self.emit(Event::RecoveryStarted {
+            task_id: parent_id,
+            round,
+        });
+
+        // Increment recovery round counter before subtask creation so that a
+        // crash between subtask creation and counter update does not grant an
+        // extra recovery round on resume.
+        {
+            let task = self
+                .state
+                .get_mut(parent_id)
+                .ok_or(OrchestratorError::TaskNotFound(parent_id))?;
+            task.recovery_rounds = round;
+        }
+        self.checkpoint_save();
+
+        // Step 2: design recovery subtasks (Opus).
+        // Agent errors treated as failed recovery round (round already consumed).
+        let ctx = self.build_context(parent_id)?;
+        let plan = match self
+            .agent
+            .design_recovery_subtasks(&ctx, failure_reason, &strategy, round)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("warning: recovery plan design failed: {e}");
+                return Ok(Some(TaskOutcome::Failed {
+                    reason: format!("recovery design failed: {failure_reason}"),
+                }));
+            }
+        };
+
+        if plan.subtasks.is_empty() {
+            return Ok(Some(TaskOutcome::Failed {
+                reason: format!("recovery produced no subtasks: {failure_reason}"),
+            }));
+        }
+
+        let approach = if plan.full_redecomposition {
+            "full"
+        } else {
+            "incremental"
+        };
+        self.emit(Event::RecoveryPlanSelected {
+            task_id: parent_id,
+            approach: approach.into(),
+        });
+
+        // For full re-decomposition, mark remaining pending children as Failed.
+        if plan.full_redecomposition {
+            let child_ids = self
+                .state
+                .get(parent_id)
+                .ok_or(OrchestratorError::TaskNotFound(parent_id))?
+                .subtask_ids
+                .clone();
+
+            for &child_id in &child_ids {
+                let child = self
+                    .state
+                    .get_mut(child_id)
+                    .ok_or(OrchestratorError::TaskNotFound(child_id))?;
+                if child.phase == TaskPhase::Pending {
+                    child.phase = TaskPhase::Failed;
+                    self.emit(Event::TaskCompleted {
+                        task_id: child_id,
+                        outcome: TaskOutcome::Failed {
+                            reason: "superseded by recovery re-decomposition".into(),
+                        },
+                    });
+                }
+            }
+        }
+
+        // Step 3: create recovery subtasks (appended to parent's subtask_ids).
+        // Recovery subtasks are NOT marked is_fix_task: they are full tasks that
+        // get their own assessment, verification, fix loops, and recovery budget.
+        // Recursion is bounded by MAX_DEPTH (8) and each level's recovery budget
+        // (MAX_RECOVERY_ROUNDS=2).
+        let count = plan.subtasks.len();
+        let recovery_child_ids =
+            self.create_subtasks(parent_id, plan.subtasks, false, true)?;
+        self.emit(Event::RecoverySubtasksCreated {
+            task_id: parent_id,
+            count,
+            round,
+        });
+        self.emit(Event::SubtasksCreated {
+            parent_id,
+            child_ids: recovery_child_ids,
+        });
+
+        // Return None to signal caller should restart the child loop.
+        Ok(None)
     }
 }
 
@@ -916,7 +1077,7 @@ mod tests {
     use crate::task::assess::AssessmentResult;
     use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
     use crate::task::verify::{VerificationOutcome, VerificationResult};
-    use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, TaskPath};
+    use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, RecoveryPlan, TaskPath};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -930,6 +1091,7 @@ mod tests {
         verify_responses: Mutex<VecDeque<VerificationResult>>,
         checkpoint_responses: Mutex<VecDeque<CheckpointDecision>>,
         recovery_responses: Mutex<VecDeque<Option<String>>>,
+        recovery_plan_responses: Mutex<VecDeque<RecoveryPlan>>,
     }
 
     impl MockAgentService {
@@ -943,6 +1105,7 @@ mod tests {
                 verify_responses: Mutex::new(VecDeque::new()),
                 checkpoint_responses: Mutex::new(VecDeque::new()),
                 recovery_responses: Mutex::new(VecDeque::new()),
+                recovery_plan_responses: Mutex::new(VecDeque::new()),
             }
         }
     }
@@ -1045,6 +1208,21 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .expect("no recovery response queued"))
+        }
+
+        async fn design_recovery_subtasks(
+            &self,
+            _ctx: &TaskContext,
+            _failure_reason: &str,
+            _strategy: &str,
+            _recovery_round: u32,
+        ) -> anyhow::Result<RecoveryPlan> {
+            Ok(self
+                .recovery_plan_responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("no recovery_plan response queued"))
         }
     }
 
@@ -2520,5 +2698,447 @@ mod tests {
         assert_eq!(branch_fix_rounds[1], (2, Model::Sonnet));
         assert_eq!(branch_fix_rounds[2], (3, Model::Sonnet));
         assert_eq!(branch_fix_rounds[3], (4, Model::Opus));
+    }
+
+    // -----------------------------------------------------------------------
+    // Recovery re-decomposition tests
+    // -----------------------------------------------------------------------
+
+    fn incremental_recovery_plan() -> RecoveryPlan {
+        RecoveryPlan {
+            full_redecomposition: false,
+            subtasks: vec![SubtaskSpec {
+                goal: "recovery fix".into(),
+                verification_criteria: vec!["fix works".into()],
+                magnitude_estimate: MagnitudeEstimate::Small,
+            }],
+            rationale: "incremental recovery".into(),
+        }
+    }
+
+    fn full_recovery_plan() -> RecoveryPlan {
+        RecoveryPlan {
+            full_redecomposition: true,
+            subtasks: vec![SubtaskSpec {
+                goal: "full redo".into(),
+                verification_criteria: vec!["redo works".into()],
+                magnitude_estimate: MagnitudeEstimate::Medium,
+            }],
+            rationale: "full re-decomposition".into(),
+        }
+    }
+
+    /// Child A fails → incremental recovery → recovery subtask succeeds → child B runs → success.
+    #[tokio::test]
+    async fn recovery_incremental_creates_subtasks() {
+        let mock = MockAgentService::new();
+
+        // Root decomposes into 2 children.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "two subtasks".into(),
+            });
+
+        // Child A: assessed as leaf, fails terminally (9 attempts).
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+        }
+
+        // Recovery: assess says recoverable, plan is incremental.
+        mock.recovery_responses.lock().unwrap().push_back(Some("retry differently".into()));
+        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+
+        // Recovery subtask: assessed as leaf, succeeds.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        // Child B (still pending, runs after recovery): assessed as leaf, succeeds.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        // Root verification passes.
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        // Original 2 children + 1 recovery subtask = 3.
+        assert_eq!(root.subtask_ids.len(), 3);
+        assert_eq!(root.recovery_rounds, 1);
+
+        // Child A should be Failed.
+        let child_a_id = root.subtask_ids[0];
+        assert_eq!(orch.state.get(child_a_id).unwrap().phase, TaskPhase::Failed);
+
+        // Child B (pending sibling) should have completed after recovery.
+        let child_b_id = root.subtask_ids[1];
+        assert_eq!(orch.state.get(child_b_id).unwrap().phase, TaskPhase::Completed);
+
+        // Recovery subtask should have completed and not be marked is_fix_task.
+        let recovery_id = root.subtask_ids[2];
+        let recovery_task = orch.state.get(recovery_id).unwrap();
+        assert_eq!(recovery_task.phase, TaskPhase::Completed);
+        assert!(!recovery_task.is_fix_task);
+    }
+
+    /// Child A fails → full recovery → pending child B skipped → recovery subtask runs → success.
+    #[tokio::test]
+    async fn recovery_full_redecomposition_skips_pending() {
+        let mock = MockAgentService::new();
+
+        // Root decomposes into 2 children.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "two subtasks".into(),
+            });
+
+        // Child A: assessed as leaf, fails terminally.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+        }
+
+        // Recovery: full re-decomposition.
+        mock.recovery_responses.lock().unwrap().push_back(Some("redo everything".into()));
+        mock.recovery_plan_responses.lock().unwrap().push_back(full_recovery_plan());
+
+        // Recovery subtask: assessed as leaf, succeeds.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        // Root verification passes.
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.subtask_ids.len(), 3); // A, B, recovery
+        assert_eq!(root.recovery_rounds, 1);
+
+        // Child B should be Failed (superseded).
+        let child_b_id = root.subtask_ids[1];
+        assert_eq!(orch.state.get(child_b_id).unwrap().phase, TaskPhase::Failed);
+    }
+
+    /// Recovery rounds exhausted (2 rounds) → parent fails.
+    #[tokio::test]
+    async fn recovery_round_limit_exhausted() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses.lock().unwrap().push_back(DecompositionResult {
+            subtasks: vec![SubtaskSpec {
+                goal: "child A".into(),
+                verification_criteria: vec!["A passes".into()],
+                magnitude_estimate: MagnitudeEstimate::Small,
+            }],
+            rationale: "one subtask".into(),
+        });
+
+        // Child A fails terminally.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+        }
+
+        // Round 1: recovery with incremental plan.
+        mock.recovery_responses.lock().unwrap().push_back(Some("try again".into()));
+        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+
+        // Recovery subtask 1: fails terminally.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("recovery 1 failed"));
+        }
+
+        // Round 2: another recovery attempt.
+        mock.recovery_responses.lock().unwrap().push_back(Some("try again".into()));
+        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+
+        // Recovery subtask 2: also fails terminally.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("recovery 2 failed"));
+        }
+
+        // Round 3 would exceed limit — no more recovery responses needed.
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { reason } if reason.contains("recovery rounds exhausted")));
+        assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 2);
+    }
+
+    /// Fix tasks do not attempt recovery (prevents recursive recovery chains).
+    /// A fix task that is a branch with a failing child should propagate failure
+    /// without calling assess_recovery.
+    #[tokio::test]
+    async fn recovery_not_attempted_for_fix_tasks() {
+        // Directly test attempt_recovery by creating a task marked is_fix_task=true.
+        let mock = MockAgentService::new();
+        let mut state = EpicState::new();
+
+        let root_id = state.next_task_id();
+        let mut root = Task::new(
+            root_id,
+            None,
+            "fix parent".into(),
+            vec!["passes".into()],
+            0,
+        );
+        root.is_fix_task = true;
+        root.path = Some(TaskPath::Branch);
+        state.insert(root);
+
+        let (tx, _rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+
+        // attempt_recovery should return Some(Failed) immediately for fix tasks.
+        let result = orch.attempt_recovery(root_id, "child broke").await.unwrap();
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap(), TaskOutcome::Failed { .. }));
+    }
+
+    /// assess_recovery returns None → child failure propagates immediately.
+    #[tokio::test]
+    async fn recovery_not_attempted_when_unrecoverable() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses.lock().unwrap().push_back(one_subtask_decomposition());
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("terminal"));
+        }
+
+        // Recovery assessment: not recoverable.
+        mock.recovery_responses.lock().unwrap().push_back(None);
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { .. }));
+        assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 0);
+    }
+
+    /// Recovery round counter persists across resume.
+    #[tokio::test]
+    async fn recovery_rounds_persisted() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses.lock().unwrap().push_back(one_subtask_decomposition());
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+        }
+
+        // Round 1 recovery.
+        mock.recovery_responses.lock().unwrap().push_back(Some("try again".into()));
+        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+
+        // Recovery subtask succeeds.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        // Root verification passes.
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Verify recovery_rounds is persisted on the task.
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.recovery_rounds, 1);
+
+        // Verify serde round-trip preserves recovery_rounds.
+        let json = serde_json::to_string(&root).unwrap();
+        let restored: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.recovery_rounds, 1);
+    }
+
+    /// Recovery plan with empty subtask list → treated as failed recovery.
+    #[tokio::test]
+    async fn recovery_empty_plan_fails() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses.lock().unwrap().push_back(one_subtask_decomposition());
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("broke"));
+        }
+
+        // Recovery: assess says recoverable, but plan has no subtasks.
+        mock.recovery_responses.lock().unwrap().push_back(Some("try something".into()));
+        mock.recovery_plan_responses.lock().unwrap().push_back(RecoveryPlan {
+            full_redecomposition: false,
+            subtasks: vec![],
+            rationale: "empty plan".into(),
+        });
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { reason } if reason.contains("no subtasks")));
+        // Round was consumed even though plan was empty.
+        assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 1);
+    }
+
+    /// Full re-decomposition with child A completed and child B pending:
+    /// child A stays Completed, child B gets Failed (superseded).
+    #[tokio::test]
+    async fn recovery_full_redecomp_preserves_completed_siblings() {
+        let mock = MockAgentService::new();
+
+        // Root decomposes into 3 children.
+        mock.decompose_responses.lock().unwrap().push_back(DecompositionResult {
+            subtasks: vec![
+                SubtaskSpec {
+                    goal: "child A".into(),
+                    verification_criteria: vec!["A passes".into()],
+                    magnitude_estimate: MagnitudeEstimate::Small,
+                },
+                SubtaskSpec {
+                    goal: "child B".into(),
+                    verification_criteria: vec!["B passes".into()],
+                    magnitude_estimate: MagnitudeEstimate::Small,
+                },
+                SubtaskSpec {
+                    goal: "child C".into(),
+                    verification_criteria: vec!["C passes".into()],
+                    magnitude_estimate: MagnitudeEstimate::Small,
+                },
+            ],
+            rationale: "three subtasks".into(),
+        });
+
+        // Child A: succeeds.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        // Child B: fails terminally.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("B failed"));
+        }
+
+        // Recovery: full re-decomposition.
+        mock.recovery_responses.lock().unwrap().push_back(Some("redo".into()));
+        mock.recovery_plan_responses.lock().unwrap().push_back(full_recovery_plan());
+
+        // Recovery subtask: succeeds.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        // Root verification passes.
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        // A, B, C (original) + recovery = 4.
+        assert_eq!(root.subtask_ids.len(), 4);
+
+        // A: Completed (untouched by full re-decomposition).
+        assert_eq!(orch.state.get(root.subtask_ids[0]).unwrap().phase, TaskPhase::Completed);
+        // B: Failed (the one that triggered recovery).
+        assert_eq!(orch.state.get(root.subtask_ids[1]).unwrap().phase, TaskPhase::Failed);
+        // C: Failed (superseded — was Pending when full re-decomposition ran).
+        assert_eq!(orch.state.get(root.subtask_ids[2]).unwrap().phase, TaskPhase::Failed);
+        // Recovery subtask: Completed.
+        assert_eq!(orch.state.get(root.subtask_ids[3]).unwrap().phase, TaskPhase::Completed);
+    }
+
+    /// Recovery events are emitted correctly.
+    #[tokio::test]
+    async fn recovery_emits_events() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses.lock().unwrap().push_back(one_subtask_decomposition());
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("broke"));
+        }
+
+        mock.recovery_responses.lock().unwrap().push_back(Some("fix it".into()));
+        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+
+        // Recovery subtask succeeds.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        // Root verification.
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Drain events and check for recovery-specific events.
+        let mut saw_recovery_started = false;
+        let mut saw_recovery_plan = false;
+        let mut saw_recovery_subtasks = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                Event::RecoveryStarted { task_id, round } => {
+                    assert_eq!(task_id, root_id);
+                    assert_eq!(round, 1);
+                    saw_recovery_started = true;
+                }
+                Event::RecoveryPlanSelected { task_id, ref approach } => {
+                    assert_eq!(task_id, root_id);
+                    assert_eq!(approach, "incremental");
+                    saw_recovery_plan = true;
+                }
+                Event::RecoverySubtasksCreated { task_id, count, round } => {
+                    assert_eq!(task_id, root_id);
+                    assert_eq!(count, 1);
+                    assert_eq!(round, 1);
+                    saw_recovery_subtasks = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_recovery_started);
+        assert!(saw_recovery_plan);
+        assert!(saw_recovery_subtasks);
     }
 }

@@ -86,6 +86,16 @@ pub struct LeafResult {
     pub discoveries: Vec<String>,
 }
 
+/// Recovery plan produced by the Opus recovery agent after a child failure.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // `rationale` field used in wire format output and tests.
+pub struct RecoveryPlan {
+    /// If true, remaining pending children are superseded; only recovery subtasks run.
+    pub full_redecomposition: bool,
+    pub subtasks: Vec<branch::SubtaskSpec>,
+    pub rationale: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_field_names)]
 pub struct Task {
@@ -107,6 +117,7 @@ pub struct Task {
     pub depth: u32,
     pub verification_fix_rounds: u32,
     pub is_fix_task: bool,
+    pub recovery_rounds: u32,
 }
 
 impl Task {
@@ -136,6 +147,7 @@ impl Task {
             depth,
             verification_fix_rounds: 0,
             is_fix_task: false,
+            recovery_rounds: 0,
         }
     }
 }

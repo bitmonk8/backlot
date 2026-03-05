@@ -9,7 +9,7 @@ pub mod tools;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
 use crate::task::verify::VerificationResult;
-use crate::task::{LeafResult, Model, Task, TaskId, TaskOutcome};
+use crate::task::{LeafResult, Model, RecoveryPlan, Task, TaskId, TaskOutcome};
 
 /// Summary of a completed sibling task, provided as context to agent calls.
 #[derive(Debug, Clone)]
@@ -86,10 +86,21 @@ pub trait AgentService: Send + Sync {
         round: u32,
     ) -> impl std::future::Future<Output = anyhow::Result<DecompositionResult>> + Send;
 
-    /// Assess whether recovery is possible after a child failure. Result not yet acted upon.
+    /// Assess whether recovery is possible after a child failure.
     fn assess_recovery(
         &self,
         ctx: &TaskContext,
         failure_reason: &str,
     ) -> impl std::future::Future<Output = anyhow::Result<Option<String>>> + Send;
+
+    /// Design recovery subtasks after a child failure (Opus).
+    /// `strategy` comes from `assess_recovery`. Returns a recovery plan with
+    /// fresh subtasks and an incremental-vs-full decision.
+    fn design_recovery_subtasks(
+        &self,
+        ctx: &TaskContext,
+        failure_reason: &str,
+        strategy: &str,
+        recovery_round: u32,
+    ) -> impl std::future::Future<Output = anyhow::Result<RecoveryPlan>> + Send;
 }

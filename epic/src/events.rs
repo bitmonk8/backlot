@@ -72,6 +72,19 @@ pub enum Event {
         count: usize,
         round: u32,
     },
+    RecoveryStarted {
+        task_id: TaskId,
+        round: u32,
+    },
+    RecoveryPlanSelected {
+        task_id: TaskId,
+        approach: String,
+    },
+    RecoverySubtasksCreated {
+        task_id: TaskId,
+        count: usize,
+        round: u32,
+    },
 }
 
 pub type EventSender = mpsc::UnboundedSender<Event>;

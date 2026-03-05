@@ -1,8 +1,8 @@
 // FlickAgent: AgentService implementation backed by the Flick library.
 
 use crate::agent::config_gen::{
-    self, AssessmentWire, CheckpointWire, DecompositionWire, RecoveryWire, TaskOutcomeWire,
-    VerificationWire,
+    self, AssessmentWire, CheckpointWire, DecompositionWire, RecoveryPlanWire, RecoveryWire,
+    TaskOutcomeWire, VerificationWire,
 };
 use crate::agent::prompts;
 use crate::agent::tools::{self, AgentMethod, ToolGrant};
@@ -10,7 +10,7 @@ use crate::agent::{AgentService, TaskContext};
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
 use crate::task::verify::VerificationResult;
-use crate::task::{LeafResult, Model};
+use crate::task::{LeafResult, Model, RecoveryPlan};
 use anyhow::{Context, bail};
 use flick::result::ResultStatus;
 use serde::de::DeserializeOwned;
@@ -333,7 +333,29 @@ impl AgentService for FlickAgent {
         )?;
 
         let wire: RecoveryWire = self.run_structured(config, &pair.query).await?;
-        Ok(wire.into())
+        Ok(wire.into_strategy())
+    }
+
+    async fn design_recovery_subtasks(
+        &self,
+        ctx: &TaskContext,
+        failure_reason: &str,
+        strategy: &str,
+        recovery_round: u32,
+    ) -> anyhow::Result<RecoveryPlan> {
+        let pair = prompts::build_design_recovery_subtasks(ctx, failure_reason, strategy, recovery_round);
+        let grant = tools::phase_tools(AgentMethod::Decompose);
+        let config = config_gen::build_recovery_plan_config(
+            &pair.system_prompt,
+            Model::Opus,
+            &self.credential_name,
+            grant,
+        )?;
+
+        let wire: RecoveryPlanWire = self
+            .run_with_tools(config, &pair.query, grant)
+            .await?;
+        RecoveryPlan::try_from(wire)
     }
 }
 
