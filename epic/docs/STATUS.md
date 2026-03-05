@@ -272,7 +272,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 - `epic resume` — Resume from `.epic/state.json`. Exits with message if no state file found.
 - `epic status` — Prints goal, root phase, and task counts (completed/in-progress/pending/failed) from persisted state. No agent or Flick needed.
 
-**Global options:** `--flick-path` (env: `EPIC_FLICK_PATH`, default: `flick`), `--credential` (env: `EPIC_CREDENTIAL`, default: `anthropic`), `--no-tui` (env: `EPIC_NO_TUI`).
+**Global options:** `--credential` (env: `EPIC_CREDENTIAL`, default: `anthropic`), `--no-tui` (env: `EPIC_NO_TUI`). (Note: `--flick-path` was originally listed here but removed in the Flick library migration.)
 
 **Files:** New `cli.rs` module. `main.rs` rewritten. `Cargo.toml` added `env` feature to clap.
 
