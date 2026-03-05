@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, and discoveries propagation complete. CLI next.
+**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, and CLI complete.
 
 ## Milestones
 
@@ -15,10 +15,11 @@
 - [x] State persistence integration — `EpicState` saves/loads via `.epic/state.json`. Orchestrator checkpoints after assessment, decomposition, child completion, and verification. `main.rs` resumes from persisted state or creates fresh. Atomic writes (write-rename), resume skips completed/failed/mid-execution tasks correctly, reuses existing decomposition, goal mismatch detection, corrupt state error handling. 5 new tests (58 total).
 - [x] TUI event consumer — `TuiApp` consumes orchestrator events via ratatui + crossterm. Task tree panel (DFS with status indicators ✓/✗/▸/·, current-task cursor), worklog panel (timestamped event stream with follow-tail), metrics panel (toggle), header bar (goal, progress, elapsed). Keyboard controls: q/Ctrl-C quit, t toggle tail, m toggle metrics, ↑↓ scroll. Orchestrator runs in background tokio task, TUI in sync foreground loop. `EPIC_NO_TUI=1` for headless mode. `TaskRegistered` event added for TUI to build task tree from events alone.
 - [x] Discoveries propagation — `AgentService::execute_leaf` returns `LeafResult` (outcome + discoveries). Orchestrator stores discoveries on tasks, emits `DiscoveriesRecorded` event, triggers checkpoint flow. Sibling context includes discoveries in prompt. Failed sibling reason extracted from attempts. 2 new tests (60 total).
+- [x] CLI (clap) — Replaced ad-hoc env-var/arg parsing with proper `clap` derive CLI. Subcommands: `epic run <goal>`, `epic resume`, `epic status`. Global options: `--flick-path`, `--credential`, `--no-tui` (all with env-var fallbacks). `status` subcommand prints goal, root phase, and task counts from persisted state. 60 tests passing.
 
 ## Next Work Candidates
 
-1. **CLI (clap)** — Replace ad-hoc env-var/arg parsing with proper CLI: `epic run <goal>`, `epic resume`, `epic status`.
+No remaining work candidates. All planned milestones complete.
 
 ## Decisions Made
 
@@ -142,3 +143,18 @@
 **Data flow:** Agent returns `TaskOutcomeWire` with optional `discoveries` → `TryFrom` extracts into `LeafResult` → orchestrator stores on `Task.discoveries` → `execute_branch` reads child discoveries → calls `checkpoint()` with them → sibling context includes discoveries via `SiblingSummary` → prompt formatting shows discoveries to subsequent tasks.
 
 **Tests:** 2 new tests: `task_outcome_wire_with_discoveries` (wire conversion), `discoveries_propagated_to_checkpoint` (end-to-end: leaf reports discoveries → stored on task → checkpoint called → event emitted). 60 total. 0 clippy warnings.
+
+### 2026-03-05: CLI (clap) implemented
+
+**Scope:** Replaced ad-hoc `std::env::args()` + env-var parsing with `clap` derive-based CLI.
+
+**Subcommands:**
+- `epic run <goal>` — Start a new run. If state file exists with same goal, resumes transparently. Different goal prints diagnostic and exits.
+- `epic resume` — Resume from `.epic/state.json`. Exits with message if no state file found.
+- `epic status` — Prints goal, root phase, and task counts (completed/in-progress/pending/failed) from persisted state. No agent or Flick needed.
+
+**Global options:** `--flick-path` (env: `EPIC_FLICK_PATH`, default: `flick`), `--credential` (env: `EPIC_CREDENTIAL`, default: `anthropic`), `--no-tui` (env: `EPIC_NO_TUI`).
+
+**Files:** New `cli.rs` module. `main.rs` rewritten. `Cargo.toml` added `env` feature to clap.
+
+**Tests:** 60 passing (no new tests — CLI is integration surface). 0 clippy warnings.
