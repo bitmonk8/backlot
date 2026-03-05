@@ -274,6 +274,50 @@ impl FlickAgent {
 }
 
 // ---------------------------------------------------------------------------
+// Init exploration (not part of AgentService — standalone call)
+// ---------------------------------------------------------------------------
+
+impl FlickAgent {
+    /// Run the init exploration agent to detect project build/test/lint setup.
+    pub async fn explore_for_init(
+        &self,
+    ) -> anyhow::Result<config_gen::InitFindingsWire> {
+        let system_prompt = "\
+You are a project analyzer. Explore the project directory to detect its build system, \
+test framework, linters, and formatters.
+
+Look for:
+- Build system markers: Cargo.toml, package.json, pyproject.toml, Makefile, CMakeLists.txt, \
+build.gradle, go.mod, etc.
+- Test frameworks: test directories, test config files (jest.config, pytest.ini, etc.)
+- Linters/formatters: clippy, eslint, ruff, black, prettier, golangci-lint, etc.
+- CI config: .github/workflows/, .gitlab-ci.yml — extract build/test/lint commands as hints.
+
+Use tools to explore the project directory. Read key config files to understand the setup.
+Do NOT look in .git, node_modules, target, or other build artifact directories.
+
+Respond with the required JSON schema."
+            .to_owned();
+
+        let query = "Explore this project and detect its verification steps \
+(build, lint, test, format commands). Read relevant config files to determine the correct commands."
+            .to_owned();
+
+        let grant = tools::ToolGrant::READ;
+        let config = config_gen::build_init_config(
+            system_prompt,
+            &self.credential_name,
+            grant,
+        );
+        let config_path =
+            config_gen::write_config(&config, &self.work_dir, u64::MAX, "init_explore").await?;
+
+        self.run_with_tools(&config_path, &query, grant, u64::MAX, "init_explore")
+            .await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AgentService implementation
 // ---------------------------------------------------------------------------
 

@@ -23,6 +23,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Initialize epic.toml via agent-driven project exploration.
+    Init,
     /// Start a new run with the given goal.
     Run {
         /// The goal to accomplish.

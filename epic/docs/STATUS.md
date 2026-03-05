@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, and CLI complete.
+**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, and `epic init` complete.
 
 ## Milestones
 
@@ -16,6 +16,7 @@
 - [x] TUI event consumer — `TuiApp` consumes orchestrator events via ratatui + crossterm. Task tree panel (DFS with status indicators ✓/✗/▸/·, current-task cursor), worklog panel (timestamped event stream with follow-tail), metrics panel (toggle), header bar (goal, progress, elapsed). Keyboard controls: q/Ctrl-C quit, t toggle tail, m toggle metrics, ↑↓ scroll. Orchestrator runs in background tokio task, TUI in sync foreground loop. `EPIC_NO_TUI=1` for headless mode. `TaskRegistered` event added for TUI to build task tree from events alone.
 - [x] Discoveries propagation — `AgentService::execute_leaf` returns `LeafResult` (outcome + discoveries). Orchestrator stores discoveries on tasks, emits `DiscoveriesRecorded` event, triggers checkpoint flow. Sibling context includes discoveries in prompt. Failed sibling reason extracted from attempts. 2 new tests (60 total).
 - [x] CLI (clap) — Replaced ad-hoc env-var/arg parsing with proper `clap` derive CLI. Subcommands: `epic run <goal>`, `epic resume`, `epic status`. Global options: `--flick-path`, `--credential`, `--no-tui` (all with env-var fallbacks). `status` subcommand prints goal, root phase, and task counts from persisted state. 60 tests passing.
+- [x] `epic init` — Agent-driven interactive configuration scaffolding. Flick agent (Sonnet, read-only tools) scans project for build/test/lint markers. Interactive CLI confirms/edits/skips each step, prompts for model preferences and depth/budget limits. Writes `epic.toml` with atomic write. Declined steps included as TOML comments. `EpicConfig` struct with `VerificationStep`, `ModelConfig`, `LimitsConfig`, `AgentConfig`, `ProjectConfig`. 3 new tests (63 total).
 
 ## Next Work Candidates
 
@@ -158,3 +159,26 @@ No remaining work candidates. All planned milestones complete.
 **Files:** New `cli.rs` module. `main.rs` rewritten. `Cargo.toml` added `env` feature to clap.
 
 **Tests:** 60 passing (no new tests — CLI is integration surface). 0 clippy warnings.
+
+### 2026-03-05: `epic init` implemented
+
+**Scope:** Agent-driven interactive configuration scaffolding. New `Init` subcommand. 3 files created, 5 files modified.
+
+**Flow:**
+1. Early `epic.toml` existence check (before Flick agent construction)
+2. `FlickAgent::explore_for_init()` — Sonnet agent with read-only tools scans project for build system markers, test frameworks, linters, CI config
+3. `InitFindingsWire` structured output with `DetectedStepWire` entries
+4. Interactive confirmation: accept/edit/skip each step, add custom steps
+5. `prompt_models()` — model preference confirmation (accept defaults or customize)
+6. `prompt_limits()` — depth/budget limit confirmation (accept defaults or customize)
+7. Atomic write (`epic.toml.tmp` → rename → `epic.toml`)
+8. Declined steps appended as TOML comments for reference
+
+**Config types:** `EpicConfig` (top-level), `VerificationStep`, `ModelConfig`, `LimitsConfig`, `AgentConfig`, `ProjectConfig` — all serde Serialize/Deserialize with TOML defaults.
+
+**Files created:** `init.rs`, `config/project.rs` (rewritten from stub).
+**Files modified:** `cli.rs` (Init subcommand), `main.rs` (wiring), `agent/config_gen.rs` (wire types + schema), `agent/flick.rs` (explore method), `agent/mod.rs` + `config/mod.rs` (visibility).
+
+**Error handling:** `read_line_checked` propagates I/O errors for critical prompts. `read_line_or_eof` propagates I/O errors, treats EOF as empty. Init uses `bail!()` not `process::exit()`.
+
+**Tests:** 3 new tests (63 total): `default_config_round_trips`, `parse_with_verification_steps`, `parse_minimal_config`. 0 clippy warnings in new code.

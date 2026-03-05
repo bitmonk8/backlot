@@ -1,6 +1,6 @@
 // Agent abstraction over Flick agent runtime (external executable).
 
-mod config_gen;
+pub mod config_gen;
 pub mod flick;
 mod models;
 mod prompts;

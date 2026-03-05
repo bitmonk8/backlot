@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod events;
 mod git;
+mod init;
 mod metrics;
 mod orchestrator;
 mod services;
@@ -34,17 +35,33 @@ async fn main() -> anyhow::Result<()> {
         return print_status(&state_path);
     }
 
+    // Check epic.toml existence before constructing agent (avoids requiring Flick for this error).
+    if matches!(&cli.command, Command::Init) {
+        let config_path = project_root.join("epic.toml");
+        if config_path.exists() {
+            eprintln!(
+                "epic.toml already exists at {}. Delete it first to reinitialize.",
+                config_path.display()
+            );
+            std::process::exit(1);
+        }
+    }
+
     std::fs::create_dir_all(&work_dir)?;
     let timeout = Duration::from_secs(300);
 
     let agent = FlickAgent::new(
         cli.flick_path,
-        project_root,
+        project_root.clone(),
         work_dir,
         cli.credential,
         timeout,
     )
     .await?;
+
+    if matches!(&cli.command, Command::Init) {
+        return init::run_init(&agent, &project_root).await;
+    }
 
     let (state, root_id, goal_text) = match &cli.command {
         Command::Run { goal } => {
@@ -141,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("Resuming from {}", state_path.display());
             (state, root_id, goal_text)
         }
-        Command::Status => unreachable!(),
+        Command::Init | Command::Status => unreachable!(),
     };
 
     let (tx, rx) = event_channel();

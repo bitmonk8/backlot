@@ -2,6 +2,7 @@
 
 use crate::agent::models::{default_max_tokens, flick_model_id};
 use crate::agent::tools::{FlickToolDef, ToolGrant, tool_definitions};
+use crate::config::project::VerificationStep;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
 use crate::task::verify::{VerificationOutcome, VerificationResult};
@@ -389,6 +390,91 @@ pub async fn write_config(
     let yaml = serde_yaml::to_string(config).context("failed to serialize flick config")?;
     tokio::fs::write(&path, yaml).await.with_context(|| format!("failed to write config to {}", path.display()))?;
     Ok(path)
+}
+
+// ---------------------------------------------------------------------------
+// Init exploration types
+// ---------------------------------------------------------------------------
+
+/// Wire format for a detected verification step from the init exploration agent.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DetectedStepWire {
+    pub name: String,
+    pub command: Vec<String>,
+    pub timeout: Option<u32>,
+    pub rationale: String,
+}
+
+impl From<DetectedStepWire> for VerificationStep {
+    fn from(w: DetectedStepWire) -> Self {
+        Self {
+            name: w.name,
+            command: w.command,
+            timeout: w.timeout.unwrap_or(300),
+        }
+    }
+}
+
+/// Wire format for init exploration agent output.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InitFindingsWire {
+    pub project_type: String,
+    pub steps: Vec<DetectedStepWire>,
+    pub notes: Option<String>,
+}
+
+pub fn init_findings_schema() -> JsonValue {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "project_type": {
+                "type": "string",
+                "description": "Short description of the project type (e.g. 'Rust/Cargo', 'Node.js/npm', 'Python/poetry')"
+            },
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Step name: Build, Lint, Test, or Format"
+                        },
+                        "command": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Command as array of strings (e.g. [\"cargo\", \"build\"])"
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Timeout in seconds (default 300)"
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "description": "Why this step was detected"
+                        }
+                    },
+                    "required": ["name", "command", "rationale"]
+                }
+            },
+            "notes": {
+                "type": "string",
+                "description": "Additional observations about the project setup"
+            }
+        },
+        "required": ["project_type", "steps"]
+    })
+}
+
+pub fn build_init_config(
+    system_prompt: String,
+    credential: &str,
+    grant: ToolGrant,
+) -> FlickConfig {
+    let mut cfg = base_config(system_prompt, Model::Sonnet, credential);
+    cfg.tools = tool_definitions(grant);
+    cfg.output_schema = Some(init_findings_schema());
+    cfg
 }
 
 // ---------------------------------------------------------------------------
