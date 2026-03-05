@@ -65,6 +65,14 @@ pub enum MagnitudeEstimate {
     Large,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
+pub struct Magnitude {
+    pub max_lines_added: u64,
+    pub max_lines_modified: u64,
+    pub max_lines_deleted: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskOutcome {
     Success,
@@ -79,6 +87,7 @@ pub struct LeafResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
 pub struct Task {
     pub id: TaskId,
     pub parent_id: Option<TaskId>,
@@ -91,9 +100,13 @@ pub struct Task {
     pub attempts: Vec<Attempt>,
     pub subtask_ids: Vec<TaskId>,
     pub magnitude_estimate: Option<MagnitudeEstimate>,
+    pub magnitude: Option<Magnitude>,
     pub discoveries: Vec<String>,
+    pub fix_attempts: Vec<Attempt>,
     pub decomposition_rationale: Option<String>,
     pub depth: u32,
+    pub verification_fix_rounds: u32,
+    pub is_fix_task: bool,
 }
 
 impl Task {
@@ -116,9 +129,13 @@ impl Task {
             attempts: Vec::new(),
             subtask_ids: Vec::new(),
             magnitude_estimate: None,
+            magnitude: None,
             discoveries: Vec::new(),
+            fix_attempts: Vec::new(),
             decomposition_rationale: None,
             depth,
+            verification_fix_rounds: 0,
+            is_fix_task: false,
         }
     }
 }

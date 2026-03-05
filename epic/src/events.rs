@@ -4,7 +4,6 @@ use crate::task::{Model, TaskId, TaskOutcome, TaskPath, TaskPhase};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Variants read by TUI (not yet wired).
 pub enum Event {
     TaskRegistered {
         task_id: TaskId,
@@ -52,6 +51,26 @@ pub enum Event {
     DiscoveriesRecorded {
         task_id: TaskId,
         count: usize,
+    },
+    FixAttempt {
+        task_id: TaskId,
+        attempt: u32,
+        model: Model,
+    },
+    FixModelEscalated {
+        task_id: TaskId,
+        from: Model,
+        to: Model,
+    },
+    BranchFixRound {
+        task_id: TaskId,
+        round: u32,
+        model: Model,
+    },
+    FixSubtasksCreated {
+        task_id: TaskId,
+        count: usize,
+        round: u32,
     },
 }
 

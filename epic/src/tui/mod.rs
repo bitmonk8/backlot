@@ -269,6 +269,42 @@ impl TuiApp {
                     self.session_start,
                 ));
             }
+            Event::FixAttempt {
+                task_id,
+                attempt,
+                model,
+            } => {
+                self.worklog.push(WorklogEntry::warn(
+                    format!("{task_id} fix attempt #{attempt} ({model:?})"),
+                    self.session_start,
+                ));
+            }
+            Event::FixModelEscalated { task_id, from, to } => {
+                self.worklog.push(WorklogEntry::warn(
+                    format!("{task_id} fix escalated: {from:?} → {to:?}"),
+                    self.session_start,
+                ));
+            }
+            Event::BranchFixRound {
+                task_id,
+                round,
+                model,
+            } => {
+                self.worklog.push(WorklogEntry::warn(
+                    format!("{task_id} branch fix round {round} ({model:?})"),
+                    self.session_start,
+                ));
+            }
+            Event::FixSubtasksCreated {
+                task_id,
+                count,
+                round,
+            } => {
+                self.worklog.push(WorklogEntry::info(
+                    format!("{task_id} created {count} fix subtask(s) (round {round})"),
+                    self.session_start,
+                ));
+            }
         }
 
         // Evict oldest entries if worklog exceeds cap.

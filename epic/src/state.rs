@@ -13,7 +13,6 @@ pub struct EpicState {
     root_id: Option<TaskId>,
 }
 
-#[allow(dead_code)] // Methods used in tests and future main wiring.
 impl EpicState {
     pub fn new() -> Self {
         Self::default()

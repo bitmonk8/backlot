@@ -22,7 +22,7 @@ use tokio::process::Command;
 const MAX_TOOL_ROUNDS: u32 = 50;
 
 /// `FlickAgent` invokes the Flick executable for each agent call.
-#[allow(dead_code)] // Fields used by invoke_flick and run methods.
+#[allow(dead_code)] // Fields are pub for construction but only read within impl methods.
 pub struct FlickAgent {
     flick_path: PathBuf,
     project_root: PathBuf,
@@ -360,6 +360,30 @@ impl AgentService for FlickAgent {
         LeafResult::try_from(wire)
     }
 
+    async fn fix_leaf(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+        failure_reason: &str,
+        attempt: u32,
+    ) -> anyhow::Result<LeafResult> {
+        let pair = prompts::build_fix_leaf(ctx, failure_reason, attempt);
+        let grant = tools::phase_tools(AgentMethod::Execute);
+        let config = config_gen::build_execute_leaf_config(
+            pair.system_prompt,
+            model,
+            &self.credential_name,
+            grant,
+        );
+        let config_path =
+            config_gen::write_config(&config, &self.work_dir, ctx.task.id.0, "fix_leaf").await?;
+
+        let wire: TaskOutcomeWire = self
+            .run_with_tools(&config_path, &pair.query, grant, ctx.task.id.0, "fix_leaf")
+            .await?;
+        LeafResult::try_from(wire)
+    }
+
     async fn design_and_decompose(
         &self,
         ctx: &TaskContext,
@@ -377,6 +401,30 @@ impl AgentService for FlickAgent {
 
         let wire: DecompositionWire = self
             .run_with_tools(&config_path, &pair.query, grant, ctx.task.id.0, "decompose")
+            .await?;
+        DecompositionResult::try_from(wire)
+    }
+
+    async fn design_fix_subtasks(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+        verification_issues: &str,
+        round: u32,
+    ) -> anyhow::Result<DecompositionResult> {
+        let pair = prompts::build_design_fix_subtasks(ctx, verification_issues, round);
+        let grant = tools::phase_tools(AgentMethod::Decompose);
+        let config = config_gen::build_decompose_config(
+            pair.system_prompt,
+            model,
+            &self.credential_name,
+            grant,
+        );
+        let config_path =
+            config_gen::write_config(&config, &self.work_dir, ctx.task.id.0, "fix_subtasks").await?;
+
+        let wire: DecompositionWire = self
+            .run_with_tools(&config_path, &pair.query, grant, ctx.task.id.0, "fix_subtasks")
             .await?;
         DecompositionResult::try_from(wire)
     }

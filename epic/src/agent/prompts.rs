@@ -155,6 +155,72 @@ Respond with the required JSON schema."
     }
 }
 
+pub fn build_fix_leaf(ctx: &TaskContext, failure_reason: &str, attempt: u32) -> PromptPair {
+    let system_prompt = "\
+You are a task executor in a recursive problem-solving system.
+
+A previous execution of this task passed but failed verification. Your job is to fix the specific \
+issues identified by the verifier rather than rewriting from scratch.
+
+Guidelines:
+- Read relevant files to understand what was already done.
+- Focus on fixing the specific verification failures, not rewriting everything.
+- Make minimal, targeted changes that address the identified issues.
+- Verify your fixes compile/work before reporting success.
+- Report any discoveries (unexpected findings, architectural insights) in the discoveries field.
+
+Respond with the required JSON schema when done."
+        .into();
+
+    let query = format!(
+        "{context}\n\n\
+         ## Fix Attempt\n\
+         Attempt: {attempt}\n\
+         Verification failure reason: {failure_reason}\n\n\
+         Fix the specific issues identified above. Do not rewrite from scratch.",
+        context = format_context(ctx),
+    );
+
+    PromptPair {
+        system_prompt,
+        query,
+    }
+}
+
+pub fn build_design_fix_subtasks(ctx: &TaskContext, verification_issues: &str, round: u32) -> PromptPair {
+    let system_prompt = "\
+You are a task decomposer in a recursive problem-solving system.
+
+A branch task's subtasks have all completed, but verification of the branch goal has failed. \
+Your job is to create targeted fix subtasks that address the specific verification issues \
+rather than re-decomposing the entire task from scratch.
+
+Guidelines:
+- Each fix subtask should target a specific verification failure.
+- Fix subtasks should be independently verifiable.
+- Use magnitude estimates: small (< 1 session), medium (1-2 sessions), large (multiple sessions / further decomposition likely).
+- Keep fix subtasks minimal and focused — do not duplicate work already done by prior subtasks.
+- Explore the codebase with tools before creating fix subtasks to understand the current state.
+
+Respond with the required JSON schema."
+        .into();
+
+    let query = format!(
+        "{context}\n\n\
+         ## Branch Verification Failure\n\
+         Round: {round}\n\
+         Verification issues: {verification_issues}\n\n\
+         Create targeted fix subtasks to address the specific verification issues above. \
+         Do not re-decompose the entire task.",
+        context = format_context(ctx),
+    );
+
+    PromptPair {
+        system_prompt,
+        query,
+    }
+}
+
 pub fn build_verify(ctx: &TaskContext) -> PromptPair {
     let system_prompt = "\
 You are a task verifier in a recursive problem-solving system.
@@ -315,6 +381,17 @@ mod tests {
     }
 
     #[test]
+    fn fix_leaf_prompt_contains_failure_context() {
+        let ctx = test_context();
+        let pair = build_fix_leaf(&ctx, "test X not passing", 2);
+        assert!(pair.query.contains("implement feature X"));
+        assert!(pair.query.contains("test X not passing"));
+        assert!(pair.query.contains("2"));
+        assert!(pair.system_prompt.contains("fix"));
+        assert!(pair.system_prompt.contains("rewriting from scratch"));
+    }
+
+    #[test]
     fn context_format_with_no_siblings() {
         let ctx = TaskContext {
             task: Task::new(TaskId(0), None, "root".into(), vec!["done".into()], 0),
@@ -327,5 +404,15 @@ mod tests {
         assert!(text.contains("None (root task)"));
         assert!(text.contains("Completed:\nNone"));
         assert!(text.contains("Pending:\nNone"));
+    }
+
+    #[test]
+    fn design_fix_subtasks_prompt_contains_context() {
+        let ctx = test_context();
+        let pair = build_design_fix_subtasks(&ctx, "lint errors in module X", 2);
+        assert!(pair.query.contains("lint errors in module X"));
+        assert!(pair.query.contains("2"));
+        assert!(pair.query.contains("implement feature X"));
+        assert!(pair.system_prompt.contains("fix"));
     }
 }

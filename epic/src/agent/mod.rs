@@ -68,7 +68,25 @@ pub trait AgentService: Send + Sync {
         discoveries: &[String],
     ) -> impl std::future::Future<Output = anyhow::Result<CheckpointDecision>> + Send;
 
-    /// Assess whether recovery is possible after a child failure. Placeholder for v1.
+    /// Re-execute a leaf task with verification failure context.
+    fn fix_leaf(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+        failure_reason: &str,
+        attempt: u32,
+    ) -> impl std::future::Future<Output = anyhow::Result<LeafResult>> + Send;
+
+    /// Design fix subtasks to address branch verification issues.
+    fn design_fix_subtasks(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+        verification_issues: &str,
+        round: u32,
+    ) -> impl std::future::Future<Output = anyhow::Result<DecompositionResult>> + Send;
+
+    /// Assess whether recovery is possible after a child failure. Result not yet acted upon.
     fn assess_recovery(
         &self,
         ctx: &TaskContext,

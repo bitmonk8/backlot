@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, and `epic init` complete.
+**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, and fix loops complete.
 
 ## Milestones
 
@@ -17,19 +17,11 @@
 - [x] Discoveries propagation — `AgentService::execute_leaf` returns `LeafResult` (outcome + discoveries). Orchestrator stores discoveries on tasks, emits `DiscoveriesRecorded` event, triggers checkpoint flow. Sibling context includes discoveries in prompt. Failed sibling reason extracted from attempts. 2 new tests (60 total).
 - [x] CLI (clap) — Replaced ad-hoc env-var/arg parsing with proper `clap` derive CLI. Subcommands: `epic run <goal>`, `epic resume`, `epic status`. Global options: `--flick-path`, `--credential`, `--no-tui` (all with env-var fallbacks). `status` subcommand prints goal, root phase, and task counts from persisted state. 60 tests passing.
 - [x] `epic init` — Agent-driven interactive configuration scaffolding. Flick agent (Sonnet, read-only tools) scans project for build/test/lint markers. Interactive CLI confirms/edits/skips each step, prompts for model preferences and depth/budget limits. Writes `epic.toml` with atomic write. Declined steps included as TOML comments. `EpicConfig` struct with `VerificationStep`, `ModelConfig`, `LimitsConfig`, `AgentConfig`, `ProjectConfig`. 3 new tests (63 total).
+- [x] Fix loop after verification failure — Three components: scope circuit breaker (`Magnitude` struct, `git diff --numstat` check, 3x threshold), leaf fix loop (retry/escalate with `fix_leaf` agent call, reuses model tier progression), branch fix loop (3 rounds Sonnet + 1 Opus for root, `design_fix_subtasks` agent call, fix subtasks marked `is_fix_task` to prevent recursive fix chains). Extracted `fail_task`, `complete_task_verified`, `create_subtasks` helpers and `evaluate_scope` pure function. 18 new tests (81 total).
 
 ## Deferred Items
 
 Items not implemented in v1, with evaluation of complexity, value, and necessity.
-
-### Fix loop after verification failure
-
-Currently verification failure is terminal — the task fails immediately. The design (EPIC_DESIGN2) envisions up to 3 fix rounds where the branch creates subtasks to address issues, then re-verifies. Root branch gets an additional Opus round.
-
-- **Status:** Spec complete. See [FIX_LOOP_SPEC.md](FIX_LOOP_SPEC.md). Promoted to next work candidate.
-- **Complexity:** Medium-high. Requires fix subtask creation from verification feedback, re-verify loop with round counter, root-level Opus escalation path. Significant orchestrator changes.
-- **Value:** High. Real-world tasks routinely produce code that fails lint or has minor issues. Without this, a 95%-correct result is treated the same as total failure.
-- **Without it:** Epic is fragile for any task where verification catches fixable issues. Usable only when agents produce clean output on first pass.
 
 ### Full recovery re-decomposition
 
@@ -81,9 +73,22 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Fix loop after verification failure** — Spec complete ([FIX_LOOP_SPEC.md](FIX_LOOP_SPEC.md)). Phase 1: leaf fix loop (~130-170 lines). Phase 2: branch fix loop (~180-250 lines). Scope circuit breaker included (~35-55 lines). Awaiting implementation approval.
+1. **Full recovery re-decomposition** — When a child fails, allow Opus recovery agent to re-decompose the branch. Currently first child failure terminates the branch.
+2. **Checkpoint adjust/escalate actions** — Haiku classification after child discoveries to modify pending subtasks or escalate.
 
 ## Decisions Made
+
+### 2026-03-05: Fix loop after verification failure implemented
+
+**Scope:** Three components across 7 files, 18 new tests (81 total). Review pass added extracted helpers, correctness fixes, and cruft cleanup.
+
+**Scope circuit breaker:** `Magnitude` struct (max_lines_added/modified/deleted) on `Task`. `check_scope_circuit_breaker()` runs `git diff --numstat HEAD`, compares against 3x magnitude estimate. Best-effort (skipped if no magnitude, no project root, or git fails). `evaluate_scope()` extracted as pure function for testability. `AssessmentWire` extended with optional magnitude fields.
+
+**Leaf fix loop:** `fix_leaf` added to `AgentService` trait. `leaf_fix_loop()` in orchestrator: retry/escalate with model tier progression (starting at the model that wrote the code). Scope check before each attempt. Fix attempts tracked separately in `task.fix_attempts`. Resume correctness: `fix_retries_at_tier` initialized from persisted `fix_attempts`. New events: `FixAttempt`, `FixModelEscalated`.
+
+**Branch fix loop:** `design_fix_subtasks` added to `AgentService` trait. `branch_fix_loop()` in orchestrator: max 3 rounds (Sonnet) for non-root, 4 rounds (3 Sonnet + 1 Opus) for root. Each round creates fix subtasks (marked `is_fix_task = true`), executes them through full pipeline, then re-verifies. Fix subtasks CAN use leaf fix loop but CANNOT trigger branch fix loop (prevents recursive chains). Empty subtask list handled as round failure. New events: `BranchFixRound`, `FixSubtasksCreated`. New fields on Task: `verification_fix_rounds`, `is_fix_task`.
+
+**Helpers extracted:** `fail_task()`, `complete_task_verified()`, `create_subtasks()` reduce duplication across orchestrator methods (~90 lines). Removed stale `#[allow(dead_code)]` annotations and unused `branch_fix_rounds` config field.
 
 ### 2026-02-25: Configuration format — TOML
 
@@ -113,7 +118,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 **Tests (6):** single_leaf, two_children, leaf_retry_and_escalation, terminal_failure, depth_cap_forces_leaf, persistence_round_trip.
 
-**Deferred for v1:** Fix loop after verification failure, full recovery re-decomposition, checkpoint adjust/escalate actions. See "Deferred Items" section for evaluation.
+**Deferred for v1:** Full recovery re-decomposition, checkpoint adjust/escalate actions. (Fix loop: since implemented, see 2026-03-05 decision.) See "Deferred Items" section for evaluation.
 
 ### 2026-03-04: Replace ZeroClaw with Flick
 

@@ -6,7 +6,7 @@ use crate::config::project::VerificationStep;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
 use crate::task::verify::{VerificationOutcome, VerificationResult};
-use crate::task::{LeafResult, MagnitudeEstimate, Model, TaskOutcome, TaskPath};
+use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, Model, TaskOutcome, TaskPath};
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -51,6 +51,9 @@ pub struct AssessmentWire {
     pub path: String,
     pub model: String,
     pub rationale: String,
+    pub max_lines_added: Option<u64>,
+    pub max_lines_modified: Option<u64>,
+    pub max_lines_deleted: Option<u64>,
 }
 
 impl TryFrom<AssessmentWire> for AssessmentResult {
@@ -62,10 +65,19 @@ impl TryFrom<AssessmentWire> for AssessmentResult {
             _ => bail!("invalid assessment path: {}", w.path),
         };
         let model = parse_model_name(&w.model)?;
+        let magnitude = match (w.max_lines_added, w.max_lines_modified, w.max_lines_deleted) {
+            (None, None, None) => None,
+            (added, modified, deleted) => Some(Magnitude {
+                max_lines_added: added.unwrap_or(0),
+                max_lines_modified: modified.unwrap_or(0),
+                max_lines_deleted: deleted.unwrap_or(0),
+            }),
+        };
         Ok(Self {
             path,
             model,
             rationale: w.rationale,
+            magnitude,
         })
     }
 }
@@ -200,7 +212,10 @@ pub fn assessment_schema() -> JsonValue {
         "properties": {
             "path": { "type": "string", "enum": ["leaf", "branch"] },
             "model": { "type": "string", "enum": ["haiku", "sonnet", "opus"] },
-            "rationale": { "type": "string" }
+            "rationale": { "type": "string" },
+            "max_lines_added": { "type": "integer" },
+            "max_lines_modified": { "type": "integer" },
+            "max_lines_deleted": { "type": "integer" }
         },
         "required": ["path", "model", "rationale"]
     })
@@ -500,10 +515,14 @@ mod tests {
             path: "leaf".into(),
             model: "haiku".into(),
             rationale: "simple".into(),
+            max_lines_added: None,
+            max_lines_modified: None,
+            max_lines_deleted: None,
         };
         let result = AssessmentResult::try_from(wire).unwrap();
         assert_eq!(result.path, TaskPath::Leaf);
         assert_eq!(result.model, Model::Haiku);
+        assert!(result.magnitude.is_none());
     }
 
     #[test]
@@ -512,6 +531,9 @@ mod tests {
             path: "invalid".into(),
             model: "haiku".into(),
             rationale: "x".into(),
+            max_lines_added: None,
+            max_lines_modified: None,
+            max_lines_deleted: None,
         };
         assert!(AssessmentResult::try_from(wire).is_err());
     }
@@ -657,5 +679,39 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("claude-haiku"));
+    }
+
+    #[test]
+    fn assessment_wire_with_magnitude() {
+        let wire = AssessmentWire {
+            path: "leaf".into(),
+            model: "sonnet".into(),
+            rationale: "test".into(),
+            max_lines_added: Some(100),
+            max_lines_modified: Some(50),
+            max_lines_deleted: Some(25),
+        };
+        let result = AssessmentResult::try_from(wire).unwrap();
+        let mag = result.magnitude.unwrap();
+        assert_eq!(mag.max_lines_added, 100);
+        assert_eq!(mag.max_lines_modified, 50);
+        assert_eq!(mag.max_lines_deleted, 25);
+    }
+
+    #[test]
+    fn assessment_wire_partial_magnitude() {
+        let wire = AssessmentWire {
+            path: "branch".into(),
+            model: "opus".into(),
+            rationale: "test".into(),
+            max_lines_added: Some(10),
+            max_lines_modified: None,
+            max_lines_deleted: None,
+        };
+        let result = AssessmentResult::try_from(wire).unwrap();
+        let mag = result.magnitude.unwrap();
+        assert_eq!(mag.max_lines_added, 10);
+        assert_eq!(mag.max_lines_modified, 0);
+        assert_eq!(mag.max_lines_deleted, 0);
     }
 }

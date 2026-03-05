@@ -50,4 +50,4 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 - `C:\UnitySrc\fds2\tools\epic\` — fds2_epic Python implementation (reference implementation)
 ## Status
 
-**Phase: Implementation** — Design complete. Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, and `epic init` complete.
+**Phase: Implementation** — Design complete. Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, and fix loops complete.

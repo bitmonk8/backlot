@@ -47,8 +47,6 @@ pub struct LimitsConfig {
     pub max_recovery_rounds: u32,
     #[serde(default = "default_retry_budget")]
     pub retry_budget: u32,
-    #[serde(default = "default_branch_fix_rounds")]
-    pub branch_fix_rounds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,7 +75,6 @@ fn default_strong_model() -> String { "opus-4.6".into() }
 const fn default_max_depth() -> u32 { 8 }
 const fn default_max_recovery_rounds() -> u32 { 2 }
 const fn default_retry_budget() -> u32 { 3 }
-const fn default_branch_fix_rounds() -> u32 { 3 }
 fn default_runtime() -> String { "flick".into() }
 fn default_flick_path() -> String { "flick".into() }
 const fn default_timeout() -> u32 { 300 }
@@ -104,7 +101,6 @@ impl Default for LimitsConfig {
             max_depth: default_max_depth(),
             max_recovery_rounds: default_max_recovery_rounds(),
             retry_budget: default_retry_budget(),
-            branch_fix_rounds: default_branch_fix_rounds(),
         }
     }
 }

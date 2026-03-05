@@ -163,7 +163,8 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = event_channel();
     let mut orchestrator = Orchestrator::new(agent, state, tx)
-        .with_state_path(state_path.clone());
+        .with_state_path(state_path.clone())
+        .with_project_root(project_root.clone());
 
     if cli.no_tui {
         drop(rx);
