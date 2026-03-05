@@ -521,27 +521,42 @@ impl<A: AgentService> Orchestrator<A> {
         id: TaskId,
         initial_failure: &str,
     ) -> Result<TaskOutcome, OrchestratorError> {
-        // Start fix attempts at the model that produced the failing output.
-        let mut fix_model = self
+        // Resume-safe: read current model and count consecutive trailing fix
+        // attempts at that tier so we don't grant extra retries after a crash.
+        let task = self
             .state
             .get(id)
-            .ok_or(OrchestratorError::TaskNotFound(id))?
-            .current_model
-            .unwrap_or(Model::Haiku);
-
-        // Resume-safe: count consecutive trailing attempts at the current tier
-        // so we don't grant extra retries after a crash mid-fix-loop.
+            .ok_or(OrchestratorError::TaskNotFound(id))?;
+        let mut fix_model = task.current_model.unwrap_or(Model::Haiku);
         #[allow(clippy::cast_possible_truncation)]
-        let mut fix_retries_at_tier: u32 = self
-            .state
-            .get(id)
-            .ok_or(OrchestratorError::TaskNotFound(id))?
+        let mut fix_retries_at_tier: u32 = task
             .fix_attempts
             .iter()
             .rev()
             .take_while(|a| a.model == fix_model)
             .count() as u32;
         let mut failure_reason = initial_failure.to_owned();
+
+        // Drain any stale tier exhaustion from a crash before escalation.
+        while fix_retries_at_tier >= RETRIES_PER_TIER {
+            if let Some(next_model) = fix_model.escalate() {
+                self.emit(Event::FixModelEscalated {
+                    task_id: id,
+                    from: fix_model,
+                    to: next_model,
+                });
+                let task = self
+                    .state
+                    .get_mut(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                task.current_model = Some(next_model);
+                fix_model = next_model;
+                fix_retries_at_tier = 0;
+                self.checkpoint_save();
+            } else {
+                return self.fail_task(id, failure_reason);
+            }
+        }
 
         loop {
             // Scope circuit breaker check.
@@ -759,16 +774,52 @@ impl<A: AgentService> Orchestrator<A> {
     }
 
     async fn execute_leaf(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
-        let mut retries_at_tier: u32 = 0;
+        // Resume-safe: read current model and count consecutive trailing attempts
+        // at that tier so we don't grant extra retries after a crash mid-retry-loop.
+        let task = self
+            .state
+            .get(id)
+            .ok_or(OrchestratorError::TaskNotFound(id))?;
+        let mut current_model = task.current_model.unwrap_or(Model::Haiku);
+        #[allow(clippy::cast_possible_truncation)]
+        let mut retries_at_tier: u32 = task
+            .attempts
+            .iter()
+            .rev()
+            .take_while(|a| a.model == current_model)
+            .count() as u32;
+
+        // Drain any stale tier exhaustion from a crash before escalation.
+        while retries_at_tier >= RETRIES_PER_TIER {
+            if let Some(next_model) = current_model.escalate() {
+                self.emit(Event::ModelEscalated {
+                    task_id: id,
+                    from: current_model,
+                    to: next_model,
+                });
+                let task = self
+                    .state
+                    .get_mut(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                task.current_model = Some(next_model);
+                current_model = next_model;
+                retries_at_tier = 0;
+                self.checkpoint_save();
+            } else {
+                // All tiers exhausted — terminal failure.
+                let last_error = self
+                    .state
+                    .get(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?
+                    .attempts
+                    .last()
+                    .and_then(|a| a.error.clone())
+                    .unwrap_or_else(|| "all tiers exhausted".into());
+                return Ok(TaskOutcome::Failed { reason: last_error });
+            }
+        }
 
         loop {
-            let current_model = self
-                .state
-                .get(id)
-                .ok_or(OrchestratorError::TaskNotFound(id))?
-                .current_model
-                .unwrap_or(Model::Haiku);
-
             let ctx = self.build_context(id)?;
             let LeafResult {
                 outcome,
@@ -788,9 +839,6 @@ impl<A: AgentService> Orchestrator<A> {
                         TaskOutcome::Failed { reason } => Some(reason.clone()),
                     },
                 });
-                // Discoveries accumulate across retries without deduplication.
-                // LLM-generated text is unlikely to repeat verbatim; if this
-                // becomes noisy, add a Haiku dedup pass before storing.
                 if !discoveries.is_empty() {
                     let count = discoveries.len();
                     task.discoveries.extend(discoveries);
@@ -800,6 +848,8 @@ impl<A: AgentService> Orchestrator<A> {
                     });
                 }
             }
+
+            self.checkpoint_save();
 
             if outcome == TaskOutcome::Success {
                 return Ok(outcome);
@@ -827,6 +877,7 @@ impl<A: AgentService> Orchestrator<A> {
                     .get_mut(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
                 task.current_model = Some(next_model);
+                current_model = next_model;
                 retries_at_tier = 0;
                 continue;
             }
@@ -2657,6 +2708,89 @@ mod tests {
         assert_eq!(child.fix_attempts[2].model, Model::Haiku);
     }
 
+    /// Resume fix loop with exhausted tier: escalates immediately without extra attempt.
+    #[tokio::test]
+    async fn leaf_fix_resume_escalates_immediately_when_tier_exhausted() {
+        let mock = MockAgentService::new();
+
+        // Child is Verifying with 3 failed fix attempts at Haiku (tier exhausted).
+        // Crash happened before escalation. On resume: should escalate to Sonnet
+        // immediately without executing a 4th Haiku fix attempt.
+
+        // Mock sequence: verify(child fail) → fix_leaf at Sonnet(success) → verify(child pass) → verify(root pass).
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("still broken"));
+
+        mock.fix_leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut state = EpicState::new();
+        let root_id = state.next_task_id();
+        let child_id = state.next_task_id();
+
+        let mut root = Task::new(root_id, None, "root".into(), vec!["root passes".into()], 0);
+        root.path = Some(TaskPath::Branch);
+        root.model = Some(Model::Sonnet);
+        root.current_model = Some(Model::Sonnet);
+        root.phase = TaskPhase::Executing;
+        root.subtask_ids = vec![child_id];
+
+        let mut child = Task::new(
+            child_id,
+            Some(root_id),
+            "child".into(),
+            vec!["child passes".into()],
+            1,
+        );
+        child.path = Some(TaskPath::Leaf);
+        child.model = Some(Model::Haiku);
+        child.current_model = Some(Model::Haiku); // Not yet escalated.
+        child.phase = TaskPhase::Verifying;
+        child.fix_attempts = vec![
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("f1".into()) },
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("f2".into()) },
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("f3".into()) },
+        ];
+
+        state.insert(root);
+        state.insert(child);
+
+        let (tx, mut rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child = orch.state.get(child_id).unwrap();
+        assert_eq!(child.phase, TaskPhase::Completed);
+        // 3 pre-existing Haiku + 1 successful Sonnet fix = 4 (no extra Haiku attempt).
+        assert_eq!(child.fix_attempts.len(), 4);
+        assert_eq!(child.fix_attempts[3].model, Model::Sonnet);
+        assert!(child.fix_attempts[3].succeeded);
+
+        // Verify escalation event.
+        let mut saw_escalation = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::FixModelEscalated { from: Model::Haiku, to: Model::Sonnet, .. }) {
+                saw_escalation = true;
+            }
+        }
+        assert!(saw_escalation, "FixModelEscalated Haiku→Sonnet expected on immediate escalation");
+    }
+
     /// Branch fix loop: root gets 4th round at Opus after 3 Sonnet rounds fail.
     #[tokio::test]
     async fn branch_fix_root_opus_round() {
@@ -4063,5 +4197,316 @@ mod tests {
 
         // Recovery round consumed.
         assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 1);
+    }
+
+    /// Resume mid-leaf-retry: pre-existing attempts are counted so retries_at_tier is correct.
+    #[tokio::test]
+    async fn leaf_retry_counter_persists_on_resume() {
+        let mock = MockAgentService::new();
+
+        // Child already assessed and mid-execution with 2 failed Haiku attempts persisted.
+        // On resume, retries_at_tier should start at 2. One more failure should escalate to Sonnet
+        // (not grant a fresh 3 retries).
+
+        // Next attempt (Haiku, attempt #3) fails → triggers escalation to Sonnet.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_failed("fail3"));
+
+        // First Sonnet attempt succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child passes, root passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut state = EpicState::new();
+        let root_id = state.next_task_id();
+        let child_id = state.next_task_id();
+
+        let mut root = Task::new(root_id, None, "root".into(), vec!["root passes".into()], 0);
+        root.path = Some(TaskPath::Branch);
+        root.model = Some(Model::Sonnet);
+        root.current_model = Some(Model::Sonnet);
+        root.phase = TaskPhase::Executing;
+        root.subtask_ids = vec![child_id];
+
+        let mut child = Task::new(
+            child_id,
+            Some(root_id),
+            "child".into(),
+            vec!["child passes".into()],
+            1,
+        );
+        child.path = Some(TaskPath::Leaf);
+        child.model = Some(Model::Haiku);
+        child.current_model = Some(Model::Haiku);
+        child.phase = TaskPhase::Executing;
+        child.attempts = vec![
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("fail1".into()) },
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("fail2".into()) },
+        ];
+
+        state.insert(root);
+        state.insert(child);
+
+        let (tx, mut rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child = orch.state.get(child_id).unwrap();
+        assert_eq!(child.phase, TaskPhase::Completed);
+        // 2 pre-existing + 1 failed Haiku + 1 successful Sonnet = 4 total.
+        assert_eq!(child.attempts.len(), 4);
+        assert_eq!(child.attempts[2].model, Model::Haiku);
+        assert!(!child.attempts[2].succeeded);
+        assert_eq!(child.attempts[3].model, Model::Sonnet);
+        assert!(child.attempts[3].succeeded);
+
+        // Verify escalation event was emitted (Haiku → Sonnet).
+        let mut saw_escalation = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::ModelEscalated { from: Model::Haiku, to: Model::Sonnet, .. }) {
+                saw_escalation = true;
+            }
+        }
+        assert!(saw_escalation, "ModelEscalated event should be emitted after 3 Haiku failures");
+    }
+
+    /// Resume at Sonnet tier with pre-existing Sonnet attempts: retries_at_tier counts
+    /// only trailing Sonnet attempts, not prior Haiku attempts.
+    #[tokio::test]
+    async fn leaf_retry_counter_resume_at_sonnet_tier() {
+        let mock = MockAgentService::new();
+
+        // Child has 3 Haiku failures + 2 Sonnet failures. On resume, retries_at_tier
+        // should be 2 (only the trailing Sonnet attempts). One more Sonnet failure
+        // should escalate to Opus.
+
+        // Sonnet attempt #3 fails → escalation to Opus.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_failed("sonnet fail3"));
+
+        // Opus attempt #1 succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child passes, root passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut state = EpicState::new();
+        let root_id = state.next_task_id();
+        let child_id = state.next_task_id();
+
+        let mut root = Task::new(root_id, None, "root".into(), vec!["root passes".into()], 0);
+        root.path = Some(TaskPath::Branch);
+        root.model = Some(Model::Sonnet);
+        root.current_model = Some(Model::Sonnet);
+        root.phase = TaskPhase::Executing;
+        root.subtask_ids = vec![child_id];
+
+        let mut child = Task::new(
+            child_id,
+            Some(root_id),
+            "child".into(),
+            vec!["child passes".into()],
+            1,
+        );
+        child.path = Some(TaskPath::Leaf);
+        child.model = Some(Model::Haiku);
+        child.current_model = Some(Model::Sonnet);
+        child.phase = TaskPhase::Executing;
+        child.attempts = vec![
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("h1".into()) },
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("h2".into()) },
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("h3".into()) },
+            Attempt { model: Model::Sonnet, succeeded: false, error: Some("s1".into()) },
+            Attempt { model: Model::Sonnet, succeeded: false, error: Some("s2".into()) },
+        ];
+
+        state.insert(root);
+        state.insert(child);
+
+        let (tx, mut rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child = orch.state.get(child_id).unwrap();
+        assert_eq!(child.phase, TaskPhase::Completed);
+        // 5 pre-existing + 1 failed Sonnet + 1 successful Opus = 7 total.
+        assert_eq!(child.attempts.len(), 7);
+        assert_eq!(child.attempts[5].model, Model::Sonnet);
+        assert!(!child.attempts[5].succeeded);
+        assert_eq!(child.attempts[6].model, Model::Opus);
+        assert!(child.attempts[6].succeeded);
+
+        // Verify escalation Sonnet → Opus.
+        let mut saw_escalation = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::ModelEscalated { from: Model::Sonnet, to: Model::Opus, .. }) {
+                saw_escalation = true;
+            }
+        }
+        assert!(saw_escalation, "ModelEscalated Sonnet→Opus event expected");
+    }
+
+    /// Resume with retries exhausted at current tier: escalates immediately without
+    /// executing an extra attempt (crash between recording failure and escalation).
+    #[tokio::test]
+    async fn leaf_retry_resume_escalates_immediately_when_tier_exhausted() {
+        let mock = MockAgentService::new();
+
+        // Child has 3 Haiku failures (tier exhausted) but current_model is still Haiku
+        // (crash happened before escalation). Should escalate to Sonnet without executing
+        // a 4th Haiku attempt.
+
+        // First Sonnet attempt succeeds (no Haiku attempts should be made).
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child passes, root passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut state = EpicState::new();
+        let root_id = state.next_task_id();
+        let child_id = state.next_task_id();
+
+        let mut root = Task::new(root_id, None, "root".into(), vec!["root passes".into()], 0);
+        root.path = Some(TaskPath::Branch);
+        root.model = Some(Model::Sonnet);
+        root.current_model = Some(Model::Sonnet);
+        root.phase = TaskPhase::Executing;
+        root.subtask_ids = vec![child_id];
+
+        let mut child = Task::new(
+            child_id,
+            Some(root_id),
+            "child".into(),
+            vec!["child passes".into()],
+            1,
+        );
+        child.path = Some(TaskPath::Leaf);
+        child.model = Some(Model::Haiku);
+        child.current_model = Some(Model::Haiku); // Not yet escalated.
+        child.phase = TaskPhase::Executing;
+        child.attempts = vec![
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("f1".into()) },
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("f2".into()) },
+            Attempt { model: Model::Haiku, succeeded: false, error: Some("f3".into()) },
+        ];
+
+        state.insert(root);
+        state.insert(child);
+
+        let (tx, mut rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child = orch.state.get(child_id).unwrap();
+        assert_eq!(child.phase, TaskPhase::Completed);
+        // 3 pre-existing Haiku + 1 successful Sonnet = 4 (no extra Haiku attempt).
+        assert_eq!(child.attempts.len(), 4);
+        assert_eq!(child.attempts[3].model, Model::Sonnet);
+        assert!(child.attempts[3].succeeded);
+
+        // Verify escalation event was emitted.
+        let mut saw_escalation = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::ModelEscalated { from: Model::Haiku, to: Model::Sonnet, .. }) {
+                saw_escalation = true;
+            }
+        }
+        assert!(saw_escalation, "ModelEscalated Haiku→Sonnet expected on immediate escalation");
+    }
+
+    /// Leaf retry attempts are persisted to disk via checkpoint_save.
+    #[tokio::test]
+    async fn leaf_retry_attempts_persisted_to_disk() {
+        let mock = MockAgentService::new();
+
+        // Root decomposes into 1 child.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        // Child assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child fails once, then succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_failed("first try failed"));
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child passes, root passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state_path = tmp.path().to_path_buf();
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        orch.state_path = Some(state_path.clone());
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // The child's attempts are persisted (2 attempts: 1 failed + 1 succeeded).
+        let loaded_state = EpicState::load(&state_path).unwrap();
+        let child_id = orch
+            .state
+            .get(root_id)
+            .unwrap()
+            .subtask_ids[0];
+        let child = loaded_state.get(child_id).unwrap();
+        assert_eq!(child.attempts.len(), 2);
+        assert!(!child.attempts[0].succeeded);
+        assert!(child.attempts[1].succeeded);
     }
 }

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, fix loops, Flick library migration, recovery re-decomposition, and checkpoint adjust/escalate complete.
+**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, fix loops, Flick library migration, recovery re-decomposition, checkpoint adjust/escalate, and all deferred items complete. 110 tests passing.
 
 ## Milestones
 
@@ -24,23 +24,7 @@
 
 ## Deferred Items
 
-Items not implemented in v1, with evaluation of complexity, value, and necessity.
-
-### Leaf retry counter resets on resume
-
-Currently, `retries_at_tier` is not persisted. On resume, a leaf that already used 2 of 3 retries gets a fresh counter — up to 9 extra attempts (bounded overshoot).
-
-- **Complexity:** Low. Persist `retries_at_tier` and current model tier in task state, restore on resume.
-- **Value:** Low. Worst case is extra API spend on resume. No correctness issue.
-- **Without it:** Minor cost inefficiency on crash+resume. Nothing breaks.
-
-### No checkpoint during leaf retry loop
-
-Currently, intermediate retry attempts are not checkpointed. On crash mid-retry, all attempts in the current loop are lost and the leaf restarts from scratch.
-
-- **Complexity:** Low. Add `checkpoint_save()` calls within the retry loop after each attempt.
-- **Value:** Low. The leaf restarts with a fresh retry counter (see above), so it still has bounded attempts. Lost attempts waste some API spend but don't affect correctness.
-- **Without it:** On crash during retry, some API spend is wasted on re-execution. Acceptable.
+No remaining deferred items.
 
 ## Design Choices (not deferred — intentional constraints)
 
@@ -60,10 +44,23 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Leaf retry counter persistence** — Persist `retries_at_tier` to prevent bounded overshoot on resume.
-2. **Leaf retry checkpoint** — Checkpoint after each retry attempt to prevent wasted API spend on crash.
+No remaining work candidates. All v1 features and polish items are complete.
 
 ## Decisions Made
+
+### 2026-03-05: Leaf retry counter persistence and checkpoint implemented
+
+**Scope:** Two deferred polish items resolved, plus two review passes (correctness fix, simplification). 1 file modified, 5 new tests (110 total).
+
+**Leaf retry counter persistence:** `execute_leaf` now initializes `retries_at_tier` from persisted `attempts` (counting consecutive trailing attempts at the current model tier), matching the pattern already used in `leaf_fix_loop`. On resume, a leaf that used 2 of 3 retries no longer gets a fresh counter.
+
+**Leaf retry checkpoint:** `execute_leaf` now calls `checkpoint_save()` after recording each attempt. On crash mid-retry, persisted attempts survive and the retry counter correctly resumes.
+
+**Top-of-loop escalation guard (review pass):** Both `execute_leaf` and `leaf_fix_loop` now check `retries_at_tier >= RETRIES_PER_TIER` at the top of the loop, before calling the agent. Fixes an edge case where a crash after recording the Nth failure but before escalation would cause one extra attempt at the exhausted tier on resume. Pre-loop `state.get()` calls collapsed from two to one in both methods.
+
+**Review pass — pre-loop drain (simplification):** Extracted the top-of-loop escalation guard into a `while` loop before the main loop in both methods. Eliminates duplicated escalation logic. `execute_leaf` now uses a local `current_model` variable (matching `leaf_fix_loop`'s `fix_model` pattern) instead of re-reading from state each iteration.
+
+**Tests (5 new, 110 total):** `leaf_retry_counter_persists_on_resume` (resume with 2 Haiku failures → escalates after 1 more), `leaf_retry_counter_resume_at_sonnet_tier` (resume at Sonnet tier with mixed Haiku+Sonnet attempts → counts only trailing Sonnet), `leaf_retry_resume_escalates_immediately_when_tier_exhausted` (3 Haiku failures persisted, current_model still Haiku → escalates without extra attempt), `leaf_fix_resume_escalates_immediately_when_tier_exhausted` (same scenario for fix loop), `leaf_retry_attempts_persisted_to_disk` (state file contains attempts after fail+succeed).
 
 ### 2026-03-05: Checkpoint adjust/escalate actions implemented
 
@@ -170,7 +167,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 **Tests (6):** single_leaf, two_children, leaf_retry_and_escalation, terminal_failure, depth_cap_forces_leaf, persistence_round_trip.
 
-**Deferred for v1:** Checkpoint adjust/escalate actions (since implemented, see 2026-03-05 decision). (Fix loop: since implemented, see 2026-03-05 decision. Recovery re-decomposition: since implemented, see 2026-03-05 decision.) See "Deferred Items" section for evaluation.
+**Previously deferred:** Checkpoint adjust/escalate actions (since implemented), fix loop (since implemented), recovery re-decomposition (since implemented), leaf retry counter persistence (since implemented), leaf retry checkpoint (since implemented). All deferred items resolved.
 
 ### 2026-03-04: Replace ZeroClaw with Flick
 
@@ -220,7 +217,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 **Best-effort checkpoints:** `checkpoint_save()` logs errors to stderr but does not abort the run.
 
-**Deferred for v1:** Leaf retry counter resets on resume (bounded overshoot). No checkpoint during leaf retry loop (intermediate attempts lost on crash). See "Deferred Items" section for evaluation.
+**Previously deferred:** Leaf retry counter persistence and leaf retry checkpoint — both implemented (see 2026-03-05 decision).
 
 **Tests:** 5 new tests: `checkpoint_saves_state`, `resume_skips_completed_child`, `resume_skips_decomposition_when_subtasks_exist`, `resume_mid_execution_branch_not_reassessed`, `resume_verifying_skips_execution` (58 total). 0 clippy warnings.
 
