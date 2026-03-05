@@ -73,8 +73,9 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Full recovery re-decomposition** — When a child fails, allow Opus recovery agent to re-decompose the branch. Currently first child failure terminates the branch.
-2. **Checkpoint adjust/escalate actions** — Haiku classification after child discoveries to modify pending subtasks or escalate.
+1. **Flick library migration** — Replace Flick subprocess invocation with direct library calls. Add `flick` as a git dependency, eliminate config/tool-result file I/O, remove `--flick-path` CLI option. See [Flick Library Migration](FLICK_LIBRARY_MIGRATION.md).
+2. **Full recovery re-decomposition** — When a child fails, allow Opus recovery agent to re-decompose the branch. Currently first child failure terminates the branch.
+3. **Checkpoint adjust/escalate actions** — Haiku classification after child discoveries to modify pending subtasks or escalate.
 
 ## Decisions Made
 
