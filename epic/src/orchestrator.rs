@@ -5,7 +5,7 @@ use crate::events::{Event, EventSender};
 use crate::state::EpicState;
 use crate::task::assess::AssessmentResult;
 use crate::task::verify::VerificationOutcome;
-use crate::task::branch::SubtaskSpec;
+use crate::task::branch::{CheckpointDecision, SubtaskSpec};
 use crate::task::{Attempt, LeafResult, Magnitude, Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
 use std::future::Future;
 use std::path::PathBuf;
@@ -307,12 +307,19 @@ impl<A: AgentService> Orchestrator<A> {
                 },
             );
 
+        // Checkpoint guidance: look at the parent task's stored guidance.
+        let checkpoint_guidance = task
+            .parent_id
+            .and_then(|pid| self.state.get(pid))
+            .and_then(|p| p.checkpoint_guidance.clone());
+
         Ok(TaskContext {
             task,
             parent_goal,
             ancestor_goals,
             completed_siblings,
             pending_sibling_goals,
+            checkpoint_guidance,
         })
     }
 
@@ -829,6 +836,7 @@ impl<A: AgentService> Orchestrator<A> {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Linear sequence of branch steps; splitting adds indirection.
     async fn execute_branch(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
         // Resume: reuse existing subtasks if already decomposed.
         let existing_subtasks = self
@@ -893,8 +901,47 @@ impl<A: AgentService> Orchestrator<A> {
 
                 if !child_discoveries.is_empty() {
                     let ctx = self.build_context(id)?;
-                    let _decision = self.agent.checkpoint(&ctx, &child_discoveries).await?;
-                    // Checkpoint adjust/escalate deferred; decision treated as Proceed.
+                    // Agent errors treated as Proceed (best-effort, like recovery).
+                    let decision = match self.agent.checkpoint(&ctx, &child_discoveries).await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!("warning: checkpoint classification failed: {e}");
+                            CheckpointDecision::Proceed
+                        }
+                    };
+                    match decision {
+                        CheckpointDecision::Proceed => {}
+                        CheckpointDecision::Adjust { guidance } => {
+                            self.emit(Event::CheckpointAdjust { task_id: id });
+                            let task = self
+                                .state
+                                .get_mut(id)
+                                .ok_or(OrchestratorError::TaskNotFound(id))?;
+                            task.checkpoint_guidance = Some(match task.checkpoint_guidance.take() {
+                                Some(existing) => format!("{existing}\n{guidance}"),
+                                None => guidance,
+                            });
+                            self.checkpoint_save();
+                        }
+                        CheckpointDecision::Escalate => {
+                            self.emit(Event::CheckpointEscalate { task_id: id });
+                            {
+                                let task = self.state.get_mut(id).ok_or(OrchestratorError::TaskNotFound(id))?;
+                                task.checkpoint_guidance = None;
+                            }
+                            let escalation_reason = format!(
+                                "checkpoint escalation: discoveries invalidate current plan. Discoveries: {}",
+                                child_discoveries.join("; ")
+                            );
+                            if let Some(recovery_outcome) =
+                                self.attempt_recovery(id, &escalation_reason).await?
+                            {
+                                return Ok(recovery_outcome);
+                            }
+                            // Recovery succeeded: restart child loop.
+                            break;
+                        }
+                    }
                 }
 
                 if let TaskOutcome::Failed { ref reason } = child_outcome {
@@ -1090,6 +1137,7 @@ mod tests {
         fix_subtask_responses: Mutex<VecDeque<DecompositionResult>>,
         verify_responses: Mutex<VecDeque<VerificationResult>>,
         checkpoint_responses: Mutex<VecDeque<CheckpointDecision>>,
+        checkpoint_errors: Mutex<VecDeque<String>>,
         recovery_responses: Mutex<VecDeque<Option<String>>>,
         recovery_plan_responses: Mutex<VecDeque<RecoveryPlan>>,
     }
@@ -1104,6 +1152,7 @@ mod tests {
                 fix_subtask_responses: Mutex::new(VecDeque::new()),
                 verify_responses: Mutex::new(VecDeque::new()),
                 checkpoint_responses: Mutex::new(VecDeque::new()),
+                checkpoint_errors: Mutex::new(VecDeque::new()),
                 recovery_responses: Mutex::new(VecDeque::new()),
                 recovery_plan_responses: Mutex::new(VecDeque::new()),
             }
@@ -1189,6 +1238,9 @@ mod tests {
             _ctx: &TaskContext,
             _discoveries: &[String],
         ) -> anyhow::Result<CheckpointDecision> {
+            if let Some(msg) = self.checkpoint_errors.lock().unwrap().pop_front() {
+                return Err(anyhow::anyhow!(msg));
+            }
             Ok(self
                 .checkpoint_responses
                 .lock()
@@ -3140,5 +3192,876 @@ mod tests {
         assert!(saw_recovery_started);
         assert!(saw_recovery_plan);
         assert!(saw_recovery_subtasks);
+    }
+
+    /// Checkpoint adjust: guidance stored on parent, visible to sibling B via context.
+    #[tokio::test]
+    async fn checkpoint_adjust_stores_guidance() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "two subtasks".into(),
+            });
+
+        // Both assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child A succeeds with discoveries.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["use API v2".into()],
+        });
+
+        // Checkpoint returns Adjust with guidance.
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Adjust {
+                guidance: "switch to API v2 format".into(),
+            });
+
+        // Child B succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child A, child B, root — all pass.
+        for _ in 0..3 {
+            mock.verify_responses
+                .lock()
+                .unwrap()
+                .push_back(pass_verification());
+        }
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Guidance stored on root (the branch parent).
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(
+            root.checkpoint_guidance.as_deref(),
+            Some("switch to API v2 format")
+        );
+
+        // CheckpointAdjust event emitted.
+        let mut saw_adjust = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::CheckpointAdjust { task_id } if task_id == root_id) {
+                saw_adjust = true;
+            }
+        }
+        assert!(saw_adjust, "CheckpointAdjust event not found");
+    }
+
+    /// Checkpoint escalate: triggers recovery machinery.
+    #[tokio::test]
+    async fn checkpoint_escalate_triggers_recovery() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "two subtasks".into(),
+            });
+
+        // Child A assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child A succeeds with discoveries.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["approach is wrong".into()],
+        });
+
+        // Checkpoint returns Escalate.
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Escalate);
+
+        // Recovery assess: recoverable.
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("switch approach".into()));
+
+        // Recovery plan: incremental, one new subtask.
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(RecoveryPlan {
+                full_redecomposition: false,
+                subtasks: vec![SubtaskSpec {
+                    goal: "recovery child".into(),
+                    verification_criteria: vec!["recovery passes".into()],
+                    magnitude_estimate: MagnitudeEstimate::Small,
+                }],
+                rationale: "fix approach".into(),
+            });
+
+        // Recovery child assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Recovery child succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Child B (still pending, runs after recovery in incremental mode) assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child B succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child A, recovery child, child B, root — all pass.
+        for _ in 0..4 {
+            mock.verify_responses
+                .lock()
+                .unwrap()
+                .push_back(pass_verification());
+        }
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Recovery round consumed.
+        assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 1);
+
+        // CheckpointEscalate event emitted.
+        let mut saw_escalate = false;
+        let mut saw_recovery_started = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::CheckpointEscalate { task_id } if task_id == root_id) {
+                saw_escalate = true;
+            }
+            if matches!(event, Event::RecoveryStarted { task_id, .. } if task_id == root_id) {
+                saw_recovery_started = true;
+            }
+        }
+        assert!(saw_escalate, "CheckpointEscalate event not found");
+        assert!(
+            saw_recovery_started,
+            "RecoveryStarted event not found (escalation should trigger recovery)"
+        );
+    }
+
+    /// Checkpoint escalate when recovery is not possible: propagates failure.
+    #[tokio::test]
+    async fn checkpoint_escalate_unrecoverable_fails() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "two subtasks".into(),
+            });
+
+        // Child A assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child A succeeds with discoveries.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["fatal issue".into()],
+        });
+
+        // Verification: child A passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Checkpoint returns Escalate.
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Escalate);
+
+        // Recovery assess: not recoverable.
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(None);
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { .. }));
+    }
+
+    /// Checkpoint agent error treated as Proceed (best-effort).
+    #[tokio::test]
+    async fn checkpoint_agent_error_treated_as_proceed() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        // Child assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child succeeds with discoveries (triggers checkpoint).
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["something interesting".into()],
+        });
+
+        // Inject an error so the checkpoint agent call returns Err.
+        mock.checkpoint_errors
+            .lock()
+            .unwrap()
+            .push_back("simulated LLM failure".into());
+
+        // Verification: child, root — both pass.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // The error fallback means no CheckpointAdjust or CheckpointEscalate events.
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, Event::CheckpointAdjust { .. }),
+                "unexpected CheckpointAdjust event after agent error"
+            );
+            assert!(
+                !matches!(event, Event::CheckpointEscalate { .. }),
+                "unexpected CheckpointEscalate event after agent error"
+            );
+        }
+
+        // No checkpoint_guidance should be stored on the parent.
+        assert!(
+            orch.state.get(root_id).unwrap().checkpoint_guidance.is_none(),
+            "checkpoint_guidance should be None when agent errors out"
+        );
+    }
+
+    /// Checkpoint guidance persisted and survives serialization round-trip.
+    #[tokio::test]
+    async fn checkpoint_guidance_persisted() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A ok".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B ok".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "two subtasks".into(),
+            });
+
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["found issue".into()],
+        });
+
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Adjust {
+                guidance: "use new approach".into(),
+            });
+
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        for _ in 0..3 {
+            mock.verify_responses
+                .lock()
+                .unwrap()
+                .push_back(pass_verification());
+        }
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Verify guidance survives JSON round-trip.
+        let json = serde_json::to_string(&orch.state).unwrap();
+        let restored: EpicState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.get(root_id).unwrap().checkpoint_guidance.as_deref(),
+            Some("use new approach")
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_multiple_adjusts_accumulates_guidance() {
+        let mock = MockAgentService::new();
+
+        // Root decomposes into 3 children: A, B, C.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A ok".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B ok".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child C".into(),
+                        verification_criteria: vec!["C ok".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "three subtasks".into(),
+            });
+
+        // All three assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child A succeeds with discoveries → triggers checkpoint.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["discovered API v2".into()],
+        });
+
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Adjust {
+                guidance: "use API v2".into(),
+            });
+
+        // Child B succeeds with discoveries → triggers checkpoint.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["discovered gzip support".into()],
+        });
+
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Adjust {
+                guidance: "also use gzip".into(),
+            });
+
+        // Child C succeeds without discoveries → no checkpoint.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // 4 verifications: children A, B, C + root.
+        for _ in 0..4 {
+            mock.verify_responses
+                .lock()
+                .unwrap()
+                .push_back(pass_verification());
+        }
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Guidance accumulates newline-separated rather than being overwritten.
+        assert_eq!(
+            orch.state
+                .get(root_id)
+                .unwrap()
+                .checkpoint_guidance
+                .as_deref(),
+            Some("use API v2\nalso use gzip")
+        );
+
+        // Two CheckpointAdjust events emitted.
+        let mut adjust_count = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::CheckpointAdjust { task_id } if task_id == root_id) {
+                adjust_count += 1;
+            }
+        }
+        assert_eq!(adjust_count, 2, "expected exactly 2 CheckpointAdjust events");
+    }
+
+    /// When a fix task's child discoveries trigger Escalate, recovery is rejected
+    /// because attempt_recovery refuses fix tasks, so the branch fails immediately.
+    #[tokio::test]
+    async fn checkpoint_escalate_on_fix_task_fails() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "two subtasks".into(),
+            });
+
+        // Child A assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child A succeeds with discoveries → triggers checkpoint.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["fatal issue".into()],
+        });
+
+        // Verification: child A passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Checkpoint returns Escalate.
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Escalate);
+
+        // No recovery_responses needed — attempt_recovery rejects fix tasks before
+        // consulting the agent.
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+
+        // Mark the root as a fix task so attempt_recovery rejects it.
+        orch.state.get_mut(root_id).unwrap().is_fix_task = true;
+
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { .. }));
+
+        // Verify events: CheckpointEscalate emitted, RecoveryStarted not emitted.
+        let mut saw_escalate = false;
+        let mut saw_recovery_started = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::CheckpointEscalate { task_id } if task_id == root_id) {
+                saw_escalate = true;
+            }
+            if matches!(event, Event::RecoveryStarted { task_id, .. } if task_id == root_id) {
+                saw_recovery_started = true;
+            }
+        }
+        assert!(saw_escalate, "CheckpointEscalate event not found");
+        assert!(
+            !saw_recovery_started,
+            "RecoveryStarted should not be emitted for fix tasks"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_guidance_flows_to_child_context() {
+        let mock = MockAgentService::new();
+        let (tx, _rx) = events::event_channel();
+
+        let mut state = EpicState::new();
+
+        // Create root (branch) with two children A and B.
+        let root_id = state.next_task_id();
+        let mut root = Task::new(
+            root_id,
+            None,
+            "root goal".into(),
+            vec!["root passes".into()],
+            0,
+        );
+
+        let child_a_id = state.next_task_id();
+        let child_a = Task::new(
+            child_a_id,
+            Some(root_id),
+            "child A goal".into(),
+            vec!["A passes".into()],
+            1,
+        );
+
+        let child_b_id = state.next_task_id();
+        let child_b = Task::new(
+            child_b_id,
+            Some(root_id),
+            "child B goal".into(),
+            vec!["B passes".into()],
+            1,
+        );
+
+        root.subtask_ids = vec![child_a_id, child_b_id];
+        root.checkpoint_guidance = Some("use API v2".into());
+        state.insert(root);
+
+        // Child A is completed.
+        let mut a = child_a;
+        a.phase = TaskPhase::Completed;
+        state.insert(a);
+
+        // Child B is pending.
+        state.insert(child_b);
+
+        let orch = Orchestrator::new(mock, state, tx);
+        let ctx = orch.build_context(child_b_id).unwrap();
+
+        assert_eq!(
+            ctx.checkpoint_guidance.as_deref(),
+            Some("use API v2"),
+            "checkpoint guidance from parent should flow into child context"
+        );
+    }
+
+    /// Checkpoint escalation when recovery rounds are already at MAX_RECOVERY_ROUNDS
+    /// results in immediate failure without starting a new recovery round.
+    #[tokio::test]
+    async fn checkpoint_escalate_recovery_rounds_exhausted() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "two subtasks".into(),
+            });
+
+        // Child A assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child A succeeds with discoveries.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["approach is wrong".into()],
+        });
+
+        // Verification: child A passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Checkpoint returns Escalate.
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Escalate);
+
+        // No recovery_responses needed — attempt_recovery will bail out
+        // before calling assess_recovery because recovery_rounds >= MAX_RECOVERY_ROUNDS.
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+
+        // Pre-set recovery_rounds to MAX_RECOVERY_ROUNDS so escalation exhausts immediately.
+        orch.state.get_mut(root_id).unwrap().recovery_rounds = 2;
+
+        let result = orch.run(root_id).await.unwrap();
+        assert!(
+            matches!(result, TaskOutcome::Failed { ref reason } if reason.contains("recovery rounds exhausted")),
+            "expected failure with 'recovery rounds exhausted', got: {result:?}"
+        );
+
+        // Verify events.
+        let mut saw_escalate = false;
+        let mut saw_recovery_started = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::CheckpointEscalate { task_id } if task_id == root_id) {
+                saw_escalate = true;
+            }
+            if matches!(event, Event::RecoveryStarted { task_id, .. } if task_id == root_id) {
+                saw_recovery_started = true;
+            }
+        }
+        assert!(saw_escalate, "CheckpointEscalate event not found");
+        assert!(
+            !saw_recovery_started,
+            "RecoveryStarted should not be emitted when recovery rounds are exhausted"
+        );
+    }
+
+    /// Checkpoint escalate after prior adjust: guidance is cleared before recovery runs.
+    #[tokio::test]
+    async fn checkpoint_escalate_clears_prior_guidance() {
+        let mock = MockAgentService::new();
+
+        // Root decomposes into 3 children: A, B, C.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child C".into(),
+                        verification_criteria: vec!["C passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "three subtasks".into(),
+            });
+
+        // Child A assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child A succeeds with discoveries.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["use API v2".into()],
+        });
+
+        // Checkpoint returns Adjust with guidance.
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Adjust {
+                guidance: "old guidance".into(),
+            });
+
+        // Child B assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child B succeeds with discoveries.
+        mock.leaf_responses.lock().unwrap().push_back(LeafResult {
+            outcome: TaskOutcome::Success,
+            discoveries: vec!["approach is fundamentally wrong".into()],
+        });
+
+        // Checkpoint returns Escalate.
+        mock.checkpoint_responses
+            .lock()
+            .unwrap()
+            .push_back(CheckpointDecision::Escalate);
+
+        // Recovery assess: recoverable.
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("fix approach".into()));
+
+        // Recovery plan: incremental, one new subtask.
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(RecoveryPlan {
+                full_redecomposition: false,
+                subtasks: vec![SubtaskSpec {
+                    goal: "recovery child".into(),
+                    verification_criteria: vec!["recovery passes".into()],
+                    magnitude_estimate: MagnitudeEstimate::Small,
+                }],
+                rationale: "fix approach".into(),
+            });
+
+        // Recovery child assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Recovery child succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Child C (still pending in incremental mode) assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child C succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child A, child B, recovery child, child C, root — all pass.
+        for _ in 0..5 {
+            mock.verify_responses
+                .lock()
+                .unwrap()
+                .push_back(pass_verification());
+        }
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Guidance cleared by escalation.
+        assert!(
+            orch.state.get(root_id).unwrap().checkpoint_guidance.is_none(),
+            "checkpoint_guidance should be None after escalation clears prior adjust guidance"
+        );
+
+        // Both CheckpointAdjust and CheckpointEscalate events emitted.
+        let mut saw_adjust = false;
+        let mut saw_escalate = false;
+        let mut saw_recovery_started = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::CheckpointAdjust { task_id } if task_id == root_id) {
+                saw_adjust = true;
+            }
+            if matches!(event, Event::CheckpointEscalate { task_id } if task_id == root_id) {
+                saw_escalate = true;
+            }
+            if matches!(event, Event::RecoveryStarted { task_id, .. } if task_id == root_id) {
+                saw_recovery_started = true;
+            }
+        }
+        assert!(saw_adjust, "CheckpointAdjust event not found");
+        assert!(saw_escalate, "CheckpointEscalate event not found");
+        assert!(
+            saw_recovery_started,
+            "RecoveryStarted event not found (escalation should trigger recovery)"
+        );
+
+        // Recovery round consumed.
+        assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 1);
     }
 }

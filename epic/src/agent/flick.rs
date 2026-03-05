@@ -312,7 +312,7 @@ impl AgentService for FlickAgent {
         let pair = prompts::build_checkpoint(ctx, discoveries);
         let config = config_gen::build_checkpoint_config(
             &pair.system_prompt,
-            Model::Sonnet,
+            Model::Haiku,
             &self.credential_name,
         )?;
 

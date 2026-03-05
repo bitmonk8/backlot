@@ -734,7 +734,7 @@ mod tests {
     fn config_no_tools_no_tools_key() {
         let config = build_checkpoint_config(
             "You are a checkpoint agent.",
-            Model::Sonnet,
+            Model::Haiku,
             "key",
         );
         assert!(config.is_ok());

@@ -2,12 +2,12 @@
 
 ## Agent Execution
 
-All agent calls invoke Flick as a subprocess. Epic spawns a Flick process per agent call with the desired model, tool configuration, and system prompt. Epic owns all persistent state.
+All agent calls use Flick as a library crate dependency. Epic calls Flick's API directly per agent call with the desired model, tool configuration, and system prompt. No subprocess spawning or file I/O — config is built as JSON in-memory. Epic owns all persistent state.
 
 Key integration points:
-- **Per-call model selection** — passed as CLI argument to Flick
+- **Per-call model selection** — passed via Flick config
 - **Per-call tool scoping** — Epic controls which tools Flick is granted per invocation
-- **Structured output** — Flick-based approach TBD; likely JSON output on stdout
+- **Structured output** — Flick returns structured JSON via output schema; Epic deserializes into wire types via serde
 - **No token streaming for v1** — TUI displays event-level updates
 
 ## Model Selection
@@ -52,9 +52,9 @@ Per-phase tool grants:
 
 | Task Path | Phase | Tools | Purpose |
 |---|---|---|---|
-| Any | Assess | NONE | Pure structured output |
+| Any | Assess | READ | Read-only analysis |
 | Leaf | Implement | READ \| WRITE \| EXECUTE | Code changes |
-| Leaf | Verify | NONE | Structured judgment |
+| Leaf | Verify | READ | Read-only analysis |
 | Branch | Design + Decompose | EXPLORE | Research, no writes |
 | Branch | Verify | TASK | May spawn sub-agents for large diffs |
 
@@ -71,4 +71,4 @@ Research Service is exposed as a tool to the agent during implementation and des
 
 ## Structured Output
 
-Structured output approach TBD pending Flick integration. Likely: Flick outputs JSON to stdout, Epic deserializes into Rust structs via serde. See [Flick Integration](FLICK_INTEGRATION.md).
+Flick returns structured JSON via `output_schema` configuration. Epic deserializes the response text into wire format types (e.g., `AssessmentWire`, `CheckpointWire`) via serde, then converts to domain types via `TryFrom`. See [Flick Integration](FLICK_INTEGRATION.md).

@@ -59,10 +59,17 @@ fn format_context(ctx: &TaskContext) -> String {
             .join("\n")
     };
 
+    let guidance_section = ctx
+        .checkpoint_guidance
+        .as_deref()
+        .map_or_else(String::new, |g| {
+            format!("\n\n## Checkpoint Guidance\n{g}")
+        });
+
     format!(
         "## Task\nGoal: {goal}\nVerification criteria:\n- {criteria}\n\n\
          ## Position\nDepth: {depth}\nParent goal: {parent}\nAncestor chain:\n{ancestors}\n\n\
-         ## Siblings\nCompleted:\n{completed}\nPending:\n{pending}",
+         ## Siblings\nCompleted:\n{completed}\nPending:\n{pending}{guidance_section}",
         goal = ctx.task.goal,
         depth = ctx.task.depth,
         parent = parent_line,
@@ -372,6 +379,7 @@ mod tests {
                 discoveries: vec!["found existing util".into()],
             }],
             pending_sibling_goals: vec!["write docs".into()],
+            checkpoint_guidance: None,
         }
     }
 
@@ -438,6 +446,15 @@ mod tests {
     }
 
     #[test]
+    fn context_format_includes_checkpoint_guidance() {
+        let mut ctx = test_context();
+        ctx.checkpoint_guidance = Some("Use API v2 format instead of v1".into());
+        let text = format_context(&ctx);
+        assert!(text.contains("## Checkpoint Guidance"));
+        assert!(text.contains("Use API v2 format instead of v1"));
+    }
+
+    #[test]
     fn context_format_with_no_siblings() {
         let ctx = TaskContext {
             task: Task::new(TaskId(0), None, "root".into(), vec!["done".into()], 0),
@@ -445,6 +462,7 @@ mod tests {
             ancestor_goals: Vec::new(),
             completed_siblings: Vec::new(),
             pending_sibling_goals: Vec::new(),
+            checkpoint_guidance: None,
         };
         let text = format_context(&ctx);
         assert!(text.contains("None (root task)"));

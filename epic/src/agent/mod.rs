@@ -29,6 +29,8 @@ pub struct TaskContext {
     pub ancestor_goals: Vec<String>,
     pub completed_siblings: Vec<SiblingSummary>,
     pub pending_sibling_goals: Vec<String>,
+    /// Adjustment guidance from a checkpoint decision, if any.
+    pub checkpoint_guidance: Option<String>,
 }
 
 /// Trait abstracting all agent interactions.

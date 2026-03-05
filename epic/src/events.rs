@@ -52,6 +52,12 @@ pub enum Event {
         task_id: TaskId,
         count: usize,
     },
+    CheckpointAdjust {
+        task_id: TaskId,
+    },
+    CheckpointEscalate {
+        task_id: TaskId,
+    },
     FixAttempt {
         task_id: TaskId,
         attempt: u32,

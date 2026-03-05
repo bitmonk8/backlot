@@ -269,6 +269,18 @@ impl TuiApp {
                     self.session_start,
                 ));
             }
+            Event::CheckpointAdjust { task_id } => {
+                self.worklog.push(WorklogEntry::warn(
+                    format!("{task_id} checkpoint: adjusting pending subtasks"),
+                    self.session_start,
+                ));
+            }
+            Event::CheckpointEscalate { task_id } => {
+                self.worklog.push(WorklogEntry::warn(
+                    format!("{task_id} checkpoint: escalating to recovery"),
+                    self.session_start,
+                ));
+            }
             Event::FixAttempt {
                 task_id,
                 attempt,

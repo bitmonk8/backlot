@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, fix loops, Flick library migration, and recovery re-decomposition complete.
+**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, fix loops, Flick library migration, recovery re-decomposition, and checkpoint adjust/escalate complete.
 
 ## Milestones
 
@@ -20,18 +20,11 @@
 - [x] Flick library migration — Replaced subprocess invocation with direct library calls. `flick` added as git dependency, `serde_yaml` removed. `FlickAgent` uses `FlickClient` API (no process spawning, no config/tool-result file I/O). `--flick-path` CLI option and `AgentConfig.flick_path` removed. Config built as JSON in-memory, parsed via `Config::from_str()`. Review pass added 3 tests, strengthened config test assertions. 81 tests passing.
 - [x] Fix loop after verification failure — Three components: scope circuit breaker (`Magnitude` struct, `git diff --numstat` check, 3x threshold), leaf fix loop (retry/escalate with `fix_leaf` agent call, reuses model tier progression), branch fix loop (3 rounds Sonnet + 1 Opus for root, `design_fix_subtasks` agent call, fix subtasks marked `is_fix_task` to prevent recursive fix chains). Extracted `fail_task`, `complete_task_verified`, `create_subtasks` helpers and `evaluate_scope` pure function. 18 new tests (81 total).
 - [x] Recovery re-decomposition — When a child fails in a branch, Opus recovery agent creates new subtasks. Two approaches: incremental (preserve completed work, append recovery subtasks) or full (skip remaining pending siblings, replace with recovery subtasks). Max 2 recovery rounds per branch. Fix tasks skip recovery (prevents recursive chains). 10 new tests (91 total).
+- [x] Checkpoint adjust/escalate actions — Checkpoint decision (proceed/adjust/escalate) now acted upon. Adjust accumulates guidance on parent task (newline-separated), propagated to pending siblings via prompt context. Escalate clears stale guidance, triggers recovery with actual discoveries. Checkpoint uses Haiku (classification task). Agent errors treated as Proceed (best-effort, with mock error injection for testing). New `checkpoint_guidance` field on Task, `CheckpointAdjust`/`CheckpointEscalate` events, TUI integration. 11 new tests (105 total).
 
 ## Deferred Items
 
 Items not implemented in v1, with evaluation of complexity, value, and necessity.
-
-### Checkpoint adjust/escalate actions
-
-Currently, discoveries from completed subtasks are passed as context to siblings but the plan is never modified. The design envisions a Haiku classification step (proceed / adjust pending subtasks / escalate to Opus recovery) after each subtask with discoveries.
-
-- **Complexity:** Medium. Haiku classification call, three-way branch, ability to modify goals/criteria of pending subtasks or trigger recovery.
-- **Value:** Medium. The current "pass discoveries as context" approach covers the common case where siblings can adapt on their own. Adjust/escalate handles cases where discoveries invalidate the plan structure itself.
-- **Without it:** Epic relies on agents to interpret discovery context and self-adjust. Works when discoveries are informational; fails when discoveries require structural plan changes.
 
 ### Leaf retry counter resets on resume
 
@@ -67,9 +60,31 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Checkpoint adjust/escalate actions** — Haiku classification after child discoveries to modify pending subtasks or escalate.
+1. **Leaf retry counter persistence** — Persist `retries_at_tier` to prevent bounded overshoot on resume.
+2. **Leaf retry checkpoint** — Checkpoint after each retry attempt to prevent wasted API spend on crash.
 
 ## Decisions Made
+
+### 2026-03-05: Checkpoint adjust/escalate actions implemented
+
+**Scope:** Checkpoint decision (proceed/adjust/escalate) now acted upon instead of discarded. 7 files modified, 11 new tests (105 total).
+
+**Three-way branch in `execute_branch`:**
+- **Proceed**: No change (existing behavior).
+- **Adjust**: Accumulate guidance string on parent task's `checkpoint_guidance` field (newline-separated if multiple Adjusts). Checkpoint saved. Subsequent siblings see guidance via `TaskContext.checkpoint_guidance` → injected into prompt as `## Checkpoint Guidance` section.
+- **Escalate**: Clear stale `checkpoint_guidance`, trigger `attempt_recovery()` with reason including actual discoveries. Reuses full recovery machinery (assess → design → create subtasks). If recovery fails, propagates failure. If recovery succeeds, restarts child loop.
+
+**Error handling:** Agent errors in checkpoint classification treated as Proceed (best-effort, matching recovery error handling pattern). Warning logged to stderr. Mock error injection via `checkpoint_errors` queue enables real error path testing.
+
+**Task changes:** New `checkpoint_guidance: Option<String>` field on `Task` (persisted, serde).
+
+**Context changes:** New `checkpoint_guidance: Option<String>` field on `TaskContext`. Populated from parent task in `build_context()`. `format_context()` in prompts.rs appends `## Checkpoint Guidance` section when present.
+
+**New events:** `CheckpointAdjust { task_id }`, `CheckpointEscalate { task_id }`. TUI worklog handles both.
+
+**Model change:** Checkpoint uses `Model::Haiku` (was Sonnet), matching AGENT_DESIGN.md spec for classification tasks.
+
+**Tests (11 new):** `context_format_includes_checkpoint_guidance` (prompt), `checkpoint_adjust_stores_guidance` (adjust path, event, guidance stored), `checkpoint_escalate_triggers_recovery` (escalate → recovery → success), `checkpoint_escalate_unrecoverable_fails` (escalate → unrecoverable → failure), `checkpoint_agent_error_treated_as_proceed` (real error injection via mock), `checkpoint_guidance_persisted` (JSON round-trip), `checkpoint_multiple_adjusts_accumulates_guidance` (guidance accumulation), `checkpoint_escalate_clears_prior_guidance` (escalate clears stale guidance), `checkpoint_escalate_on_fix_task_fails` (fix task rejects recovery), `checkpoint_escalate_recovery_rounds_exhausted` (exhausted budget), `checkpoint_guidance_flows_to_child_context` (build_context propagation).
 
 ### 2026-03-05: Recovery re-decomposition implemented
 
@@ -155,7 +170,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 **Tests (6):** single_leaf, two_children, leaf_retry_and_escalation, terminal_failure, depth_cap_forces_leaf, persistence_round_trip.
 
-**Deferred for v1:** Checkpoint adjust/escalate actions. (Fix loop: since implemented, see 2026-03-05 decision. Recovery re-decomposition: since implemented, see 2026-03-05 decision.) See "Deferred Items" section for evaluation.
+**Deferred for v1:** Checkpoint adjust/escalate actions (since implemented, see 2026-03-05 decision). (Fix loop: since implemented, see 2026-03-05 decision. Recovery re-decomposition: since implemented, see 2026-03-05 decision.) See "Deferred Items" section for evaluation.
 
 ### 2026-03-04: Replace ZeroClaw with Flick
 
