@@ -60,21 +60,6 @@ pub struct UsageResponse {
     pub cache_read_input_tokens: u64,
 }
 
-/// Provider trait — two methods: call and `build_request`.
-pub trait Provider: Send + Sync {
-    /// Call the model and return a complete response.
-    fn call(
-        &self,
-        params: RequestParams<'_>,
-    ) -> impl std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send;
-
-    /// Build the request body as JSON (for --dry-run).
-    fn build_request(
-        &self,
-        params: RequestParams<'_>,
-    ) -> Result<serde_json::Value, ProviderError>;
-}
-
 /// Concrete provider enum — enables test verification of constructed variant.
 pub enum ProviderInstance {
     Messages(messages::MessagesProvider),
@@ -88,8 +73,8 @@ impl DynProvider for ProviderInstance {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
     {
         match self {
-            Self::Messages(p) => Box::pin(p.call(params)),
-            Self::ChatCompletions(p) => Box::pin(p.call(params)),
+            Self::Messages(p) => p.call_boxed(params),
+            Self::ChatCompletions(p) => p.call_boxed(params),
         }
     }
 
@@ -98,25 +83,9 @@ impl DynProvider for ProviderInstance {
         params: RequestParams<'_>,
     ) -> Result<serde_json::Value, ProviderError> {
         match self {
-            Self::Messages(p) => Provider::build_request(p, params),
-            Self::ChatCompletions(p) => Provider::build_request(p, params),
+            Self::Messages(p) => DynProvider::build_request(p, params),
+            Self::ChatCompletions(p) => DynProvider::build_request(p, params),
         }
-    }
-}
-
-/// Extract an (`input_tokens`, `output_tokens`) pair from a JSON usage object.
-/// Returns `None` if neither field is present.
-pub(crate) fn extract_token_pair(
-    usage: &serde_json::Value,
-    input_field: &str,
-    output_field: &str,
-) -> Option<(u64, u64)> {
-    let input = usage.get(input_field).and_then(serde_json::Value::as_u64);
-    let output = usage.get(output_field).and_then(serde_json::Value::as_u64);
-    if input.is_some() || output.is_some() {
-        Some((input.unwrap_or(0), output.unwrap_or(0)))
-    } else {
-        None
     }
 }
 
@@ -125,21 +94,22 @@ pub fn create_provider(
     provider_config: &ProviderConfig,
     api_key: String,
     base_url: &str,
+    client: reqwest::Client,
 ) -> ProviderInstance {
     match provider_config.api {
         crate::ApiKind::Messages => {
-            ProviderInstance::Messages(messages::MessagesProvider::new(base_url, api_key))
+            ProviderInstance::Messages(messages::MessagesProvider::new(base_url, api_key, client))
         }
         crate::ApiKind::ChatCompletions => {
             let compat = provider_config.compat.clone().unwrap_or_default();
             ProviderInstance::ChatCompletions(chat_completions::ChatCompletionsProvider::new(
-                base_url, api_key, compat,
+                base_url, api_key, compat, client,
             ))
         }
     }
 }
 
-/// Object-safe wrapper for Provider.
+/// Object-safe provider trait — implemented directly by each provider.
 pub trait DynProvider: Send + Sync {
     fn call_boxed<'a>(
         &'a self,
@@ -150,22 +120,6 @@ pub trait DynProvider: Send + Sync {
         &self,
         params: RequestParams<'_>,
     ) -> Result<serde_json::Value, ProviderError>;
-}
-
-impl<T: Provider> DynProvider for T {
-    fn call_boxed<'a>(
-        &'a self,
-        params: RequestParams<'a>,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>> {
-        Box::pin(self.call(params))
-    }
-
-    fn build_request(
-        &self,
-        params: RequestParams<'_>,
-    ) -> Result<serde_json::Value, ProviderError> {
-        Provider::build_request(self, params)
-    }
 }
 
 #[cfg(test)]
@@ -198,7 +152,7 @@ mod tests {
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&config, "test-key".into(), "https://custom.anthropic.com");
+        let provider = create_provider(&config, "test-key".into(), "https://custom.anthropic.com", reqwest::Client::new());
         match &provider {
             ProviderInstance::Messages(p) => {
                 assert_eq!(p.base_url(), "https://custom.anthropic.com");
@@ -216,7 +170,7 @@ mod tests {
                 explicit_tool_choice_auto: true,
             }),
         };
-        let provider = create_provider(&config, "test-key".into(), "https://custom.openai.com");
+        let provider = create_provider(&config, "test-key".into(), "https://custom.openai.com", reqwest::Client::new());
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert_eq!(p.base_url(), "https://custom.openai.com");
@@ -233,7 +187,7 @@ mod tests {
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&messages_config, "key".into(), "https://api.anthropic.com");
+        let provider = create_provider(&messages_config, "key".into(), "https://api.anthropic.com", reqwest::Client::new());
         match &provider {
             ProviderInstance::Messages(p) => {
                 assert_eq!(p.base_url(), "https://api.anthropic.com");
@@ -246,7 +200,7 @@ mod tests {
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&openai_config, "key".into(), "https://api.openai.com");
+        let provider = create_provider(&openai_config, "key".into(), "https://api.openai.com", reqwest::Client::new());
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert_eq!(p.base_url(), "https://api.openai.com");
@@ -262,7 +216,7 @@ mod tests {
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&config, "key".into(), "https://api.openai.com");
+        let provider = create_provider(&config, "key".into(), "https://api.openai.com", reqwest::Client::new());
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert!(!p.compat().explicit_tool_choice_auto);

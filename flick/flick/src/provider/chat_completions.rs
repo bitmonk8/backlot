@@ -1,13 +1,13 @@
-use std::time::Duration;
-
 use reqwest::Client;
 
 use crate::config::CompatFlags;
 use crate::context::{ContentBlock, Message, Role};
 use crate::error::ProviderError;
 use crate::model::openai_reasoning_effort;
+use std::pin::Pin;
+
 use crate::provider::{
-    ModelResponse, Provider, RequestParams, ToolCallResponse, ToolDefinition, UsageResponse,
+    DynProvider, ModelResponse, RequestParams, ToolCallResponse, ToolDefinition, UsageResponse,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
@@ -20,16 +20,12 @@ pub struct ChatCompletionsProvider {
 }
 
 impl ChatCompletionsProvider {
-    #[allow(clippy::expect_used)] // Client::new() panics on same failure
-    pub fn new(base_url: &str, api_key: String, compat: CompatFlags) -> Self {
+    pub fn new(base_url: &str, api_key: String, compat: CompatFlags, client: Client) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             compat,
-            client: Client::builder()
-                .connect_timeout(Duration::from_secs(30))
-                .build()
-                .expect("failed to build HTTP client"),
+            client,
         }
     }
 
@@ -106,24 +102,27 @@ impl ChatCompletionsProvider {
     }
 }
 
-impl Provider for ChatCompletionsProvider {
-    async fn call(
-        &self,
-        params: RequestParams<'_>,
-    ) -> Result<ModelResponse, ProviderError> {
-        let body = self.build_body(&params);
-        let url = format!("{}/v1/chat/completions", self.base_url);
+impl DynProvider for ChatCompletionsProvider {
+    fn call_boxed<'a>(
+        &'a self,
+        params: RequestParams<'a>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let body = self.build_body(&params);
+            let url = format!("{}/v1/chat/completions", self.base_url);
 
-        let json = super::http::request_json(|| {
-            self.client
-                .post(&url)
-                .header("authorization", format!("Bearer {}", self.api_key))
-                .header("content-type", "application/json")
-                .json(&body)
+            let json = super::http::request_json(|| {
+                self.client
+                    .post(&url)
+                    .header("authorization", format!("Bearer {}", self.api_key))
+                    .header("content-type", "application/json")
+                    .json(&body)
+            })
+            .await?;
+
+            parse_response(&json)
         })
-        .await?;
-
-        parse_response(&json)
     }
 
     fn build_request(
@@ -295,7 +294,7 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
 
     // Usage
     let usage_obj = &json["usage"];
-    let (input_tokens, output_tokens) = crate::provider::extract_token_pair(
+    let (input_tokens, output_tokens) = extract_token_pair(
         usage_obj,
         "prompt_tokens",
         "completion_tokens",
@@ -318,6 +317,22 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
             cache_read_input_tokens: cached,
         },
     })
+}
+
+/// Extract an (`input_tokens`, `output_tokens`) pair from a JSON usage object.
+/// Returns `None` if neither field is present.
+fn extract_token_pair(
+    usage: &serde_json::Value,
+    input_field: &str,
+    output_field: &str,
+) -> Option<(u64, u64)> {
+    let input = usage.get(input_field).and_then(serde_json::Value::as_u64);
+    let output = usage.get(output_field).and_then(serde_json::Value::as_u64);
+    if input.is_some() || output.is_some() {
+        Some((input.unwrap_or(0), output.unwrap_or(0)))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -409,6 +424,7 @@ mod tests {
             "https://api.example.com",
             "test-key".into(),
             CompatFlags::default(),
+            Client::new(),
         )
     }
 
@@ -482,6 +498,7 @@ mod tests {
             CompatFlags {
                 explicit_tool_choice_auto: true,
             },
+            Client::new(),
         );
         let (msgs, _) = minimal_params();
         let tools = vec![crate::provider::ToolDefinition {

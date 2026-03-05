@@ -1,5 +1,11 @@
 # Flick — Library Extraction Spec
 
+## Status
+
+**Complete.** Phases 1-2 are done. The workspace restructure and `FlickClient` API are implemented.
+
+Note: Implementation details below may differ from actual code — this document preserves the original spec for reference.
+
 ## Goal
 
 Split Flick into a reusable Rust library crate (`flick`) and a thin CLI binary (`flick-cli`). Rust applications can embed Flick directly, avoiding process-spawn overhead and gaining connection/credential reuse across calls.
@@ -182,7 +188,7 @@ This eliminates all filesystem dependency for library users who don't want `~/.f
 
 ## Migration Strategy
 
-### Phase 1: Restructure into workspace (no API changes)
+### Phase 1: Restructure into workspace (no API changes) — DONE
 
 1. Create workspace `Cargo.toml` at root.
 2. Move `src/` to `flick/src/`.
@@ -190,13 +196,14 @@ This eliminates all filesystem dependency for library users who don't want `~/.f
 4. `flick-cli` depends on `flick` library.
 5. All existing tests pass. Binary name unchanged (`flick`).
 
-### Phase 2: Introduce `FlickClient`
+### Phase 2: Introduce `FlickClient` — DONE
 
 1. Add `FlickClient` struct to `flick/src/lib.rs`.
 2. Provider constructors accept `reqwest::Client` parameter.
 3. Add `Config::from_str()`.
-4. Add `ResolvedCredential` + `with_credential()`.
-5. CLI wrapper uses `FlickClient` internally.
+4. `FlickClient` takes injected `Box<dyn DynProvider>` — fully testable with mocks.
+5. Add `resolve_provider()` standalone function for credential resolution.
+6. CLI uses `FlickClient` internally (`cmd_run_core` takes `&FlickClient`).
 
 ### Phase 3: Publish
 

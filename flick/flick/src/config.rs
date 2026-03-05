@@ -7,6 +7,13 @@ use crate::error::ConfigError;
 use crate::model::{anthropic_budget_tokens, ReasoningLevel};
 use crate::provider::ToolDefinition;
 
+/// Config string format for `Config::from_str`.
+#[derive(Debug, Clone, Copy)]
+pub enum ConfigFormat {
+    Yaml,
+    Json,
+}
+
 /// Top-level configuration.
 ///
 /// Fields are private to enforce validation invariants. Use getter methods
@@ -136,12 +143,7 @@ impl Config {
         // Validate extension before reading the file.
         match ext {
             Some("yaml" | "yml" | "json") => {}
-            Some(_) => {
-                return Err(ConfigError::UnsupportedFormat(
-                    path.display().to_string(),
-                ));
-            }
-            None => {
+            _ => {
                 return Err(ConfigError::UnsupportedFormat(
                     path.display().to_string(),
                 ));
@@ -154,25 +156,29 @@ impl Config {
                 ConfigError::from(e)
             }
         })?;
-        match ext {
-            Some("json") => {
-                let config: Self =
-                    serde_json::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
-                config.validate()?;
-                Ok(config)
-            }
-            _ => {
-                let config: Self =
-                    serde_yml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
-                config.validate()?;
-                Ok(config)
-            }
-        }
+        let format = if ext == Some("json") {
+            ConfigFormat::Json
+        } else {
+            ConfigFormat::Yaml
+        };
+        Self::from_str(&text, format)
     }
 
     /// Parse and validate a YAML config string.
     pub fn parse_yaml(s: &str) -> Result<Self, ConfigError> {
-        let config: Self = serde_yml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        Self::from_str(s, ConfigFormat::Yaml)
+    }
+
+    /// Parse from a string with an explicit format. No file I/O.
+    pub fn from_str(s: &str, format: ConfigFormat) -> Result<Self, ConfigError> {
+        let config: Self = match format {
+            ConfigFormat::Yaml => {
+                serde_yml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?
+            }
+            ConfigFormat::Json => {
+                serde_json::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?
+            }
+        };
         config.validate()?;
         Ok(config)
     }

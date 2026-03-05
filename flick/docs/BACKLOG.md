@@ -1,6 +1,6 @@
 # Flick — Backlog
 
-## Fix Later (12)
+## Fix Later (11)
 
 ### L1. No `deny_unknown_fields` — config typos silently ignored — `config.rs`
 
@@ -65,13 +65,6 @@ On the Unix code path in `load_or_create_secret_key`, if `file.write_all(hex_key
 - **Severity:** Medium — **Fix Risk:** Low — **Effort:** Trivial
 - **Category:** Bug
 
-### L21. `output_schema` silently ignored by Messages provider — `provider/messages.rs:96-101`
-
-When `params.output_schema` is `Some`, the Messages provider discards it without emitting a warning. A user who configures `output_schema` and targets the Anthropic Messages API receives unstructured output with no diagnostic. The Chat Completions provider honours the field via `response_format`.
-
-- **Severity:** Medium — **Fix Risk:** Low — **Effort:** Trivial
-- **Category:** UX
-
 ### L22. Empty thinking signature stored in context, breaks next API call — `runner.rs`
 
 When the provider returns thinking content with an empty signature (e.g., Chat Completions provider, or a malformed Anthropic response), a `ContentBlock::Thinking { signature: "" }` is pushed to context. When that context is later replayed to the Anthropic Messages API in a multi-turn session, the empty signature violates the API contract and produces a hard error on the next invocation.
@@ -88,7 +81,7 @@ When the provider returns thinking content with an empty signature (e.g., Chat C
 
 ---
 
-## Fix When Touched (34)
+## Fix When Touched (41)
 
 ### T1. `read_stdin` accepts unlimited input size — `main.rs`
 

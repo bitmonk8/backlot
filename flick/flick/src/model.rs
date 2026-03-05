@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Abstract reasoning level, mapped per-provider to concrete parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningLevel {
     Minimal,

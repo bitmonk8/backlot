@@ -1,12 +1,12 @@
-use std::time::Duration;
-
 use reqwest::Client;
 
 use crate::context::{ContentBlock, Message, Role};
 use crate::error::ProviderError;
 use crate::model::anthropic_budget_tokens;
+use std::pin::Pin;
+
 use crate::provider::{
-    ModelResponse, Provider, RequestParams, ThinkingContent, ToolCallResponse, UsageResponse,
+    DynProvider, ModelResponse, RequestParams, ThinkingContent, ToolCallResponse, UsageResponse,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -19,15 +19,11 @@ pub struct MessagesProvider {
 }
 
 impl MessagesProvider {
-    #[allow(clippy::expect_used)] // Client::new() panics on same failure
-    pub fn new(base_url: &str, api_key: String) -> Self {
+    pub fn new(base_url: &str, api_key: String, client: Client) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
-            client: Client::builder()
-                .connect_timeout(Duration::from_secs(30))
-                .build()
-                .expect("failed to build HTTP client"),
+            client,
         }
     }
 
@@ -106,25 +102,28 @@ impl MessagesProvider {
     }
 }
 
-impl Provider for MessagesProvider {
-    async fn call(
-        &self,
-        params: RequestParams<'_>,
-    ) -> Result<ModelResponse, ProviderError> {
-        let body = self.build_body(&params);
-        let url = format!("{}/v1/messages", self.base_url);
+impl DynProvider for MessagesProvider {
+    fn call_boxed<'a>(
+        &'a self,
+        params: RequestParams<'a>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let body = self.build_body(&params);
+            let url = format!("{}/v1/messages", self.base_url);
 
-        let json = super::http::request_json(|| {
-            self.client
-                .post(&url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", API_VERSION)
-                .header("content-type", "application/json")
-                .json(&body)
+            let json = super::http::request_json(|| {
+                self.client
+                    .post(&url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", API_VERSION)
+                    .header("content-type", "application/json")
+                    .json(&body)
+            })
+            .await?;
+
+            parse_response(&json)
         })
-        .await?;
-
-        parse_response(&json)
     }
 
     fn build_request(
@@ -323,7 +322,7 @@ mod tests {
     use super::super::test_helpers::minimal_params;
 
     fn make_provider() -> MessagesProvider {
-        MessagesProvider::new(DEFAULT_BASE_URL, "test-key".into())
+        MessagesProvider::new(DEFAULT_BASE_URL, "test-key".into(), Client::new())
     }
 
     #[test]

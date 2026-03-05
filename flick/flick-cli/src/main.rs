@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use xxhash_rust::xxh3::xxh3_128;
 
-use flick::runner;
 use flick::config::Config;
 use flick::context::Context;
 use flick::credential::CredentialStore;
@@ -13,8 +12,9 @@ use flick::error::FlickError;
 use flick::history;
 use flick::model::ReasoningLevel;
 use flick::model_list::{self, ModelFetcher};
-use flick::prompter::{Prompter, TerminalPrompter};
-use flick::provider::{DynProvider, create_provider};
+use flick::FlickClient;
+mod prompter;
+use prompter::{Prompter, TerminalPrompter};
 use flick::result::{FlickResult, ResultError, ResultStatus, UsageSummary};
 
 #[derive(Parser)]
@@ -146,39 +146,33 @@ async fn cmd_run(
         config.override_reasoning(flick::config::ReasoningConfig { level: r })?;
     }
 
-    let provider_config = config.active_provider()?;
-    let cred_store = CredentialStore::new()?;
-    let cred_name = provider_config
-        .credential
-        .as_deref()
-        .unwrap_or_else(|| config.model().provider());
-    let cred_entry = cred_store.get(cred_name).await?;
-    let provider = create_provider(provider_config, cred_entry.key, &cred_entry.base_url);
+    let provider = flick::resolve_provider(&config).await?;
+    let client = FlickClient::new(config, provider);
 
-
-    let (mut context, query_text) = if let Some(ref hash) = resume {
+    let (mut context, query_text, tool_results) = if let Some(ref hash) = resume {
         // Resume session
         let flick_dir = flick::credential::flick_dir()?;
         let context_file = flick_dir.join("contexts").join(format!("{hash}.json"));
-        let mut ctx = Context::load_from_file(&context_file).await?;
+        let ctx = Context::load_from_file(&context_file).await?;
 
-        // tool_results_path guaranteed by validate_run_args
-        let tool_results =
-            flick::context::load_tool_results(tool_results_path.as_ref().unwrap()).await?;
-        ctx.push_tool_results(tool_results)?;
-        (ctx, String::new()) // no user query on resume
+        // tool_results_path presence guaranteed by validate_run_args
+        let tr_path = tool_results_path.as_ref().ok_or_else(|| {
+            FlickError::InvalidArguments("--resume requires --tool-results".into())
+        })?;
+        let tr = flick::context::load_tool_results(tr_path).await?;
+        (ctx, String::new(), Some(tr))
     } else {
         // New session
         let qt = match &query {
             Some(q) => q.clone(),
             None => read_stdin().await?,
         };
-        (Context::default(), qt)
+        (Context::default(), qt, None)
     };
 
     let mut stdout = std::io::stdout().lock();
     let flick_result = cmd_run_core(
-        &config, &provider, &mut context, &query_text, dry_run, &mut stdout,
+        &client, &mut context, &query_text, tool_results, dry_run, &mut stdout,
     ).await?;
 
     // For non-dry-run runs, compute context hash, write context file, output result
@@ -211,6 +205,7 @@ async fn cmd_run(
             cache_read_input_tokens: 0,
             cost_usd: 0.0,
         });
+        let config = client.config();
         let invocation = history::Invocation {
             config_path: config_path.clone(),
             model: config.model().name().to_string(),
@@ -268,39 +263,35 @@ fn validate_run_args(
     Ok(())
 }
 
-/// Testable core: all dependencies injected, no direct I/O.
+/// Testable core: all dependencies injected via `FlickClient`, no direct I/O.
 ///
 /// Returns `None` for dry-run, `Some(FlickResult)` for real runs.
 async fn cmd_run_core(
-    config: &Config,
-    provider: &dyn DynProvider,
+    client: &FlickClient,
     context: &mut Context,
     query: &str,
+    tool_results: Option<Vec<flick::context::ContentBlock>>,
     dry_run: bool,
     output: &mut impl Write,
 ) -> Result<Option<FlickResult>, FlickError> {
-    // Push user query only for new sessions (non-empty query)
-    if !query.is_empty() {
-        context.push_user_text(query)?;
-    } else if context.messages.is_empty() {
-        return Err(FlickError::NoQuery);
-    }
-
     if dry_run {
-        let tool_defs: Vec<flick::provider::ToolDefinition> = config
-            .tools()
-            .iter()
-            .map(flick::config::ToolConfig::to_definition)
-            .collect();
-        let params = runner::build_params(config, &context.messages, &tool_defs);
-        let request_json = provider.build_request(params)?;
+        if query.is_empty() {
+            return Err(FlickError::NoQuery);
+        }
+        let request_json = client.build_request(query)?;
         let json_str = serde_json::to_string_pretty(&request_json)
             .map_err(|e| FlickError::Io(std::io::Error::other(e)))?;
         writeln!(output, "{json_str}").map_err(FlickError::Io)?;
         return Ok(None);
     }
 
-    let result = runner::run(config, provider, context).await?;
+    let result = if let Some(tr) = tool_results {
+        client.resume(context, tr).await?
+    } else if !query.is_empty() {
+        client.run(query, context).await?
+    } else {
+        return Err(FlickError::NoQuery);
+    };
     Ok(Some(result))
 }
 
@@ -690,7 +681,7 @@ async fn read_stdin() -> Result<String, FlickError> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use flick::prompter::MockPrompter;
+    use crate::prompter::MockPrompter;
 
     // -- validate_run_args tests --
 
@@ -996,74 +987,10 @@ mod tests {
     // -- cmd_run_core tests --
 
     use flick::context::ContentBlock;
-    use flick::provider::{ModelResponse, RequestParams, ToolCallResponse, UsageResponse};
+    use flick::provider::ToolCallResponse;
     use flick::result::ResultStatus;
-    use std::pin::Pin;
-    use std::sync::Mutex;
-
-    struct StubProvider;
-    impl DynProvider for StubProvider {
-        fn call_boxed<'a>(
-            &'a self,
-            _params: RequestParams<'a>,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, flick::error::ProviderError>> + Send + 'a>> {
-            Box::pin(async { unreachable!() })
-        }
-        fn build_request(&self, _params: RequestParams<'_>) -> Result<serde_json::Value, flick::error::ProviderError> {
-            Ok(serde_json::json!({"model": "test"}))
-        }
-    }
-
-    /// Provider that returns a single canned response, for `cmd_run_core` tests.
-    struct InlineTestProvider {
-        response: Mutex<Option<ModelResponse>>,
-    }
-
-    impl InlineTestProvider {
-        fn with_text(text: &str) -> Self {
-            Self {
-                response: Mutex::new(Some(ModelResponse {
-                    text: Some(text.to_string()),
-                    thinking: Vec::new(),
-                    tool_calls: Vec::new(),
-                    usage: UsageResponse::default(),
-                })),
-            }
-        }
-
-        fn with_tool_calls(calls: Vec<ToolCallResponse>) -> Self {
-            Self {
-                response: Mutex::new(Some(ModelResponse {
-                    text: None,
-                    thinking: Vec::new(),
-                    tool_calls: calls,
-                    usage: UsageResponse::default(),
-                })),
-            }
-        }
-    }
-
-    impl DynProvider for InlineTestProvider {
-        fn call_boxed<'a>(
-            &'a self,
-            _params: RequestParams<'a>,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, flick::error::ProviderError>> + Send + 'a>> {
-            let response = self
-                .response
-                .lock()
-                .expect("mutex poisoned")
-                .take()
-                .expect("InlineTestProvider called more than once");
-            Box::pin(async move { Ok(response) })
-        }
-
-        fn build_request(
-            &self,
-            _params: RequestParams<'_>,
-        ) -> Result<serde_json::Value, flick::error::ProviderError> {
-            Ok(serde_json::json!({"model": "test"}))
-        }
-    }
+    use flick::test_support::{SingleShotProvider, StubBuildProvider};
+    use flick::DynProvider;
 
     fn stub_config() -> Config {
         Config::parse_yaml(r"
@@ -1078,21 +1005,25 @@ provider:
 ").expect("stub config should parse")
     }
 
+    fn stub_client(provider: Box<dyn DynProvider>) -> FlickClient {
+        FlickClient::new(stub_config(), provider)
+    }
+
     #[tokio::test]
     async fn run_core_empty_query_returns_no_query() {
-        let config = stub_config();
+        let client = stub_client(Box::new(StubBuildProvider));
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&config, &StubProvider, &mut Context::default(), "", false, &mut output).await;
+        let result = cmd_run_core(&client, &mut Context::default(), "", None, false, &mut output).await;
         assert!(matches!(result, Err(FlickError::NoQuery)));
     }
 
     #[tokio::test]
     async fn run_core_dry_run_writes_json() {
-        let config = stub_config();
+        let client = stub_client(Box::new(StubBuildProvider));
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&config, &StubProvider, &mut Context::default(), "hello", true, &mut output).await;
+        let result = cmd_run_core(&client, &mut Context::default(), "hello", None, true, &mut output).await;
         let flick_result = result.expect("should succeed");
         assert!(flick_result.is_none(), "dry-run should return None");
 
@@ -1103,13 +1034,12 @@ provider:
 
     #[tokio::test]
     async fn run_core_non_dry_run_text_response() {
-        let config = stub_config();
-        let provider = InlineTestProvider::with_text("Hello from model");
+        let client = stub_client(SingleShotProvider::with_text("Hello from model"));
         let mut context = Context::default();
         let mut output = Vec::new();
 
         let result = cmd_run_core(
-            &config, &provider, &mut context, "say hello", false, &mut output,
+            &client, &mut context, "say hello", None, false, &mut output,
         )
         .await
         .expect("should succeed");
@@ -1147,16 +1077,17 @@ tools:
         )
         .expect("config should parse");
 
-        let provider = InlineTestProvider::with_tool_calls(vec![ToolCallResponse {
+        let provider = SingleShotProvider::with_tool_calls(vec![ToolCallResponse {
             call_id: "tc_1".into(),
             tool_name: "read_file".into(),
             arguments: r#"{"path":"/tmp/test"}"#.into(),
         }]);
+        let client = FlickClient::new(config, provider);
         let mut context = Context::default();
         let mut output = Vec::new();
 
         let result = cmd_run_core(
-            &config, &provider, &mut context, "read the file", false, &mut output,
+            &client, &mut context, "read the file", None, false, &mut output,
         )
         .await
         .expect("should succeed");
@@ -1197,8 +1128,7 @@ tools:
         )
         .expect("config should parse");
 
-        // Build a context as if a previous run returned tool calls and
-        // the caller already pushed tool results (simulating --resume).
+        // Build context as if a previous run returned tool calls.
         let mut context = Context::default();
         context.push_user_text("read the file").expect("push user");
         context
@@ -1208,27 +1138,27 @@ tools:
                 input: serde_json::json!({"path": "/tmp/test"}),
             }])
             .expect("push assistant");
-        context
-            .push_tool_results(vec![ContentBlock::ToolResult {
-                tool_use_id: "tc_1".into(),
-                content: "file contents here".into(),
-                is_error: false,
-            }])
-            .expect("push tool results");
 
-        let provider = InlineTestProvider::with_text("The file contains data.");
+        // Tool results to be pushed by client.resume().
+        let tool_results = vec![ContentBlock::ToolResult {
+            tool_use_id: "tc_1".into(),
+            content: "file contents here".into(),
+            is_error: false,
+        }];
+
+        let provider = SingleShotProvider::with_text("The file contains data.");
+        let client = FlickClient::new(config, provider);
         let mut output = Vec::new();
 
-        // Empty query simulates resume path (tool results already pushed).
         let result = cmd_run_core(
-            &config, &provider, &mut context, "", false, &mut output,
+            &client, &mut context, "", Some(tool_results), false, &mut output,
         )
         .await
         .expect("should succeed");
 
         let flick_result = result.expect("non-dry-run should return Some");
         assert_eq!(flick_result.status, ResultStatus::Complete);
-        // Context should now have 4 messages: user, assistant(tool_use), user(tool_result), assistant(text)
+        // Context: user, assistant(tool_use), user(tool_result), assistant(text)
         assert_eq!(context.messages.len(), 4);
     }
 

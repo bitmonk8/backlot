@@ -468,10 +468,10 @@ async fn run_content_block_ordering() {
 
 // -- Two-step structured output tests --
 
-/// Config with tools + output_schema on a chat_completions provider.
+/// Config with tools + `output_schema` on a `chat_completions` provider.
 fn test_config_chat_completions_with_schema() -> Config {
     Config::parse_yaml(
-        r#"
+        r"
 model:
   provider: test
   name: test-model
@@ -502,12 +502,12 @@ output_schema:
 pricing:
   input_per_million: 1.0
   output_per_million: 2.0
-"#,
+",
     )
     .expect("test config should parse")
 }
 
-/// Two-step: chat_completions + tools + schema triggers two provider calls
+/// Two-step: `chat_completions` + tools + schema triggers two provider calls
 /// when the first call completes without tool use.
 #[tokio::test]
 async fn run_two_step_structured_output() {
@@ -574,7 +574,7 @@ async fn run_two_step_skipped_when_tool_calls_pending() {
 #[tokio::test]
 async fn run_no_two_step_for_messages_api() {
     let config = Config::parse_yaml(
-        r#"
+        r"
 model:
   provider: test
   name: test-model
@@ -605,7 +605,7 @@ output_schema:
 pricing:
   input_per_million: 1.0
   output_per_million: 2.0
-"#,
+",
     )
     .expect("test config should parse");
 
@@ -625,11 +625,11 @@ pricing:
     assert!(captured[0].output_schema.is_some());
 }
 
-/// Two-step: chat_completions with schema but no tools does NOT trigger two-step.
+/// Two-step: `chat_completions` with schema but no tools does NOT trigger two-step.
 #[tokio::test]
 async fn run_no_two_step_without_tools() {
     let config = Config::parse_yaml(
-        r#"
+        r"
 model:
   provider: test
   name: test-model
@@ -650,7 +650,7 @@ output_schema:
 pricing:
   input_per_million: 1.0
   output_per_million: 2.0
-"#,
+",
     )
     .expect("test config should parse");
 

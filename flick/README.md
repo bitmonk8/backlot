@@ -1,6 +1,13 @@
 # Flick
 
-Ultra-small, ultra-fast command-line tool written in Rust. Takes a YAML (or JSON) config and a query, makes a single LLM call, and returns a JSON result to stdout. Flick declares tool definitions to the model but never executes tools. The caller drives the agent loop externally.
+Ultra-small, ultra-fast LLM primitive written in Rust. Available as both a **CLI tool** (`flick-cli`) and a **Rust library** (`flick`). Takes a YAML (or JSON) config and a query, makes a single LLM call, and returns a JSON result. Flick declares tool definitions to the model but never executes tools. The caller drives the agent loop externally.
+
+The project is a Cargo workspace with two crates:
+
+| Crate | Type | Description |
+|-------|------|-------------|
+| `flick` | library | Core engine — config parsing, provider abstraction, model calling |
+| `flick-cli` | binary | CLI interface wrapping the library |
 
 ## Relationship to Epic
 
@@ -11,10 +18,10 @@ Ultra-small, ultra-fast command-line tool written in Rust. Takes a YAML (or JSON
 
 ## Design Principles
 
-- **Ultra-small.** Minimal binary, minimal dependencies (15 runtime crates (+1 Windows-only)).
+- **Ultra-small.** Minimal binary, minimal dependencies (13 runtime crates (+1 Windows-only)).
 - **Ultra-fast.** Negligible startup overhead. Time-to-first-token is the bottleneck.
 - **Unix-philosophy.** Takes input, produces output, composes via stdin/stdout.
-- **No framework.** Single executable, not an SDK or library.
+- **Dual interface.** Usable as a standalone CLI or embedded as a Rust library.
 - **Tool-calling models only.** No capability-checking fallbacks.
 - **Compatibility-by-configuration.** Provider quirks via flags, not subclasses.
 - **Separation of concerns.** Flick is a pure LLM interface: config in, model call, result out. Tool execution is the caller's responsibility.
@@ -60,6 +67,38 @@ provider:
 ```sh
 flick run --config config.yaml --query "What is Rust?"
 ```
+
+## Library Usage
+
+Add `flick` as a dependency:
+
+```toml
+[dependencies]
+flick = { path = "flick" }  # or from your registry
+tokio = { version = "1", features = ["rt", "macros"] }
+```
+
+```rust
+use flick::{Config, ConfigFormat, Context, FlickClient};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let yaml = std::fs::read_to_string("config.yaml")?;
+    let config = Config::from_str(&yaml, ConfigFormat::Yaml)?;
+    let provider = flick::resolve_provider(&config).await?;
+    let client = FlickClient::new(config, provider);
+
+    let mut ctx = Context::default();
+    let result = client.run("What is Rust?", &mut ctx).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+
+    // To resume after tool calls:
+    // let result = client.resume(&mut ctx, tool_results).await?;
+    Ok(())
+}
+```
+
+For callers that manage their own credentials, use `flick::provider::create_provider` directly to construct a provider, then pass it to `FlickClient::new`.
 
 ## CLI Reference
 
@@ -386,7 +425,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-290 tests (215 lib, 51 bin, 13 runner, 11 integration). One additional Unix-only test for file permissions.
+303 tests (220 lib, 54 bin, 18 runner, 11 integration). One additional Unix-only test for file permissions.
 
 ## License
 
