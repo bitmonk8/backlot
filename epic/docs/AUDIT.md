@@ -214,41 +214,21 @@ Recommended priority (highest-value cells first):
 | Note | 176 |
 | **Total** | **541** |
 
-### Top 5 Most Concerning Findings
+### Top Remaining Finding
 
 **1. Unsandboxed bash execution (U5-R2 #1, U2-R2 #1) — CRITICAL**
 `tool_bash` passes LLM-supplied commands to `sh -c` with zero sandboxing: no containers, namespaces, network isolation, or command allowlist. An agent can exfiltrate data, install software, access credentials, or destroy the host. The `project_root` cwd is trivially escaped. This is the single highest-risk issue in the codebase.
-
-**2. ~~Config not loaded at runtime (U10-R1 #1, U7-R1 #1, X6 #1-3) — MAJOR~~ RESOLVED**
-~~`epic.toml` configuration is collected via `epic init` and persisted, but the orchestrator never reads it. `MAX_DEPTH`, `RETRIES_PER_TIER`, `MAX_RECOVERY_ROUNDS`, and model preferences are all hardcoded constants. User customization is silently ignored.~~ Config now loaded at startup. All hardcoded constants replaced with `LimitsConfig` fields. Model preferences wired through `ModelConfig`. Verification steps included in prompts.
-
-**3. Model selection diverges from design spec (U1-R7, U2-R7, U6-R7, U4-R7) — MAJOR**
-Assessment uses Sonnet instead of Haiku (overspend on classification). Decomposition ignores the assessment-selected model. Recovery assessment uses Sonnet instead of Opus (under-quality for critical decision). Verification always uses Sonnet instead of `max(Haiku, impl_model)`. These affect both cost control and agent effectiveness.
-
-**4. Recovery subtasks get fresh budgets — multiplicative cost risk (B7 #2) — MAJOR** *(Resolved)*
-Recovery subtasks are created with `is_fix_task: false` and inherit the parent's `recovery_rounds` counter, preventing fresh recovery budgets. Combined with a global `max_total_tasks` cap (default 100, configurable via `epic.toml`) and configurable `max_depth` (default 8), multiplicative recovery depth is now bounded. *(Mitigations applied: recovery subtasks inherit the parent's `recovery_rounds`, and a global `max_total_tasks` cap prevents unbounded task creation.)*
-
-**5. Documentation drift from Flick library migration (U17-R4, U17-R8, U17-R7) — MAJOR**
-ARCHITECTURE.md, CONFIGURATION.md, and DOCUMENT_STORE.md still describe Flick as a subprocess/external executable. AGENT_DESIGN.md has incorrect model assignments. CONFIGURATION.md documents a removed `flick_path` option and a non-existent CLI interface. 14+ stale references across docs.
 
 ### Recommended Action Items (Priority Order)
 
 1. **Sandbox the bash tool.** Run agent commands in a container, bubblewrap, or restricted shell. Drop network access by default. This is a security prerequisite for real-world use.
 
-2. **Wire epic.toml to the orchestrator.** Load config at startup, pass limits to `Orchestrator::new`. Remove or deprecate hardcoded constants. The config structs and init flow already exist — only the plumbing is missing.
+2. **Add CI pipeline.** GitHub Actions with `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`. Pin the Flick git dependency to a rev/tag. Add `rust-toolchain.toml`.
 
-3. **Fix model selection to match AGENT_DESIGN.md.** Assessment → Haiku, decomposition → assessment-selected model, recovery assessment → Opus, verification → max(Haiku, impl_model). Or update the design doc if the current choices are intentional.
+3. **Extract main() into testable function.** Replace `process::exit` calls with `bail!`, extract `async fn run()` that accepts injected dependencies. This unlocks integration testing for the entire entry point.
 
-4. ~~**Cap total task count and recovery depth.**~~ **Done.** Global `max_total_tasks` cap (default 100) added, recovery subtasks inherit parent's `recovery_rounds`.
+4. **Remove dead modules.** `src/git.rs`, `src/metrics.rs`, `src/services/*.rs` are empty stubs declared in `main.rs` but never used.
 
-5. **Update stale documentation.** Remove subprocess references from ARCHITECTURE.md, fix CLI description in CONFIGURATION.md, remove `flick_path`, update model assignments in AGENT_DESIGN.md.
+5. **Deduplicate retry/escalation loop.** `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical state machine code. Extract a shared `retry_with_escalation` helper.
 
-6. **Add CI pipeline.** GitHub Actions with `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`. Pin the Flick git dependency to a rev/tag. Add `rust-toolchain.toml`.
-
-7. **Extract main() into testable function.** Replace `process::exit` calls with `bail!`, extract `async fn run()` that accepts injected dependencies. This unlocks integration testing for the entire entry point.
-
-8. **Remove dead modules.** `src/git.rs`, `src/metrics.rs`, `src/services/*.rs` are empty stubs declared in `main.rs` but never used.
-
-9. **Deduplicate retry/escalation loop.** `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical state machine code. Extract a shared `retry_with_escalation` helper.
-
-10. **Add cycle detection to `dfs_order`.** `EpicState::dfs_order` will infinite-loop on cyclic task graphs from corrupted state files.
+6. **Add cycle detection to `dfs_order`.** `EpicState::dfs_order` will infinite-loop on cyclic task graphs from corrupted state files.

@@ -17,7 +17,7 @@
 │   → verify, leaf/branch paths)              │
 ├────────────────┬────────────────────────────┤
 │  Services      │  Agent Layer               │
-│  - Research    │  - All calls via Flick CLI  │
+│  - Research    │  - All calls via Flick lib  │
 │  - Verification│  - Per-call model selection │
 │  - Document    │  - Per-call tool scoping    │
 │    Store       │  - Prompt assembly          │
@@ -36,7 +36,7 @@
 | Async runtime | tokio | `tokio` |
 | Error handling | thiserror at module boundaries, anyhow for propagation | `thiserror`, `anyhow` |
 | Serialization | serde ecosystem | `serde`, `serde_json`, `toml` |
-| Agent runtime | Flick (external executable, subprocess invocation) | None (no crate dependency) |
+| Agent runtime | Flick (library crate dependency) | `flick` (git dependency) |
 | TUI | ratatui + crossterm, read-only monitoring for v1 | `ratatui`, `crossterm` |
 | Config format | TOML | `toml` |
 
@@ -110,7 +110,7 @@ For each subtask (DFS preorder):
 All major components receive their dependencies explicitly. No globals, statics, or singletons. The entry point constructs the dependency graph and threads it through.
 
 Key dependency types:
-- `AgentContext` — bundles Flick subprocess configuration, document store, verification config. Each agent call spawns a new Flick process (stateless per-call).
+- `TaskContext` and `FlickAgent` — bundle Flick library configuration, document store, verification config. Each agent call creates a new `FlickClient` via Flick's library API (stateless per-call, no process spawning).
 - `EventEmitter` — trait object for logging/TUI events
 - `ProjectConfig` — verification steps, paths, model preferences (loaded from TOML)
 - `EpicState` — task tree and session state (owned by orchestrator)

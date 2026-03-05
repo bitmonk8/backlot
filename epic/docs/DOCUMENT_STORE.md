@@ -25,7 +25,7 @@ Centralized knowledge collection at `.epic/docs/`. All tasks see all accumulated
 
 ### Librarian
 
-A Flick agent (Haiku model, read-only tools) manages document placement, merging, and restructuring. Invoked as a subprocess like all other agent calls. Prevents documents from growing unbounded. Handles deduplication.
+A Flick agent (Haiku model, read-only tools) manages document placement, merging, and restructuring. Invoked via Flick library like all other agent calls. Prevents documents from growing unbounded. Handles deduplication.
 
 ## Research Service
 
@@ -53,6 +53,6 @@ The research service is demand-driven — called when an agent hits uncertainty 
 ## Rust Implementation Considerations
 
 - Document store is file-based (markdown files in `.epic/docs/`) for v1. Small document counts make this sufficient; SQLite index can layer on later if needed.
-- Query/record operations invoke agent calls (Haiku) via Flick subprocess
+- Query/record operations invoke agent calls (Haiku) via Flick library
 - Epic owns all persistent knowledge storage.
 - Serde for structured responses from librarian/query agents

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (135 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, and task/recovery caps remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (135 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, and stale documentation remediated; continuing hardening.
 
 ## Milestones
 
@@ -49,16 +49,12 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 
-1. **Sandboxing** — Two-layer approach documented in [SANDBOXING.md](SANDBOXING.md). Security: VM/container guidance + startup detection warning. Operational correctness: Frida-based runtime interception (frida-gum/frida-core) to enforce per-phase access policies. Next step: prototype Frida Rust bindings. (Critical: U5-R2 #1, U2-R2 #1)
-2. ~~**Wire epic.toml to the orchestrator**~~ — **Done.** Config loaded at startup, hardcoded constants replaced. (Major: U10-R1, U7-R1, X6)
-3. ~~**Fix model selection to match AGENT_DESIGN.md**~~ — **Done.** Assessment→Haiku, decompose→assessment-selected, recovery→Opus, verification→spec-compliant capping. (Major: U1-R7, U2-R7, U6-R7)
-4. ~~**Cap total task count and recovery depth**~~ — **Done.** `max_total_tasks` config (default 100), limit checked at decomposition/fix/recovery. Recovery subtasks inherit parent's `recovery_rounds`. (Major: B7, U1-R2)
-5. **Update stale documentation** — 14+ subprocess/Flick references not updated after library migration. (Major: U17-R4, U17-R8)
-6. **Add CI pipeline** — No CI exists. Pin Flick dependency. Add `rust-toolchain.toml`. (Critical: X4)
-7. **Extract main() into testable function** — Replace `process::exit` with `bail!`, enable integration testing. (Critical: U12-R6)
-8. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs. (Major: U14-R4, U15-R4, U16-R4)
-9. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code. (Major: B1, U1-R5)
-10. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files. (Major: U8-R1, U8-R2)
+1. **Sandboxing** — Two-layer approach documented in [SANDBOXING.md](SANDBOXING.md). Security: VM/container guidance + startup detection warning. Operational correctness: Frida-based runtime interception (frida-gum/frida-core) to enforce per-phase access policies. Next step: prototype Frida Rust bindings. (Critical)
+2. **Add CI pipeline** — No CI exists. Pin Flick dependency. Add `rust-toolchain.toml`. (Critical)
+3. **Extract main() into testable function** — Replace `process::exit` with `bail!`, enable integration testing. (Critical)
+4. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs. (Major)
+5. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code. (Major)
+6. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files. (Major)
 
 ## Decisions Made
 
