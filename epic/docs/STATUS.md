@@ -48,7 +48,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 
-1. **Sandbox the bash tool** — LLM agents run arbitrary shell commands with zero isolation. Security prerequisite for real-world use. (Critical: U5-R2 #1, U2-R2 #1)
+1. **Sandboxing** — Two-layer approach documented in [SANDBOXING.md](SANDBOXING.md). Security: VM/container guidance + startup detection warning. Operational correctness: Frida-based runtime interception (frida-gum/frida-core) to enforce per-phase access policies. Next step: prototype Frida Rust bindings. (Critical: U5-R2 #1, U2-R2 #1)
 2. **Wire epic.toml to the orchestrator** — Config is collected by `init` but never loaded at runtime. `MAX_DEPTH`, `RETRIES_PER_TIER`, model preferences all hardcoded. (Major: U10-R1, U7-R1, X6)
 3. **Fix model selection to match AGENT_DESIGN.md** — Assessment, decomposition, recovery, and verification all use wrong model tiers. (Major: U1-R7, U2-R7, U6-R7)
 4. **Cap total task count and recovery depth** — Recovery subtasks get fresh budgets, enabling exponential cost. (Major: B7, U1-R2)
@@ -60,6 +60,18 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 10. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files. (Major: U8-R1, U8-R2)
 
 ## Decisions Made
+
+### 2026-03-05: Sandboxing approach decided
+
+**Two distinct concerns, two distinct solutions:**
+
+1. **Security isolation** — Not epic's job. The only robust boundary is a user-managed VM/container. Epic will: (a) best-effort detect at startup whether it's running in a container/VM, (b) warn if not, (c) provide documentation with recommended container configurations. Epic will NOT implement OS-level sandboxing (namespaces, seccomp, chroot, etc.) and will NOT refuse to run outside a container.
+
+2. **Correct epic operation** — Frida-based runtime interception. frida-gum for in-process syscall hooking (file open/write/exec), frida-core for child process attachment (bash-spawned subprocesses). Per-phase access policies (read set, write set, spawn rules) enforced at the syscall level. Existing enforcement layers retained (ToolGrant bitflags, safe_path containment). Rollout plan: audit mode first (log violations), then enforcement mode (block violations).
+
+**Open questions:** Child process injection latency, write set derivation granularity, network policy, tokio thread pool interaction with per-thread interceptors, graceful degradation if Frida unavailable.
+
+See [SANDBOXING.md](SANDBOXING.md) for full design document.
 
 ### 2026-03-05: Full codebase audit completed
 

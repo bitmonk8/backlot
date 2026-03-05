@@ -37,6 +37,7 @@ Epic inherits the *conceptual model* from fds2_epic but diverges in implementati
 | [TUI Design](TUI_DESIGN.md) | Terminal interface: task tree, worklog, progress display |
 | [Fix Loop Spec](FIX_LOOP_SPEC.md) | Fix loop after verification failure: leaf fix, branch fix, scope circuit breaker |
 | [Flick Library Migration](FLICK_LIBRARY_MIGRATION.md) | Spec (implemented): replace subprocess invocation with library dependency |
+| [Sandboxing](SANDBOXING.md) | Two-layer sandboxing: VM/container guidance (security) + Frida-based runtime enforcement (operational correctness) |
 | [Open Questions](OPEN_QUESTIONS.md) | Design decisions record (all resolved) |
 | [Status](STATUS.md) | Current phase, milestones, next work candidates, decisions log |
 
