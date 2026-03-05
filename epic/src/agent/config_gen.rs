@@ -1,6 +1,5 @@
 // Flick configuration generation: in-memory config, wire format types, output schemas.
 
-use crate::agent::models::default_max_tokens;
 use crate::agent::tools::{FlickToolDef, ToolGrant, tool_definitions};
 use crate::config::project::{ModelConfig, VerificationStep};
 use crate::task::assess::AssessmentResult;
@@ -324,8 +323,16 @@ pub fn recovery_plan_schema() -> JsonValue {
 // Config builders (one per AgentService method)
 // ---------------------------------------------------------------------------
 
+/// Default max token budget for a given model tier.
+const fn default_max_tokens(model: Model) -> u32 {
+    match model {
+        Model::Haiku | Model::Sonnet => 8192,
+        Model::Opus => 16384,
+    }
+}
+
 /// Resolve the Flick model name for a tier, using config overrides.
-fn resolve_model_name<'a>(model: Model, model_config: &'a ModelConfig) -> &'a str {
+fn resolve_model_name(model: Model, model_config: &ModelConfig) -> &str {
     match model {
         Model::Haiku => &model_config.fast,
         Model::Sonnet => &model_config.balanced,
@@ -563,8 +570,6 @@ fn parse_model_name(s: &str) -> anyhow::Result<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::models::flick_model_id;
-
     #[test]
     fn assessment_wire_roundtrip() {
         let wire = AssessmentWire {
@@ -835,18 +840,9 @@ mod tests {
     #[test]
     fn resolve_model_name_default_config_matches_flick_ids() {
         let default_cfg = ModelConfig::default();
-        assert_eq!(
-            resolve_model_name(Model::Haiku, &default_cfg),
-            flick_model_id(Model::Haiku),
-        );
-        assert_eq!(
-            resolve_model_name(Model::Sonnet, &default_cfg),
-            flick_model_id(Model::Sonnet),
-        );
-        assert_eq!(
-            resolve_model_name(Model::Opus, &default_cfg),
-            flick_model_id(Model::Opus),
-        );
+        assert_eq!(resolve_model_name(Model::Haiku, &default_cfg), "claude-haiku-4-5-20251001");
+        assert_eq!(resolve_model_name(Model::Sonnet, &default_cfg), "claude-sonnet-4-6");
+        assert_eq!(resolve_model_name(Model::Opus, &default_cfg), "claude-opus-4-6");
     }
 
     #[test]
@@ -865,6 +861,13 @@ mod tests {
         .unwrap();
         // build_init_config uses Model::Sonnet, which maps to cfg.balanced.
         assert_eq!(config.model().name(), "my-custom-sonnet");
+    }
+
+    #[test]
+    fn default_max_tokens_per_tier() {
+        assert_eq!(default_max_tokens(Model::Haiku), 8192);
+        assert_eq!(default_max_tokens(Model::Sonnet), 8192);
+        assert_eq!(default_max_tokens(Model::Opus), 16384);
     }
 
     #[test]

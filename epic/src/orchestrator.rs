@@ -450,7 +450,6 @@ impl<A: AgentService> Orchestrator<A> {
                     .get_mut(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
                 task.path = Some(assessment.path.clone());
-                task.model = Some(assessment.model);
                 task.current_model = Some(assessment.model);
                 task.magnitude.clone_from(&assessment.magnitude);
             }
@@ -476,6 +475,17 @@ impl<A: AgentService> Orchestrator<A> {
         })
     }
 
+    fn verification_model(&self, id: TaskId) -> Result<Model, OrchestratorError> {
+        let task = self.state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
+        match task.path {
+            Some(TaskPath::Leaf) => {
+                let impl_model = task.current_model.unwrap_or(Model::Haiku);
+                Ok(impl_model.clamp(Model::Haiku, Model::Sonnet))
+            }
+            _ => Ok(Model::Sonnet),
+        }
+    }
+
     async fn finalize_task(
         &mut self,
         id: TaskId,
@@ -485,8 +495,9 @@ impl<A: AgentService> Orchestrator<A> {
             self.transition(id, TaskPhase::Verifying)?;
             self.emit(Event::VerificationStarted { task_id: id });
 
+            let verify_model = self.verification_model(id)?;
             let ctx = self.build_context(id)?;
-            let verify_result = self.agent.verify(&ctx).await?;
+            let verify_result = self.agent.verify(&ctx, verify_model).await?;
 
             match verify_result.outcome {
                 VerificationOutcome::Pass => self.complete_task_verified(id),
@@ -629,8 +640,9 @@ impl<A: AgentService> Orchestrator<A> {
             if outcome == TaskOutcome::Success {
                 // Re-verify after successful fix.
                 self.emit(Event::VerificationStarted { task_id: id });
+                let verify_model = self.verification_model(id)?;
                 let ctx = self.build_context(id)?;
-                let verify_result = self.agent.verify(&ctx).await?;
+                let verify_result = self.agent.verify(&ctx, verify_model).await?;
 
                 match verify_result.outcome {
                     VerificationOutcome::Pass => {
@@ -761,8 +773,9 @@ impl<A: AgentService> Orchestrator<A> {
 
             // Re-verify the branch after fix subtasks complete.
             self.emit(Event::VerificationStarted { task_id: id });
+            let verify_model = self.verification_model(id)?;
             let ctx = self.build_context(id)?;
-            let verify_result = self.agent.verify(&ctx).await?;
+            let verify_result = self.agent.verify(&ctx, verify_model).await?;
 
             match verify_result.outcome {
                 VerificationOutcome::Pass => {
@@ -906,8 +919,10 @@ impl<A: AgentService> Orchestrator<A> {
             .clone();
 
         if existing_subtasks.is_empty() {
+            let task = self.state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
+            let decompose_model = task.current_model.unwrap_or(Model::Sonnet);
             let ctx = self.build_context(id)?;
-            let decomposition = self.agent.design_and_decompose(&ctx).await?;
+            let decomposition = self.agent.design_and_decompose(&ctx, decompose_model).await?;
 
             {
                 let task = self
@@ -1200,6 +1215,8 @@ mod tests {
         checkpoint_errors: Mutex<VecDeque<String>>,
         recovery_responses: Mutex<VecDeque<Option<String>>>,
         recovery_plan_responses: Mutex<VecDeque<RecoveryPlan>>,
+        verify_models: Mutex<Vec<Model>>,
+        decompose_models: Mutex<Vec<Model>>,
     }
 
     impl MockAgentService {
@@ -1215,6 +1232,8 @@ mod tests {
                 checkpoint_errors: Mutex::new(VecDeque::new()),
                 recovery_responses: Mutex::new(VecDeque::new()),
                 recovery_plan_responses: Mutex::new(VecDeque::new()),
+                verify_models: Mutex::new(Vec::new()),
+                decompose_models: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1260,7 +1279,9 @@ mod tests {
         async fn design_and_decompose(
             &self,
             _ctx: &TaskContext,
+            model: Model,
         ) -> anyhow::Result<DecompositionResult> {
+            self.decompose_models.lock().unwrap().push(model);
             Ok(self
                 .decompose_responses
                 .lock()
@@ -1284,7 +1305,8 @@ mod tests {
                 .expect("no fix_subtask response queued"))
         }
 
-        async fn verify(&self, _ctx: &TaskContext) -> anyhow::Result<VerificationResult> {
+        async fn verify(&self, _ctx: &TaskContext, model: Model) -> anyhow::Result<VerificationResult> {
+            self.verify_models.lock().unwrap().push(model);
             Ok(self
                 .verify_responses
                 .lock()
@@ -1682,7 +1704,6 @@ mod tests {
 
         let mut root = Task::new(root_id, None, "root".into(), vec!["passes".into()], 0);
         root.path = Some(TaskPath::Branch);
-        root.model = Some(Model::Sonnet);
         root.current_model = Some(Model::Sonnet);
         root.phase = TaskPhase::Executing;
         root.subtask_ids = vec![completed_child_id, pending_child_id];
@@ -1811,7 +1832,6 @@ mod tests {
         // Root: Executing, Branch, has mid as child.
         let mut root = Task::new(root_id, None, "root".into(), vec!["passes".into()], 0);
         root.path = Some(TaskPath::Branch);
-        root.model = Some(Model::Sonnet);
         root.current_model = Some(Model::Sonnet);
         root.phase = TaskPhase::Executing;
         root.subtask_ids = vec![mid_id];
@@ -1819,7 +1839,6 @@ mod tests {
         // Mid: Executing, Branch, has grandchild. Was mid-execution when killed.
         let mut mid = Task::new(mid_id, Some(root_id), "mid".into(), vec!["mid passes".into()], 1);
         mid.path = Some(TaskPath::Branch);
-        mid.model = Some(Model::Sonnet);
         mid.current_model = Some(Model::Sonnet);
         mid.phase = TaskPhase::Executing;
         mid.subtask_ids = vec![grandchild_id];
@@ -1872,7 +1891,6 @@ mod tests {
 
         let mut root = Task::new(root_id, None, "root".into(), vec!["passes".into()], 0);
         root.path = Some(TaskPath::Branch);
-        root.model = Some(Model::Sonnet);
         root.current_model = Some(Model::Sonnet);
         root.phase = TaskPhase::Executing;
         root.subtask_ids = vec![child_id];
@@ -1886,7 +1904,6 @@ mod tests {
             1,
         );
         child.path = Some(TaskPath::Leaf);
-        child.model = Some(Model::Haiku);
         child.current_model = Some(Model::Haiku);
         child.phase = TaskPhase::Verifying;
 
@@ -2683,7 +2700,6 @@ mod tests {
 
         let mut root = Task::new(root_id, None, "root".into(), vec!["root passes".into()], 0);
         root.path = Some(TaskPath::Branch);
-        root.model = Some(Model::Sonnet);
         root.current_model = Some(Model::Sonnet);
         root.phase = TaskPhase::Executing;
         root.subtask_ids = vec![child_id];
@@ -2696,7 +2712,6 @@ mod tests {
             1,
         );
         child.path = Some(TaskPath::Leaf);
-        child.model = Some(Model::Haiku);
         child.current_model = Some(Model::Haiku);
         child.phase = TaskPhase::Verifying;
         child.fix_attempts = vec![
@@ -2755,7 +2770,6 @@ mod tests {
 
         let mut root = Task::new(root_id, None, "root".into(), vec!["root passes".into()], 0);
         root.path = Some(TaskPath::Branch);
-        root.model = Some(Model::Sonnet);
         root.current_model = Some(Model::Sonnet);
         root.phase = TaskPhase::Executing;
         root.subtask_ids = vec![child_id];
@@ -2768,7 +2782,6 @@ mod tests {
             1,
         );
         child.path = Some(TaskPath::Leaf);
-        child.model = Some(Model::Haiku);
         child.current_model = Some(Model::Haiku); // Not yet escalated.
         child.phase = TaskPhase::Verifying;
         child.fix_attempts = vec![
@@ -4247,7 +4260,6 @@ mod tests {
 
         let mut root = Task::new(root_id, None, "root".into(), vec!["root passes".into()], 0);
         root.path = Some(TaskPath::Branch);
-        root.model = Some(Model::Sonnet);
         root.current_model = Some(Model::Sonnet);
         root.phase = TaskPhase::Executing;
         root.subtask_ids = vec![child_id];
@@ -4260,7 +4272,6 @@ mod tests {
             1,
         );
         child.path = Some(TaskPath::Leaf);
-        child.model = Some(Model::Haiku);
         child.current_model = Some(Model::Haiku);
         child.phase = TaskPhase::Executing;
         child.attempts = vec![
@@ -4333,7 +4344,6 @@ mod tests {
 
         let mut root = Task::new(root_id, None, "root".into(), vec!["root passes".into()], 0);
         root.path = Some(TaskPath::Branch);
-        root.model = Some(Model::Sonnet);
         root.current_model = Some(Model::Sonnet);
         root.phase = TaskPhase::Executing;
         root.subtask_ids = vec![child_id];
@@ -4346,7 +4356,6 @@ mod tests {
             1,
         );
         child.path = Some(TaskPath::Leaf);
-        child.model = Some(Model::Haiku);
         child.current_model = Some(Model::Sonnet);
         child.phase = TaskPhase::Executing;
         child.attempts = vec![
@@ -4416,7 +4425,6 @@ mod tests {
 
         let mut root = Task::new(root_id, None, "root".into(), vec!["root passes".into()], 0);
         root.path = Some(TaskPath::Branch);
-        root.model = Some(Model::Sonnet);
         root.current_model = Some(Model::Sonnet);
         root.phase = TaskPhase::Executing;
         root.subtask_ids = vec![child_id];
@@ -4429,7 +4437,6 @@ mod tests {
             1,
         );
         child.path = Some(TaskPath::Leaf);
-        child.model = Some(Model::Haiku);
         child.current_model = Some(Model::Haiku); // Not yet escalated.
         child.phase = TaskPhase::Executing;
         child.attempts = vec![
@@ -4890,5 +4897,151 @@ mod tests {
         // 2 attempts: 1 Haiku fail + 1 Sonnet success (same as retry_budget=1).
         assert_eq!(child.attempts.len(), 2);
         assert_eq!(child.current_model, Some(Model::Sonnet));
+    }
+
+    /// Leaf with Haiku model passes Haiku to verify.
+    #[tokio::test]
+    async fn verify_model_leaf_haiku() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses.lock().unwrap().push_back(AssessmentResult {
+            path: TaskPath::Leaf,
+            model: Model::Haiku,
+            rationale: "simple".into(),
+            magnitude: None,
+        });
+
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+
+        // Child verify + root verify.
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let captured = orch.agent.verify_models.lock().unwrap().clone();
+        // First verify call is child (leaf Haiku), second is root (branch Sonnet).
+        assert_eq!(captured[0], Model::Haiku);
+    }
+
+    /// Leaf with Sonnet model passes Sonnet to verify.
+    #[tokio::test]
+    async fn verify_model_leaf_sonnet() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses.lock().unwrap().push_back(AssessmentResult {
+            path: TaskPath::Leaf,
+            model: Model::Sonnet,
+            rationale: "medium".into(),
+            magnitude: None,
+        });
+
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let captured = orch.agent.verify_models.lock().unwrap().clone();
+        assert_eq!(captured[0], Model::Sonnet);
+    }
+
+    /// Leaf with Opus model gets capped to Sonnet for verification.
+    #[tokio::test]
+    async fn verify_model_leaf_opus_capped() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses.lock().unwrap().push_back(AssessmentResult {
+            path: TaskPath::Leaf,
+            model: Model::Opus,
+            rationale: "hard leaf".into(),
+            magnitude: None,
+        });
+
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let captured = orch.agent.verify_models.lock().unwrap().clone();
+        // Opus is clamped to Sonnet for leaf verification.
+        assert_eq!(captured[0], Model::Sonnet);
+    }
+
+    /// Branch task always uses Sonnet for verification.
+    #[tokio::test]
+    async fn verify_model_branch_always_sonnet() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let captured = orch.agent.verify_models.lock().unwrap().clone();
+        // Second verify call is for root (branch) — always Sonnet.
+        assert_eq!(captured[1], Model::Sonnet);
+    }
+
+    /// Branch decompose receives the model from assessment.
+    #[tokio::test]
+    async fn decompose_model_from_assessment() {
+        let mock = MockAgentService::new();
+
+        // Root always branches with Sonnet (hardcoded in execute_task).
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+
+        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let captured = orch.agent.decompose_models.lock().unwrap().clone();
+        // Root's assessment is hardcoded to Model::Sonnet.
+        assert_eq!(captured[0], Model::Sonnet);
     }
 }

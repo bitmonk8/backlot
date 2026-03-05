@@ -33,7 +33,7 @@ pub enum TaskPhase {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Model {
     Haiku,
     Sonnet,
@@ -49,6 +49,7 @@ impl Model {
             Self::Opus => None,
         }
     }
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,7 +106,6 @@ pub struct Task {
     pub verification_criteria: Vec<String>,
     pub path: Option<TaskPath>,
     pub phase: TaskPhase,
-    pub model: Option<Model>,
     pub current_model: Option<Model>,
     pub attempts: Vec<Attempt>,
     pub subtask_ids: Vec<TaskId>,
@@ -136,7 +136,6 @@ impl Task {
             verification_criteria,
             path: None,
             phase: TaskPhase::Pending,
-            model: None,
             current_model: None,
             attempts: Vec::new(),
             subtask_ids: Vec::new(),
@@ -151,5 +150,17 @@ impl Task {
             is_fix_task: false,
             recovery_rounds: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_ordering_haiku_lt_sonnet_lt_opus() {
+        assert!(Model::Haiku < Model::Sonnet);
+        assert!(Model::Sonnet < Model::Opus);
+        assert!(Model::Haiku < Model::Opus);
     }
 }

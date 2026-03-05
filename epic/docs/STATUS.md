@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (120 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (125 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring and model selection remediated; continuing hardening.
 
 ## Milestones
 
@@ -51,7 +51,7 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 
 1. **Sandboxing** — Two-layer approach documented in [SANDBOXING.md](SANDBOXING.md). Security: VM/container guidance + startup detection warning. Operational correctness: Frida-based runtime interception (frida-gum/frida-core) to enforce per-phase access policies. Next step: prototype Frida Rust bindings. (Critical: U5-R2 #1, U2-R2 #1)
 2. ~~**Wire epic.toml to the orchestrator**~~ — **Done.** Config loaded at startup, hardcoded constants replaced. (Major: U10-R1, U7-R1, X6)
-3. **Fix model selection to match AGENT_DESIGN.md** — Assessment, decomposition, recovery, and verification all use wrong model tiers. (Major: U1-R7, U2-R7, U6-R7)
+3. ~~**Fix model selection to match AGENT_DESIGN.md**~~ — **Done.** Assessment→Haiku, decompose→assessment-selected, recovery→Opus, verification→spec-compliant capping. (Major: U1-R7, U2-R7, U6-R7)
 4. **Cap total task count and recovery depth** — Recovery subtasks get fresh budgets, enabling exponential cost. (Major: B7, U1-R2)
 5. **Update stale documentation** — 14+ subprocess/Flick references not updated after library migration. (Major: U17-R4, U17-R8)
 6. **Add CI pipeline** — No CI exists. Pin Flick dependency. Add `rust-toolchain.toml`. (Critical: X4)
@@ -62,6 +62,26 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 
 ## Decisions Made
 
+### 2026-03-05: Fix model selection to match AGENT_DESIGN.md
+
+**Scope:** All agent call sites now use the model specified in AGENT_DESIGN.md. 7 files modified, 125 tests passing. Two review passes applied simplification and test coverage fixes.
+
+**Model enum (`task/mod.rs`):** Added `#[derive(PartialOrd, Ord)]` (variant order: Haiku < Sonnet < Opus). Removed dead `model: Option<Model>` field from `Task` (only `current_model` is used). Unit test guards ordering invariant.
+
+**AgentService trait (`agent/mod.rs`):** `design_and_decompose()` and `verify()` now take a `model: Model` parameter so the orchestrator can pass the correct model per-spec.
+
+**FlickAgent (`agent/flick.rs`):**
+- Assessment: `Model::Sonnet` → `Model::Haiku` (spec: classification task)
+- `design_and_decompose`: accepts `model` parameter instead of hardcoding Sonnet (spec: assessment-selected)
+- `verify`: accepts `model` parameter instead of hardcoding Sonnet (spec varies by leaf/branch)
+- `assess_recovery`: `Model::Sonnet` → `Model::Opus` (spec: requires strongest reasoning)
+
+**Orchestrator (`orchestrator.rs`):** New `verification_model()` helper uses `impl_model.clamp(Haiku, Sonnet)` for leaves, Sonnet for branches. All `verify` and `design_and_decompose` call sites pass the correct model. `MockAgentService` captures model params via `verify_models`/`decompose_models` vectors for test assertions.
+
+**Cleanup:** Deleted `agent/models.rs` — moved `default_max_tokens()` into `config_gen.rs`, eliminated redundant `flick_model_id()`. Removed tautological test, added `default_max_tokens_per_tier` test.
+
+**Tests (7 new, 125 total):** `model_ordering_haiku_lt_sonnet_lt_opus`, `verify_model_leaf_haiku`, `verify_model_leaf_sonnet`, `verify_model_leaf_opus_capped`, `verify_model_branch_always_sonnet`, `decompose_model_from_assessment`, `default_max_tokens_per_tier`.
+
 ### 2026-03-05: Wire epic.toml to orchestrator runtime
 
 **Scope:** `epic.toml` config loaded at startup and threaded through orchestrator and agent layer. 7 files modified, 10 new tests (120 total). Two review passes applied fixes.
@@ -70,7 +90,7 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 
 **Orchestrator (`orchestrator.rs`):** Removed all 5 hardcoded constants (`MAX_DEPTH`, `RETRIES_PER_TIER`, `MAX_RECOVERY_ROUNDS`, `MAX_BRANCH_FIX_ROUNDS`, `MAX_ROOT_FIX_ROUNDS`). Replaced with `self.limits.*` fields. Zero-value limits clamped to minimum 1 at start of `run()`.
 
-**Agent layer (`flick.rs`, `config_gen.rs`, `prompts.rs`):** `FlickAgent` takes `ModelConfig` and `Vec<VerificationStep>` as constructor params (no builder methods). `resolve_model_name(&ModelConfig, Model) -> &str` maps tiers to config-specified names. `flick_model_id()` moved to `#[cfg(test)]` only. Verification prompts include configured commands.
+**Agent layer (`flick.rs`, `config_gen.rs`, `prompts.rs`):** `FlickAgent` takes `ModelConfig` and `Vec<VerificationStep>` as constructor params (no builder methods). `resolve_model_name(&ModelConfig, Model) -> &str` maps tiers to config-specified names. Verification prompts include configured commands.
 
 **Review pass 1 — critical bug fix:** `ModelConfig::default()` values were short names (`"haiku-4.5"`) not valid API model IDs (`"claude-haiku-4-5-20251001"`). Fixed defaults to match `flick_model_id()`. Added regression test.
 
@@ -146,7 +166,7 @@ See [SANDBOXING.md](SANDBOXING.md) for full design document.
 - **Incremental**: Preserve completed work. Recovery subtasks appended to parent's subtask list. Remaining pending siblings still execute after recovery subtasks.
 - **Full re-decomposition**: Remaining pending siblings marked as Failed ("superseded by recovery re-decomposition"). Only recovery subtasks execute.
 
-**Recovery flow:** Child fails → check recovery budget (max 2 rounds) and not a fix task → `assess_recovery()` (Sonnet, no tools) determines if recoverable and suggests strategy → `design_recovery_subtasks()` (Opus, with tools) creates recovery plan with fresh magnitude estimates → subtasks created and appended → child loop restarts.
+**Recovery flow:** Child fails → check recovery budget (max 2 rounds) and not a fix task → `assess_recovery()` (Opus, no tools) determines if recoverable and suggests strategy → `design_recovery_subtasks()` (Opus, with tools) creates recovery plan with fresh magnitude estimates → subtasks created and appended → child loop restarts.
 
 **New types:** `RecoveryPlan` (full_redecomposition, subtasks, rationale), `RecoveryPlanWire` with `TryFrom` conversion, `recovery_plan_schema()`, `build_recovery_plan_config()`.
 
@@ -233,7 +253,7 @@ See [SANDBOXING.md](SANDBOXING.md) for full design document.
 ### 2026-03-04: Agent call wiring implemented
 
 **Scope:** `FlickAgent` implementing `AgentService` trait. 8 files modified/created:
-- `models.rs` — Model → Flick model ID mapping (Haiku/Sonnet/Opus) and token limits
+- `models.rs` — Model → Flick model ID mapping and token limits (later collapsed into `config_gen.rs`)
 - `tools.rs` — `ToolGrant` bitflags, tool definitions for Flick config, stubbed `execute_tool()`
 - `config_gen.rs` — `FlickConfig` YAML generation, 6 wire format types (`AssessmentWire`, `DecompositionWire`, etc.) with `TryFrom` conversions, 6 JSON output schemas, `write_config()`
 - `prompts.rs` — Prompt assembly (system prompt + query) for all 6 `AgentService` methods

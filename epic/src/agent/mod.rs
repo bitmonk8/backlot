@@ -2,7 +2,6 @@
 
 pub mod config_gen;
 pub mod flick;
-mod models;
 mod prompts;
 pub mod tools;
 
@@ -55,12 +54,14 @@ pub trait AgentService: Send + Sync {
     fn design_and_decompose(
         &self,
         ctx: &TaskContext,
+        model: Model,
     ) -> impl std::future::Future<Output = anyhow::Result<DecompositionResult>> + Send;
 
     /// Independent verification of a completed task.
     fn verify(
         &self,
         ctx: &TaskContext,
+        model: Model,
     ) -> impl std::future::Future<Output = anyhow::Result<VerificationResult>> + Send;
 
     /// Inter-subtask checkpoint after a child reports discoveries.

@@ -204,7 +204,7 @@ impl AgentService for FlickAgent {
         let grant = tools::phase_tools(AgentMethod::Analyze);
         let config = config_gen::build_assess_config(
             &pair.system_prompt,
-            Model::Sonnet,
+            Model::Haiku,
             &self.credential_name,
             grant,
             &self.model_config,
@@ -261,12 +261,13 @@ impl AgentService for FlickAgent {
     async fn design_and_decompose(
         &self,
         ctx: &TaskContext,
+        model: Model,
     ) -> anyhow::Result<DecompositionResult> {
         let pair = prompts::build_design_and_decompose(ctx);
         let grant = tools::phase_tools(AgentMethod::Decompose);
         let config = config_gen::build_decompose_config(
             &pair.system_prompt,
-            Model::Sonnet,
+            model,
             &self.credential_name,
             grant,
             &self.model_config,
@@ -301,12 +302,12 @@ impl AgentService for FlickAgent {
         DecompositionResult::try_from(wire)
     }
 
-    async fn verify(&self, ctx: &TaskContext) -> anyhow::Result<VerificationResult> {
+    async fn verify(&self, ctx: &TaskContext, model: Model) -> anyhow::Result<VerificationResult> {
         let pair = prompts::build_verify(ctx, &self.verification_steps);
         let grant = tools::phase_tools(AgentMethod::Analyze);
         let config = config_gen::build_verify_config(
             &pair.system_prompt,
-            Model::Sonnet,
+            model,
             &self.credential_name,
             grant,
             &self.model_config,
@@ -343,7 +344,7 @@ impl AgentService for FlickAgent {
         let pair = prompts::build_assess_recovery(ctx, failure_reason);
         let config = config_gen::build_recovery_config(
             &pair.system_prompt,
-            Model::Sonnet,
+            Model::Opus,
             &self.credential_name,
             &self.model_config,
         )?;
