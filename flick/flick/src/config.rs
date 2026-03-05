@@ -19,6 +19,7 @@ pub enum ConfigFormat {
 /// Fields are private to enforce validation invariants. Use getter methods
 /// for read access and `override_*` methods for CLI flag overrides.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     model: ModelConfig,
 
@@ -39,6 +40,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelConfig {
     provider: String,
     name: String,
@@ -74,16 +76,19 @@ impl ModelConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReasoningConfig {
     pub level: ReasoningLevel,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputSchema {
     pub schema: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub api: ApiKind,
     #[serde(default)]
@@ -94,6 +99,7 @@ pub struct ProviderConfig {
 
 /// Per-provider quirk flags. All default to false.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompatFlags {
     #[serde(default)]
     pub explicit_tool_choice_auto: bool,
@@ -101,6 +107,7 @@ pub struct CompatFlags {
 
 /// A tool definition from the tools list in config.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolConfig {
     name: String,
     description: String,
@@ -132,6 +139,7 @@ impl ToolConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PricingConfig {
     pub input_per_million: f64,
     pub output_per_million: f64,
@@ -220,8 +228,7 @@ impl Config {
         &mut self,
         reasoning: ReasoningConfig,
     ) -> Result<(), ConfigError> {
-        let old = self.model.reasoning.take();
-        self.model.reasoning = Some(reasoning);
+        let old = self.model.reasoning.replace(reasoning);
         if let Err(e) = self.validate() {
             self.model.reasoning = old;
             return Err(e);
@@ -261,6 +268,20 @@ impl Config {
                     "tool name cannot be empty".into(),
                 ));
             }
+            if tool.description.is_empty() {
+                return Err(ConfigError::InvalidToolConfig(format!(
+                    "tool '{}': description cannot be empty",
+                    tool.name
+                )));
+            }
+            if let Some(params) = &tool.parameters {
+                if !params.is_object() {
+                    return Err(ConfigError::InvalidToolConfig(format!(
+                        "tool '{}': parameters must be a JSON object",
+                        tool.name
+                    )));
+                }
+            }
             if !seen_names.insert(&tool.name) {
                 return Err(ConfigError::InvalidToolConfig(format!(
                     "tool '{}': duplicate tool name",
@@ -297,6 +318,13 @@ impl Config {
                     "temperature {temp} exceeds maximum {max_temp} for this provider"
                 )));
             }
+        }
+
+        // Reasoning + output_schema is unsupported by the Anthropic API
+        if self.model.reasoning.is_some() && self.output_schema.is_some() && provider.api == ApiKind::Messages {
+            return Err(ConfigError::InvalidModelConfig(
+                "reasoning and output_schema cannot be used together (Anthropic API limitation)".into(),
+            ));
         }
 
         // Anthropic API requires budget_tokens < max_tokens
@@ -787,11 +815,11 @@ provider:
     }
 
     #[tokio::test]
-    async fn unknown_fields_in_provider_section_ignored() {
+    async fn unknown_fields_in_provider_section_rejected() {
         let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\n    base_url: https://stale.example.com\n";
         let f = write_temp_config(yaml);
-        let config = Config::load(f.path()).await.expect("should parse despite unknown base_url field");
-        assert_eq!(config.active_provider().expect("provider").api, ApiKind::Messages);
+        let result = Config::load(f.path()).await;
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
 
     // -- tools list tests --
@@ -965,4 +993,119 @@ pricing:
             serde_json::from_str(bad_json).map_err(|e| ConfigError::Parse(e.to_string()));
         assert!(matches!(result, Err(ConfigError::Parse(_))));
     }
+
+    // -- L1: deny_unknown_fields tests --
+
+    #[test]
+    fn unknown_top_level_field_rejected() {
+        let yaml = "model:\n  provider: test\n  name: m\nprovider:\n  test:\n    api: messages\nextra_field: oops\n";
+        let result = Config::parse_yaml(yaml);
+        assert!(matches!(result, Err(ConfigError::Parse(msg)) if msg.contains("extra_field")));
+    }
+
+    #[test]
+    fn unknown_model_field_rejected() {
+        let yaml = "model:\n  provider: test\n  name: m\n  temprature: 0.5\nprovider:\n  test:\n    api: messages\n";
+        let result = Config::parse_yaml(yaml);
+        assert!(matches!(result, Err(ConfigError::Parse(msg)) if msg.contains("temprature")));
+    }
+
+    // -- L23: reasoning + output_schema mutual exclusion --
+
+    #[test]
+    fn reasoning_plus_output_schema_rejected_messages() {
+        let yaml = "model:\n  provider: test\n  name: test-model\n  max_tokens: 64000\n  reasoning:\n    level: medium\nprovider:\n  test:\n    api: messages\noutput_schema:\n  schema:\n    type: object\n";
+        let result = Config::parse_yaml(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("reasoning") && msg.contains("output_schema")));
+    }
+
+    #[test]
+    fn reasoning_plus_output_schema_allowed_chat_completions() {
+        let yaml = "model:\n  provider: test\n  name: test-model\n  reasoning:\n    level: medium\nprovider:\n  test:\n    api: chat_completions\noutput_schema:\n  schema:\n    type: object\n";
+        let config = Config::parse_yaml(yaml)
+            .expect("should allow reasoning + output_schema for chat_completions");
+        assert!(config.model().reasoning().is_some());
+        assert!(config.output_schema().is_some());
+    }
+
+    // -- T4: empty tool description --
+
+    #[test]
+    fn tools_empty_description_rejected() {
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: \"\"\n";
+        let result = Config::parse_yaml(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("description")));
+    }
+
+    // -- T44: tool parameters must be JSON object --
+
+    #[test]
+    fn tools_parameters_string_rejected() {
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: a tool\n    parameters: \"not an object\"\n";
+        let result = Config::parse_yaml(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object")));
+    }
+
+    #[test]
+    fn tools_parameters_array_rejected() {
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: a tool\n    parameters:\n      - item1\n";
+        let result = Config::parse_yaml(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object")));
+    }
+
+    #[test]
+    fn reasoning_plus_output_schema_rejected_via_override() {
+        // Config with output_schema but no reasoning on a Messages provider.
+        let yaml = "model:\n  provider: test\n  name: test-model\n  max_tokens: 64000\nprovider:\n  test:\n    api: messages\noutput_schema:\n  schema:\n    type: object\n";
+        let mut config = Config::parse_yaml(yaml).expect("should parse");
+        assert!(config.model().reasoning().is_none());
+
+        let result = config.override_reasoning(ReasoningConfig {
+            level: crate::model::ReasoningLevel::Medium,
+        });
+        let err_msg = result.expect_err("should reject reasoning + output_schema").to_string();
+        assert!(err_msg.contains("reasoning") && err_msg.contains("output_schema"));
+
+        // Verify rollback: reasoning should still be None.
+        assert!(config.model().reasoning().is_none());
+    }
+
+    #[test]
+    fn override_reasoning_reverts_to_previous_value() {
+        // Config with medium reasoning and max_tokens: 10001.
+        // Medium budget = 10000, so 10000 < 10001 passes.
+        // High budget = 32000, so 32000 >= 10001 fails.
+        let yaml = "model:\n  provider: test\n  name: test-model\n  max_tokens: 10001\n  reasoning:\n    level: medium\nprovider:\n  test:\n    api: messages\n";
+        let mut config = Config::parse_yaml(yaml).expect("should parse");
+        assert!(matches!(
+            config.model().reasoning().unwrap().level,
+            crate::model::ReasoningLevel::Medium
+        ));
+
+        let result = config.override_reasoning(ReasoningConfig {
+            level: crate::model::ReasoningLevel::High,
+        });
+        assert!(result.is_err(), "high reasoning should be rejected with max_tokens=10001");
+
+        // Verify rollback: reasoning should still be Medium.
+        assert!(matches!(
+            config.model().reasoning().unwrap().level,
+            crate::model::ReasoningLevel::Medium
+        ));
+    }
+
+    #[test]
+    fn unknown_tool_field_rejected() {
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: a tool\n    timeout: 30\n";
+        let result = Config::parse_yaml(yaml);
+        assert!(matches!(result, Err(ConfigError::Parse(msg)) if msg.contains("timeout")));
+    }
+
+    #[test]
+    fn tools_parameters_number_rejected() {
+        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: a tool\n    parameters: 42\n";
+        let result = Config::parse_yaml(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object")));
+    }
+
 }

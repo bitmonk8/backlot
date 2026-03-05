@@ -1,56 +1,14 @@
 # Flick — Backlog
 
-46 items in 9 clusters, ordered by value (highest first).
+39 items in 8 active clusters (1 resolved), ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
 ---
 
-## 1. Config Validation & Error Quality (7 items)
+## ~~1. Config Validation & Error Quality~~ — RESOLVED
 
-Typos silently ignored, invalid combinations not rejected, empty/whitespace inputs not caught early. One pass through `config.rs` and related validation code.
-
-### L1. No `deny_unknown_fields` — config typos silently ignored — `config.rs`
-
-Misspelled config fields (e.g., `temprature`) are silently discarded. A user who writes `temprature = 0.5` gets no error — the temperature is `None`. Most impactful on `ModelConfig` where typos silently change behavior.
-
-- **M** — Fix Risk: Medium — Effort: Low
-
-### L23. Reasoning + `output_schema` mutual exclusion not enforced — `config.rs`
-
-`build_params` strips temperature when reasoning is active but does not strip `output_schema`. The Anthropic API rejects requests combining extended thinking with structured output. No validation guards this combination at config load or at request build time; the error surfaces as an opaque API 400.
-
-- **M** — Fix Risk: Low — Effort: Low
-
-### T4. Empty tool description accepted — `config.rs`
-
-`description = ""` passes validation. Functionally useless to the model.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T42. `override_reasoning` uses `take()` instead of `replace()` — `config.rs`
-
-`override_model_name` uses `std::mem::replace` for transactional rollback; `override_reasoning` uses `take()` then assigns. If `validate()` ever panics, the field is left as `Some(new_value)` and `old` is dropped.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T43. Zero cost reported without warning for unknown models — `config.rs`
-
-When neither a `pricing` config section nor a builtin registry entry exists for the model, `compute_cost` returns `0.0`. The result reports `cost_usd: 0.0`, which misleads the caller into thinking the call was free.
-
-- **L** — Fix Risk: None — Effort: Low
-
-### T44. Tool `parameters` not validated as JSON Schema — `config.rs`
-
-`ToolConfig.parameters` accepts any `serde_json::Value` (string, number, array). An invalid schema passes config validation and is forwarded to the model; the API rejects it at request time with an opaque error.
-
-- **L** — Fix Risk: Low — Effort: Low
-
-### T45. Empty `--query ""` not rejected before config/credential I/O — `main.rs`
-
-When `--query ""` is passed explicitly, `cmd_run` loads config, decrypts credentials, and optionally reads a context file before `cmd_run_core` rejects it with `NoQuery`. The I/O is wasted and credential errors obscure the real issue.
-
-- **L** — Fix Risk: None — Effort: Trivial
+All 7 items fixed: `deny_unknown_fields` on all config structs (L1), reasoning + output_schema mutual exclusion (L23), empty tool description rejected (T4), `override_reasoning` uses `Option::replace()` (T42), CLI warning for unknown models (T43), tool parameters must be JSON object (T44), empty `--query ""` rejected before I/O (T45).
 
 ---
 

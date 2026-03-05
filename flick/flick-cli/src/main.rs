@@ -134,8 +134,16 @@ async fn cmd_run(
     model_override: Option<String>,
     reasoning_override: Option<ReasoningLevel>,
 ) -> Result<(), FlickError> {
-    // Validate CLI argument combinations
+    // Validate CLI argument combinations (before empty-query check so
+    // mutually-exclusive flags produce the more specific error).
     validate_run_args(query.as_deref(), resume.as_deref(), tool_results_path.as_deref())?;
+
+    // Reject explicitly empty --query before any I/O
+    if let Some(ref q) = query {
+        if q.trim().is_empty() {
+            return Err(FlickError::NoQuery);
+        }
+    }
 
     let mut config = Config::load(&config_path).await?;
 
@@ -144,6 +152,13 @@ async fn cmd_run(
     }
     if let Some(r) = reasoning_override {
         config.override_reasoning(flick::config::ReasoningConfig { level: r })?;
+    }
+
+    if config.pricing() == (0.0, 0.0) {
+        eprintln!(
+            "warning: no pricing info for model '{}'; cost will be reported as 0.0",
+            config.model().name()
+        );
     }
 
     let provider = flick::resolve_provider(&config).await?;
@@ -275,7 +290,7 @@ async fn cmd_run_core(
     output: &mut impl Write,
 ) -> Result<Option<FlickResult>, FlickError> {
     if dry_run {
-        if query.is_empty() {
+        if query.trim().is_empty() {
             return Err(FlickError::NoQuery);
         }
         let request_json = client.build_request(query)?;
@@ -287,7 +302,7 @@ async fn cmd_run_core(
 
     let result = if let Some(tr) = tool_results {
         client.resume(context, tr).await?
-    } else if !query.is_empty() {
+    } else if !query.trim().is_empty() {
         client.run(query, context).await?
     } else {
         return Err(FlickError::NoQuery);
@@ -1015,6 +1030,24 @@ provider:
         let mut output = Vec::new();
 
         let result = cmd_run_core(&client, &mut Context::default(), "", None, false, &mut output).await;
+        assert!(matches!(result, Err(FlickError::NoQuery)));
+    }
+
+    #[tokio::test]
+    async fn run_core_whitespace_only_query_returns_no_query() {
+        let client = stub_client(Box::new(StubBuildProvider));
+        let mut output = Vec::new();
+
+        let result = cmd_run_core(&client, &mut Context::default(), "   ", None, false, &mut output).await;
+        assert!(matches!(result, Err(FlickError::NoQuery)));
+    }
+
+    #[tokio::test]
+    async fn run_core_dry_run_empty_query_returns_no_query() {
+        let client = stub_client(Box::new(StubBuildProvider));
+        let mut output = Vec::new();
+
+        let result = cmd_run_core(&client, &mut Context::default(), "", None, true, &mut output).await;
         assert!(matches!(result, Err(FlickError::NoQuery)));
     }
 
