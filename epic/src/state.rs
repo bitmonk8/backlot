@@ -28,6 +28,10 @@ impl EpicState {
         self.tasks.insert(task.id, task);
     }
 
+    pub fn task_count(&self) -> usize {
+        self.tasks.len()
+    }
+
     pub fn get(&self, id: TaskId) -> Option<&Task> {
         self.tasks.get(&id)
     }
@@ -134,5 +138,19 @@ mod tests {
         assert_eq!(order, vec![root_id, child_id]);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn task_count_tracks_insertions() {
+        let mut state = EpicState::new();
+        assert_eq!(state.task_count(), 0);
+
+        let t1 = Task::new(TaskId(1), None, "goal 1".into(), vec![], 0);
+        state.insert(t1);
+        assert_eq!(state.task_count(), 1);
+
+        let t2 = Task::new(TaskId(2), None, "goal 2".into(), vec![], 0);
+        state.insert(t2);
+        assert_eq!(state.task_count(), 2);
     }
 }

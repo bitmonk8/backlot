@@ -339,6 +339,12 @@ impl TuiApp {
                     self.session_start,
                 ));
             }
+            Event::TaskLimitReached { task_id } => {
+                self.worklog.push(WorklogEntry::error(
+                    format!("{task_id} task limit reached — no new subtasks created"),
+                    self.session_start,
+                ));
+            }
         }
 
         // Evict oldest entries if worklog exceeds cap.

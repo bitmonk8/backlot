@@ -91,6 +91,9 @@ pub enum Event {
         count: usize,
         round: u32,
     },
+    TaskLimitReached {
+        task_id: TaskId,
+    },
 }
 
 pub type EventSender = mpsc::UnboundedSender<Event>;

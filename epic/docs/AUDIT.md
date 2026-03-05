@@ -225,8 +225,8 @@ Recommended priority (highest-value cells first):
 **3. Model selection diverges from design spec (U1-R7, U2-R7, U6-R7, U4-R7) — MAJOR**
 Assessment uses Sonnet instead of Haiku (overspend on classification). Decomposition ignores the assessment-selected model. Recovery assessment uses Sonnet instead of Opus (under-quality for critical decision). Verification always uses Sonnet instead of `max(Haiku, impl_model)`. These affect both cost control and agent effectiveness.
 
-**4. Recovery subtasks get fresh budgets — multiplicative cost risk (B7 #2) — MAJOR**
-Recovery subtasks are created with `is_fix_task: false` and `recovery_rounds: 0`, giving each a fresh recovery budget. Combined with configurable `max_depth` (default 8), this enables multiplicative recovery depth with potentially exponential agent calls. No global task count or cost cap exists (U1-R2 #1). *(Note: `MAX_DEPTH` is now configurable via `epic.toml` `[limits]` section, but the multiplicative cost concern remains.)*
+**4. Recovery subtasks get fresh budgets — multiplicative cost risk (B7 #2) — MAJOR** *(Resolved)*
+Recovery subtasks are created with `is_fix_task: false` and inherit the parent's `recovery_rounds` counter, preventing fresh recovery budgets. Combined with a global `max_total_tasks` cap (default 100, configurable via `epic.toml`) and configurable `max_depth` (default 8), multiplicative recovery depth is now bounded. *(Mitigations applied: recovery subtasks inherit the parent's `recovery_rounds`, and a global `max_total_tasks` cap prevents unbounded task creation.)*
 
 **5. Documentation drift from Flick library migration (U17-R4, U17-R8, U17-R7) — MAJOR**
 ARCHITECTURE.md, CONFIGURATION.md, and DOCUMENT_STORE.md still describe Flick as a subprocess/external executable. AGENT_DESIGN.md has incorrect model assignments. CONFIGURATION.md documents a removed `flick_path` option and a non-existent CLI interface. 14+ stale references across docs.
@@ -239,7 +239,7 @@ ARCHITECTURE.md, CONFIGURATION.md, and DOCUMENT_STORE.md still describe Flick as
 
 3. **Fix model selection to match AGENT_DESIGN.md.** Assessment → Haiku, decomposition → assessment-selected model, recovery assessment → Opus, verification → max(Haiku, impl_model). Or update the design doc if the current choices are intentional.
 
-4. **Cap total task count and recovery depth.** Add a global task limit (e.g., 100) and prevent recovery subtasks from getting fresh recovery budgets. Consider a global cost/token budget.
+4. ~~**Cap total task count and recovery depth.**~~ **Done.** Global `max_total_tasks` cap (default 100) added, recovery subtasks inherit parent's `recovery_rounds`.
 
 5. **Update stale documentation.** Remove subprocess references from ARCHITECTURE.md, fix CLI description in CONFIGURATION.md, remove `flick_path`, update model assignments in AGENT_DESIGN.md.
 

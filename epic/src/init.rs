@@ -251,8 +251,8 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
     let defaults = LimitsConfig::default();
     println!("\nDepth/budget limits (press Enter to accept defaults):");
     println!(
-        "  max_depth={}, retry_budget={}, max_recovery_rounds={}",
-        defaults.max_depth, defaults.retry_budget, defaults.max_recovery_rounds
+        "  max_depth={}, max_recovery_rounds={}, retry_budget={}, max_total_tasks={}",
+        defaults.max_depth, defaults.max_recovery_rounds, defaults.retry_budget, defaults.max_total_tasks
     );
     print!("  Accept defaults? [Y/n] ");
     io::stdout().flush()?;
@@ -281,8 +281,13 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
     let retry_budget = read_line_or_default(&mut lines, &defaults.retry_budget.to_string())
         .parse()
         .unwrap_or(defaults.retry_budget);
+    print!("  Max total tasks [{}]: ", defaults.max_total_tasks);
+    io::stdout().flush()?;
+    let max_total_tasks = read_line_or_default(&mut lines, &defaults.max_total_tasks.to_string())
+        .parse()
+        .unwrap_or(defaults.max_total_tasks);
     drop(lines);
-    Ok(LimitsConfig { max_depth, max_recovery_rounds, retry_budget, ..Default::default() })
+    Ok(LimitsConfig { max_depth, max_recovery_rounds, retry_budget, max_total_tasks, ..Default::default() })
 }
 
 /// Read a line, returning an error on I/O failure or EOF.

@@ -81,6 +81,7 @@ max_recovery_rounds = 2       # Per branch
 retry_budget = 3              # Retries per model tier per leaf
 branch_fix_rounds = 3         # Verification fix rounds per branch
 root_fix_rounds = 4           # Verification fix rounds for root task (extra Opus round)
+max_total_tasks = 100         # Maximum total tasks (including root) allowed in a single run. Prevents unbounded cost growth.
 ```
 
 ## Init: `epic init`

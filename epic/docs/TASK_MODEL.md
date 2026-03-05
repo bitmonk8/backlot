@@ -73,8 +73,9 @@ Ordered cheapest → most expensive:
 1. Scope circuit breaker (3x magnitude estimate → immediate rollback)
 2. Retry budget exhaustion → model escalation (Haiku→Sonnet→Opus)
 3. Terminal leaf failure → rollback, fail to parent
-4. Parent Opus recovery assessment (max 2 recovery rounds per branch)
+4. Parent Opus recovery assessment (max `max_recovery_rounds` recovery rounds per branch, default 2, configurable via `epic.toml`)
 5. Branch failure → escalate to grandparent
+6. Global task count cap (`max_total_tasks`, default 100) — hard limit on total tasks created in a single run, preventing unbounded cost growth from recovery amplification
 
 ## Context Propagation
 

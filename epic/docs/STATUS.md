@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (125 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring and model selection remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (135 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, and task/recovery caps remediated; continuing hardening.
 
 ## Milestones
 
@@ -52,7 +52,7 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 1. **Sandboxing** — Two-layer approach documented in [SANDBOXING.md](SANDBOXING.md). Security: VM/container guidance + startup detection warning. Operational correctness: Frida-based runtime interception (frida-gum/frida-core) to enforce per-phase access policies. Next step: prototype Frida Rust bindings. (Critical: U5-R2 #1, U2-R2 #1)
 2. ~~**Wire epic.toml to the orchestrator**~~ — **Done.** Config loaded at startup, hardcoded constants replaced. (Major: U10-R1, U7-R1, X6)
 3. ~~**Fix model selection to match AGENT_DESIGN.md**~~ — **Done.** Assessment→Haiku, decompose→assessment-selected, recovery→Opus, verification→spec-compliant capping. (Major: U1-R7, U2-R7, U6-R7)
-4. **Cap total task count and recovery depth** — Recovery subtasks get fresh budgets, enabling exponential cost. (Major: B7, U1-R2)
+4. ~~**Cap total task count and recovery depth**~~ — **Done.** `max_total_tasks` config (default 100), limit checked at decomposition/fix/recovery. Recovery subtasks inherit parent's `recovery_rounds`. (Major: B7, U1-R2)
 5. **Update stale documentation** — 14+ subprocess/Flick references not updated after library migration. (Major: U17-R4, U17-R8)
 6. **Add CI pipeline** — No CI exists. Pin Flick dependency. Add `rust-toolchain.toml`. (Critical: X4)
 7. **Extract main() into testable function** — Replace `process::exit` with `bail!`, enable integration testing. (Critical: U12-R6)
@@ -61,6 +61,16 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 10. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files. (Major: U8-R1, U8-R2)
 
 ## Decisions Made
+
+### 2026-03-05: Cap total task count and recovery depth
+
+**Scope:** Prevent exponential cost growth from unbounded task creation and nested recovery. 14 files modified (8 source, 6 docs), 10 new tests (135 total). Three review passes applied correctness, simplicity, testing, and documentation fixes.
+
+**Total task cap:** New `max_total_tasks: u32` field in `LimitsConfig` (default: 100, clamped to min 1). `EpicState::task_count()` exposes current count. `check_task_limit()` helper checks before all three task creation points (decomposition, fix subtasks, recovery subtasks). When limit is hit, the branch fails gracefully with a clear error message. New `TaskLimitReached { task_id }` event emitted and handled in TUI worklog. `epic init` prompts for the value.
+
+**Recovery depth inheritance:** Recovery subtasks inherit the parent's `recovery_rounds` counter via `create_subtasks(..., inherit_recovery_rounds: Option<u32>)` parameter. Checkpoint saved atomically with inheritance. Prevents nested recovery branches from each independently using the full `max_recovery_rounds` budget.
+
+**Tests (10 new, 135 total):** `default_max_total_tasks`, `max_total_tasks_round_trips`, `task_limit_blocks_decomposition` (includes event emission check), `task_limit_blocks_fix_subtasks`, `task_limit_blocks_recovery_subtasks`, `recovery_depth_inherited_not_fresh`, `max_total_tasks_zero_clamped_blocks_decomposition`, `task_limit_exact_boundary_permits`, `task_count_tracks_insertions`, `recovery_inherited_budget_blocks_second_recovery`.
 
 ### 2026-03-05: Fix model selection to match AGENT_DESIGN.md
 

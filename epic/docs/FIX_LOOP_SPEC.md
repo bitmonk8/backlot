@@ -181,6 +181,7 @@ New method `branch_fix_loop(&mut self, id: TaskId, initial_failure: &str) -> Res
 - Each round: design_fix_subtasks() -> create subtasks -> execute each -> re-verify.
 - Fix subtasks are children of the branch, appended to `subtask_ids`.
 - Fix subtasks are marked with `is_fix_task: bool` on `Task` for TUI display differentiation.
+- Before creating any subtasks (fix or otherwise), the orchestrator checks the global `max_total_tasks` cap and blocks creation if the limit is reached.
 - Checkpoints after subtask creation and after each subtask completion.
 
 ### Task State Changes
@@ -221,6 +222,7 @@ FixSubtasksCreated { task_id: TaskId, count: usize, round: u32 }
 - Fix subtasks CAN use the leaf fix loop (Phase 1) if their own verification fails.
 - Fix subtasks CANNOT trigger the branch fix loop. This prevents recursive fix chains.
 - Fix subtasks receive context about the original branch goal and what they're fixing.
+- Recovery subtasks inherit the parent's `recovery_rounds` counter (via `create_subtasks(..., inherit_recovery_rounds)`) to prevent exponential cost growth across nested recovery chains.
 
 ### Estimated Scope
 

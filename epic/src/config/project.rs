@@ -51,6 +51,8 @@ pub struct LimitsConfig {
     pub branch_fix_rounds: u32,
     #[serde(default = "default_root_fix_rounds")]
     pub root_fix_rounds: u32,
+    #[serde(default = "default_max_total_tasks")]
+    pub max_total_tasks: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +81,7 @@ const fn default_max_recovery_rounds() -> u32 { 2 }
 const fn default_retry_budget() -> u32 { 3 }
 const fn default_branch_fix_rounds() -> u32 { 3 }
 const fn default_root_fix_rounds() -> u32 { 4 }
+const fn default_max_total_tasks() -> u32 { 100 }
 fn default_runtime() -> String { "flick".into() }
 const fn default_timeout() -> u32 { 300 }
 
@@ -106,6 +109,7 @@ impl Default for LimitsConfig {
             retry_budget: default_retry_budget(),
             branch_fix_rounds: default_branch_fix_rounds(),
             root_fix_rounds: default_root_fix_rounds(),
+            max_total_tasks: default_max_total_tasks(),
         }
     }
 }
@@ -154,5 +158,25 @@ timeout = 600
         let config: EpicConfig = toml::from_str("").unwrap();
         assert_eq!(config.limits.retry_budget, 3);
         assert!(config.verification_steps.is_empty());
+    }
+
+    #[test]
+    fn default_max_total_tasks() {
+        let config = LimitsConfig::default();
+        assert_eq!(config.max_total_tasks, 100);
+    }
+
+    #[test]
+    fn max_total_tasks_round_trips() {
+        let toml_str = r#"
+[limits]
+max_total_tasks = 42
+"#;
+        let config: EpicConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.limits.max_total_tasks, 42);
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let reparsed: EpicConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.limits.max_total_tasks, 42);
     }
 }
