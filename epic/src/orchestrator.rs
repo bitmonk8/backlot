@@ -7,6 +7,7 @@ use crate::task::assess::AssessmentResult;
 use crate::task::verify::VerificationOutcome;
 use crate::task::{Attempt, Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use thiserror::Error;
 
@@ -21,11 +22,11 @@ pub enum OrchestratorError {
     Agent(#[from] anyhow::Error),
 }
 
-#[allow(dead_code)] // Used in tests; main.rs wiring pending.
 pub struct Orchestrator<A: AgentService> {
     agent: A,
     state: EpicState,
     events: EventSender,
+    state_path: Option<PathBuf>,
 }
 
 impl<A: AgentService> Orchestrator<A> {
@@ -34,16 +35,32 @@ impl<A: AgentService> Orchestrator<A> {
             agent,
             state,
             events,
+            state_path: None,
         }
     }
 
+    pub fn with_state_path(mut self, path: PathBuf) -> Self {
+        self.state_path = Some(path);
+        self
+    }
+
     pub async fn run(&mut self, root_id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
+        self.state.set_root_id(root_id);
         self.execute_task(root_id).await
     }
 
-    #[allow(dead_code)] // Used after run completes for state persistence.
     pub fn into_state(self) -> EpicState {
         self.state
+    }
+
+    /// Write state to disk if a state path is configured. Best-effort: logs
+    /// but does not propagate write errors to avoid aborting the run.
+    fn checkpoint_save(&self) {
+        if let Some(ref path) = self.state_path {
+            if let Err(e) = self.state.save(path) {
+                eprintln!("warning: state checkpoint failed: {e}");
+            }
+        }
     }
 
     fn emit(&self, event: Event) {
@@ -141,6 +158,51 @@ impl<A: AgentService> Orchestrator<A> {
         id: TaskId,
     ) -> Pin<Box<dyn Future<Output = Result<TaskOutcome, OrchestratorError>> + Send + '_>> {
         Box::pin(async move {
+            // Resume: skip already-terminal tasks.
+            {
+                let task = self
+                    .state
+                    .get(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                match task.phase {
+                    TaskPhase::Completed => return Ok(TaskOutcome::Success),
+                    TaskPhase::Failed => {
+                        return Ok(TaskOutcome::Failed {
+                            reason: "previously failed".into(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            // Resume: task was mid-verification. Re-verify without re-executing.
+            {
+                let task = self
+                    .state
+                    .get(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                if task.path.is_some() && task.phase == TaskPhase::Verifying {
+                    return self.finalize_task(id, TaskOutcome::Success).await;
+                }
+            }
+
+            // Resume: task was mid-execution with path already set. Skip assessment.
+            {
+                let task = self
+                    .state
+                    .get(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                if task.path.is_some() && task.phase == TaskPhase::Executing {
+                    let path = task.path.clone().unwrap();
+                    self.transition(id, TaskPhase::Executing)?;
+                    let outcome = match path {
+                        TaskPath::Leaf => self.execute_leaf(id).await?,
+                        TaskPath::Branch => self.execute_branch(id).await?,
+                    };
+                    return self.finalize_task(id, outcome).await;
+                }
+            }
+
             self.transition(id, TaskPhase::Assessing)?;
 
             let task = self
@@ -186,6 +248,7 @@ impl<A: AgentService> Orchestrator<A> {
                 task_id: id,
                 model: assessment.model,
             });
+            self.checkpoint_save();
 
             self.transition(id, TaskPhase::Executing)?;
 
@@ -194,50 +257,61 @@ impl<A: AgentService> Orchestrator<A> {
                 TaskPath::Branch => self.execute_branch(id).await?,
             };
 
-            if outcome == TaskOutcome::Success {
-                self.transition(id, TaskPhase::Verifying)?;
-                self.emit(Event::VerificationStarted { task_id: id });
-
-                let ctx = self.build_context(id)?;
-                let verify_result = self.agent.verify(&ctx).await?;
-
-                match verify_result.outcome {
-                    VerificationOutcome::Pass => {
-                        self.transition(id, TaskPhase::Completed)?;
-                        self.emit(Event::VerificationComplete {
-                            task_id: id,
-                            passed: true,
-                        });
-                        self.emit(Event::TaskCompleted {
-                            task_id: id,
-                            outcome: TaskOutcome::Success,
-                        });
-                        Ok(TaskOutcome::Success)
-                    }
-                    VerificationOutcome::Fail { reason } => {
-                        // Fix loop deferred for v1 — verification failure = task failure.
-                        self.transition(id, TaskPhase::Failed)?;
-                        self.emit(Event::VerificationComplete {
-                            task_id: id,
-                            passed: false,
-                        });
-                        let outcome = TaskOutcome::Failed { reason };
-                        self.emit(Event::TaskCompleted {
-                            task_id: id,
-                            outcome: outcome.clone(),
-                        });
-                        Ok(outcome)
-                    }
-                }
-            } else {
-                self.transition(id, TaskPhase::Failed)?;
-                self.emit(Event::TaskCompleted {
-                    task_id: id,
-                    outcome: outcome.clone(),
-                });
-                Ok(outcome)
-            }
+            self.finalize_task(id, outcome).await
         })
+    }
+
+    async fn finalize_task(
+        &mut self,
+        id: TaskId,
+        outcome: TaskOutcome,
+    ) -> Result<TaskOutcome, OrchestratorError> {
+        if outcome == TaskOutcome::Success {
+            self.transition(id, TaskPhase::Verifying)?;
+            self.emit(Event::VerificationStarted { task_id: id });
+
+            let ctx = self.build_context(id)?;
+            let verify_result = self.agent.verify(&ctx).await?;
+
+            match verify_result.outcome {
+                VerificationOutcome::Pass => {
+                    self.transition(id, TaskPhase::Completed)?;
+                    self.emit(Event::VerificationComplete {
+                        task_id: id,
+                        passed: true,
+                    });
+                    self.emit(Event::TaskCompleted {
+                        task_id: id,
+                        outcome: TaskOutcome::Success,
+                    });
+                    self.checkpoint_save();
+                    Ok(TaskOutcome::Success)
+                }
+                VerificationOutcome::Fail { reason } => {
+                    // Fix loop deferred for v1 — verification failure = task failure.
+                    self.transition(id, TaskPhase::Failed)?;
+                    self.emit(Event::VerificationComplete {
+                        task_id: id,
+                        passed: false,
+                    });
+                    let outcome = TaskOutcome::Failed { reason };
+                    self.emit(Event::TaskCompleted {
+                        task_id: id,
+                        outcome: outcome.clone(),
+                    });
+                    self.checkpoint_save();
+                    Ok(outcome)
+                }
+            }
+        } else {
+            self.transition(id, TaskPhase::Failed)?;
+            self.emit(Event::TaskCompleted {
+                task_id: id,
+                outcome: outcome.clone(),
+            });
+            self.checkpoint_save();
+            Ok(outcome)
+        }
     }
 
     async fn execute_leaf(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
@@ -305,52 +379,86 @@ impl<A: AgentService> Orchestrator<A> {
     }
 
     async fn execute_branch(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
-        let ctx = self.build_context(id)?;
-        let decomposition = self.agent.design_and_decompose(&ctx).await?;
-
-        {
-            let task = self
-                .state
-                .get_mut(id)
-                .ok_or(OrchestratorError::TaskNotFound(id))?;
-            task.decomposition_rationale = Some(decomposition.rationale);
-        }
-
-        let parent_depth = self
+        // Resume: reuse existing subtasks if already decomposed.
+        let existing_subtasks = self
             .state
             .get(id)
             .ok_or(OrchestratorError::TaskNotFound(id))?
-            .depth;
+            .subtask_ids
+            .clone();
 
-        let mut child_ids = Vec::new();
-        for spec in decomposition.subtasks {
-            let child_id = self.state.next_task_id();
-            let mut child = Task::new(
-                child_id,
-                Some(id),
-                spec.goal,
-                spec.verification_criteria,
-                parent_depth + 1,
-            );
-            child.magnitude_estimate = Some(spec.magnitude_estimate);
-            child_ids.push(child_id);
-            self.state.insert(child);
-        }
+        let child_ids = if existing_subtasks.is_empty() {
+            let ctx = self.build_context(id)?;
+            let decomposition = self.agent.design_and_decompose(&ctx).await?;
 
-        {
-            let task = self
+            {
+                let task = self
+                    .state
+                    .get_mut(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                task.decomposition_rationale = Some(decomposition.rationale);
+            }
+
+            let parent_depth = self
                 .state
-                .get_mut(id)
-                .ok_or(OrchestratorError::TaskNotFound(id))?;
-            task.subtask_ids.clone_from(&child_ids);
-        }
+                .get(id)
+                .ok_or(OrchestratorError::TaskNotFound(id))?
+                .depth;
 
-        self.emit(Event::SubtasksCreated {
-            parent_id: id,
-            child_ids: child_ids.clone(),
-        });
+            let mut new_child_ids = Vec::new();
+            for spec in decomposition.subtasks {
+                let child_id = self.state.next_task_id();
+                let mut child = Task::new(
+                    child_id,
+                    Some(id),
+                    spec.goal,
+                    spec.verification_criteria,
+                    parent_depth + 1,
+                );
+                child.magnitude_estimate = Some(spec.magnitude_estimate);
+                new_child_ids.push(child_id);
+                self.state.insert(child);
+            }
+
+            {
+                let task = self
+                    .state
+                    .get_mut(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                task.subtask_ids.clone_from(&new_child_ids);
+            }
+
+            self.emit(Event::SubtasksCreated {
+                parent_id: id,
+                child_ids: new_child_ids.clone(),
+            });
+            self.checkpoint_save();
+
+            new_child_ids
+        } else {
+            existing_subtasks
+        };
 
         for &child_id in &child_ids {
+            // Resume: skip children in terminal phases.
+            let child_phase = self
+                .state
+                .get(child_id)
+                .ok_or(OrchestratorError::TaskNotFound(child_id))?
+                .phase
+                .clone();
+
+            match child_phase {
+                TaskPhase::Completed => continue,
+                TaskPhase::Failed => {
+                    let reason = "previously failed".to_string();
+                    let ctx = self.build_context(id)?;
+                    let _recovery = self.agent.assess_recovery(&ctx, &reason).await?;
+                    return Ok(TaskOutcome::Failed { reason });
+                }
+                _ => {}
+            }
+
             let child_outcome = self.execute_task(child_id).await?;
 
             // Check for discoveries → checkpoint.
@@ -725,6 +833,319 @@ mod tests {
         assert_eq!(child.attempts.len(), 9);
         assert_eq!(child.phase, TaskPhase::Failed);
         assert_eq!(orch.state.get(root_id).unwrap().phase, TaskPhase::Failed);
+    }
+
+    /// State is checkpointed to disk during execution.
+    #[tokio::test]
+    async fn checkpoint_saves_state() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(TaskOutcome::Success);
+
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let dir = std::env::temp_dir().join("epic_test_checkpoint");
+        std::fs::create_dir_all(&dir).unwrap();
+        let state_path = dir.join("state.json");
+
+        // Clean up any previous run.
+        let _ = std::fs::remove_file(&state_path);
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        orch.state.set_root_id(root_id);
+        orch.state_path = Some(state_path.clone());
+
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // State file should exist from checkpoint writes.
+        assert!(state_path.exists(), "state.json should exist after run");
+
+        // Load and verify it contains the completed task tree.
+        let loaded = EpicState::load(&state_path).unwrap();
+        assert_eq!(loaded.root_id(), Some(root_id));
+        let loaded_root = loaded.get(root_id).unwrap();
+        assert_eq!(loaded_root.phase, TaskPhase::Completed);
+        assert!(!loaded_root.subtask_ids.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Resume: completed child is NOT re-executed; pending child runs normally.
+    #[tokio::test]
+    async fn resume_skips_completed_child() {
+        let mock = MockAgentService::new();
+
+        // No decompose response — root already has subtask_ids.
+        // No assess/leaf response for completed child — would panic if called.
+
+        // Pending child: assessed as leaf, executes, succeeds.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(TaskOutcome::Success);
+
+        // Verification: pending child passes, root passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut state = EpicState::new();
+        let root_id = state.next_task_id();
+        let completed_child_id = state.next_task_id();
+        let pending_child_id = state.next_task_id();
+
+        let mut root = Task::new(root_id, None, "root".into(), vec!["passes".into()], 0);
+        root.path = Some(TaskPath::Branch);
+        root.model = Some(Model::Sonnet);
+        root.current_model = Some(Model::Sonnet);
+        root.phase = TaskPhase::Executing;
+        root.subtask_ids = vec![completed_child_id, pending_child_id];
+
+        let mut completed_child = Task::new(
+            completed_child_id,
+            Some(root_id),
+            "done".into(),
+            vec!["done".into()],
+            1,
+        );
+        completed_child.phase = TaskPhase::Completed;
+
+        let pending_child = Task::new(
+            pending_child_id,
+            Some(root_id),
+            "todo".into(),
+            vec!["todo".into()],
+            1,
+        );
+
+        state.insert(root);
+        state.insert(completed_child);
+        state.insert(pending_child);
+
+        let (tx, _rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        assert_eq!(
+            orch.state.get(completed_child_id).unwrap().phase,
+            TaskPhase::Completed
+        );
+        assert_eq!(
+            orch.state.get(pending_child_id).unwrap().phase,
+            TaskPhase::Completed
+        );
+    }
+
+    /// Resume: existing subtask_ids on root skips decomposition.
+    #[tokio::test]
+    async fn resume_skips_decomposition_when_subtasks_exist() {
+        let mock = MockAgentService::new();
+
+        // No decompose response queued — would panic if called.
+
+        // Child: assessed as leaf, executes, succeeds.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(TaskOutcome::Success);
+
+        // Verification: child passes, root passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut state = EpicState::new();
+        let root_id = state.next_task_id();
+        let child_id = state.next_task_id();
+
+        let mut root = Task::new(root_id, None, "root".into(), vec!["passes".into()], 0);
+        root.subtask_ids = vec![child_id];
+
+        let child = Task::new(
+            child_id,
+            Some(root_id),
+            "existing child".into(),
+            vec!["child passes".into()],
+            1,
+        );
+
+        state.insert(root);
+        state.insert(child);
+
+        let (tx, _rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.subtask_ids, vec![child_id]);
+        assert_eq!(root.phase, TaskPhase::Completed);
+    }
+
+    /// Resume: mid-execution Branch is NOT re-assessed; uses existing path and children.
+    #[tokio::test]
+    async fn resume_mid_execution_branch_not_reassessed() {
+        let mock = MockAgentService::new();
+
+        // No assess or decompose responses queued — would panic if called.
+
+        // Grandchild: assessed as leaf, executes, succeeds.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(TaskOutcome::Success);
+
+        // Verification: grandchild, middle branch, root — all pass.
+        for _ in 0..3 {
+            mock.verify_responses
+                .lock()
+                .unwrap()
+                .push_back(pass_verification());
+        }
+
+        let mut state = EpicState::new();
+        let root_id = state.next_task_id(); // T0
+        let mid_id = state.next_task_id(); // T1
+        let grandchild_id = state.next_task_id(); // T2
+
+        // Root: Executing, Branch, has mid as child.
+        let mut root = Task::new(root_id, None, "root".into(), vec!["passes".into()], 0);
+        root.path = Some(TaskPath::Branch);
+        root.model = Some(Model::Sonnet);
+        root.current_model = Some(Model::Sonnet);
+        root.phase = TaskPhase::Executing;
+        root.subtask_ids = vec![mid_id];
+
+        // Mid: Executing, Branch, has grandchild. Was mid-execution when killed.
+        let mut mid = Task::new(mid_id, Some(root_id), "mid".into(), vec!["mid passes".into()], 1);
+        mid.path = Some(TaskPath::Branch);
+        mid.model = Some(Model::Sonnet);
+        mid.current_model = Some(Model::Sonnet);
+        mid.phase = TaskPhase::Executing;
+        mid.subtask_ids = vec![grandchild_id];
+
+        // Grandchild: Pending, not yet executed.
+        let grandchild = Task::new(
+            grandchild_id,
+            Some(mid_id),
+            "grandchild".into(),
+            vec!["gc passes".into()],
+            2,
+        );
+
+        state.insert(root);
+        state.insert(mid);
+        state.insert(grandchild);
+
+        let (tx, _rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Mid was NOT re-assessed — still Branch with same child.
+        let mid = orch.state.get(mid_id).unwrap();
+        assert_eq!(mid.path, Some(TaskPath::Branch));
+        assert_eq!(mid.subtask_ids, vec![grandchild_id]);
+        assert_eq!(mid.phase, TaskPhase::Completed);
+    }
+
+    /// Resume: task in Verifying phase goes straight to re-verification, not re-execution.
+    #[tokio::test]
+    async fn resume_verifying_skips_execution() {
+        let mock = MockAgentService::new();
+
+        // No decompose, assess, or leaf responses — would panic if re-executed.
+
+        // Verification: child passes, root passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut state = EpicState::new();
+        let root_id = state.next_task_id();
+        let child_id = state.next_task_id();
+
+        let mut root = Task::new(root_id, None, "root".into(), vec!["passes".into()], 0);
+        root.path = Some(TaskPath::Branch);
+        root.model = Some(Model::Sonnet);
+        root.current_model = Some(Model::Sonnet);
+        root.phase = TaskPhase::Executing;
+        root.subtask_ids = vec![child_id];
+
+        // Child was mid-verification when killed.
+        let mut child = Task::new(
+            child_id,
+            Some(root_id),
+            "child".into(),
+            vec!["child passes".into()],
+            1,
+        );
+        child.path = Some(TaskPath::Leaf);
+        child.model = Some(Model::Haiku);
+        child.current_model = Some(Model::Haiku);
+        child.phase = TaskPhase::Verifying;
+
+        state.insert(root);
+        state.insert(child);
+
+        let (tx, _rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // Child went straight to verification, not re-execution.
+        assert_eq!(orch.state.get(child_id).unwrap().phase, TaskPhase::Completed);
+        // No attempts added — leaf was not re-executed.
+        assert!(orch.state.get(child_id).unwrap().attempts.is_empty());
     }
 
     /// Task at max depth forced to Leaf path.

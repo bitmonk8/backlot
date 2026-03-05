@@ -10,6 +10,7 @@ use std::path::Path;
 pub struct EpicState {
     tasks: HashMap<TaskId, Task>,
     next_id: u64,
+    root_id: Option<TaskId>,
 }
 
 #[allow(dead_code)] // Methods used in tests and future main wiring.
@@ -52,9 +53,22 @@ impl EpicState {
         result
     }
 
+    pub const fn set_root_id(&mut self, id: TaskId) {
+        self.root_id = Some(id);
+    }
+
+    pub const fn root_id(&self) -> Option<TaskId> {
+        self.root_id
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, json)?;
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -91,14 +105,19 @@ mod tests {
         root.subtask_ids.push(child_id);
         state.insert(root);
         state.insert(child);
+        state.set_root_id(root_id);
 
         let dir = std::env::temp_dir().join("epic_test_state");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.json");
         state.save(&path).unwrap();
 
+        // Atomic write must not leave a .tmp file behind.
+        assert!(!dir.join("state.json.tmp").exists());
+
         let loaded = EpicState::load(&path).unwrap();
         assert_eq!(loaded.next_id, 2);
+        assert_eq!(loaded.root_id(), Some(root_id));
 
         let loaded_root = loaded.get(root_id).unwrap();
         assert_eq!(loaded_root.goal, "root goal");

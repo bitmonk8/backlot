@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, and tool execution complete. State persistence next.
+**Implementation** — Core orchestrator, agent wiring, tool execution, and state persistence complete. TUI next.
 
 ## Milestones
 
@@ -12,13 +12,13 @@
 - [x] Agent runtime selected — ZeroClaw evaluated, audited, forked, then replaced by [Flick](https://github.com/bitmonk8/flick) (external executable, no crate dependency). Dependency count reduced from ~771 to ~104 packages.
 - [x] Agent call wiring — `FlickAgent` implements `AgentService` via Flick subprocess invocation. Config generation (YAML), structured output schemas, wire format types with `TryFrom` conversions, prompt assembly, tool loop with resume. 38 tests passing.
 - [x] Tool execution — All 6 tools implemented: `read_file`, `glob`, `grep`, `write_file`, `edit_file`, `bash`. Path sandboxing, size limits, timeout handling. 15 new tests (53 total).
-- [ ] State persistence integration — Wire `EpicState::save`/`load` into the main run loop for session resume
+- [x] State persistence integration — `EpicState` saves/loads via `.epic/state.json`. Orchestrator checkpoints after assessment, decomposition, child completion, and verification. `main.rs` resumes from persisted state or creates fresh. Atomic writes (write-rename), resume skips completed/failed/mid-execution tasks correctly, reuses existing decomposition, goal mismatch detection, corrupt state error handling. 5 new tests (58 total).
 
 ## Next Work Candidates
 
-1. **State persistence integration** — Wire `EpicState::save`/`load` into the main run loop for session resume.
-3. **TUI event consumer** — Connect `EventReceiver` to ratatui task tree and worklog panels.
-4. **Discoveries propagation** — `TaskOutcomeWire.discoveries` is parsed but dropped during `TryFrom` conversion. Requires `AgentService` trait signature change to carry discoveries alongside `TaskOutcome`.
+1. **TUI event consumer** — Connect `EventReceiver` to ratatui task tree and worklog panels.
+2. **Discoveries propagation** — `TaskOutcomeWire.discoveries` is parsed but dropped during `TryFrom` conversion. Requires `AgentService` trait signature change to carry discoveries alongside `TaskOutcome`.
+3. **CLI (clap)** — Replace ad-hoc env-var/arg parsing with proper CLI: `epic run <goal>`, `epic resume`, `epic status`.
 
 ## Decisions Made
 
@@ -83,3 +83,23 @@
 **Async:** `glob`/`grep` use `spawn_blocking` to avoid blocking the tokio runtime with sync `WalkDir`/`std::fs` I/O.
 
 **Tests:** 15 new tests (53 total). 0 clippy warnings.
+
+### 2026-03-05: State persistence integration
+
+**Scope:** `EpicState` gains `root_id` field for session resume. `Orchestrator` gains `state_path: Option<PathBuf>` and `checkpoint_save()` method. `main.rs` loads from `.epic/state.json` if present, otherwise creates fresh state. Extracted `finalize_task` method for verification/completion logic.
+
+**Checkpoint locations:** After assessment (path/model applied), after decomposition (subtasks created), after each task completion/failure (verification pass/fail, execution failure).
+
+**Resume semantics:** `execute_task` returns early for `Completed`/`Failed` tasks. `Verifying` tasks skip to re-verification (not re-execution). `Executing` tasks with `path` already set skip re-assessment. `execute_branch` reuses existing `subtask_ids` (skips `design_and_decompose`), skips terminal children. `Orchestrator::run()` sets `root_id` on state.
+
+**Atomic writes:** `save()` writes to `.json.tmp` then renames. Prevents corruption on kill.
+
+**Goal mismatch:** CLI goal compared against persisted root goal; exits with diagnostic on mismatch.
+
+**Corrupt state:** `EpicState::load()` errors produce human-readable message and exit, not raw serde trace.
+
+**Best-effort checkpoints:** `checkpoint_save()` logs errors to stderr but does not abort the run.
+
+**Deferred for v1:** Leaf retry counter resets on resume (bounded overshoot). No checkpoint during leaf retry loop (intermediate attempts lost on crash).
+
+**Tests:** 5 new tests: `checkpoint_saves_state`, `resume_skips_completed_child`, `resume_skips_decomposition_when_subtasks_exist`, `resume_mid_execution_branch_not_reassessed`, `resume_verifying_skips_execution` (58 total). 0 clippy warnings.
