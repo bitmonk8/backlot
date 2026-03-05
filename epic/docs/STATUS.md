@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, TUI, discoveries propagation, CLI, `epic init`, fix loops, Flick library migration, recovery re-decomposition, checkpoint adjust/escalate, and all deferred items complete. 110 tests passing.
+**Audit complete, pre-hardening** — All v1 features implemented (110 tests passing). Full codebase audit executed (95 review cells, 541 findings). Awaiting triage and remediation of audit findings before real-world use.
 
 ## Milestones
 
@@ -21,6 +21,8 @@
 - [x] Fix loop after verification failure — Three components: scope circuit breaker (`Magnitude` struct, `git diff --numstat` check, 3x threshold), leaf fix loop (retry/escalate with `fix_leaf` agent call, reuses model tier progression), branch fix loop (3 rounds Sonnet + 1 Opus for root, `design_fix_subtasks` agent call, fix subtasks marked `is_fix_task` to prevent recursive fix chains). Extracted `fail_task`, `complete_task_verified`, `create_subtasks` helpers and `evaluate_scope` pure function. 18 new tests (81 total).
 - [x] Recovery re-decomposition — When a child fails in a branch, Opus recovery agent creates new subtasks. Two approaches: incremental (preserve completed work, append recovery subtasks) or full (skip remaining pending siblings, replace with recovery subtasks). Max 2 recovery rounds per branch. Fix tasks skip recovery (prevents recursive chains). 10 new tests (91 total).
 - [x] Checkpoint adjust/escalate actions — Checkpoint decision (proceed/adjust/escalate) now acted upon. Adjust accumulates guidance on parent task (newline-separated), propagated to pending siblings via prompt context. Escalate clears stale guidance, triggers recovery with actual discoveries. Checkpoint uses Haiku (classification task). Agent errors treated as Proceed (best-effort, with mock error injection for testing). New `checkpoint_guidance` field on Task, `CheckpointAdjust`/`CheckpointEscalate` events, TUI integration. 11 new tests (105 total).
+
+- [x] Full codebase audit — 95 review cells (81 matrix, 6 cross-cutting, 8 broad-lens). 541 findings: 4 critical, 120 major, 241 minor, 176 note. See [AUDIT.md](AUDIT.md).
 
 ## Deferred Items
 
@@ -44,9 +46,33 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-No remaining work candidates. All v1 features and polish items are complete.
+Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
+
+1. **Sandbox the bash tool** — LLM agents run arbitrary shell commands with zero isolation. Security prerequisite for real-world use. (Critical: U5-R2 #1, U2-R2 #1)
+2. **Wire epic.toml to the orchestrator** — Config is collected by `init` but never loaded at runtime. `MAX_DEPTH`, `RETRIES_PER_TIER`, model preferences all hardcoded. (Major: U10-R1, U7-R1, X6)
+3. **Fix model selection to match AGENT_DESIGN.md** — Assessment, decomposition, recovery, and verification all use wrong model tiers. (Major: U1-R7, U2-R7, U6-R7)
+4. **Cap total task count and recovery depth** — Recovery subtasks get fresh budgets, enabling exponential cost. (Major: B7, U1-R2)
+5. **Update stale documentation** — 14+ subprocess/Flick references not updated after library migration. (Major: U17-R4, U17-R8)
+6. **Add CI pipeline** — No CI exists. Pin Flick dependency. Add `rust-toolchain.toml`. (Critical: X4)
+7. **Extract main() into testable function** — Replace `process::exit` with `bail!`, enable integration testing. (Critical: U12-R6)
+8. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs. (Major: U14-R4, U15-R4, U16-R4)
+9. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code. (Major: B1, U1-R5)
+10. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files. (Major: U8-R1, U8-R2)
 
 ## Decisions Made
+
+### 2026-03-05: Full codebase audit completed
+
+**Scope:** 95 independent review agents audited the entire codebase (~9,400 lines of Rust across 29 source files plus 13 design documents). Reviews covered correctness, security, error handling, dead code, simplification, testability, design intent, and doc consistency.
+
+**Results:** 541 findings total — 4 critical, 120 major, 241 minor, 176 note. Detailed reports in `docs/audit/`. Consolidated results and prioritized action items in `docs/AUDIT.md`.
+
+**Top concerns identified:**
+1. Unsandboxed bash tool execution (critical security gap)
+2. `epic.toml` config collected but never loaded at runtime (all limits hardcoded)
+3. Model selection diverges from AGENT_DESIGN.md spec across 4+ call sites
+4. Recovery subtasks get fresh budgets, enabling exponential cost growth
+5. 14+ stale documentation references to pre-migration subprocess pattern
 
 ### 2026-03-05: Leaf retry counter persistence and checkpoint implemented
 
