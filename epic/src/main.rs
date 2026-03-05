@@ -14,14 +14,14 @@ use events::event_channel;
 use orchestrator::Orchestrator;
 use state::EpicState;
 use task::Task;
+use tui::TuiApp;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
-    // Minimal wiring — just enough to construct and run the orchestrator.
-    // A proper CLI (clap) is a follow-up.
     let flick_path = std::env::var("EPIC_FLICK_PATH")
         .map_or_else(|_| PathBuf::from("flick"), PathBuf::from);
 
@@ -43,9 +43,10 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     let cli_goal = std::env::args().nth(1);
+    let no_tui = std::env::var("EPIC_NO_TUI").is_ok();
 
     // Resume from persisted state, or create fresh state from CLI goal.
-    let (state, root_id) = if state_path.exists() {
+    let (state, root_id, goal_text) = if state_path.exists() {
         let state = match EpicState::load(&state_path) {
             Ok(s) => s,
             Err(e) => {
@@ -60,10 +61,12 @@ async fn main() -> anyhow::Result<()> {
             .root_id()
             .ok_or_else(|| anyhow::anyhow!("persisted state has no root_id"))?;
 
-        // Detect goal mismatch if a CLI goal was provided.
+        let persisted_goal = state
+            .get(root_id)
+            .map_or_else(String::new, |t| t.goal.clone());
+
         if let Some(ref goal) = cli_goal {
-            let persisted_goal = state.get(root_id).map_or("", |t| t.goal.as_str());
-            if goal != persisted_goal {
+            if goal != &persisted_goal {
                 eprintln!(
                     "State file exists with different goal: \"{persisted_goal}\". \
                      Use --resume to continue, or delete .epic/state.json to start fresh."
@@ -73,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         eprintln!("Resuming from {}", state_path.display());
-        (state, root_id)
+        (state, root_id, persisted_goal)
     } else {
         let Some(goal) = cli_goal else {
             eprintln!("Usage: epic <goal>");
@@ -85,25 +88,61 @@ async fn main() -> anyhow::Result<()> {
         let root = Task::new(
             root_id,
             None,
-            goal,
+            goal.clone(),
             vec!["Task completed successfully".into()],
             0,
         );
         state.insert(root);
         state.set_root_id(root_id);
-        (state, root_id)
+        (state, root_id, goal)
     };
 
-    let (tx, _rx) = event_channel();
+    let (tx, rx) = event_channel();
     let mut orchestrator = Orchestrator::new(agent, state, tx)
         .with_state_path(state_path.clone());
 
-    let outcome = orchestrator.run(root_id).await?;
+    if no_tui {
+        // Headless mode: run orchestrator directly, discard events.
+        let outcome = orchestrator.run(root_id).await?;
+        let state = orchestrator.into_state();
+        state.save(&state_path)?;
+        println!("Epic completed: {outcome:?}");
+    } else {
+        // TUI mode: orchestrator in background, TUI in blocking thread.
+        let mut tui_app = TuiApp::new(goal_text);
 
-    // Final save.
-    let state = orchestrator.into_state();
-    state.save(&state_path)?;
-    println!("Epic completed: {outcome:?}");
+        let orch_handle = tokio::spawn(async move {
+            let result = orchestrator.run(root_id).await;
+            let state = orchestrator.into_state();
+            (result, state)
+        });
+
+        // TUI is a blocking crossterm loop — run on a blocking thread.
+        let tui_result =
+            tokio::task::spawn_blocking(move || tui_app.run(rx)).await?;
+
+        // Give orchestrator 2s to finish gracefully, then abort.
+        let abort_handle = orch_handle.abort_handle();
+        match tokio::time::timeout(Duration::from_secs(2), orch_handle).await {
+            Ok(Ok((result, state))) => {
+                state.save(&state_path)?;
+                if let Ok(outcome) = result {
+                    println!("Epic completed: {outcome:?}");
+                } else if let Err(e) = result {
+                    eprintln!("Orchestrator error: {e}");
+                }
+            }
+            Ok(Err(e)) => {
+                eprintln!("Orchestrator task panicked: {e}");
+            }
+            Err(_) => {
+                abort_handle.abort();
+                eprintln!("Orchestrator still running after timeout, aborted.");
+            }
+        }
+
+        tui_result?;
+    }
 
     Ok(())
 }

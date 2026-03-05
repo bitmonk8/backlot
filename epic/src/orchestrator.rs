@@ -46,6 +46,23 @@ impl<A: AgentService> Orchestrator<A> {
 
     pub async fn run(&mut self, root_id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
         self.state.set_root_id(root_id);
+        // Register all tasks for TUI (root + any pre-existing subtasks on resume).
+        for id in self.state.dfs_order(root_id) {
+            if let Some(t) = self.state.get(id) {
+                self.emit(Event::TaskRegistered {
+                    task_id: id,
+                    parent_id: t.parent_id,
+                    goal: t.goal.clone(),
+                    depth: t.depth,
+                });
+                if t.phase != TaskPhase::Pending {
+                    self.emit(Event::PhaseTransition {
+                        task_id: id,
+                        phase: t.phase,
+                    });
+                }
+            }
+        }
         self.execute_task(root_id).await
     }
 
@@ -72,7 +89,7 @@ impl<A: AgentService> Orchestrator<A> {
             .state
             .get_mut(id)
             .ok_or(OrchestratorError::TaskNotFound(id))?;
-        task.phase = phase.clone();
+        task.phase = phase;
         self.emit(Event::PhaseTransition { task_id: id, phase });
         Ok(())
     }
@@ -428,6 +445,16 @@ impl<A: AgentService> Orchestrator<A> {
                 task.subtask_ids.clone_from(&new_child_ids);
             }
 
+            for &child_id in &new_child_ids {
+                if let Some(child) = self.state.get(child_id) {
+                    self.emit(Event::TaskRegistered {
+                        task_id: child_id,
+                        parent_id: child.parent_id,
+                        goal: child.goal.clone(),
+                        depth: child.depth,
+                    });
+                }
+            }
             self.emit(Event::SubtasksCreated {
                 parent_id: id,
                 child_ids: new_child_ids.clone(),
@@ -445,8 +472,7 @@ impl<A: AgentService> Orchestrator<A> {
                 .state
                 .get(child_id)
                 .ok_or(OrchestratorError::TaskNotFound(child_id))?
-                .phase
-                .clone();
+                .phase;
 
             match child_phase {
                 TaskPhase::Completed => continue,

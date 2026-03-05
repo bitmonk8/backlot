@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Implementation** — Core orchestrator, agent wiring, tool execution, and state persistence complete. TUI next.
+**Implementation** — Core orchestrator, agent wiring, tool execution, state persistence, and TUI complete. Discoveries propagation and CLI next.
 
 ## Milestones
 
@@ -13,12 +13,12 @@
 - [x] Agent call wiring — `FlickAgent` implements `AgentService` via Flick subprocess invocation. Config generation (YAML), structured output schemas, wire format types with `TryFrom` conversions, prompt assembly, tool loop with resume. 38 tests passing.
 - [x] Tool execution — All 6 tools implemented: `read_file`, `glob`, `grep`, `write_file`, `edit_file`, `bash`. Path sandboxing, size limits, timeout handling. 15 new tests (53 total).
 - [x] State persistence integration — `EpicState` saves/loads via `.epic/state.json`. Orchestrator checkpoints after assessment, decomposition, child completion, and verification. `main.rs` resumes from persisted state or creates fresh. Atomic writes (write-rename), resume skips completed/failed/mid-execution tasks correctly, reuses existing decomposition, goal mismatch detection, corrupt state error handling. 5 new tests (58 total).
+- [x] TUI event consumer — `TuiApp` consumes orchestrator events via ratatui + crossterm. Task tree panel (DFS with status indicators ✓/✗/▸/·, current-task cursor), worklog panel (timestamped event stream with follow-tail), metrics panel (toggle), header bar (goal, progress, elapsed). Keyboard controls: q/Ctrl-C quit, t toggle tail, m toggle metrics, ↑↓ scroll. Orchestrator runs in background tokio task, TUI in sync foreground loop. `EPIC_NO_TUI=1` for headless mode. `TaskRegistered` event added for TUI to build task tree from events alone.
 
 ## Next Work Candidates
 
-1. **TUI event consumer** — Connect `EventReceiver` to ratatui task tree and worklog panels.
-2. **Discoveries propagation** — `TaskOutcomeWire.discoveries` is parsed but dropped during `TryFrom` conversion. Requires `AgentService` trait signature change to carry discoveries alongside `TaskOutcome`.
-3. **CLI (clap)** — Replace ad-hoc env-var/arg parsing with proper CLI: `epic run <goal>`, `epic resume`, `epic status`.
+1. **Discoveries propagation** — `TaskOutcomeWire.discoveries` is parsed but dropped during `TryFrom` conversion. Requires `AgentService` trait signature change to carry discoveries alongside `TaskOutcome`.
+2. **CLI (clap)** — Replace ad-hoc env-var/arg parsing with proper CLI: `epic run <goal>`, `epic resume`, `epic status`.
 
 ## Decisions Made
 
@@ -103,3 +103,25 @@
 **Deferred for v1:** Leaf retry counter resets on resume (bounded overshoot). No checkpoint during leaf retry loop (intermediate attempts lost on crash).
 
 **Tests:** 5 new tests: `checkpoint_saves_state`, `resume_skips_completed_child`, `resume_skips_decomposition_when_subtasks_exist`, `resume_mid_execution_branch_not_reassessed`, `resume_verifying_skips_execution` (58 total). 0 clippy warnings.
+
+### 2026-03-05: TUI event consumer implemented
+
+**Scope:** `TuiApp` in `tui/mod.rs` consumes `EventReceiver` and renders via ratatui + crossterm. 4 files implemented/rewritten, 2 files modified.
+
+**Layout:** Header (status, goal, progress counter, elapsed time), body (task tree + worklog, optionally + metrics), footer (keybindings).
+
+**Task tree:** DFS-ordered display built from `TaskRegistered` events. Status indicators: ✓ completed, ✗ failed, ▸ in progress, · pending. Current-task cursor (←). Scrollable via ↑↓.
+
+**Worklog:** Timestamped event stream with color-coded entries (green=success, red=error, yellow=warn). Follow-tail toggle (t key).
+
+**Metrics panel:** Toggle (m key). Shows task counts by phase (total, completed, in-progress, pending, failed).
+
+**Event additions:** `TaskRegistered { task_id, parent_id, goal, depth }` added to `Event` enum. Emitted by orchestrator for root task, pre-existing subtasks (resume), and newly created subtasks.
+
+**Architecture:** Orchestrator runs in background `tokio::spawn` task. TUI runs in `spawn_blocking` (not on async runtime). Events drained non-blockingly via `try_recv`. `EPIC_NO_TUI=1` env var for headless mode (original behavior). On TUI quit, orchestrator gets 2s grace period then `abort_handle.abort()`.
+
+**Safety:** Panic hook restores terminal (raw mode + alternate screen) before default handler. UTF-8 safe truncation via `char_indices().take_while()` on full string. Scroll clamped in both key handler and render. Worklog capped at 10,000 entries. `TaskCompleted` defensively sets phase regardless of event ordering. `TaskPhase` derives `Copy`.
+
+**Files modified:** `events.rs` (new variant), `orchestrator.rs` (emit `TaskRegistered`, `Copy` cleanup), `main.rs` (TUI/headless mode split, `spawn_blocking`, abort), `task/mod.rs` (`TaskPhase` + `Copy`), `tui/mod.rs`, `tui/task_tree.rs`, `tui/worklog.rs`, `tui/metrics.rs`.
+
+**Tests:** 58 passing (no new tests — TUI is UI code, tested via existing orchestrator event emission tests). 0 clippy warnings.

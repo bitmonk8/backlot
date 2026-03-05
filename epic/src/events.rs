@@ -6,6 +6,12 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Variants read by TUI (not yet wired).
 pub enum Event {
+    TaskRegistered {
+        task_id: TaskId,
+        parent_id: Option<TaskId>,
+        goal: String,
+        depth: u32,
+    },
     PhaseTransition {
         task_id: TaskId,
         phase: TaskPhase,
