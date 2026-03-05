@@ -49,9 +49,9 @@ timeout = 600
 
 ```toml
 [models]
-fast = "haiku-4.5"       # Assessment, checkpoints, document ops
-balanced = "sonnet-4.5"  # Implementation, branch verification
-strong = "opus-4.6"      # Recovery, complex decomposition
+fast = "claude-haiku-4-5-20251001"   # Assessment, checkpoints, document ops
+balanced = "claude-sonnet-4-6"      # Implementation, branch verification
+strong = "claude-opus-4-6"          # Recovery, complex decomposition
 
 # Or override with provider-specific model IDs
 # fast = "custom:https://my-endpoint.com/haiku"
@@ -69,8 +69,7 @@ epic_dir = ".epic"            # Epic working directory
 
 ```toml
 [agent]
-runtime = "flick"             # Agent runtime executable
-flick_path = "flick"          # Path to Flick binary (default: on PATH)
+runtime = "flick"             # Agent runtime (library crate dependency)
 ```
 
 ## Depth and Budget Configuration
@@ -81,6 +80,7 @@ max_depth = 8                 # Task tree depth cap
 max_recovery_rounds = 2       # Per branch
 retry_budget = 3              # Retries per model tier per leaf
 branch_fix_rounds = 3         # Verification fix rounds per branch
+root_fix_rounds = 4           # Verification fix rounds for root task (extra Opus round)
 ```
 
 ## Init: `epic init`

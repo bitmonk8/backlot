@@ -282,7 +282,7 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
         .parse()
         .unwrap_or(defaults.retry_budget);
     drop(lines);
-    Ok(LimitsConfig { max_depth, max_recovery_rounds, retry_budget })
+    Ok(LimitsConfig { max_depth, max_recovery_rounds, retry_budget, ..Default::default() })
 }
 
 /// Read a line, returning an error on I/O failure or EOF.

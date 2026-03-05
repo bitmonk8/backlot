@@ -13,6 +13,7 @@ mod tui;
 
 use agent::flick::FlickAgent;
 use cli::{Cli, Command};
+use config::project::EpicConfig;
 use events::event_channel;
 use orchestrator::Orchestrator;
 use state::EpicState;
@@ -48,12 +49,23 @@ async fn main() -> anyhow::Result<()> {
     }
 
     std::fs::create_dir_all(&work_dir)?;
+
+    let config_path = project_root.join("epic.toml");
+    let epic_config = if config_path.exists() {
+        let contents = std::fs::read_to_string(&config_path)?;
+        toml::from_str::<EpicConfig>(&contents)?
+    } else {
+        EpicConfig::default()
+    };
+
     let timeout = Duration::from_secs(300);
 
     let agent = FlickAgent::new(
         project_root.clone(),
         cli.credential,
         timeout,
+        epic_config.models.clone(),
+        epic_config.verification_steps.clone(),
     );
 
     if matches!(&cli.command, Command::Init) {
@@ -160,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = event_channel();
     let mut orchestrator = Orchestrator::new(agent, state, tx)
+        .with_limits(epic_config.limits)
         .with_state_path(state_path.clone())
         .with_project_root(project_root.clone());
 

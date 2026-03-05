@@ -1,6 +1,7 @@
 // Prompt templates and assembly for agent system prompts.
 
 use crate::agent::TaskContext;
+use crate::config::project::VerificationStep;
 use crate::task::TaskOutcome;
 
 /// A system prompt + user query pair for a Flick call.
@@ -228,21 +229,34 @@ Respond with the required JSON schema."
     }
 }
 
-pub fn build_verify(ctx: &TaskContext) -> PromptPair {
-    let system_prompt = "\
-You are a task verifier in a recursive problem-solving system.
+pub fn build_verify(ctx: &TaskContext, verification_steps: &[VerificationStep]) -> PromptPair {
+    let steps_section = if verification_steps.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = verification_steps
+            .iter()
+            .map(|s| format!("- {}: `{}`", s.name, s.command.join(" ")))
+            .collect();
+        format!(
+            "\n\nProject verification commands (from epic.toml):\n{}",
+            lines.join("\n")
+        )
+    };
 
-Independently verify whether a completed task meets its verification criteria.
-Check the actual state of the codebase, not just the executor's claims.
-
-Guidelines:
-- Read relevant files and run verification commands.
-- Check each verification criterion independently.
-- Report pass only if ALL criteria are met.
-- Provide detailed explanation of what was checked and findings.
-
-Respond with the required JSON schema."
-        .into();
+    let system_prompt = format!(
+        "You are a task verifier in a recursive problem-solving system.\n\
+         \n\
+         Independently verify whether a completed task meets its verification criteria.\n\
+         Check the actual state of the codebase, not just the executor's claims.\n\
+         \n\
+         Guidelines:\n\
+         - Read relevant files and run verification commands.\n\
+         - Check each verification criterion independently.\n\
+         - Report pass only if ALL criteria are met.\n\
+         - Provide detailed explanation of what was checked and findings.{steps_section}\n\
+         \n\
+         Respond with the required JSON schema."
+    );
 
     let query = format!(
         "{context}\n\n\
@@ -412,7 +426,7 @@ mod tests {
     #[test]
     fn verify_prompt_contains_context() {
         let ctx = test_context();
-        let pair = build_verify(&ctx);
+        let pair = build_verify(&ctx, &[]);
         assert!(pair.query.contains("implement feature X"));
         assert!(pair.system_prompt.contains("verifier"));
     }
@@ -481,6 +495,23 @@ mod tests {
         assert!(pair.system_prompt.contains("recovery"));
         assert!(pair.system_prompt.contains("incremental"));
         assert!(pair.system_prompt.contains("full"));
+    }
+
+    #[test]
+    fn verify_prompt_contains_verification_steps() {
+        let ctx = test_context();
+        let steps = vec![VerificationStep {
+            name: "Build".into(),
+            command: vec!["cargo".into(), "build".into()],
+            timeout: 300,
+        }];
+        let pair = build_verify(&ctx, &steps);
+        assert!(
+            pair.system_prompt.contains("Build: `cargo build`"),
+            "system prompt should contain formatted verification step, got: {}",
+            pair.system_prompt,
+        );
+        assert!(pair.system_prompt.contains("Project verification commands"));
     }
 
     #[test]

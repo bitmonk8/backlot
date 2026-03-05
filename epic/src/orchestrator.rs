@@ -1,6 +1,7 @@
 // Recursive task execution, DFS traversal, state persistence, resume.
 
 use crate::agent::{AgentService, SiblingSummary, TaskContext};
+use crate::config::project::LimitsConfig;
 use crate::events::{Event, EventSender};
 use crate::state::EpicState;
 use crate::task::assess::AssessmentResult;
@@ -12,11 +13,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use thiserror::Error;
 
-const MAX_DEPTH: u32 = 8;
-const RETRIES_PER_TIER: u32 = 3;
-const MAX_BRANCH_FIX_ROUNDS: u32 = 3;
-const MAX_ROOT_FIX_ROUNDS: u32 = 4;
-const MAX_RECOVERY_ROUNDS: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
@@ -83,17 +79,24 @@ pub struct Orchestrator<A: AgentService> {
     events: EventSender,
     state_path: Option<PathBuf>,
     project_root: Option<PathBuf>,
+    limits: LimitsConfig,
 }
 
 impl<A: AgentService> Orchestrator<A> {
-    pub const fn new(agent: A, state: EpicState, events: EventSender) -> Self {
+    pub fn new(agent: A, state: EpicState, events: EventSender) -> Self {
         Self {
             agent,
             state,
             events,
             state_path: None,
             project_root: None,
+            limits: LimitsConfig::default(),
         }
+    }
+
+    pub fn with_limits(mut self, limits: LimitsConfig) -> Self {
+        self.limits = limits;
+        self
     }
 
     pub fn with_state_path(mut self, path: PathBuf) -> Self {
@@ -107,6 +110,11 @@ impl<A: AgentService> Orchestrator<A> {
     }
 
     pub async fn run(&mut self, root_id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
+        // Clamp minimum values to 1 to prevent zero-iteration loops.
+        self.limits.retry_budget = self.limits.retry_budget.max(1);
+        self.limits.branch_fix_rounds = self.limits.branch_fix_rounds.max(1);
+        self.limits.root_fix_rounds = self.limits.root_fix_rounds.max(1);
+
         self.state.set_root_id(root_id);
         // Register all tasks for TUI (root + any pre-existing subtasks on resume).
         for id in self.state.dfs_order(root_id) {
@@ -423,7 +431,7 @@ impl<A: AgentService> Orchestrator<A> {
                     rationale: "Root task always branches".into(),
                     magnitude: None,
                 }
-            } else if depth >= MAX_DEPTH {
+            } else if depth >= self.limits.max_depth {
                 AssessmentResult {
                     path: TaskPath::Leaf,
                     model: Model::Sonnet,
@@ -538,7 +546,7 @@ impl<A: AgentService> Orchestrator<A> {
         let mut failure_reason = initial_failure.to_owned();
 
         // Drain any stale tier exhaustion from a crash before escalation.
-        while fix_retries_at_tier >= RETRIES_PER_TIER {
+        while fix_retries_at_tier >= self.limits.retry_budget {
             if let Some(next_model) = fix_model.escalate() {
                 self.emit(Event::FixModelEscalated {
                     task_id: id,
@@ -644,7 +652,7 @@ impl<A: AgentService> Orchestrator<A> {
 
             fix_retries_at_tier += 1;
 
-            if fix_retries_at_tier < RETRIES_PER_TIER {
+            if fix_retries_at_tier < self.limits.retry_budget {
                 continue;
             }
 
@@ -683,7 +691,7 @@ impl<A: AgentService> Orchestrator<A> {
             .parent_id
             .is_none();
 
-        let max_rounds = if is_root { MAX_ROOT_FIX_ROUNDS } else { MAX_BRANCH_FIX_ROUNDS };
+        let max_rounds = if is_root { self.limits.root_fix_rounds } else { self.limits.branch_fix_rounds };
         let mut failure_reason = initial_failure.to_owned();
 
         loop {
@@ -790,7 +798,7 @@ impl<A: AgentService> Orchestrator<A> {
             .count() as u32;
 
         // Drain any stale tier exhaustion from a crash before escalation.
-        while retries_at_tier >= RETRIES_PER_TIER {
+        while retries_at_tier >= self.limits.retry_budget {
             if let Some(next_model) = current_model.escalate() {
                 self.emit(Event::ModelEscalated {
                     task_id: id,
@@ -857,7 +865,7 @@ impl<A: AgentService> Orchestrator<A> {
 
             retries_at_tier += 1;
 
-            if retries_at_tier < RETRIES_PER_TIER {
+            if retries_at_tier < self.limits.retry_budget {
                 self.emit(Event::RetryAttempt {
                     task_id: id,
                     attempt: retries_at_tier,
@@ -1040,10 +1048,11 @@ impl<A: AgentService> Orchestrator<A> {
         }
 
         // Check recovery round budget.
-        if task.recovery_rounds >= MAX_RECOVERY_ROUNDS {
+        let max_recovery = self.limits.max_recovery_rounds;
+        if task.recovery_rounds >= max_recovery {
             return Ok(Some(TaskOutcome::Failed {
                 reason: format!(
-                    "recovery rounds exhausted ({MAX_RECOVERY_ROUNDS}): {failure_reason}"
+                    "recovery rounds exhausted ({max_recovery}): {failure_reason}"
                 ),
             }));
         }
@@ -1148,8 +1157,8 @@ impl<A: AgentService> Orchestrator<A> {
         // Step 3: create recovery subtasks (appended to parent's subtask_ids).
         // Recovery subtasks are NOT marked is_fix_task: they are full tasks that
         // get their own assessment, verification, fix loops, and recovery budget.
-        // Recursion is bounded by MAX_DEPTH (8) and each level's recovery budget
-        // (MAX_RECOVERY_ROUNDS=2).
+        // Recursion is bounded by config.limits.max_depth and each level's recovery budget
+        // (config.limits.max_recovery_rounds).
         let count = plan.subtasks.len();
         let recovery_child_ids =
             self.create_subtasks(parent_id, plan.subtasks, false, true)?;
@@ -1922,7 +1931,9 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
-        // Set up state with root at depth MAX_DEPTH - 1 so child hits cap.
+        // Set up state with root at depth max_depth - 1 so child hits cap.
+        let limits = LimitsConfig::default();
+        let max_depth = limits.max_depth;
         let mut state = EpicState::new();
         let root_id = state.next_task_id();
         let root = Task::new(
@@ -1930,21 +1941,21 @@ mod tests {
             None,
             "deep root".into(),
             vec!["passes".into()],
-            MAX_DEPTH - 1,
+            max_depth - 1,
         );
         state.insert(root);
         let (tx, _rx) = events::event_channel();
         let mut orch = Orchestrator::new(mock, state, tx);
 
         // Root is not at depth 0 but has no parent, so it's forced to Branch.
-        // Child will be at MAX_DEPTH, forced to Leaf (no assess call needed).
+        // Child will be at max_depth, forced to Leaf (no assess call needed).
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
 
         let child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
         let child = orch.state.get(child_id).unwrap();
         assert_eq!(child.path, Some(TaskPath::Leaf));
-        assert_eq!(child.depth, MAX_DEPTH);
+        assert_eq!(child.depth, max_depth);
     }
 
     /// Leaf reports discoveries → stored on task → checkpoint called → sibling sees them.
@@ -3962,7 +3973,7 @@ mod tests {
         );
     }
 
-    /// Checkpoint escalation when recovery rounds are already at MAX_RECOVERY_ROUNDS
+    /// Checkpoint escalation when recovery rounds are already at max_recovery_rounds
     /// results in immediate failure without starting a new recovery round.
     #[tokio::test]
     async fn checkpoint_escalate_recovery_rounds_exhausted() {
@@ -4012,11 +4023,11 @@ mod tests {
             .push_back(CheckpointDecision::Escalate);
 
         // No recovery_responses needed — attempt_recovery will bail out
-        // before calling assess_recovery because recovery_rounds >= MAX_RECOVERY_ROUNDS.
+        // before calling assess_recovery because recovery_rounds >= max_recovery_rounds.
 
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
 
-        // Pre-set recovery_rounds to MAX_RECOVERY_ROUNDS so escalation exhausts immediately.
+        // Pre-set recovery_rounds to max_recovery_rounds so escalation exhausts immediately.
         orch.state.get_mut(root_id).unwrap().recovery_rounds = 2;
 
         let result = orch.run(root_id).await.unwrap();
@@ -4508,5 +4519,376 @@ mod tests {
         assert_eq!(child.attempts.len(), 2);
         assert!(!child.attempts[0].succeeded);
         assert!(child.attempts[1].succeeded);
+    }
+
+    // -----------------------------------------------------------------------
+    // Config wiring tests: verify non-default config values change behavior
+    // -----------------------------------------------------------------------
+
+    /// Custom max_depth=2: root at depth 1, child at depth 2 is forced to Leaf without assess.
+    #[tokio::test]
+    async fn custom_max_depth_forces_leaf() {
+        let mock = MockAgentService::new();
+
+        // Root branches (forced), decomposition returns 1 subtask.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        // No assess response queued — child should be force-leafed without calling assess.
+
+        // Child leaf execution succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child, root.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut limits = LimitsConfig::default();
+        limits.max_depth = 2;
+
+        let mut state = EpicState::new();
+        let root_id = state.next_task_id();
+        let root = Task::new(root_id, None, "deep root".into(), vec!["passes".into()], 1);
+        state.insert(root);
+        let (tx, _rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx).with_limits(limits);
+
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
+        let child = orch.state.get(child_id).unwrap();
+        assert_eq!(child.path, Some(TaskPath::Leaf));
+        assert_eq!(child.depth, 2);
+    }
+
+    /// Custom retry_budget=1: Haiku fails once → immediately escalates to Sonnet.
+    #[tokio::test]
+    async fn custom_retry_budget_escalates_early() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // 1 Haiku failure → escalate → 1 Sonnet success.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_failed("haiku failed"));
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child, root.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut limits = LimitsConfig::default();
+        limits.retry_budget = 1;
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        orch.limits = limits;
+
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
+        let child = orch.state.get(child_id).unwrap();
+        // Only 2 attempts total: 1 Haiku fail + 1 Sonnet success.
+        assert_eq!(child.attempts.len(), 2);
+        assert_eq!(child.current_model, Some(Model::Sonnet));
+    }
+
+    /// Custom max_recovery_rounds=1: recovery attempted once, refused on second failure.
+    #[tokio::test]
+    async fn custom_max_recovery_rounds_limits_recovery() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses.lock().unwrap().push_back(DecompositionResult {
+            subtasks: vec![SubtaskSpec {
+                goal: "child A".into(),
+                verification_criteria: vec!["A passes".into()],
+                magnitude_estimate: MagnitudeEstimate::Small,
+            }],
+            rationale: "one subtask".into(),
+        });
+
+        // Child A fails terminally (9 attempts: 3 per tier).
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+        }
+
+        // Round 1: recovery with incremental plan.
+        mock.recovery_responses.lock().unwrap().push_back(Some("try again".into()));
+        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+
+        // Recovery subtask 1: also fails terminally.
+        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        for _ in 0..9 {
+            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("recovery failed"));
+        }
+
+        // Round 2 would exceed limit (max_recovery_rounds=1) — no more recovery responses needed.
+
+        let mut limits = LimitsConfig::default();
+        limits.max_recovery_rounds = 1;
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        orch.limits = limits;
+
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { reason } if reason.contains("recovery rounds exhausted")));
+        assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 1);
+    }
+
+    /// Custom root_fix_rounds=1: root verification fails → 1 fix round → still fails → task fails.
+    #[tokio::test]
+    async fn custom_root_fix_rounds_limits_fix_attempts() {
+        let mock = MockAgentService::new();
+
+        // Root branches, 1 original subtask.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        // Original child: leaf, succeeds, verification passes.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Root verification fails.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("root check failed"));
+
+        // 1 fix round: fix subtask created, executed (leaf, succeeds, verification passes).
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Root re-verification still fails after round 1.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("root still failing"));
+
+        // With root_fix_rounds=1, no more rounds allowed — task fails.
+
+        let mut limits = LimitsConfig::default();
+        limits.root_fix_rounds = 1;
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        orch.limits = limits;
+
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { .. }));
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.verification_fix_rounds, 1);
+        assert_eq!(root.phase, TaskPhase::Failed);
+    }
+
+    /// Custom branch_fix_rounds=1: non-root branch verification fails → 1 fix round → fails.
+    #[tokio::test]
+    async fn custom_branch_fix_rounds_limits_fix_attempts() {
+        let mock = MockAgentService::new();
+
+        // Root branches into 1 child.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        // Child assessed as Branch (not leaf).
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(AssessmentResult {
+                path: TaskPath::Branch,
+                model: Model::Sonnet,
+                rationale: "needs decomposition".into(),
+                magnitude: None,
+            });
+
+        // Child decomposes into 1 grandchild.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![SubtaskSpec {
+                    goal: "grandchild".into(),
+                    verification_criteria: vec!["gc passes".into()],
+                    magnitude_estimate: MagnitudeEstimate::Small,
+                }],
+                rationale: "one grandchild".into(),
+            });
+
+        // Grandchild: leaf, succeeds, verification passes.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Child (branch) verification fails.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("branch check failed"));
+
+        // 1 fix round for child branch.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Child re-verification still fails.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("branch still failing"));
+
+        // Child fails with branch_fix_rounds=1.
+        // Root: recovery for child failure — not recoverable.
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(None);
+
+        let mut limits = LimitsConfig::default();
+        limits.branch_fix_rounds = 1;
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        orch.limits = limits;
+
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { .. }));
+
+        let child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
+        let child = orch.state.get(child_id).unwrap();
+        assert_eq!(child.verification_fix_rounds, 1);
+        assert_eq!(child.phase, TaskPhase::Failed);
+    }
+
+    /// retry_budget=0 is clamped to 1: leaf still gets at least one attempt.
+    #[tokio::test]
+    async fn zero_retry_budget_clamped_to_one() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // 1 Haiku failure → escalate (budget=1) → 1 Sonnet success.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_failed("haiku failed"));
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification: child, root.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let mut limits = LimitsConfig::default();
+        limits.retry_budget = 0; // Should be clamped to 1.
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        orch.limits = limits;
+
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
+        let child = orch.state.get(child_id).unwrap();
+        // 2 attempts: 1 Haiku fail + 1 Sonnet success (same as retry_budget=1).
+        assert_eq!(child.attempts.len(), 2);
+        assert_eq!(child.current_model, Some(Model::Sonnet));
     }
 }

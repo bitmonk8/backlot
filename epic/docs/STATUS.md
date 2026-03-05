@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit complete, pre-hardening** — All v1 features implemented (110 tests passing). Full codebase audit executed (95 review cells, 541 findings). Awaiting triage and remediation of audit findings before real-world use.
+**Audit remediation in progress** — All v1 features implemented (120 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring remediated; continuing hardening.
 
 ## Milestones
 
@@ -23,6 +23,7 @@
 - [x] Checkpoint adjust/escalate actions — Checkpoint decision (proceed/adjust/escalate) now acted upon. Adjust accumulates guidance on parent task (newline-separated), propagated to pending siblings via prompt context. Escalate clears stale guidance, triggers recovery with actual discoveries. Checkpoint uses Haiku (classification task). Agent errors treated as Proceed (best-effort, with mock error injection for testing). New `checkpoint_guidance` field on Task, `CheckpointAdjust`/`CheckpointEscalate` events, TUI integration. 11 new tests (105 total).
 
 - [x] Full codebase audit — 95 review cells (81 matrix, 6 cross-cutting, 8 broad-lens). 541 findings: 4 critical, 120 major, 241 minor, 176 note. See [AUDIT.md](AUDIT.md).
+- [x] Wire epic.toml to orchestrator — `EpicConfig` loaded from `epic.toml` at startup (falls back to defaults). All hardcoded orchestrator constants (`MAX_DEPTH`, `RETRIES_PER_TIER`, `MAX_RECOVERY_ROUNDS`, `MAX_BRANCH_FIX_ROUNDS`, `MAX_ROOT_FIX_ROUNDS`) replaced with `LimitsConfig` fields. `FlickAgent` takes `ModelConfig` and `Vec<VerificationStep>` as constructor params. `resolve_model_name` maps `Model` tiers to config-specified names. Verification prompts include configured commands. Zero-value limits clamped to 1. Two review passes: fixed critical bug (default model names were not valid API IDs), collapsed `_with_models` duplication (removed 7 wrapper functions), simplified Orchestrator to hold `LimitsConfig` not full `EpicConfig`, replaced FlickAgent builders with constructor params. 10 new tests (120 total).
 
 ## Deferred Items
 
@@ -49,7 +50,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 
 1. **Sandboxing** — Two-layer approach documented in [SANDBOXING.md](SANDBOXING.md). Security: VM/container guidance + startup detection warning. Operational correctness: Frida-based runtime interception (frida-gum/frida-core) to enforce per-phase access policies. Next step: prototype Frida Rust bindings. (Critical: U5-R2 #1, U2-R2 #1)
-2. **Wire epic.toml to the orchestrator** — Config is collected by `init` but never loaded at runtime. `MAX_DEPTH`, `RETRIES_PER_TIER`, model preferences all hardcoded. (Major: U10-R1, U7-R1, X6)
+2. ~~**Wire epic.toml to the orchestrator**~~ — **Done.** Config loaded at startup, hardcoded constants replaced. (Major: U10-R1, U7-R1, X6)
 3. **Fix model selection to match AGENT_DESIGN.md** — Assessment, decomposition, recovery, and verification all use wrong model tiers. (Major: U1-R7, U2-R7, U6-R7)
 4. **Cap total task count and recovery depth** — Recovery subtasks get fresh budgets, enabling exponential cost. (Major: B7, U1-R2)
 5. **Update stale documentation** — 14+ subprocess/Flick references not updated after library migration. (Major: U17-R4, U17-R8)
@@ -60,6 +61,22 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 10. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files. (Major: U8-R1, U8-R2)
 
 ## Decisions Made
+
+### 2026-03-05: Wire epic.toml to orchestrator runtime
+
+**Scope:** `epic.toml` config loaded at startup and threaded through orchestrator and agent layer. 7 files modified, 10 new tests (120 total). Two review passes applied fixes.
+
+**Config loading (`main.rs`):** Reads `epic.toml` from project root. Falls back to `EpicConfig::default()` if missing. Passes `ModelConfig` and `Vec<VerificationStep>` to `FlickAgent` as constructor params. Passes `LimitsConfig` to `Orchestrator` via `.with_limits()`.
+
+**Orchestrator (`orchestrator.rs`):** Removed all 5 hardcoded constants (`MAX_DEPTH`, `RETRIES_PER_TIER`, `MAX_RECOVERY_ROUNDS`, `MAX_BRANCH_FIX_ROUNDS`, `MAX_ROOT_FIX_ROUNDS`). Replaced with `self.limits.*` fields. Zero-value limits clamped to minimum 1 at start of `run()`.
+
+**Agent layer (`flick.rs`, `config_gen.rs`, `prompts.rs`):** `FlickAgent` takes `ModelConfig` and `Vec<VerificationStep>` as constructor params (no builder methods). `resolve_model_name(&ModelConfig, Model) -> &str` maps tiers to config-specified names. `flick_model_id()` moved to `#[cfg(test)]` only. Verification prompts include configured commands.
+
+**Review pass 1 — critical bug fix:** `ModelConfig::default()` values were short names (`"haiku-4.5"`) not valid API model IDs (`"claude-haiku-4-5-20251001"`). Fixed defaults to match `flick_model_id()`. Added regression test.
+
+**Review pass 2 — simplification:** Removed 7 `#[allow(dead_code)]` wrapper functions (collapsed `_with_models` duplication). Changed `resolve_model_name` from `Option<&ModelConfig>` to `&ModelConfig` (dead `None` branch removed). Orchestrator holds `LimitsConfig` not `EpicConfig`. FlickAgent uses constructor params not builders. Added tests for `branch_fix_rounds`, `root_fix_rounds`, `build_init_config` model threading, and `retry_budget=0` clamping.
+
+**Backward compatibility:** No `epic.toml` required. All defaults match previous hardcoded values.
 
 ### 2026-03-05: Sandboxing approach decided
 

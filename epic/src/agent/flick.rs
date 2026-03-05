@@ -7,6 +7,7 @@ use crate::agent::config_gen::{
 use crate::agent::prompts;
 use crate::agent::tools::{self, AgentMethod, ToolGrant};
 use crate::agent::{AgentService, TaskContext};
+use crate::config::project::{ModelConfig, VerificationStep};
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
 use crate::task::verify::VerificationResult;
@@ -25,18 +26,24 @@ pub struct FlickAgent {
     project_root: PathBuf,
     credential_name: String,
     call_timeout: Duration,
+    model_config: ModelConfig,
+    verification_steps: Vec<VerificationStep>,
 }
 
 impl FlickAgent {
-    pub const fn new(
+    pub fn new(
         project_root: PathBuf,
         credential_name: String,
         call_timeout: Duration,
+        model_config: ModelConfig,
+        verification_steps: Vec<VerificationStep>,
     ) -> Self {
         Self {
             project_root,
             credential_name,
             call_timeout,
+            model_config,
+            verification_steps,
         }
     }
 
@@ -180,6 +187,7 @@ Respond with the required JSON schema.";
             system_prompt,
             &self.credential_name,
             grant,
+            &self.model_config,
         )?;
 
         self.run_with_tools(config, query, grant).await
@@ -199,6 +207,7 @@ impl AgentService for FlickAgent {
             Model::Sonnet,
             &self.credential_name,
             grant,
+            &self.model_config,
         )?;
 
         let wire: AssessmentWire = self.run_structured(config, &pair.query).await?;
@@ -217,6 +226,7 @@ impl AgentService for FlickAgent {
             model,
             &self.credential_name,
             grant,
+            &self.model_config,
         )?;
 
         let wire: TaskOutcomeWire = self
@@ -239,6 +249,7 @@ impl AgentService for FlickAgent {
             model,
             &self.credential_name,
             grant,
+            &self.model_config,
         )?;
 
         let wire: TaskOutcomeWire = self
@@ -258,6 +269,7 @@ impl AgentService for FlickAgent {
             Model::Sonnet,
             &self.credential_name,
             grant,
+            &self.model_config,
         )?;
 
         let wire: DecompositionWire = self
@@ -280,6 +292,7 @@ impl AgentService for FlickAgent {
             model,
             &self.credential_name,
             grant,
+            &self.model_config,
         )?;
 
         let wire: DecompositionWire = self
@@ -289,13 +302,14 @@ impl AgentService for FlickAgent {
     }
 
     async fn verify(&self, ctx: &TaskContext) -> anyhow::Result<VerificationResult> {
-        let pair = prompts::build_verify(ctx);
+        let pair = prompts::build_verify(ctx, &self.verification_steps);
         let grant = tools::phase_tools(AgentMethod::Analyze);
         let config = config_gen::build_verify_config(
             &pair.system_prompt,
             Model::Sonnet,
             &self.credential_name,
             grant,
+            &self.model_config,
         )?;
 
         let wire: VerificationWire = self
@@ -314,6 +328,7 @@ impl AgentService for FlickAgent {
             &pair.system_prompt,
             Model::Haiku,
             &self.credential_name,
+            &self.model_config,
         )?;
 
         let wire: CheckpointWire = self.run_structured(config, &pair.query).await?;
@@ -330,6 +345,7 @@ impl AgentService for FlickAgent {
             &pair.system_prompt,
             Model::Sonnet,
             &self.credential_name,
+            &self.model_config,
         )?;
 
         let wire: RecoveryWire = self.run_structured(config, &pair.query).await?;
@@ -350,6 +366,7 @@ impl AgentService for FlickAgent {
             Model::Opus,
             &self.credential_name,
             grant,
+            &self.model_config,
         )?;
 
         let wire: RecoveryPlanWire = self

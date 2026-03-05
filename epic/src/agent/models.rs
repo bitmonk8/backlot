@@ -3,6 +3,7 @@
 use crate::task::Model;
 
 /// Flick model identifier string for a given model tier.
+#[cfg(test)]
 pub const fn flick_model_id(model: Model) -> &'static str {
     match model {
         Model::Haiku => "claude-haiku-4-5-20251001",

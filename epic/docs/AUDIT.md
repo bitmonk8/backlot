@@ -219,14 +219,14 @@ Recommended priority (highest-value cells first):
 **1. Unsandboxed bash execution (U5-R2 #1, U2-R2 #1) — CRITICAL**
 `tool_bash` passes LLM-supplied commands to `sh -c` with zero sandboxing: no containers, namespaces, network isolation, or command allowlist. An agent can exfiltrate data, install software, access credentials, or destroy the host. The `project_root` cwd is trivially escaped. This is the single highest-risk issue in the codebase.
 
-**2. Config not loaded at runtime (U10-R1 #1, U7-R1 #1, X6 #1-3) — MAJOR**
-`epic.toml` configuration is collected via `epic init` and persisted, but the orchestrator never reads it. `MAX_DEPTH`, `RETRIES_PER_TIER`, `MAX_RECOVERY_ROUNDS`, and model preferences are all hardcoded constants. User customization is silently ignored. Multiple independent agents flagged this from different angles.
+**2. ~~Config not loaded at runtime (U10-R1 #1, U7-R1 #1, X6 #1-3) — MAJOR~~ RESOLVED**
+~~`epic.toml` configuration is collected via `epic init` and persisted, but the orchestrator never reads it. `MAX_DEPTH`, `RETRIES_PER_TIER`, `MAX_RECOVERY_ROUNDS`, and model preferences are all hardcoded constants. User customization is silently ignored.~~ Config now loaded at startup. All hardcoded constants replaced with `LimitsConfig` fields. Model preferences wired through `ModelConfig`. Verification steps included in prompts.
 
 **3. Model selection diverges from design spec (U1-R7, U2-R7, U6-R7, U4-R7) — MAJOR**
 Assessment uses Sonnet instead of Haiku (overspend on classification). Decomposition ignores the assessment-selected model. Recovery assessment uses Sonnet instead of Opus (under-quality for critical decision). Verification always uses Sonnet instead of `max(Haiku, impl_model)`. These affect both cost control and agent effectiveness.
 
 **4. Recovery subtasks get fresh budgets — multiplicative cost risk (B7 #2) — MAJOR**
-Recovery subtasks are created with `is_fix_task: false` and `recovery_rounds: 0`, giving each a fresh recovery budget. Combined with `MAX_DEPTH=8`, this enables multiplicative recovery depth with potentially exponential agent calls. No global task count or cost cap exists (U1-R2 #1).
+Recovery subtasks are created with `is_fix_task: false` and `recovery_rounds: 0`, giving each a fresh recovery budget. Combined with configurable `max_depth` (default 8), this enables multiplicative recovery depth with potentially exponential agent calls. No global task count or cost cap exists (U1-R2 #1). *(Note: `MAX_DEPTH` is now configurable via `epic.toml` `[limits]` section, but the multiplicative cost concern remains.)*
 
 **5. Documentation drift from Flick library migration (U17-R4, U17-R8, U17-R7) — MAJOR**
 ARCHITECTURE.md, CONFIGURATION.md, and DOCUMENT_STORE.md still describe Flick as a subprocess/external executable. AGENT_DESIGN.md has incorrect model assignments. CONFIGURATION.md documents a removed `flick_path` option and a non-existent CLI interface. 14+ stale references across docs.

@@ -47,6 +47,10 @@ pub struct LimitsConfig {
     pub max_recovery_rounds: u32,
     #[serde(default = "default_retry_budget")]
     pub retry_budget: u32,
+    #[serde(default = "default_branch_fix_rounds")]
+    pub branch_fix_rounds: u32,
+    #[serde(default = "default_root_fix_rounds")]
+    pub root_fix_rounds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,12 +71,14 @@ pub struct VerificationStep {
 
 fn default_root() -> String { ".".into() }
 fn default_epic_dir() -> String { ".epic".into() }
-fn default_fast_model() -> String { "haiku-4.5".into() }
-fn default_balanced_model() -> String { "sonnet-4.5".into() }
-fn default_strong_model() -> String { "opus-4.6".into() }
+fn default_fast_model() -> String { "claude-haiku-4-5-20251001".into() }
+fn default_balanced_model() -> String { "claude-sonnet-4-6".into() }
+fn default_strong_model() -> String { "claude-opus-4-6".into() }
 const fn default_max_depth() -> u32 { 8 }
 const fn default_max_recovery_rounds() -> u32 { 2 }
 const fn default_retry_budget() -> u32 { 3 }
+const fn default_branch_fix_rounds() -> u32 { 3 }
+const fn default_root_fix_rounds() -> u32 { 4 }
 fn default_runtime() -> String { "flick".into() }
 const fn default_timeout() -> u32 { 300 }
 
@@ -98,6 +104,8 @@ impl Default for LimitsConfig {
             max_depth: default_max_depth(),
             max_recovery_rounds: default_max_recovery_rounds(),
             retry_budget: default_retry_budget(),
+            branch_fix_rounds: default_branch_fix_rounds(),
+            root_fix_rounds: default_root_fix_rounds(),
         }
     }
 }
@@ -118,7 +126,7 @@ mod tests {
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: EpicConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.limits.max_depth, 8);
-        assert_eq!(parsed.models.fast, "haiku-4.5");
+        assert_eq!(parsed.models.fast, "claude-haiku-4-5-20251001");
     }
 
     #[test]
