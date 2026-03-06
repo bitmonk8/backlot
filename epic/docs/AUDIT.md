@@ -231,6 +231,126 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 ## Recommended Action Items (Priority Order)
 
-1. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
+*Resolved: former #1 (empty-subtask validation), former #2 (bash process group kill) — 2026-03-06.*
 
-*Resolved: #2 (empty-subtask validation), #3 (bash process group kill) — 2026-03-06.*
+### 1. Correctness fixes (5 majors)
+
+Logic errors that can produce wrong outcomes at runtime.
+
+| Ref | Summary | Fix |
+|-----|---------|-----|
+| U1-R1#1 | `execute_branch` reports Success when all children failed after recovery exhaustion | Check final child statuses after recovery rounds |
+| U8-R1#1 | `load()` doesn't validate `next_id > max(existing IDs)` — ID collision on resume | Validate and bump `next_id` in `load()` |
+| U5-R3#2 | `tool_bash` returns `Ok` for non-zero exit — callers may misinterpret | Return error or distinct result for non-zero exit |
+| U2-R1#1 | `run_structured` doesn't guard against `ToolCallsPending` status from Flick | Handle or reject `ToolCallsPending` explicitly |
+| U7-R3#1 | `Task::path` and `current_model` are `Option` with no safe accessor — callers unwrap | Add accessor methods that return `Result` or panic-free defaults |
+
+### 2. Input validation & resource limits (6 majors)
+
+Prevent resource exhaustion and data leakage — all fixable with standard code changes.
+
+| Ref | Summary | Fix |
+|-----|---------|-----|
+| U5-R2#2 | Full environment inherited by bash child — credentials exposed | `Command::env_clear()` + explicit allowlist |
+| U5-R2#3 | No write-content size limit on `write_file` — disk exhaustion | Add `MAX_WRITE_BYTES` constant and reject oversized content |
+| U5-R2#4 | No regex complexity limit in `tool_grep` — ReDoS vector | Use `RegexBuilder::size_limit()` / `dfa_size_limit()` |
+| U5-R1#3 | Glob filter bypass when `strip_prefix` fails in `tool_grep` | Change `strip_prefix` failure from implicit-pass to explicit-skip |
+| U1-R2#2 | `git diff` subprocess has no timeout — can hang indefinitely | Wrap in `tokio::time::timeout()` |
+| U2-R2#4 | `credential_name` passed through JSON with potential leakage in error paths | Redact credential names in error/log output |
+
+### 3. Design intent alignment (9 majors + 4 partially resolved)
+
+Divergences from EPIC_DESIGN2.md and AGENT_DESIGN.md specs.
+
+| Ref | Summary | Fix |
+|-----|---------|-----|
+| U2-R7#4 | Decompose tool grant is READ-only — spec says EXPLORE (READ\|EXECUTE\|WEB) | Update tool grant to match AGENT_DESIGN.md |
+| U4-R7#1 | No cost/scope guardrails in any prompt | Add budget/scope awareness to prompts |
+| U4-R7#2 | Assessment prompt omits tie-breaking bias toward branch | Add prefer-branch instruction per EPIC_DESIGN2 |
+| U4-R7#3 | Assessment prompt omits root-is-always-branch rule | Add root-is-branch rule to assessment prompt |
+| U7-R7#3 | File-level review and simplification review phases not implemented | Implement or explicitly defer with rationale |
+| B2#1 | `assess` config includes tool definitions but `run_structured` ignores tool calls | Remove tool config from assess, or switch to `run_with_tools` |
+| B8#1 | Checkpoint agent cannot see child subtasks | Include child task list in checkpoint prompt context |
+| B8#2 | Decomposition rationale not delivered to recovery agent | Thread rationale through to recovery prompt |
+| B7#1 | Leaf fix loop runs unchecked on fix subtasks — recursive fix-within-fix | Add guard to skip fix loop for `is_fix_task` leaves |
+| U1-R7#5 | *(partial)* `build_context` missing `parent_decomposition_rationale` and `parent_discoveries` | Add fields to `TaskContext`, populate in `build_context()` |
+| U4-R7#4 | *(partial)* `verify()` prompt not split into leaf vs branch variants | Split `build_verify` into leaf/branch variants |
+| U6-R1#1 | *(partial)* `assess()` passes tool config to `run_structured` which ignores it | Remove tool config from assess config |
+| B7#2 | *(partial)* Recovery subtasks get fresh per-branch budgets | Propagate remaining budgets from parent |
+
+### 4. Documentation drift (5 majors + 1 partially resolved)
+
+Design docs out of sync with implementation.
+
+| Ref | Summary | Fix |
+|-----|---------|-----|
+| U17-R8#9 | VERIFICATION.md `timeout_secs: u64` vs code `timeout: u32` | Update doc to match code type |
+| U17-R8#10 | TASK_MODEL.md references `submit_result` tool — no such tool | Remove or replace reference |
+| U17-R8#11 | Assessment uses `run_structured` (no tools), but AGENT_DESIGN.md says READ tools | Update doc to reflect actual no-tools approach |
+| U17-R8#14 | TUI_DESIGN.md event names don't match actual Event enum variants | Update event names in doc |
+| U17-R8#15 | TUI_DESIGN.md `VerificationResult` vs actual `VerificationComplete` | Update doc |
+| U17-R8#6 | *(partial)* CONFIGURATION.md CLI section still shows old syntax | Rewrite CLI section to match `run`/`resume`/`status`/`init` |
+
+### 5. Error handling (2 majors)
+
+| Ref | Summary | Fix |
+|-----|---------|-----|
+| U11-R1#1 | `read_line()` in init silently discards I/O errors | Propagate or log the error |
+| U12-R1#1 | TUI abort path does not save state — user loses progress on Ctrl-C | Save state in TUI shutdown handler |
+
+### 6. Simplification (6 majors + 1 dead code)
+
+Reduce duplication and remove unused code.
+
+| Ref | Summary | Fix |
+|-----|---------|-----|
+| U2-R5#2 | `execute_leaf` and `fix_leaf` in FlickAgent have identical bodies | Extract shared implementation |
+| U2-R5#3 | `design_and_decompose` and `design_fix_subtasks` share identical tail | Extract shared implementation |
+| U3-R5#1 | Subtask schema duplicated between decomposition and recovery | Extract shared schema builder |
+| U3-R6#1 | `build_config` monolith couples JSON assembly to `flick::Config::from_str` | Split JSON assembly from parsing |
+| B3#1 | `VerificationStarted`/`VerificationComplete` events redundant with task events | Remove or merge |
+| B3#2 | `SubtasksCreated` emitted redundantly alongside variant-specific events | Remove or merge |
+| U2-R7#5 | No usage/cost tracking — `result.usage` never read | Remove dead field or implement tracking |
+
+### 7. Config validation (3 partially resolved)
+
+| Ref | Summary | Fix |
+|-----|---------|-----|
+| U10-R1#2 | `LimitsConfig` has no comprehensive validation | Add `validate()` with bounds checking |
+| U10-R6#2 | Config validation incomplete — no boundary tests | Add `PartialEq` derives and boundary tests |
+| U10-R6#3 | No dedicated config `load()` abstraction | Add `EpicConfig::load(path)` in config module |
+
+### 8. Testability (16 majors)
+
+Injection seams, test isolation, and missing coverage. Largest group — can be addressed incrementally.
+
+| Ref | Summary | Fix |
+|-----|---------|-----|
+| U5-R6#1 | No filesystem abstraction for tool testing | Add FS trait or test helper |
+| U5-R6#2 | No process execution abstraction for bash testing | Add process trait or test helper |
+| U2-R6#1 | `build_client` hard-codes `flick::resolve_provider` | Add injection point |
+| U2-R6#2 | `run_with_tools` tool-loop not unit-testable | Decouple from FlickClient |
+| U2-R6#3 | `tools::execute_tool` called directly with no indirection | Add trait boundary |
+| U1-R6#1 | `check_scope_circuit_breaker` shells out to `git` directly | Add git trait or injection |
+| U6-R6#1 | `MockAgentService` private to `orchestrator::tests` | Move to shared test module |
+| U7-R6#1 | `TaskPhase` transitions unchecked | Add `try_transition` guard |
+| U7-R6#2 | `LeafResult` and `RecoveryPlan` lack `PartialEq` | Add `PartialEq` derive |
+| U7-R6#3 | Zero unit tests in task module | Add tests |
+| U8-R6#1 | `save`/`load` coupled to real filesystem | Add abstraction or test helpers |
+| U8-R6#2 | No error/failure path tests for save/load | Add failure path tests |
+| U10-R6#1 | No `PartialEq` derive on config structs | Add derive |
+| U10-R6#4 | `init.rs` prompt functions read from `io::stdin()` directly | Accept `Read` trait param |
+| U11-R6 | Zero test coverage for init module | Add tests |
+| U13-R6 | Zero test coverage for TUI module | Add tests |
+| U14-R6 | git module empty; scope check hardwired with no trait boundary | Add git trait |
+
+### 9. Operational correctness sandboxing (Frida)
+
+TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement. Deferred until items 1–8 are addressed.
+
+| Ref | Summary |
+|-----|---------|
+| U5-R1#1 | TOCTOU symlink race in `safe_path` with `allow_new_file` |
+| U2-R2#2 | TOCTOU in `write_file` path validation |
+| U2-R2#3 | TOCTOU in `edit_file` between read and write |
+| *(full)* | Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. |

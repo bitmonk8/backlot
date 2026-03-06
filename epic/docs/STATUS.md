@@ -50,7 +50,16 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 ## Next Work Candidates
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
-1. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
+
+1. **Correctness fixes** (5 majors) — Logic errors: branch success after all children failed, ID collision on resume, bash exit code misinterpretation, ToolCallsPending guard, unsafe Option unwraps.
+2. **Input validation & resource limits** (6 majors) — Env filtering for bash child, write size limit, regex complexity limit, glob filter bypass, git diff timeout, credential redaction.
+3. **Design intent alignment** (9 majors + 4 partial) — Tool grant mismatch, missing prompt guardrails, assessment bias/root rules, checkpoint context, recovery rationale, fix-within-fix guard.
+4. **Documentation drift** (5 majors + 1 partial) — Type mismatches, stale tool/event names, CLI syntax.
+5. **Error handling** (2 majors) — Init I/O error swallowing, TUI abort state loss.
+6. **Simplification** (6 majors + 1 dead code) — FlickAgent method dedup, schema dedup, event consolidation, usage tracking.
+7. **Config validation** (3 partial) — LimitsConfig bounds checking, PartialEq derives, load abstraction.
+8. **Testability** (16 majors) — Injection seams, FS/process abstractions, mock sharing, missing test coverage. Largest group — incremental.
+9. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. Deferred until 1–8 addressed. See [SANDBOXING.md](SANDBOXING.md).
 
 ## Decisions Made
 
