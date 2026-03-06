@@ -77,6 +77,12 @@ impl FlickAgent {
 
         check_error(&result)?;
 
+        // No tools are configured; a ToolCallsPending status means the model
+        // hallucinated tool use and the response likely isn't valid JSON.
+        if matches!(result.status, ResultStatus::ToolCallsPending) {
+            bail!("model requested tool calls in structured-only (no-tool) context");
+        }
+
         let text = extract_text(&result)?;
         serde_json::from_str(&text)
             .with_context(|| format!("failed to parse structured output: {text}"))
@@ -502,6 +508,20 @@ mod tests {
         };
         let err = check_error(&result).unwrap_err();
         assert!(err.to_string().contains("unknown flick error"));
+    }
+
+    #[test]
+    fn check_error_passes_tool_calls_pending() {
+        // check_error only rejects Error status; ToolCallsPending is caught
+        // separately by run_structured's own guard.
+        let result = flick::FlickResult {
+            status: ResultStatus::ToolCallsPending,
+            content: vec![],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        assert!(check_error(&result).is_ok());
     }
 
     #[test]

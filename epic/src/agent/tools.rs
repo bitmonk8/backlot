@@ -287,14 +287,30 @@ pub async fn execute_tool(
         Some(_) => {}
     }
 
+    // Bash returns a richer type because non-zero exit is not a dispatch
+    // failure but must still set is_error for callers.
+    if name == "bash" {
+        return match tool_bash(input, project_root).await {
+            Ok(out) => ToolExecResult {
+                tool_use_id,
+                content: out.content,
+                is_error: out.is_error,
+            },
+            Err(msg) => ToolExecResult {
+                tool_use_id,
+                content: msg,
+                is_error: true,
+            },
+        };
+    }
+
     let result = match name {
         "read_file" => tool_read_file(input, project_root).await,
         "glob" => tool_glob(input, project_root).await,
         "grep" => tool_grep(input, project_root).await,
         "write_file" => tool_write_file(input, project_root).await,
         "edit_file" => tool_edit_file(input, project_root).await,
-        "bash" => tool_bash(input, project_root).await,
-        _ => Err(format!("unknown tool: {name}")),
+        _ => unreachable!("required_grant() filters unknown tools before dispatch"),
     };
 
     match result {
@@ -544,7 +560,14 @@ async fn tool_edit_file(input: &JsonValue, project_root: &Path) -> Result<String
     Ok(format!("edited {}", path.display()))
 }
 
-async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<String, String> {
+/// Carries both content and error flag from bash execution, since a non-zero
+/// exit is not a dispatch failure but should still surface via `is_error`.
+struct BashOutput {
+    content: String,
+    is_error: bool,
+}
+
+async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<BashOutput, String> {
     let command = get_str(input, "command")?;
     let timeout_secs = input
         .get("timeout")
@@ -590,7 +613,11 @@ async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<String, Str
     let timeout_dur = std::time::Duration::from_secs(timeout_secs);
     if let Ok(wait_result) = tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
         let output = wait_result.map_err(|e| format!("command failed: {e}"))?;
-        Ok(format_bash_output(&output))
+        let is_error = output.status.code() != Some(0);
+        Ok(BashOutput {
+            content: format_bash_output(&output),
+            is_error,
+        })
     } else {
         // Timeout: kill the entire process group, not just the direct child.
         if let Some(pid) = child_pid {
@@ -970,18 +997,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bash_exit_code() {
+    async fn test_bash_zero_exit_not_error() {
         let tmp = TempDir::new().unwrap();
         let result = execute_tool(
             "tu_1".into(),
             "bash",
-            &serde_json::json!({"command": "exit 42"}),
+            &serde_json::json!({"command": "true"}),
             tmp.path(),
             ToolGrant::BASH,
         )
         .await;
-        assert!(!result.is_error); // bash tool reports exit code in content, not as error
-        assert!(result.content.contains("[exit code: 42]"));
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_bash_nonzero_exit_is_error() {
+        let tmp = TempDir::new().unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "bash",
+            &serde_json::json!({"command": "exit 1"}),
+            tmp.path(),
+            ToolGrant::BASH,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("[exit code: 1]"));
     }
 
     /// Verify that calling kill_process_tree with a stale (already-exited) PID

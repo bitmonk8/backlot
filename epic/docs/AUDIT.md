@@ -79,17 +79,17 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 **Completed:** 2026-03-05. All 95 review cells executed. 541 original findings.
 
-**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, dead stub removal, retry/escalation deduplication, empty-subtask validation, and bash process group kill — resolving 70 findings fully and 15 partially.
+**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, dead stub removal, retry/escalation deduplication, empty-subtask validation, bash process group kill, and correctness fixes (branch-success guard, next_id validation, bash exit code, ToolCallsPending guard, safe Option accessors) — resolving 75 findings fully and 15 partially.
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
 | Critical | 0 | 0 |
-| Major | 70 | 8 |
+| Major | 65 | 8 |
 | Minor | 223 | 7 |
 | Note | 164 | 3 |
-| **Total** | **459** | **15** |
+| **Total** | **454** | **15** |
 
 ### Remaining Findings by Category
 
@@ -102,7 +102,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Dead code/stubs (unused ToolGrant flags, usage tracking) | ~21 | 0 | ~3 |
 | Design intent gaps (prompt content, tool grants, missing review phase) | ~40 | 0 | ~10 |
 | Doc drift (TUI event names, CLI syntax, type mismatches) | ~25 | 0 | ~5 |
-| Correctness (cycle detection, phase transitions) | ~27 | 0 | ~5 |
+| Correctness (cycle detection, phase transitions) | ~22 | 0 | 0 |
 | Other (clippy, naming, notes) | ~128 | 0 | 0 |
 
 ---
@@ -131,13 +131,7 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 ### Correctness
 
-| Ref | Finding | Location |
-|-----|---------|----------|
-| U1-R1#1 | `execute_branch` can report Success when all children failed after recovery exhaustion | `orchestrator.rs` |
-| U8-R1#1 | `load()` does not validate `next_id > max(existing task IDs)` — ID collision on resume | `state.rs` |
-| U5-R3#2 | `tool_bash` returns `Ok` for non-zero exit status — callers may misinterpret failures | `tools.rs` |
-| U2-R1#1 | `run_structured` does not guard against `ToolCallsPending` status from Flick | `flick.rs` |
-| U7-R3#1 | `Task::path` and `current_model` are `Option` with no safe accessor — callers unwrap unsafely | `task/mod.rs` |
+*All 5 correctness majors resolved 2026-03-06: U1-R1#1 (branch-success guard), U8-R1#1 (next_id validation), U5-R3#2 (bash exit code), U2-R1#1 (ToolCallsPending guard), U7-R3#1 (pattern match guard replacing unsafe unwrap).*
 
 ### Testability
 
@@ -231,21 +225,10 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 ## Recommended Action Items (Priority Order)
 
-*Resolved: former #1 (empty-subtask validation), former #2 (bash process group kill) — 2026-03-06.*
+*Resolved: empty-subtask validation, bash process group kill — 2026-03-06.*
+*Resolved: correctness fixes (U1-R1#1, U8-R1#1, U5-R3#2, U2-R1#1, U7-R3#1) — 2026-03-06.*
 
-### 1. Correctness fixes (5 majors)
-
-Logic errors that can produce wrong outcomes at runtime.
-
-| Ref | Summary | Fix |
-|-----|---------|-----|
-| U1-R1#1 | `execute_branch` reports Success when all children failed after recovery exhaustion | Check final child statuses after recovery rounds |
-| U8-R1#1 | `load()` doesn't validate `next_id > max(existing IDs)` — ID collision on resume | Validate and bump `next_id` in `load()` |
-| U5-R3#2 | `tool_bash` returns `Ok` for non-zero exit — callers may misinterpret | Return error or distinct result for non-zero exit |
-| U2-R1#1 | `run_structured` doesn't guard against `ToolCallsPending` status from Flick | Handle or reject `ToolCallsPending` explicitly |
-| U7-R3#1 | `Task::path` and `current_model` are `Option` with no safe accessor — callers unwrap | Add accessor methods that return `Result` or panic-free defaults |
-
-### 2. Input validation & resource limits (6 majors)
+### 1. Input validation & resource limits (6 majors)
 
 Prevent resource exhaustion and data leakage — all fixable with standard code changes.
 
@@ -258,7 +241,7 @@ Prevent resource exhaustion and data leakage — all fixable with standard code 
 | U1-R2#2 | `git diff` subprocess has no timeout — can hang indefinitely | Wrap in `tokio::time::timeout()` |
 | U2-R2#4 | `credential_name` passed through JSON with potential leakage in error paths | Redact credential names in error/log output |
 
-### 3. Design intent alignment (9 majors + 4 partially resolved)
+### 2. Design intent alignment (9 majors + 4 partially resolved)
 
 Divergences from EPIC_DESIGN2.md and AGENT_DESIGN.md specs.
 
@@ -278,7 +261,7 @@ Divergences from EPIC_DESIGN2.md and AGENT_DESIGN.md specs.
 | U6-R1#1 | *(partial)* `assess()` passes tool config to `run_structured` which ignores it | Remove tool config from assess config |
 | B7#2 | *(partial)* Recovery subtasks get fresh per-branch budgets | Propagate remaining budgets from parent |
 
-### 4. Documentation drift (5 majors + 1 partially resolved)
+### 3. Documentation drift (5 majors + 1 partially resolved)
 
 Design docs out of sync with implementation.
 
@@ -291,14 +274,14 @@ Design docs out of sync with implementation.
 | U17-R8#15 | TUI_DESIGN.md `VerificationResult` vs actual `VerificationComplete` | Update doc |
 | U17-R8#6 | *(partial)* CONFIGURATION.md CLI section still shows old syntax | Rewrite CLI section to match `run`/`resume`/`status`/`init` |
 
-### 5. Error handling (2 majors)
+### 4. Error handling (2 majors)
 
 | Ref | Summary | Fix |
 |-----|---------|-----|
 | U11-R1#1 | `read_line()` in init silently discards I/O errors | Propagate or log the error |
 | U12-R1#1 | TUI abort path does not save state — user loses progress on Ctrl-C | Save state in TUI shutdown handler |
 
-### 6. Simplification (6 majors + 1 dead code)
+### 5. Simplification (6 majors + 1 dead code)
 
 Reduce duplication and remove unused code.
 
@@ -312,7 +295,7 @@ Reduce duplication and remove unused code.
 | B3#2 | `SubtasksCreated` emitted redundantly alongside variant-specific events | Remove or merge |
 | U2-R7#5 | No usage/cost tracking — `result.usage` never read | Remove dead field or implement tracking |
 
-### 7. Config validation (3 partially resolved)
+### 6. Config validation (3 partially resolved)
 
 | Ref | Summary | Fix |
 |-----|---------|-----|
@@ -320,7 +303,7 @@ Reduce duplication and remove unused code.
 | U10-R6#2 | Config validation incomplete — no boundary tests | Add `PartialEq` derives and boundary tests |
 | U10-R6#3 | No dedicated config `load()` abstraction | Add `EpicConfig::load(path)` in config module |
 
-### 8. Testability (16 majors)
+### 7. Testability (16 majors)
 
 Injection seams, test isolation, and missing coverage. Largest group — can be addressed incrementally.
 
@@ -344,9 +327,9 @@ Injection seams, test isolation, and missing coverage. Largest group — can be 
 | U13-R6 | Zero test coverage for TUI module | Add tests |
 | U14-R6 | git module empty; scope check hardwired with no trait boundary | Add git trait |
 
-### 9. Operational correctness sandboxing (Frida)
+### 8. Operational correctness sandboxing (Frida)
 
-TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement. Deferred until items 1–8 are addressed.
+TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement. Deferred until items 1–7 are addressed.
 
 | Ref | Summary |
 |-----|---------|

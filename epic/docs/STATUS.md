@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (166 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, stale documentation, empty-subtask validation, and bash process group kill remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (172 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, stale documentation, empty-subtask validation, bash process group kill, and correctness fixes remediated; continuing hardening.
 
 ## Milestones
 
@@ -51,17 +51,30 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 
-1. **Correctness fixes** (5 majors) — Logic errors: branch success after all children failed, ID collision on resume, bash exit code misinterpretation, ToolCallsPending guard, unsafe Option unwraps.
-2. **Input validation & resource limits** (6 majors) — Env filtering for bash child, write size limit, regex complexity limit, glob filter bypass, git diff timeout, credential redaction.
-3. **Design intent alignment** (9 majors + 4 partial) — Tool grant mismatch, missing prompt guardrails, assessment bias/root rules, checkpoint context, recovery rationale, fix-within-fix guard.
-4. **Documentation drift** (5 majors + 1 partial) — Type mismatches, stale tool/event names, CLI syntax.
-5. **Error handling** (2 majors) — Init I/O error swallowing, TUI abort state loss.
-6. **Simplification** (6 majors + 1 dead code) — FlickAgent method dedup, schema dedup, event consolidation, usage tracking.
-7. **Config validation** (3 partial) — LimitsConfig bounds checking, PartialEq derives, load abstraction.
-8. **Testability** (16 majors) — Injection seams, FS/process abstractions, mock sharing, missing test coverage. Largest group — incremental.
-9. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. Deferred until 1–8 addressed. See [SANDBOXING.md](SANDBOXING.md).
+1. **Input validation & resource limits** (6 majors) — Env filtering for bash child, write size limit, regex complexity limit, glob filter bypass, git diff timeout, credential redaction.
+2. **Design intent alignment** (9 majors + 4 partial) — Tool grant mismatch, missing prompt guardrails, assessment bias/root rules, checkpoint context, recovery rationale, fix-within-fix guard.
+3. **Documentation drift** (5 majors + 1 partial) — Type mismatches, stale tool/event names, CLI syntax.
+4. **Error handling** (2 majors) — Init I/O error swallowing, TUI abort state loss.
+5. **Simplification** (6 majors + 1 dead code) — FlickAgent method dedup, schema dedup, event consolidation, usage tracking.
+6. **Config validation** (3 partial) — LimitsConfig bounds checking, PartialEq derives, load abstraction.
+7. **Testability** (16 majors) — Injection seams, FS/process abstractions, mock sharing, missing test coverage. Largest group — incremental.
+8. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. Deferred until 1–7 addressed. See [SANDBOXING.md](SANDBOXING.md).
 
 ## Decisions Made
+
+### 2026-03-06: Correctness fixes (5 audit majors resolved)
+
+**Scope:** 4 files modified (`orchestrator.rs`, `state.rs`, `agent/tools.rs`, `agent/flick.rs`). 172 tests passing, 0 clippy warnings.
+
+**U1-R1#1 — Branch success guard (orchestrator.rs):** After the outer loop in `execute_branch`, added a check that at least one non-fix child reached `TaskPhase::Completed`. If none did, returns `TaskOutcome::Failed` instead of vacuous success. 2 new tests.
+
+**U8-R1#1 — next_id validation (state.rs):** `load()` now validates that `next_id` exceeds all existing `TaskId` values. If corrupted, silently repairs to `max + 1`. Prevents duplicate ID generation on resume from hand-edited or corrupted state files. 2 new tests.
+
+**U5-R3#2 — Bash exit code (tools.rs):** `tool_bash` now returns `is_error: true` when the command exits with non-zero status. New `BashOutput` struct carries both content and error flag. `execute_tool` dispatch handles bash separately from other tools. 2 new tests.
+
+**U2-R1#1 — ToolCallsPending guard (flick.rs):** `run_structured` now checks for `ResultStatus::ToolCallsPending` after `check_error` and bails with a clear message if the model unexpectedly requests tool calls in a no-tool context. 1 new test.
+
+**U7-R3#1 — Pattern match guard (orchestrator.rs):** Replaced unsafe `task.path.clone().unwrap()` with `if let (Some(path), TaskPhase::Executing) = (&task.path, task.phase)` pattern match, eliminating the panic-on-None path.
 
 ### 2026-03-06: Empty-subtask validation and bash process group kill
 

@@ -1,7 +1,7 @@
 // EpicState: task tree persistence and session resume.
 
 use crate::task::{Task, TaskId};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -82,7 +82,18 @@ impl EpicState {
 
     pub fn load(path: &Path) -> Result<Self> {
         let json = std::fs::read_to_string(path)?;
-        let state = serde_json::from_str(&json)?;
+        let mut state: Self = serde_json::from_str(&json)?;
+
+        // Guard against corrupted/hand-edited files where next_id is too low.
+        let max_existing = state.tasks.keys().map(|id| id.0).max().unwrap_or(0);
+        if let Some(min_next) = max_existing.checked_add(1) {
+            if state.next_id < min_next {
+                state.next_id = min_next;
+            }
+        } else {
+            bail!("task ID space exhausted (max existing ID is u64::MAX)");
+        }
+
         Ok(state)
     }
 }
@@ -292,6 +303,48 @@ mod tests {
         state.insert(Task::new(d, Some(a), "d".into(), vec![], 1));
         let order = state.dfs_order(a);
         assert_eq!(order, vec![a, b, c, d]);
+    }
+
+    #[test]
+    fn load_repairs_next_id_below_max_task_id() {
+        let mut state = EpicState::new();
+        let id_a = TaskId(5);
+        let id_b = TaskId(10);
+        state.insert(Task::new(id_a, None, "a".into(), vec![], 0));
+        state.insert(Task::new(id_b, Some(id_a), "b".into(), vec![], 1));
+        // Deliberately set next_id below the max existing ID.
+        state.next_id = 3;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.json");
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        std::fs::write(&path, json).unwrap();
+
+        let loaded = EpicState::load(&path).unwrap();
+        // next_id must be at least max(existing) + 1.
+        assert!(
+            loaded.next_id > id_b.0,
+            "next_id {} should exceed max task id {}",
+            loaded.next_id,
+            id_b.0
+        );
+        assert_eq!(loaded.next_id, 11);
+    }
+
+    #[test]
+    fn load_preserves_valid_next_id() {
+        let mut state = EpicState::new();
+        let id = TaskId(2);
+        state.insert(Task::new(id, None, "x".into(), vec![], 0));
+        state.next_id = 50; // already well above max
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.json");
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        std::fs::write(&path, json).unwrap();
+
+        let loaded = EpicState::load(&path).unwrap();
+        assert_eq!(loaded.next_id, 50);
     }
 
     #[test]

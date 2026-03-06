@@ -483,8 +483,8 @@ impl<A: AgentService> Orchestrator<A> {
                     .state
                     .get(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
-                if task.path.is_some() && task.phase == TaskPhase::Executing {
-                    let path = task.path.clone().unwrap();
+                if let (Some(path), TaskPhase::Executing) = (&task.path, task.phase) {
+                    let path = path.clone();
                     self.transition(id, TaskPhase::Executing)?;
                     let outcome = match path {
                         TaskPath::Leaf => self.execute_leaf(id).await?,
@@ -1099,9 +1099,25 @@ impl<A: AgentService> Orchestrator<A> {
             }
         }
 
-        // If the loop exits normally, all unrecovered failures were already
-        // propagated via attempt_recovery. Remaining Failed children are those
-        // whose failures were handled by recovery subtasks.
+        // Guard: if every non-fix child failed (recovery exhausted or skipped),
+        // the branch itself must report failure rather than vacuous success.
+        let child_ids = self
+            .state
+            .get(id)
+            .ok_or(OrchestratorError::TaskNotFound(id))?
+            .subtask_ids
+            .clone();
+        let any_non_fix_succeeded = child_ids.iter().any(|&cid| {
+            self.state.get(cid).is_some_and(|c| {
+                !c.is_fix_task && c.phase == TaskPhase::Completed
+            })
+        });
+        if !any_non_fix_succeeded {
+            return Ok(TaskOutcome::Failed {
+                reason: "all non-fix children failed".into(),
+            });
+        }
+
         Ok(TaskOutcome::Success)
     }
 
@@ -6419,5 +6435,120 @@ mod tests {
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await;
         assert!(result.is_err());
+    }
+
+    /// When all non-fix children are Failed (e.g. on resume after recovery exhaustion),
+    /// `execute_branch` must return Failure, not vacuous Success.
+    #[tokio::test]
+    async fn branch_fails_when_all_children_failed() {
+        let mock = MockAgentService::new();
+        let mut state = EpicState::new();
+
+        // Root: branch, mid-execution (simulates resume).
+        let root_id = state.next_task_id();
+        let mut root = Task::new(
+            root_id,
+            None,
+            "root goal".into(),
+            vec!["root passes".into()],
+            0,
+        );
+        root.path = Some(TaskPath::Branch);
+        root.phase = TaskPhase::Executing;
+
+        // Two children, both already Failed.
+        let child_a = state.next_task_id();
+        let mut a = Task::new(
+            child_a,
+            Some(root_id),
+            "child A".into(),
+            vec!["A passes".into()],
+            1,
+        );
+        a.phase = TaskPhase::Failed;
+        a.path = Some(TaskPath::Leaf);
+
+        let child_b = state.next_task_id();
+        let mut b = Task::new(
+            child_b,
+            Some(root_id),
+            "child B".into(),
+            vec!["B passes".into()],
+            1,
+        );
+        b.phase = TaskPhase::Failed;
+        b.path = Some(TaskPath::Leaf);
+
+        root.subtask_ids = vec![child_a, child_b];
+        state.insert(root);
+        state.insert(a);
+        state.insert(b);
+
+        let (tx, _rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+
+        let result = orch.run(root_id).await.unwrap();
+        assert!(
+            matches!(result, TaskOutcome::Failed { ref reason } if reason.contains("all non-fix children failed")),
+            "expected Failure when all children failed, got: {result:?}"
+        );
+    }
+
+    /// Branch with a mix of failed non-fix children and a successful non-fix child
+    /// should still report Success (only fails when ALL non-fix children failed).
+    #[tokio::test]
+    async fn branch_succeeds_when_some_children_completed() {
+        let mock = MockAgentService::new();
+        let mut state = EpicState::new();
+
+        let root_id = state.next_task_id();
+        let mut root = Task::new(
+            root_id,
+            None,
+            "root goal".into(),
+            vec!["root passes".into()],
+            0,
+        );
+        root.path = Some(TaskPath::Branch);
+        root.phase = TaskPhase::Executing;
+
+        let child_a = state.next_task_id();
+        let mut a = Task::new(
+            child_a,
+            Some(root_id),
+            "child A".into(),
+            vec!["A passes".into()],
+            1,
+        );
+        a.phase = TaskPhase::Completed;
+        a.path = Some(TaskPath::Leaf);
+
+        let child_b = state.next_task_id();
+        let mut b = Task::new(
+            child_b,
+            Some(root_id),
+            "child B".into(),
+            vec!["B passes".into()],
+            1,
+        );
+        b.phase = TaskPhase::Failed;
+        b.path = Some(TaskPath::Leaf);
+
+        root.subtask_ids = vec![child_a, child_b];
+        state.insert(root);
+        state.insert(a);
+        state.insert(b);
+
+        // Root verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let (tx, _rx) = events::event_channel();
+        let mut orch = Orchestrator::new(mock, state, tx);
+
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
     }
 }
