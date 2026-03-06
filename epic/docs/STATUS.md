@@ -51,14 +51,17 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 1. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
-2. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs.
-3. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code.
-4. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files.
-5. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-6. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-7. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
+2. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code.
+3. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files.
+4. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+5. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+6. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
 
 ## Decisions Made
+
+### 2026-03-06: Remove dead stub modules
+
+**Scope:** Deleted 6 empty stub files (`src/git.rs`, `src/metrics.rs`, `src/services/mod.rs`, `src/services/research.rs`, `src/services/verification.rs`, `src/services/document_store.rs`) and removed `mod git;`, `mod metrics;`, `mod services;` from `src/main.rs`. 145 tests passing, 0 clippy warnings.
 
 ### 2026-03-06: Extract main() into testable function
 

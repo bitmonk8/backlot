@@ -27,9 +27,9 @@ The audit is organized as a **review matrix**: review types on one axis, code un
 | U11 | init | `init.rs` | Agent-driven interactive scaffolding |
 | U12 | cli + main | `cli.rs`, `main.rs` | Clap CLI, wiring, TUI/headless split, shutdown |
 | U13 | tui | `tui/*.rs` | TuiApp, task tree, worklog, metrics panels |
-| U14 | git | `git.rs` | git diff --numstat, scope circuit breaker support |
-| U15 | metrics | `metrics.rs` | Token/cost tracking |
-| U16 | services | `services/*.rs` | Stubs: document_store, research, verification |
+| U14 | git | `git.rs` | git diff --numstat, scope circuit breaker support (stub removed) |
+| U15 | metrics | `metrics.rs` | Token/cost tracking (stub removed) |
+| U16 | services | `services/*.rs` | Stubs: document_store, research, verification (removed) |
 | U17 | docs | `docs/*.md` | Design documents |
 
 ## Review Types
@@ -79,7 +79,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 **Completed:** 2026-03-05. All 95 review cells executed. 541 original findings.
 
-**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, and main.rs testability — resolving 58 findings fully and 15 partially.
+**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, and dead stub removal — resolving 62 findings fully and 15 partially.
 
 ### Current Findings by Severity
 
@@ -89,7 +89,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Major | 77 | 8 |
 | Minor | 224 | 7 |
 | Note | 164 | 3 |
-| **Total** | **465** | **15** |
+| **Total** | **461** | **15** |
 
 ### Remaining Findings by Category
 
@@ -99,7 +99,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~70 | 0 | ~10 |
 | Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~45 | 0 | ~8 |
-| Dead code/stubs (git.rs, metrics.rs, services/, unused ToolGrant flags) | ~25 | 0 | ~5 |
+| Dead code/stubs (unused ToolGrant flags, usage tracking) | ~21 | 0 | ~3 |
 | Design intent gaps (prompt content, tool grants, missing review phase) | ~40 | 0 | ~10 |
 | Doc drift (TUI event names, CLI syntax, type mismatches) | ~25 | 0 | ~5 |
 | Correctness (empty subtask validation, cycle detection, phase transitions) | ~30 | 0 | ~8 |
@@ -192,11 +192,9 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 | Ref | Finding | Location |
 |-----|---------|----------|
-| U14-R4#1 | `git.rs` is an empty stub declared in `main.rs` | `git.rs` |
-| U15-R4#1 | `metrics.rs` is an empty stub declared in `main.rs` | `metrics.rs` |
-| U16-R4#1 | `services/` module (document_store, research, verification) — all empty stubs | `services/*.rs` |
 | U2-R7#5 | No usage/cost tracking — `result.usage` never read in production code | `flick.rs` |
-| X5#1, X5#2 | Dead stub modules still declared in `main.rs` (overlaps U14/U15/U16 above) | `main.rs` |
+
+*Resolved: U14-R4#1 (`git.rs`), U15-R4#1 (`metrics.rs`), U16-R4#1 (`services/*.rs`), X5#1/X5#2 (mod declarations) — all removed 2026-03-06.*
 
 ### Design Intent
 
@@ -240,9 +238,8 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 ## Recommended Action Items (Priority Order)
 
 1. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
-2. **Remove dead modules.** `git.rs`, `metrics.rs`, `services/*.rs`.
-3. **Deduplicate retry/escalation loop.** Extract shared state machine from `execute_leaf` and `leaf_fix_loop`.
-4. **Add cycle detection to `dfs_order`.** Infinite loop on corrupted state files.
-5. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-6. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-7. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.
+2. **Deduplicate retry/escalation loop.** Extract shared state machine from `execute_leaf` and `leaf_fix_loop`.
+3. **Add cycle detection to `dfs_order`.** Infinite loop on corrupted state files.
+4. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+5. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+6. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.
