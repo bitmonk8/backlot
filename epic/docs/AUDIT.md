@@ -113,21 +113,17 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 ---
 
-## Major Findings (70 still valid, 8 partially resolved)
+## Major Findings (64 still valid, 8 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
 | Ref | Finding | Location |
 |-----|---------|----------|
-| U5-R2#2 | Full environment inherited by bash child process — credentials, tokens, PATH all exposed | `tools.rs` |
-| U5-R2#3 | No write-content size limit on `write_file` — agent can exhaust disk | `tools.rs` |
-| U5-R2#4 | No regex pattern size/complexity limit in `tool_grep` — ReDoS vector | `tools.rs` |
+*Resolved 2026-03-06: U5-R2#2 (bash env filtering), U5-R2#3 (write size limit), U5-R2#4 (regex complexity limit), U5-R1#3 (glob filter bypass), U1-R2#2 (git diff timeout), U2-R2#4 (credential redaction).*
+
 | U5-R1#1 | TOCTOU symlink race in `safe_path` with `allow_new_file` — race between validation and open | `tools.rs` |
-| U5-R1#3 | Glob filter bypass when `strip_prefix` fails in `tool_grep` — files outside root may be searched | `tools.rs` |
 | U2-R2#2 | TOCTOU in `write_file` path validation — path validated then file written non-atomically | `tools.rs` |
 | U2-R2#3 | TOCTOU in `edit_file` between read and write — file may change between operations | `tools.rs` |
-| U2-R2#4 | `credential_name` passed through JSON config with potential leakage in error paths | `flick.rs`, `config_gen.rs` |
-| U1-R2#2 | `git diff` subprocess in `check_scope_circuit_breaker` has no `tokio::time::timeout` — can hang indefinitely | `orchestrator.rs` |
 
 ### Correctness
 
@@ -227,19 +223,9 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 *Resolved: empty-subtask validation, bash process group kill — 2026-03-06.*
 *Resolved: correctness fixes (U1-R1#1, U8-R1#1, U5-R3#2, U2-R1#1, U7-R3#1) — 2026-03-06.*
+*Resolved: input validation & resource limits (U5-R2#2, U5-R2#3, U5-R2#4, U5-R1#3, U1-R2#2, U2-R2#4) — 2026-03-06.*
 
-### 1. Input validation & resource limits (6 majors)
-
-Prevent resource exhaustion and data leakage — all fixable with standard code changes.
-
-| Ref | Summary | Fix |
-|-----|---------|-----|
-| U5-R2#2 | Full environment inherited by bash child — credentials exposed | `Command::env_clear()` + explicit allowlist |
-| U5-R2#3 | No write-content size limit on `write_file` — disk exhaustion | Add `MAX_WRITE_BYTES` constant and reject oversized content |
-| U5-R2#4 | No regex complexity limit in `tool_grep` — ReDoS vector | Use `RegexBuilder::size_limit()` / `dfa_size_limit()` |
-| U5-R1#3 | Glob filter bypass when `strip_prefix` fails in `tool_grep` | Change `strip_prefix` failure from implicit-pass to explicit-skip |
-| U1-R2#2 | `git diff` subprocess has no timeout — can hang indefinitely | Wrap in `tokio::time::timeout()` |
-| U2-R2#4 | `credential_name` passed through JSON with potential leakage in error paths | Redact credential names in error/log output |
+### ~~1. Input validation & resource limits (6 majors)~~ — All resolved 2026-03-06
 
 ### 2. Design intent alignment (9 majors + 4 partially resolved)
 

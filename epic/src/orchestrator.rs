@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use thiserror::Error;
 
+const GIT_DIFF_TIMEOUT_SECS: u64 = 30;
+
 enum VerifyOutcome {
     Passed,
     Failed(String),
@@ -429,13 +431,18 @@ impl<A: AgentService> Orchestrator<A> {
             None => return Ok(ScopeCheck::WithinBounds),
         };
 
-        let output = match tokio::process::Command::new("git")
+        let git_future = tokio::process::Command::new("git")
             .args(["diff", "--numstat", "HEAD"])
             .current_dir(&project_root)
-            .output()
-            .await
+            .output();
+
+        let output = match tokio::time::timeout(
+            std::time::Duration::from_secs(GIT_DIFF_TIMEOUT_SECS),
+            git_future,
+        )
+        .await
         {
-            Ok(o) if o.status.success() => o,
+            Ok(Ok(o)) if o.status.success() => o,
             _ => return Ok(ScopeCheck::WithinBounds),
         };
 

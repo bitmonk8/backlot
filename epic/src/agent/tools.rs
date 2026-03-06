@@ -2,7 +2,7 @@
 
 use bitflags::bitflags;
 use globset::GlobBuilder;
-use regex::Regex;
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 #[cfg(unix)]
@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 const MAX_READ_BYTES: u64 = 256 * 1024;
+const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_GLOB_RESULTS: usize = 1000;
 const MAX_GREP_OUTPUT: usize = 64 * 1024;
 const MAX_GREP_FILE_BYTES: u64 = 10 * 1024 * 1024;
@@ -414,7 +415,11 @@ async fn tool_grep(input: &JsonValue, project_root: &Path) -> Result<String, Str
         None => project_root.to_path_buf(),
     };
 
-    let re = Regex::new(&pattern).map_err(|e| format!("invalid regex: {e}"))?;
+    let re = RegexBuilder::new(&pattern)
+        .size_limit(1 << 20)
+        .dfa_size_limit(1 << 20)
+        .build()
+        .map_err(|e| format!("invalid regex: {e}"))?;
 
     let glob_filter = match get_str_opt(input, "glob") {
         Some(g) => Some(
@@ -455,10 +460,11 @@ async fn tool_grep(input: &JsonValue, project_root: &Path) -> Result<String, Str
 
             // Apply glob filter on relative path
             if let Some(ref gf) = glob_filter {
-                if let Ok(rel) = path.strip_prefix(&search_dir) {
-                    if !gf.is_match(&*rel.to_string_lossy()) {
-                        continue;
-                    }
+                let Ok(rel) = path.strip_prefix(&search_dir) else {
+                    continue;
+                };
+                if !gf.is_match(&*rel.to_string_lossy()) {
+                    continue;
                 }
             }
 
@@ -497,6 +503,13 @@ async fn tool_grep(input: &JsonValue, project_root: &Path) -> Result<String, Str
 async fn tool_write_file(input: &JsonValue, project_root: &Path) -> Result<String, String> {
     let raw_path = get_str(input, "path")?;
     let content = get_str(input, "content")?;
+
+    if content.len() > MAX_WRITE_BYTES {
+        return Err(format!(
+            "content too large: {} bytes (limit: {MAX_WRITE_BYTES})",
+            content.len()
+        ));
+    }
 
     // Resolve path: for new files, create parent dirs first, then validate containment.
     let candidate = if Path::new(raw_path).is_absolute() {
@@ -581,7 +594,32 @@ async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<BashOutput,
         .current_dir(project_root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+        .kill_on_drop(true)
+        .env_clear();
+
+    for key in &[
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "SHELL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SYSTEMROOT",
+        "COMSPEC",
+        "WINDIR",
+        "PROGRAMFILES",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
 
     // Put child in its own session so we can kill the whole tree via process group.
     #[cfg(unix)]
@@ -910,6 +948,60 @@ mod tests {
         assert!(!result.content.contains("data.txt"));
     }
 
+    #[tokio::test]
+    async fn test_grep_regex_complexity_rejected() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "aaa\n").unwrap();
+        let huge = format!("({}){{{}}}", "a|b|c|d|e|f|g|h|i|j".repeat(50), 9999);
+        let result = execute_tool(
+            "tu_1".into(),
+            "grep",
+            &serde_json::json!({"pattern": huge}),
+            tmp.path(),
+            ToolGrant::READ,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("invalid regex"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_normal_regex_works() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("code.rs"), "fn hello_world() {}\n").unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "grep",
+            &serde_json::json!({"pattern": r"fn\s+\w+"}),
+            tmp.path(),
+            ToolGrant::READ,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("fn hello_world"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_glob_filter_strip_prefix_skip() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), "fn hello()\n").unwrap();
+        std::fs::write(tmp.path().join("src/lib.rs"), "fn hello()\n").unwrap();
+        std::fs::write(tmp.path().join("src/data.txt"), "fn hello()\n").unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "grep",
+            &serde_json::json!({"pattern": "fn hello", "glob": "*.rs"}),
+            tmp.path(),
+            ToolGrant::READ,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("main.rs"));
+        assert!(result.content.contains("lib.rs"));
+        assert!(!result.content.contains("data.txt"));
+    }
+
     // -- write_file tests --
 
     #[tokio::test]
@@ -927,6 +1019,38 @@ mod tests {
         assert!(result.content.contains("wrote"));
         let content = std::fs::read_to_string(tmp.path().join("sub/new.txt")).unwrap();
         assert_eq!(content, "created");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_size_limit() {
+        let tmp = TempDir::new().unwrap();
+        let big = "x".repeat(MAX_WRITE_BYTES + 1);
+        let result = execute_tool(
+            "tu_1".into(),
+            "write_file",
+            &serde_json::json!({"path": "big.txt", "content": big}),
+            tmp.path(),
+            ToolGrant::WRITE,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("content too large"));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_at_limit() {
+        let tmp = TempDir::new().unwrap();
+        let exact = "x".repeat(MAX_WRITE_BYTES);
+        let result = execute_tool(
+            "tu_1".into(),
+            "write_file",
+            &serde_json::json!({"path": "exact.txt", "content": exact}),
+            tmp.path(),
+            ToolGrant::WRITE,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("wrote"));
     }
 
     // -- edit_file tests --
@@ -1071,4 +1195,40 @@ mod tests {
             "background process survived timeout — process group kill failed"
         );
     }
+
+    #[tokio::test]
+    async fn test_bash_env_filtered() {
+        let tmp = TempDir::new().unwrap();
+        // SAFETY: no other threads read EPIC_TEST_SECRET.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("EPIC_TEST_SECRET", "leaked");
+        }
+
+        let result = execute_tool(
+            "tu_1".into(),
+            "bash",
+            &serde_json::json!({"command": "env"}),
+            tmp.path(),
+            ToolGrant::BASH,
+        )
+        .await;
+
+        assert!(!result.is_error);
+        assert!(
+            !result.content.contains("EPIC_TEST_SECRET"),
+            "secret env var leaked into child process"
+        );
+        assert!(
+            result.content.contains("PATH="),
+            "PATH should be present in child environment"
+        );
+
+        // SAFETY: no other threads read EPIC_TEST_SECRET.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var("EPIC_TEST_SECRET");
+        }
+    }
+
 }

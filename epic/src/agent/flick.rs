@@ -21,10 +21,24 @@ use std::time::Duration;
 
 const MAX_TOOL_ROUNDS: u32 = 50;
 
+struct RedactedString(String);
+
+impl std::fmt::Debug for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl std::fmt::Display for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
 /// `FlickAgent` invokes the Flick library for each agent call.
 pub struct FlickAgent {
     project_root: PathBuf,
-    credential_name: String,
+    credential_name: RedactedString,
     call_timeout: Duration,
     model_config: ModelConfig,
     verification_steps: Vec<VerificationStep>,
@@ -40,7 +54,7 @@ impl FlickAgent {
     ) -> Self {
         Self {
             project_root,
-            credential_name,
+            credential_name: RedactedString(credential_name),
             call_timeout,
             model_config,
             verification_steps,
@@ -174,7 +188,7 @@ Respond with the required JSON schema.";
         let grant = tools::ToolGrant::READ;
         let config = config_gen::build_init_config(
             system_prompt,
-            &self.credential_name,
+            &self.credential_name.0,
             grant,
             &self.model_config,
         )?;
@@ -194,7 +208,7 @@ impl AgentService for FlickAgent {
         let config = config_gen::build_assess_config(
             &pair.system_prompt,
             Model::Haiku,
-            &self.credential_name,
+            &self.credential_name.0,
             grant,
             &self.model_config,
         )?;
@@ -209,7 +223,7 @@ impl AgentService for FlickAgent {
         let config = config_gen::build_execute_leaf_config(
             &pair.system_prompt,
             model,
-            &self.credential_name,
+            &self.credential_name.0,
             grant,
             &self.model_config,
         )?;
@@ -230,7 +244,7 @@ impl AgentService for FlickAgent {
         let config = config_gen::build_execute_leaf_config(
             &pair.system_prompt,
             model,
-            &self.credential_name,
+            &self.credential_name.0,
             grant,
             &self.model_config,
         )?;
@@ -249,7 +263,7 @@ impl AgentService for FlickAgent {
         let config = config_gen::build_decompose_config(
             &pair.system_prompt,
             model,
-            &self.credential_name,
+            &self.credential_name.0,
             grant,
             &self.model_config,
         )?;
@@ -270,7 +284,7 @@ impl AgentService for FlickAgent {
         let config = config_gen::build_decompose_config(
             &pair.system_prompt,
             model,
-            &self.credential_name,
+            &self.credential_name.0,
             grant,
             &self.model_config,
         )?;
@@ -285,7 +299,7 @@ impl AgentService for FlickAgent {
         let config = config_gen::build_verify_config(
             &pair.system_prompt,
             model,
-            &self.credential_name,
+            &self.credential_name.0,
             grant,
             &self.model_config,
         )?;
@@ -303,7 +317,7 @@ impl AgentService for FlickAgent {
         let config = config_gen::build_checkpoint_config(
             &pair.system_prompt,
             Model::Haiku,
-            &self.credential_name,
+            &self.credential_name.0,
             &self.model_config,
         )?;
 
@@ -320,7 +334,7 @@ impl AgentService for FlickAgent {
         let config = config_gen::build_recovery_config(
             &pair.system_prompt,
             Model::Opus,
-            &self.credential_name,
+            &self.credential_name.0,
             &self.model_config,
         )?;
 
@@ -341,7 +355,7 @@ impl AgentService for FlickAgent {
         let config = config_gen::build_recovery_plan_config(
             &pair.system_prompt,
             Model::Opus,
-            &self.credential_name,
+            &self.credential_name.0,
             grant,
             &self.model_config,
         )?;
@@ -403,6 +417,13 @@ fn extract_tool_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacted_string_hides_value() {
+        let r = RedactedString("anthropic_key".into());
+        assert_eq!(format!("{r:?}"), "[REDACTED]");
+        assert_eq!(format!("{r}"), "[REDACTED]");
+    }
 
     #[test]
     fn extract_text_from_result() {

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (172 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, stale documentation, empty-subtask validation, bash process group kill, and correctness fixes remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (179 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, stale documentation, empty-subtask validation, bash process group kill, correctness fixes, and input validation & resource limits remediated; continuing hardening.
 
 ## Milestones
 
@@ -51,7 +51,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 
-1. **Input validation & resource limits** (6 majors) — Env filtering for bash child, write size limit, regex complexity limit, glob filter bypass, git diff timeout, credential redaction.
+1. ~~**Input validation & resource limits** (6 majors)~~ — **Resolved 2026-03-06.**
 2. **Design intent alignment** (9 majors + 4 partial) — Tool grant mismatch, missing prompt guardrails, assessment bias/root rules, checkpoint context, recovery rationale, fix-within-fix guard.
 3. **Documentation drift** (5 majors + 1 partial) — Type mismatches, stale tool/event names, CLI syntax.
 4. **Error handling** (2 majors) — Init I/O error swallowing, TUI abort state loss.
@@ -61,6 +61,22 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 8. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. Deferred until 1–7 addressed. See [SANDBOXING.md](SANDBOXING.md).
 
 ## Decisions Made
+
+### 2026-03-06: Input validation & resource limits (6 audit majors resolved)
+
+**Scope:** 4 files modified (`agent/tools.rs`, `agent/flick.rs`, `agent/config_gen.rs`, `orchestrator.rs`). 179 tests passing, 0 clippy warnings.
+
+**U5-R2#2 — Bash env filtering (tools.rs):** `tool_bash` now calls `env_clear()` on the child process and re-adds only an explicit allowlist of safe environment variables (`PATH`, `HOME`, `USER`, `LANG`, `TERM`, etc.). Prevents credential/token leakage to agent-spawned commands. 1 new test.
+
+**U5-R2#3 — Write size limit (tools.rs):** `tool_write_file` now rejects content exceeding `MAX_WRITE_BYTES` (1 MiB) before any path resolution. Prevents agent-driven disk exhaustion. 2 new tests.
+
+**U5-R2#4 — Regex complexity limit (tools.rs):** `tool_grep` now uses `RegexBuilder` with `size_limit(1 << 20)` and `dfa_size_limit(1 << 20)`, capping compiled regex program size at 1 MiB. Mitigates ReDoS from pathological patterns. 2 new tests.
+
+**U5-R1#3 — Glob filter bypass (tools.rs):** Changed `strip_prefix` failure in `tool_grep` glob filtering from implicit-pass to explicit-skip (`let Ok(rel) = ... else { continue }`). Files that can't be expressed relative to the search directory are now excluded. 1 new test.
+
+**U1-R2#2 — Git diff timeout (orchestrator.rs):** `check_scope_circuit_breaker` now wraps `git diff --numstat` in `tokio::time::timeout(30s)`. Timeout treated as best-effort `WithinBounds`, same as command failure. New `GIT_DIFF_TIMEOUT_SECS` constant.
+
+**U2-R2#4 — Credential redaction (flick.rs, config_gen.rs):** Added `RedactedString` wrapper type with `Debug`/`Display` impls that output `[REDACTED]`. `FlickAgent::credential_name` changed to `RedactedString`. `Config::from_str` error path scrubs credential name from error messages. 1 new test.
 
 ### 2026-03-06: Correctness fixes (5 audit majors resolved)
 
