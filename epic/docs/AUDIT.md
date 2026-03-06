@@ -1,44 +1,36 @@
-# Project Audit Plan
+# Project Audit
 
 ## Purpose
 
-Full audit of the Epic codebase at v1 completion (110 tests, ~9,400 lines of Rust across 29 source files). Goals: identify correctness issues, stale/dead code, doc drift, security gaps, design fidelity, and simplification opportunities before real-world use.
+Full audit of the Epic codebase at v1 completion. Goals: identify correctness issues, stale/dead code, doc drift, security gaps, design fidelity, and simplification opportunities before real-world use.
 
 ## Approach
 
 The audit is organized as a **review matrix**: review types on one axis, code units on the other. Each cell is a focused task for a single agent. Not every cell applies — cells marked `--` are intentionally skipped.
 
-## Status Key
-
-- `[ ]` — Not started
-- `[~]` — In progress
-- `[x]` — Complete
-- `[!]` — Blocked or needs discussion
-- `--` — Not applicable (intentionally skipped)
-
 ---
 
 ## Code Units
 
-| ID | Unit | Files | Lines | Description |
-|----|------|-------|-------|-------------|
-| U1 | orchestrator | `orchestrator.rs` | 4,512 | DFS loop, retry/escalation, fix loops, recovery, checkpoints, resume |
-| U2 | agent/flick | `agent/flick.rs` | 533 | FlickClient wrapper, tool loop, structured output, resume |
-| U3 | agent/config_gen | `agent/config_gen.rs` | 818 | Wire types, TryFrom conversions, JSON schemas |
-| U4 | agent/prompts | `agent/prompts.rs` | 495 | Prompt assembly for all agent methods |
-| U5 | agent/tools | `agent/tools.rs` | 932 | 6 tool implementations, path sandboxing, size limits |
-| U6 | agent/models | `agent/models.rs`, `agent/mod.rs` | 147 | Model IDs, token limits, AgentService trait |
-| U7 | task | `task/*.rs` | 208 | Task struct, phases, Magnitude, LeafResult, subtypes |
-| U8 | state | `state.rs` | 138 | EpicState persistence, atomic writes, load/save |
-| U9 | events | `events.rs` | ~100 | Event enum, all variants |
-| U10 | config | `config/*.rs` | 153 | EpicConfig, VerificationStep, TOML loading |
-| U11 | init | `init.rs` | 324 | Agent-driven interactive scaffolding |
-| U12 | cli + main | `cli.rs`, `main.rs` | ~350 | Clap CLI, wiring, TUI/headless split, shutdown |
-| U13 | tui | `tui/*.rs` | 766 | TuiApp, task tree, worklog, metrics panels |
-| U14 | git | `git.rs` | ~80 | git diff --numstat, scope circuit breaker support |
-| U15 | metrics | `metrics.rs` | ~60 | Token/cost tracking |
-| U16 | services | `services/*.rs` | 5 | Stubs: document_store, research, verification |
-| U17 | docs | `docs/*.md` | — | All 13 design documents |
+| ID | Unit | Files | Description |
+|----|------|-------|-------------|
+| U1 | orchestrator | `orchestrator.rs` | DFS loop, retry/escalation, fix loops, recovery, checkpoints, resume |
+| U2 | agent/flick | `agent/flick.rs` | FlickClient wrapper, tool loop, structured output, resume |
+| U3 | agent/config_gen | `agent/config_gen.rs` | Wire types, TryFrom conversions, JSON schemas |
+| U4 | agent/prompts | `agent/prompts.rs` | Prompt assembly for all agent methods |
+| U5 | agent/tools | `agent/tools.rs` | 6 tool implementations, path sandboxing, size limits |
+| U6 | agent/mod | `agent/mod.rs` | AgentService trait |
+| U7 | task | `task/*.rs` | Task struct, phases, Magnitude, LeafResult, subtypes |
+| U8 | state | `state.rs` | EpicState persistence, atomic writes, load/save |
+| U9 | events | `events.rs` | Event enum, all variants |
+| U10 | config | `config/*.rs` | EpicConfig, VerificationStep, TOML loading |
+| U11 | init | `init.rs` | Agent-driven interactive scaffolding |
+| U12 | cli + main | `cli.rs`, `main.rs` | Clap CLI, wiring, TUI/headless split, shutdown |
+| U13 | tui | `tui/*.rs` | TuiApp, task tree, worklog, metrics panels |
+| U14 | git | `git.rs` | git diff --numstat, scope circuit breaker support |
+| U15 | metrics | `metrics.rs` | Token/cost tracking |
+| U16 | services | `services/*.rs` | Stubs: document_store, research, verification |
+| U17 | docs | `docs/*.md` | Design documents |
 
 ## Review Types
 
@@ -47,7 +39,7 @@ The audit is organized as a **review matrix**: review types on one axis, code un
 | R1 | **Correctness** | Logic errors, edge cases, unsound assumptions, off-by-one, missed error paths |
 | R2 | **Security** | Injection, sandboxing, TOCTOU, credential exposure, resource exhaustion |
 | R3 | **Error handling** | Panics (unwrap/expect), error propagation, graceful degradation, resource cleanup |
-| R4 | **Dead code & cruft** | Unused code, stubs, stale comments, subprocess/ZeroClaw/YAML remnants, stale allow annotations |
+| R4 | **Dead code & cruft** | Unused code, stubs, stale comments, stale allow annotations |
 | R5 | **Simplification** | Unnecessary complexity, duplicated logic, boilerplate reduction, extraction opportunities |
 | R6 | **Testability** | Mock boundaries, test friction, isolation, missing coverage, state machine clarity |
 | R7 | **Design intent** | Fidelity to EPIC_DESIGN2, agent autonomy balance, cost control, verification enforcement |
@@ -57,16 +49,16 @@ The audit is organized as a **review matrix**: review types on one axis, code un
 
 ## Review Matrix
 
-Each cell is one focused agent task. Cells contain status checkboxes.
+Each cell is one focused agent task. All 95 cells complete. Detailed findings in `docs/audit/*.md`.
 
-| Unit | R1 Correct | R2 Security | R3 Errors | R4 Cruft | R5 Simplify | R6 Tests | R7 Design | R8 Docs |
-|------|-----------|-------------|-----------|----------|-------------|----------|-----------|---------|
+| Unit | R1 | R2 | R3 | R4 | R5 | R6 | R7 | R8 |
+|------|----|----|----|----|----|----|----|----|
 | **U1** orchestrator | [x] | [x] | [x] | [x] | [x] | [x] | [x] | -- |
 | **U2** agent/flick | [x] | [x] | [x] | [x] | [x] | [x] | [x] | -- |
 | **U3** agent/config_gen | [x] | -- | [x] | [x] | [x] | [x] | -- | -- |
 | **U4** agent/prompts | [x] | -- | [x] | [x] | [x] | [x] | [x] | -- |
 | **U5** agent/tools | [x] | [x] | [x] | [x] | [x] | [x] | -- | -- |
-| **U6** agent/models | [x] | -- | [x] | [x] | -- | [x] | [x] | -- |
+| **U6** agent/mod | [x] | -- | [x] | [x] | -- | [x] | [x] | -- |
 | **U7** task | [x] | -- | [x] | [x] | [x] | [x] | [x] | -- |
 | **U8** state | [x] | [x] | [x] | [x] | -- | [x] | -- | -- |
 | **U9** events | [x] | -- | -- | [x] | [x] | -- | -- | -- |
@@ -79,156 +71,222 @@ Each cell is one focused agent task. Cells contain status checkboxes.
 | **U16** services | -- | -- | -- | [x] | -- | -- | -- | -- |
 | **U17** docs | -- | -- | -- | [x] | -- | -- | [x] | [x] |
 
-### Cell count: 81 matrix cells
-
----
-
-## Cross-Cutting Reviews
-
-Some concerns span the entire codebase and don't fit neatly into one unit. These are separate single-agent tasks.
-
-- [x] **X1: Cargo.toml & dependencies** — Unused deps, feature flags, edition, metadata, build reproducibility.
-- [x] **X2: Clippy pedantic** — Run `cargo clippy -- -W clippy::pedantic` across the whole codebase. Triage warnings.
-- [x] **X3: Compiler warnings** — `cargo build` with all warnings enabled. Check for suppressed warnings.
-- [x] **X4: CI readiness** — Assess what a CI pipeline would need. No CI config exists today.
-- [x] **X5: Global patterns** — Naming consistency, visibility boundaries, module organization across the whole project.
-- [x] **X6: Constants vs. config** — Audit all hardcoded constants (RETRIES_PER_TIER, MAX_RECOVERY_ROUNDS, etc.). Which should be configurable?
-
----
-
-## Broad-Lens Reviews
-
-These reviews deliberately span multiple code units to find issues that are **invisible when examining a single module in isolation**. Each agent reads all files in its scope. Agents must NOT raise issues that could be found within a single code unit — those belong in the matrix cells above.
-
-### Simplification (broad)
-
-- [x] **B1: Duplicated patterns across modules** — Read all of: `orchestrator.rs`, `agent/flick.rs`, `agent/config_gen.rs`, `init.rs`. Identify repeated patterns that appear in 2+ modules: retry/escalation progressions, agent-call-then-parse sequences, checkpoint-save-after-mutation patterns, error-to-string formatting. Only flag patterns where a shared abstraction would reduce total code without adding indirection that hurts readability.
-
-- [x] **B2: Data flow and type conversions** — Read: `agent/config_gen.rs` (wire types), `task/mod.rs` (domain types), `agent/prompts.rs` (context formatting), `orchestrator.rs` (where conversions happen). Trace the full path: domain type → prompt context → agent call → wire type → TryFrom → domain type. Identify unnecessary intermediate representations, fields that are serialized but never read by agents, conversions that could be eliminated by aligning types.
-
-- [x] **B3: Event and state coupling** — Read: `events.rs`, `orchestrator.rs`, `tui/mod.rs`, `state.rs`. Events serve two consumers (TUI display and implicit state logging). Are there events that exist only because the TUI needs them but add checkpoint/persistence overhead? Are there state changes that should emit events but don't? Is the event enum pulling its weight or should some variants be consolidated?
-
-- [x] **B4: Error handling uniformity** — Read all agent-calling code in: `orchestrator.rs`, `agent/flick.rs`, `init.rs`. Compare how agent errors are handled across every call site. Are some calls best-effort (log and continue) while similar calls are fatal? Is the inconsistency intentional or accidental? Could a common error handling strategy reduce code without losing nuance?
-
-### Design (broad)
-
-- [x] **B5: Orchestrator responsibility boundaries** — Read: `orchestrator.rs`, `agent/mod.rs` (trait), `task/mod.rs`, `state.rs`. The orchestrator is 4,512 lines and owns: task execution, state mutation, checkpointing, fix loops, recovery, event emission, and agent dispatch. Map which responsibilities are inherent to orchestration vs. which are bolted on. Identify responsibilities that could live closer to the data they operate on (e.g., should `Task` own its phase transitions? Should fix-loop logic live with the agent layer?). Do NOT recommend extraction for its own sake — only where the current placement causes confusion, duplication, or coupling.
-
-- [x] **B6: Agent contract coherence** — Read: `agent/mod.rs` (AgentService trait), `agent/flick.rs` (implementation), `agent/config_gen.rs` (wire types), `agent/prompts.rs` (prompt assembly). The AgentService trait has ~8 methods. Do they form a coherent contract, or have some methods been added ad-hoc as features were bolted on? Are there methods with nearly identical signatures that could be unified? Do the wire types and prompt structures follow a consistent pattern, or has each method evolved its own conventions?
-
-- [x] **B7: Recovery and fix architecture** — Read: the fix loop sections of `orchestrator.rs`, the recovery sections of `orchestrator.rs`, `agent/mod.rs` (recovery + fix trait methods). The system has 5 layers of failure handling: retry at same tier, model escalation, leaf fix loop, branch fix loop, recovery re-decomposition. Review how these layers compose. Can a task go through all 5 layers in a single run? Are there interaction edge cases (e.g., a recovery subtask entering a fix loop that triggers another recovery)? Are the guard rails (is_fix_task, max rounds) sufficient and consistently applied?
-
-- [x] **B8: Prompt and context pipeline** — Read: `agent/prompts.rs`, `agent/config_gen.rs` (schemas), `orchestrator.rs` (context building: `build_context`, sibling summaries, checkpoint guidance). The quality of agent output depends entirely on what goes into the prompt. Trace the full context pipeline for each agent method. Is context complete (does the agent have what it needs)? Is it minimal (no noise that wastes tokens)? Are sibling discoveries, checkpoint guidance, and failure reasons always included when relevant and omitted when not?
-
----
-
-## Agent Instructions
-
-Each agent receives:
-1. The **review type definition** (from the Review Types table above).
-2. The **code unit files** to read.
-3. For R7 (Design intent): also read `EPIC_DESIGN2.md` and relevant design docs.
-4. For R8 (Doc consistency): read the design doc and the corresponding source files.
-
-Each agent produces:
-- A list of **findings**, each with: severity (critical/major/minor/note), description, file:line reference where applicable, and suggested fix if obvious.
-- Findings are recorded in the matrix section below.
-
----
-
-## Findings
-
-Findings are recorded per cell after each agent completes. Format:
-
-### U{n}-R{n}: {unit} / {review type}
-
-**Status:** [ ] Not started
-
-| # | Severity | Finding | Location | Suggestion |
-|---|----------|---------|----------|------------|
-| | | | | |
-
----
-
-## Execution Order
-
-Recommended priority (highest-value cells first):
-
-**Phase 1 — High-risk, high-complexity units:**
-- U1 (orchestrator): R1, R3, R5, R6, R7 — largest file, most complex logic
-- U5 (tools): R1, R2 — security-critical
-- U2 (flick): R1, R3 — external API boundary
-
-**Phase 2 — Data integrity and agent behavior:**
-- U3 (config_gen): R1, R5 — wire type correctness, boilerplate
-- U4 (prompts): R1, R7 — prompt quality drives agent effectiveness
-- U8 (state): R1, R2 — persistence correctness
-- U7 (task): R1, R7 — core data model
-
-**Phase 3 — Supporting modules:**
-- U12 (cli+main): R1, R3 — entry point, shutdown
-- U11 (init): R1, R3 — user-facing interactive flow
-- U13 (tui): R1, R3 — display correctness, crash recovery
-
-**Phase 4 — Cleanup and docs:**
-- All remaining R4 (cruft) cells
-- U17 (docs): R8, R7
-- Cross-cutting reviews X1–X6
-
-**Phase 5 — Broad-lens reviews (after matrix cells complete):**
-- B1–B4 (simplification broad) — depend on matrix findings to avoid re-raising known issues
-- B5–B8 (design broad) — depend on R7 matrix cells for per-unit design context
-
----
-
-## Summary
-
-| Review Type | Cells | Done | Findings |
-|-------------|-------|------|----------|
-| R1 Correctness | 15 | 15 | 78 |
-| R2 Security | 5 | 5 | 35 |
-| R3 Error handling | 14 | 14 | 51 |
-| R4 Dead code & cruft | 17 | 17 | 45 |
-| R5 Simplification | 10 | 10 | 63 |
-| R6 Testability | 13 | 13 | 96 |
-| R7 Design intent | 6 | 6 | 57 |
-| R8 Doc consistency | 1 | 1 | 20 |
-| Cross-cutting | 6 | 6 | 57 |
-| Broad-lens simplification | 4 | 4 | 17 |
-| Broad-lens design | 4 | 4 | 22 |
-| **Total** | **95** | **95** | **541** |
+Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4 (CI readiness), X5 (global patterns), X6 (constants vs config). Broad-lens: B1–B4 (simplification), B5–B8 (design).
 
 ---
 
 ## Audit Results Summary
 
-**Completed:** 2026-03-05. All 95 review cells executed by independent agents. Detailed findings in `docs/audit/*.md`.
+**Completed:** 2026-03-05. All 95 review cells executed. 541 original findings.
 
-### Findings by Severity
+**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, and stale documentation — resolving 52 findings fully and 18 partially.
 
-| Severity | Count |
-|----------|-------|
-| Critical | 4 |
-| Major | 120 |
-| Minor | 241 |
-| Note | 176 |
-| **Total** | **541** |
+### Current Findings by Severity
 
-### Top Remaining Finding
+| Severity | Still Valid | Partially Resolved |
+|----------|------------|-------------------|
+| Critical | 3 | 0 |
+| Major | 80 | 8 |
+| Minor | 224 | 7 |
+| Note | 164 | 3 |
+| **Total** | **471** | **18** |
 
-**1. Unsandboxed bash execution (U5-R2 #1, U2-R2 #1) — CRITICAL**
-`tool_bash` passes LLM-supplied commands to `sh -c` with zero sandboxing: no containers, namespaces, network isolation, or command allowlist. An agent can exfiltrate data, install software, access credentials, or destroy the host. The `project_root` cwd is trivially escaped. This is the single highest-risk issue in the codebase.
+Note: The original audit counted unsandboxed bash as 2 critical findings (security + tools review cells). Per [SANDBOXING.md](SANDBOXING.md), this is now split: security isolation (C1, critical — solved by container/VM guidance + startup detection) and operational correctness (C2, major — solved by Frida-based runtime interception).
 
-### Recommended Action Items (Priority Order)
+### Remaining Findings by Category
 
-1. **Sandbox the bash tool.** Run agent commands in a container, bubblewrap, or restricted shell. Drop network access by default. This is a security prerequisite for real-world use.
+| Category | Approx count | Critical | Major |
+|---|---|---|---|
+| Security isolation (container/VM guidance, startup detection) | ~2 | 1 | 0 |
+| Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
+| Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
+| Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~70 | 0 | ~10 |
+| Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~45 | 0 | ~8 |
+| Dead code/stubs (git.rs, metrics.rs, services/, unused ToolGrant flags) | ~25 | 0 | ~5 |
+| Design intent gaps (prompt content, tool grants, missing review phase) | ~40 | 0 | ~10 |
+| Doc drift (TUI event names, CLI syntax, type mismatches) | ~25 | 0 | ~5 |
+| Correctness (empty subtask validation, cycle detection, phase transitions) | ~30 | 0 | ~8 |
+| CI pipeline | ~8 | 0 | ~3 |
+| Other (clippy, naming, notes) | ~128 | 0 | 0 |
 
-2. **Add CI pipeline.** GitHub Actions with `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`. Pin the Flick git dependency to a rev/tag. Add `rust-toolchain.toml`.
+---
 
-3. **Extract main() into testable function.** Replace `process::exit` calls with `bail!`, extract `async fn run()` that accepts injected dependencies. This unlocks integration testing for the entire entry point.
+## Critical Findings (4)
 
-4. **Remove dead modules.** `src/git.rs`, `src/metrics.rs`, `src/services/*.rs` are empty stubs declared in `main.rs` but never used.
+### C1. Security isolation: no container/VM guidance or detection
+**Refs:** U2-R2#1, U5-R2#1 (security aspect)
 
-5. **Deduplicate retry/escalation loop.** `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical state machine code. Extract a shared `retry_with_escalation` helper.
+LLM agents execute arbitrary shell commands via `tool_bash` (`sh -c`). No amount of in-process checking can fully prevent escape. Per [SANDBOXING.md](SANDBOXING.md), the only robust security boundary is running epic inside a user-managed VM or container. Epic's responsibility is guidance, not enforcement:
 
-6. **Add cycle detection to `dfs_order`.** `EpicState::dfs_order` will infinite-loop on cyclic task graphs from corrupted state files.
+1. **Documentation** — README.md must explicitly guide users toward Docker/Podman/VM with recommended configurations (bind-mount project only, restrict network, drop capabilities).
+2. **Startup detection** — Best-effort check for container/VM environment at startup. If not detected, emit a prominent warning. Detection signals documented in SANDBOXING.md.
+
+Epic will not implement OS-level sandboxing and will not refuse to run outside a container.
+
+### C2. Operational correctness: no per-phase access enforcement (Major)
+**Refs:** U2-R2#1, U5-R2#1 (correctness aspect)
+
+Separate from security isolation, each epic phase (assess, decompose, execute, verify) has a defined contract for what it should access. Currently these contracts are enforced only at the prompt level (`ToolGrant` bitflags) and via `safe_path()` containment — both of which are bypassed by bash commands. A read-only phase can write files; an execute phase can modify files outside its scope.
+
+Per [SANDBOXING.md](SANDBOXING.md), the solution is Frida-based runtime interception (frida-gum for in-process, frida-core for child processes) to enforce per-phase access policies at the syscall level. This is complex, has open questions (child process injection latency, tokio thread interaction, write set derivation), and should start in audit mode before enforcement mode.
+
+This is not a security boundary — it is an operational correctness mechanism. Severity: Major.
+
+### C3. No CI pipeline
+**Ref:** X4#1
+
+No CI configuration exists. No automated build, test, clippy, or fmt checks. The Flick git dependency is unpinned. No `rust-toolchain.toml`.
+
+### C4. main.rs untestable
+**Ref:** U12-R6#1
+
+`main.rs` uses `process::exit()` in multiple error paths, accepts no dependency injection, and has zero test coverage. Cannot integration-test the entry point without extracting an `async fn run()` that returns `Result`.
+
+---
+
+## Major Findings (79 still valid, 8 partially resolved)
+
+### Operational Correctness & Sandboxing
+
+| Ref | Finding | Location |
+|-----|---------|----------|
+| U5-R2#2 | Full environment inherited by bash child process — credentials, tokens, PATH all exposed | `tools.rs` |
+| U5-R2#3 | No write-content size limit on `write_file` — agent can exhaust disk | `tools.rs` |
+| U5-R2#4 | No regex pattern size/complexity limit in `tool_grep` — ReDoS vector | `tools.rs` |
+| U5-R1#1 | TOCTOU symlink race in `safe_path` with `allow_new_file` — race between validation and open | `tools.rs` |
+| U5-R1#2 | Bash timeout does not kill process group — grandchild processes orphaned | `tools.rs` |
+| U5-R1#3 | Glob filter bypass when `strip_prefix` fails in `tool_grep` — files outside root may be searched | `tools.rs` |
+| U2-R2#2 | TOCTOU in `write_file` path validation — path validated then file written non-atomically | `tools.rs` |
+| U2-R2#3 | TOCTOU in `edit_file` between read and write — file may change between operations | `tools.rs` |
+| U2-R2#4 | `credential_name` passed through JSON config with potential leakage in error paths | `flick.rs`, `config_gen.rs` |
+| U1-R2#2 | `git diff` subprocess in `check_scope_circuit_breaker` has no `tokio::time::timeout` — can hang indefinitely | `orchestrator.rs` |
+
+### Correctness
+
+| Ref | Finding | Location |
+|-----|---------|----------|
+| U1-R1#1 | `execute_branch` can report Success when all children failed after recovery exhaustion | `orchestrator.rs` |
+| U3-R1#1 | `DecompositionWire::try_from` accepts empty `subtasks` vec — creates branch with no children | `config_gen.rs` |
+| U3-R1#2 | `RecoveryPlanWire::try_from` accepts empty `subtasks` vec — creates recovery with no work | `config_gen.rs` |
+| U8-R1#1 | `load()` does not validate `next_id > max(existing task IDs)` — ID collision on resume | `state.rs` |
+| U8-R1#2 | `dfs_order` has no cycle detection — infinite loop on corrupted state files | `state.rs` |
+| U5-R3#1 | Bash timeout doesn't explicitly kill child/process group — resources leak | `tools.rs` |
+| U5-R3#2 | `tool_bash` returns `Ok` for non-zero exit status — callers may misinterpret failures | `tools.rs` |
+| U2-R1#1 | `run_structured` does not guard against `ToolCallsPending` status from Flick | `flick.rs` |
+| U7-R3#1 | `Task::path` and `current_model` are `Option` with no safe accessor — callers unwrap unsafely | `task/mod.rs` |
+
+### Testability
+
+| Ref | Finding | Location |
+|-----|---------|----------|
+| U5-R6#1 | No filesystem abstraction for tool testing — all tests require real FS | `tools.rs` |
+| U5-R6#2 | No process execution abstraction for bash testing — tests spawn real shells | `tools.rs` |
+| U2-R6#1 | `build_client` hard-codes `flick::resolve_provider` with no injection point | `flick.rs` |
+| U2-R6#2 | `run_with_tools` tool-loop logic not unit-testable — tightly coupled to FlickClient | `flick.rs` |
+| U2-R6#3 | `tools::execute_tool` called directly with no indirection for test isolation | `flick.rs` |
+| U1-R6#1 | `check_scope_circuit_breaker` shells out to `git` directly — untestable without real repo | `orchestrator.rs` |
+| U6-R6#1 | `MockAgentService` is private to `orchestrator::tests` — cannot reuse in other test modules | `orchestrator.rs` |
+| U7-R6#1 | `TaskPhase` transitions unchecked — no `try_transition` guard, any transition silently succeeds | `task/mod.rs` |
+| U7-R6#2 | `LeafResult` and `RecoveryPlan` lack `PartialEq` — cannot assert equality in tests | `task/mod.rs` |
+| U7-R6#3 | Zero unit tests in task module | `task/` |
+| U8-R6#1 | `save`/`load` coupled to real filesystem — no abstraction for test isolation | `state.rs` |
+| U8-R6#2 | No error/failure path tests for save/load | `state.rs` |
+| U10-R6#1 | No `PartialEq` derive on config structs — cannot assert equality in tests | `config/` |
+| U10-R6#4 | `init.rs` prompt functions read from `io::stdin()` directly — untestable | `init.rs` |
+| U11-R6 | Zero test coverage for entire init module (multiple findings) | `init.rs` |
+| U13-R6 | Zero test coverage for entire TUI module (multiple findings) | `tui/` |
+| U14-R6 | git module empty; scope check hardwired in orchestrator with no trait boundary (multiple findings) | `git.rs`, `orchestrator.rs` |
+
+### Simplification & Deduplication
+
+| Ref | Finding | Location |
+|-----|---------|----------|
+| U1-R5#1, B1#1, B5#1 | `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical retry-escalation state machine | `orchestrator.rs` |
+| U2-R5#2 | `execute_leaf` and `fix_leaf` in FlickAgent have identical bodies after prompt line | `flick.rs` |
+| U2-R5#3 | `design_and_decompose` and `design_fix_subtasks` in FlickAgent share identical tail | `flick.rs` |
+| U3-R5#1 | Subtask schema duplicated between `decomposition_schema` and `recovery_plan_schema` | `config_gen.rs` |
+| U3-R6#1 | `build_config` monolith couples JSON assembly to `flick::Config::from_str` | `config_gen.rs` |
+| B3#1 | `VerificationStarted`/`VerificationComplete` event pair — redundant with `TaskCompleted`/`TaskFailed` | `events.rs`, `orchestrator.rs` |
+| B3#2 | `SubtasksCreated` emitted redundantly alongside `RecoverySubtasksCreated`/`FixSubtasksCreated` | `events.rs`, `orchestrator.rs` |
+| U12-R5 | Duplicated state-load sequences in `main.rs` (multiple findings) | `main.rs` |
+
+### Error Handling
+
+| Ref | Finding | Location |
+|-----|---------|----------|
+| B4#1 | `verify()` errors are fatal inside fix loops — should be best-effort like recovery | `orchestrator.rs` |
+| B4#2 | `design_fix_subtasks` errors are fatal — inconsistent with best-effort `design_recovery_subtasks` | `orchestrator.rs` |
+| U11-R1#1 | `read_line()` in init silently discards I/O errors | `init.rs` |
+| U12-R1#1 | TUI abort path does not save state — user loses progress on Ctrl-C during TUI mode | `main.rs` |
+| U12-R3 | `process::exit()` used in multiple error paths — prevents cleanup and testability (multiple findings) | `main.rs` |
+| U5-R3#1 | Bash timeout doesn't explicitly kill child — resources leak on timeout (also correctness) | `tools.rs` |
+
+### Dead Code & Stubs
+
+| Ref | Finding | Location |
+|-----|---------|----------|
+| U14-R4#1 | `git.rs` is an empty stub declared in `main.rs` | `git.rs` |
+| U15-R4#1 | `metrics.rs` is an empty stub declared in `main.rs` | `metrics.rs` |
+| U16-R4#1 | `services/` module (document_store, research, verification) — all empty stubs | `services/*.rs` |
+| U2-R7#5 | No usage/cost tracking — `result.usage` never read in production code | `flick.rs` |
+| X5#1, X5#2 | Dead stub modules still declared in `main.rs` (overlaps U14/U15/U16 above) | `main.rs` |
+
+### Design Intent
+
+| Ref | Finding | Location |
+|-----|---------|----------|
+| U2-R7#4 | Decompose tool grant is READ-only — AGENT_DESIGN.md specifies EXPLORE (READ\|EXECUTE\|WEB) | `flick.rs` |
+| U4-R7#1 | No cost/scope guardrails in any prompt — agents have no budget awareness | `prompts.rs` |
+| U4-R7#2 | Assessment prompt omits tie-breaking bias toward branch (EPIC_DESIGN2 specifies prefer-branch) | `prompts.rs` |
+| U4-R7#3 | Assessment prompt omits root-is-always-branch rule | `prompts.rs` |
+| U7-R7#3 | File-level review and simplification review phases not implemented | `orchestrator.rs` |
+| B2#1 | `assess` config includes tool definitions but `run_structured` ignores tool calls | `flick.rs`, `config_gen.rs` |
+| B8#1 | Checkpoint agent cannot see child subtasks — classifies without knowing the plan structure | `orchestrator.rs`, `prompts.rs` |
+| B8#2 | Decomposition rationale promised in prompt but not delivered to recovery agent | `prompts.rs` |
+| B7#1 | Leaf fix loop runs unchecked on fix subtasks — no guard prevents recursive fix-loop-within-fix-loop | `orchestrator.rs` |
+
+### Documentation Drift
+
+| Ref | Finding | Location |
+|-----|---------|----------|
+| U17-R8#9 | VERIFICATION.md `timeout_secs: u64` vs code `timeout: u32` | `VERIFICATION.md` |
+| U17-R8#10 | TASK_MODEL.md references `submit_result` tool — no such tool exists | `TASK_MODEL.md` |
+| U17-R8#11 | Assessment uses `run_structured` (no tools), but AGENT_DESIGN.md says READ tools | `AGENT_DESIGN.md` |
+| U17-R8#14 | TUI_DESIGN.md event names don't match actual Event enum variants | `TUI_DESIGN.md` |
+| U17-R8#15 | TUI_DESIGN.md `VerificationResult` vs actual `VerificationComplete` | `TUI_DESIGN.md` |
+
+### CI & Build
+
+| Ref | Finding | Location |
+|-----|---------|----------|
+| X1#1 | Flick git dependency has no pinned rev/tag — builds are not reproducible | `Cargo.toml` |
+| X4 | No CI pipeline — no automated build, test, clippy, or fmt checks (multiple findings) | — |
+
+### Partially Resolved Majors
+
+| Ref | Finding | Status |
+|-----|---------|--------|
+| U1-R7#5 | `build_context` missing `parent_decomposition_rationale` and `parent_discoveries` | Decomposition rationale stored on Task but not propagated to context |
+| U4-R7#4 | `verify()` prompt not split into leaf vs branch variants | verify() now accepts `model: Model` param, but prompt text is still identical |
+| U6-R1#1 | `assess()` calls `run_structured` with tools config that won't be handled | Model corrected to Haiku, but tool config still passed to non-tool runner |
+| U10-R1#2 | `LimitsConfig` values used but no comprehensive validation | Some fields clamped to min 1, but no full validate() method |
+| U10-R6#2 | Config validation incomplete | Clamping added for some fields; no comprehensive boundary checks |
+| U10-R6#3 | No dedicated config `load()` with filesystem abstraction | Config loaded in main.rs directly; no config-module-level load function |
+| U17-R8#6 | CONFIGURATION.md CLI section still shows old syntax | Actual subcommands are run/resume/status/init; doc shows `epic "problem"`, `epic --resume` |
+| B7#2 | Recovery subtasks get fresh budgets enabling cost growth | `max_total_tasks` cap provides a global safeguard; recovery depth inherited; but per-branch budgets still reset |
+
+---
+
+## Recommended Action Items (Priority Order)
+
+1. **Security isolation: container/VM guidance + startup detection.** Add container/VM setup documentation to README.md. Implement best-effort virtualization detection at startup with a warning when not detected. See [SANDBOXING.md](SANDBOXING.md) Concern 1. This is the security prerequisite for real-world use — small scope, high value.
+2. **Add CI pipeline.** GitHub Actions with build, test, clippy, fmt. Pin Flick dependency to a rev/tag. Add `rust-toolchain.toml`.
+3. **Extract `main()` into testable function.** Replace `process::exit` with `bail!`, extract `async fn run()`.
+4. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
+5. **Remove dead modules.** `git.rs`, `metrics.rs`, `services/*.rs`.
+6. **Deduplicate retry/escalation loop.** Extract shared state machine from `execute_leaf` and `leaf_fix_loop`.
+7. **Add cycle detection to `dfs_order`.** Infinite loop on corrupted state files.
+8. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+9. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+10. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.
+11. **Pin Flick git dependency.** Add `rev = "..."` or `tag = "..."` to `Cargo.toml`.
