@@ -6,6 +6,7 @@ mod git;
 mod init;
 mod metrics;
 mod orchestrator;
+mod sandbox;
 mod services;
 mod state;
 mod task;
@@ -34,6 +35,16 @@ async fn main() -> anyhow::Result<()> {
 
     if let Command::Status = &cli.command {
         return print_status(&state_path);
+    }
+
+    if matches!(&cli.command, Command::Run { .. } | Command::Resume) && !cli.no_sandbox_warn {
+        if !sandbox::detect_virtualization() {
+            eprintln!(
+                "Warning: No container or VM detected. Running epic outside an isolated environment \
+                 is not recommended — agents execute arbitrary shell commands. See epic documentation \
+                 for container setup guidance."
+            );
+        }
     }
 
     // Check epic.toml existence before constructing agent (avoids requiring credentials for this error).

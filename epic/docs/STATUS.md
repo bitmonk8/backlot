@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (135 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, and stale documentation remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (145 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, and stale documentation remediated; continuing hardening.
 
 ## Milestones
 
@@ -24,6 +24,7 @@
 
 - [x] Full codebase audit — 95 review cells (81 matrix, 6 cross-cutting, 8 broad-lens). 541 findings: 4 critical, 120 major, 241 minor, 176 note. See [AUDIT.md](AUDIT.md).
 - [x] Wire epic.toml to orchestrator — `EpicConfig` loaded from `epic.toml` at startup (falls back to defaults). All hardcoded orchestrator constants (`MAX_DEPTH`, `RETRIES_PER_TIER`, `MAX_RECOVERY_ROUNDS`, `MAX_BRANCH_FIX_ROUNDS`, `MAX_ROOT_FIX_ROUNDS`) replaced with `LimitsConfig` fields. `FlickAgent` takes `ModelConfig` and `Vec<VerificationStep>` as constructor params. `resolve_model_name` maps `Model` tiers to config-specified names. Verification prompts include configured commands. Zero-value limits clamped to 1. Two review passes: fixed critical bug (default model names were not valid API IDs), collapsed `_with_models` duplication (removed 7 wrapper functions), simplified Orchestrator to hold `LimitsConfig` not full `EpicConfig`, replaced FlickAgent builders with constructor params. 10 new tests (120 total).
+- [x] Container/VM startup detection — Best-effort virtualization detection with stderr warning on `Run`/`Resume`. Suppressible via `--no-sandbox-warn`. Platform-specific checks (Linux containers/WSL, macOS VMs, Windows VMs). Review pass fixed 2 major issues (false-positive `CONTAINER_HOST`, deprecated `wmic`). 10 new tests (145 total).
 
 ## Deferred Items
 
@@ -48,8 +49,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 ## Next Work Candidates
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
-
-1. **Container/VM guidance + startup detection** — Add Docker/Podman setup docs to README. Implement best-effort virtualization detection at startup with a warning when not detected. Small scope. See [SANDBOXING.md](SANDBOXING.md) Concern 1.
+1. **Add container setup documentation to README** — Docker/Podman/VM setup guidance with recommended configurations, bind-mount patterns, network policy. Completes the security isolation guidance from SANDBOXING.md Concern 1.
 2. **Add CI pipeline** — GitHub Actions with build, test, clippy, fmt. Pin Flick dependency to a rev/tag. Add `rust-toolchain.toml`.
 3. **Extract main() into testable function** — Replace `process::exit` with `bail!`, extract `async fn run()`. Unblocks integration testing.
 4. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
@@ -62,6 +62,22 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 11. **Pin Flick git dependency** — Add `rev = "..."` or `tag = "..."` to `Cargo.toml`.
 
 ## Decisions Made
+
+### 2026-03-06: Container/VM startup detection implemented
+
+**Scope:** Best-effort virtualization detection at startup with warning. 3 files (1 new, 2 modified), 10 new tests (145 total). One review pass applied 2 major fixes, 4 minor fixes, and 6 additional tests.
+
+**New module (`sandbox.rs`):** `detect_virtualization()` function with platform-specific detection via `cfg` attributes. Linux: `/.dockerenv`, `/run/.containerenv`, `/proc/1/cgroup` (docker/containerd/podman), `/proc/version` (WSL), `systemd-detect-virt`. macOS: `sysctl -n kern.hv_vmm_present`. Windows: PowerShell `Get-CimInstance Win32_ComputerSystem` model check for VM vendor strings. Unsupported platforms return false. All errors silently ignored (best-effort). Parsing logic extracted into `pub(super)` pure functions for testability.
+
+**CLI (`cli.rs`):** Added `--no-sandbox-warn` flag (env: `EPIC_NO_SANDBOX_WARN`) to suppress the warning.
+
+**Startup (`main.rs`):** On `Run`/`Resume` commands, calls `detect_virtualization()`. If false and not suppressed, prints stderr warning recommending container/VM usage. Does not refuse to run.
+
+**Review pass — correctness:** Removed `CONTAINER_HOST` env var check (host-side signal, caused false positives on bare-metal Windows with Docker Desktop). Replaced deprecated `wmic` with PowerShell `Get-CimInstance`. Added `podman` to cgroup content check. Updated cgroup comment for v2 awareness.
+
+**Review pass — testability:** Extracted pure parsing functions (`cgroup_indicates_container`, `version_indicates_wsl`, `sysctl_indicates_vm`, `model_indicates_vm`) from I/O for unit testing. Added CLI parsing tests for `--no-sandbox-warn`.
+
+**Tests (10 new, 145 total):** `detect_returns_bool_without_panicking`, `model_detects_vmware`, `model_detects_virtualbox`, `model_detects_generic_virtual`, `model_detects_kvm`, `model_detects_qemu`, `model_empty_string`, `model_bare_metal`, `no_sandbox_warn_flag_parsed`, `no_sandbox_warn_defaults_false`. Additional cfg-gated tests for Linux (7, including `cgroup_empty_string`) and macOS (2) compiled on respective platforms.
 
 ### 2026-03-05: Cap total task count and recovery depth
 

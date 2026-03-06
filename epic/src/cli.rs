@@ -13,6 +13,10 @@ pub struct Cli {
     /// Disable the TUI; run headless with event output to stderr.
     #[arg(long, env = "EPIC_NO_TUI", global = true)]
     pub no_tui: bool,
+
+    /// Suppress the warning when no container/VM is detected.
+    #[arg(long, env = "EPIC_NO_SANDBOX_WARN", global = true)]
+    pub no_sandbox_warn: bool,
 }
 
 #[derive(Subcommand)]
@@ -28,4 +32,22 @@ pub enum Command {
     Resume,
     /// Show the current status of a run.
     Status,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_sandbox_warn_flag_parsed() {
+        let cli = Cli::try_parse_from(["epic", "--no-sandbox-warn", "run", "test goal"])
+            .expect("should parse");
+        assert!(cli.no_sandbox_warn);
+    }
+
+    #[test]
+    fn no_sandbox_warn_defaults_false() {
+        let cli = Cli::try_parse_from(["epic", "run", "test goal"]).expect("should parse");
+        assert!(!cli.no_sandbox_warn);
+    }
 }

@@ -18,7 +18,7 @@ Epic does **not** attempt OS-level sandboxing. The only robust security boundary
 
 Epic's responsibility is **guidance, not enforcement**:
 
-1. **Startup detection** — Best-effort check for container/VM environment. If not detected, emit a prominent warning recommending the user run epic inside an isolated environment.
+1. **Startup detection** (implemented) — `sandbox::detect_virtualization()` performs best-effort checks for container/VM environment. If not detected, emits a warning to stderr. Suppressible via `--no-sandbox-warn` or `EPIC_NO_SANDBOX_WARN`.
 2. **Documentation** — Provide recommended container configurations (Dockerfile/Compose examples, bind-mount guidance, network policy).
 
 ### Detection Signals
@@ -31,6 +31,8 @@ Epic's responsibility is **guidance, not enforcement**:
 | Linux VM (general) | `systemd-detect-virt` returns a hypervisor name |
 | macOS VM | `sysctl kern.hv_vmm_present` returns 1 |
 | WSL | `/proc/version` contains `Microsoft` or `WSL` |
+| Windows VM | PowerShell `(Get-CimInstance Win32_ComputerSystem).Model` contains VM vendor string |
+| Windows (note) | Unlike Linux/macOS, no reliable signal for running inside a Windows container |
 
 None of these are foolproof. Detection is best-effort — a false negative means the warning shows unnecessarily, which is acceptable.
 

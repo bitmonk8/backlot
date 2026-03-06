@@ -91,7 +91,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Note | 164 | 3 |
 | **Total** | **471** | **18** |
 
-Note: The original audit counted unsandboxed bash as 2 critical findings (security + tools review cells). Per [SANDBOXING.md](SANDBOXING.md), this is now split: security isolation (C1, critical — solved by container/VM guidance + startup detection) and operational correctness (C2, major — solved by Frida-based runtime interception).
+Note: The original audit counted unsandboxed bash as 2 critical findings (security + tools review cells). Per [SANDBOXING.md](SANDBOXING.md), this is now split: security isolation (C1, critical — partially addressed — startup detection implemented, container setup docs remain) and operational correctness (C2, major — solved by Frida-based runtime interception).
 
 ### Remaining Findings by Category
 
@@ -113,13 +113,13 @@ Note: The original audit counted unsandboxed bash as 2 critical findings (securi
 
 ## Critical Findings (4)
 
-### C1. Security isolation: no container/VM guidance or detection
+### C1. Security isolation: container/VM setup documentation pending
 **Refs:** U2-R2#1, U5-R2#1 (security aspect)
 
 LLM agents execute arbitrary shell commands via `tool_bash` (`sh -c`). No amount of in-process checking can fully prevent escape. Per [SANDBOXING.md](SANDBOXING.md), the only robust security boundary is running epic inside a user-managed VM or container. Epic's responsibility is guidance, not enforcement:
 
-1. **Documentation** — README.md must explicitly guide users toward Docker/Podman/VM with recommended configurations (bind-mount project only, restrict network, drop capabilities).
-2. **Startup detection** — Best-effort check for container/VM environment at startup. If not detected, emit a prominent warning. Detection signals documented in SANDBOXING.md.
+1. **Startup detection** (done) — `sandbox::detect_virtualization()` performs best-effort container/VM detection at startup, emitting a stderr warning when not detected. Suppressible via `--no-sandbox-warn` or `EPIC_NO_SANDBOX_WARN`.
+2. **Documentation** (remaining) — README.md must explicitly guide users toward Docker/Podman/VM with recommended configurations (bind-mount project only, restrict network, drop capabilities).
 
 Epic will not implement OS-level sandboxing and will not refuse to run outside a container.
 
@@ -279,7 +279,7 @@ No CI configuration exists. No automated build, test, clippy, or fmt checks. The
 
 ## Recommended Action Items (Priority Order)
 
-1. **Security isolation: container/VM guidance + startup detection.** Add container/VM setup documentation to README.md. Implement best-effort virtualization detection at startup with a warning when not detected. See [SANDBOXING.md](SANDBOXING.md) Concern 1. This is the security prerequisite for real-world use — small scope, high value.
+1. **Security isolation: container setup documentation.** Startup detection is implemented (`sandbox::detect_virtualization()`). Remaining work: Add Docker/Podman/VM setup documentation to README.md with recommended configurations (Dockerfile examples, bind-mount guidance, network policy). See [SANDBOXING.md](SANDBOXING.md) Concern 1.
 2. **Add CI pipeline.** GitHub Actions with build, test, clippy, fmt. Pin Flick dependency to a rev/tag. Add `rust-toolchain.toml`.
 3. **Extract `main()` into testable function.** Replace `process::exit` with `bail!`, extract `async fn run()`.
 4. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
