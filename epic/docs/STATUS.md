@@ -49,12 +49,17 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 
-1. **Sandboxing** — Two-layer approach documented in [SANDBOXING.md](SANDBOXING.md). Security: VM/container guidance + startup detection warning. Operational correctness: Frida-based runtime interception (frida-gum/frida-core) to enforce per-phase access policies. Next step: prototype Frida Rust bindings. (Critical)
-2. **Add CI pipeline** — No CI exists. Pin Flick dependency. Add `rust-toolchain.toml`. (Critical)
-3. **Extract main() into testable function** — Replace `process::exit` with `bail!`, enable integration testing. (Critical)
-4. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs. (Major)
-5. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code. (Major)
-6. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files. (Major)
+1. **Container/VM guidance + startup detection** — Add Docker/Podman setup docs to README. Implement best-effort virtualization detection at startup with a warning when not detected. Small scope. See [SANDBOXING.md](SANDBOXING.md) Concern 1.
+2. **Add CI pipeline** — GitHub Actions with build, test, clippy, fmt. Pin Flick dependency to a rev/tag. Add `rust-toolchain.toml`.
+3. **Extract main() into testable function** — Replace `process::exit` with `bail!`, extract `async fn run()`. Unblocks integration testing.
+4. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
+5. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs.
+6. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code.
+7. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files.
+8. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+9. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+10. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
+11. **Pin Flick git dependency** — Add `rev = "..."` or `tag = "..."` to `Cargo.toml`.
 
 ## Decisions Made
 
