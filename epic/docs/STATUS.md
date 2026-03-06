@@ -25,6 +25,7 @@
 - [x] Full codebase audit — 95 review cells (81 matrix, 6 cross-cutting, 8 broad-lens). 541 findings: 4 critical, 120 major, 241 minor, 176 note. See [AUDIT.md](AUDIT.md).
 - [x] Wire epic.toml to orchestrator — `EpicConfig` loaded from `epic.toml` at startup (falls back to defaults). All hardcoded orchestrator constants (`MAX_DEPTH`, `RETRIES_PER_TIER`, `MAX_RECOVERY_ROUNDS`, `MAX_BRANCH_FIX_ROUNDS`, `MAX_ROOT_FIX_ROUNDS`) replaced with `LimitsConfig` fields. `FlickAgent` takes `ModelConfig` and `Vec<VerificationStep>` as constructor params. `resolve_model_name` maps `Model` tiers to config-specified names. Verification prompts include configured commands. Zero-value limits clamped to 1. Two review passes: fixed critical bug (default model names were not valid API IDs), collapsed `_with_models` duplication (removed 7 wrapper functions), simplified Orchestrator to hold `LimitsConfig` not full `EpicConfig`, replaced FlickAgent builders with constructor params. 10 new tests (120 total).
 - [x] Container/VM startup detection — Best-effort virtualization detection with stderr warning on `Run`/`Resume`. Suppressible via `--no-sandbox-warn`. Platform-specific checks (Linux containers/WSL, macOS VMs, Windows VMs). Review pass fixed 2 major issues (false-positive `CONTAINER_HOST`, deprecated `wmic`). 10 new tests (145 total).
+- [x] CI pipeline — GitHub Actions workflow (fmt, clippy, test, build). Flick git dependency pinned to rev `8bf1d79`. `rust-toolchain.toml` pins Rust 1.93.1 with clippy + rustfmt components. Cargo dependency caching. Also fixed 50+ pre-existing clippy warnings and formatting issues across 13 source files. 145 tests, 0 clippy warnings.
 
 ## Deferred Items
 
@@ -50,7 +51,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 1. ~~**Add container setup documentation to README**~~ — Done. README.md created in project root with full documentation including sandboxing guidance.
-2. **Add CI pipeline** — GitHub Actions with build, test, clippy, fmt. Pin Flick dependency to a rev/tag. Add `rust-toolchain.toml`.
+2. ~~**Add CI pipeline**~~ — Done. GitHub Actions (fmt, clippy, test, build). Flick pinned to rev `8bf1d79`. `rust-toolchain.toml` pins Rust 1.93.1. PR #1.
 3. **Extract main() into testable function** — Replace `process::exit` with `bail!`, extract `async fn run()`. Unblocks integration testing.
 4. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
 5. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs.
@@ -59,9 +60,23 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 8. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
 9. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
 10. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
-11. **Pin Flick git dependency** — Add `rev = "..."` or `tag = "..."` to `Cargo.toml`.
+11. ~~**Pin Flick git dependency**~~ — Done. Pinned to rev `8bf1d79` in Cargo.toml (part of CI pipeline work).
 
 ## Decisions Made
+
+### 2026-03-06: CI pipeline and clippy/fmt remediation
+
+**Scope:** GitHub Actions CI, Flick dependency pinning, Rust toolchain pinning, and codebase-wide clippy/fmt fixes. 4 new files, 13 modified source files. PR #1.
+
+**CI workflow (`.github/workflows/ci.yml`):** Four parallel jobs — Format (`cargo fmt --all --check`), Clippy (`cargo clippy --all-targets -- -D warnings`), Test (`cargo test`), Build (`cargo build`). Triggers on push to `main` and PRs targeting `main`. Cargo registry/git/target caching per job. `rustup show` installs toolchain from `rust-toolchain.toml`.
+
+**Dependency pinning (`Cargo.toml`):** Flick git dependency pinned to `rev = "8bf1d79"` (was unpinned `main` branch).
+
+**Toolchain pinning (`rust-toolchain.toml`):** Channel `1.93.1` with `clippy` and `rustfmt` components.
+
+**Clippy fixes (50+ warnings across 13 files):** `let...else` patterns, `const fn` annotations, doc comment backticks (21 occurrences), `Default::default()` field assignment replaced with struct literals (7), similar variable name renames (2), single-char string-to-char patterns (3), `u64`-to-`usize` cast via `try_from` (1), `Drop`-in-scrutinee extraction (1), `matches!` macro (1), collapsed `if` (1), unnecessary raw string hashes (1), unnecessary return type (1), `too_many_lines` allow (1).
+
+**Formatting:** `cargo fmt --all` applied across all source files.
 
 ### 2026-03-06: README.md and documentation deduplication
 
