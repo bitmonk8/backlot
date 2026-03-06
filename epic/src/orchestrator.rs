@@ -15,6 +15,11 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use thiserror::Error;
 
+enum VerifyOutcome {
+    Passed,
+    Failed(String),
+}
+
 /// Distinguishes first-execution from fix-loop retry behavior.
 /// Keeps the shared retry-with-escalation loop in one place.
 enum LeafRetryMode {
@@ -206,6 +211,40 @@ impl<A: AgentService> Orchestrator<A> {
         });
         self.checkpoint_save();
         Ok(TaskOutcome::Success)
+    }
+
+    async fn try_verify(
+        &mut self,
+        id: TaskId,
+    ) -> Result<VerifyOutcome, OrchestratorError> {
+        self.emit(Event::VerificationStarted { task_id: id });
+        let verify_model = self.verification_model(id)?;
+        let ctx = self.build_context(id)?;
+        match self.agent.verify(&ctx, verify_model).await {
+            Ok(verify_result) => match verify_result.outcome {
+                VerificationOutcome::Pass => {
+                    self.complete_task_verified(id)?;
+                    Ok(VerifyOutcome::Passed)
+                }
+                VerificationOutcome::Fail { reason } => {
+                    self.emit(Event::VerificationComplete {
+                        task_id: id,
+                        passed: false,
+                    });
+                    self.checkpoint_save();
+                    Ok(VerifyOutcome::Failed(reason))
+                }
+            },
+            Err(e) => {
+                eprintln!("warning: verify failed: {e}");
+                self.emit(Event::VerificationComplete {
+                    task_id: id,
+                    passed: false,
+                });
+                self.checkpoint_save();
+                Ok(VerifyOutcome::Failed(format!("verification error: {e}")))
+            }
+        }
     }
 
     /// If creating `count` new tasks would exceed the global limit, emits
@@ -733,22 +772,9 @@ impl<A: AgentService> Orchestrator<A> {
             if outcome == TaskOutcome::Success {
                 if is_fix {
                     // Re-verify after successful fix.
-                    self.emit(Event::VerificationStarted { task_id: id });
-                    let verify_model = self.verification_model(id)?;
-                    let ctx = self.build_context(id)?;
-                    let verify_result = self.agent.verify(&ctx, verify_model).await?;
-                    match verify_result.outcome {
-                        VerificationOutcome::Pass => {
-                            return self.complete_task_verified(id);
-                        }
-                        VerificationOutcome::Fail { reason } => {
-                            self.emit(Event::VerificationComplete {
-                                task_id: id,
-                                passed: false,
-                            });
-                            failure_reason = Some(reason);
-                            self.checkpoint_save();
-                        }
+                    match self.try_verify(id).await? {
+                        VerifyOutcome::Passed => return Ok(TaskOutcome::Success),
+                        VerifyOutcome::Failed(reason) => failure_reason = Some(reason),
                     }
                 } else {
                     return Ok(outcome);
@@ -882,10 +908,20 @@ impl<A: AgentService> Orchestrator<A> {
             });
 
             let ctx = self.build_context(id)?;
-            let decomposition = self
+            // Agent errors treated as failed round (best-effort, like recovery).
+            let decomposition = match self
                 .agent
                 .design_fix_subtasks(&ctx, model, &failure_reason, round)
-                .await?;
+                .await
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("warning: fix subtask design failed: {e}");
+                    failure_reason = format!("fix design failed: {e}");
+                    self.checkpoint_save();
+                    continue;
+                }
+            };
 
             if decomposition.subtasks.is_empty() {
                 "fix agent produced no subtasks".clone_into(&mut failure_reason);
@@ -912,25 +948,10 @@ impl<A: AgentService> Orchestrator<A> {
             }
 
             // Re-verify the branch after fix subtasks complete.
-            self.emit(Event::VerificationStarted { task_id: id });
-            let verify_model = self.verification_model(id)?;
-            let ctx = self.build_context(id)?;
-            let verify_result = self.agent.verify(&ctx, verify_model).await?;
-
-            match verify_result.outcome {
-                VerificationOutcome::Pass => {
-                    return self.complete_task_verified(id);
-                }
-                VerificationOutcome::Fail { reason } => {
-                    self.emit(Event::VerificationComplete {
-                        task_id: id,
-                        passed: false,
-                    });
-                    failure_reason = reason;
-                }
+            match self.try_verify(id).await? {
+                VerifyOutcome::Passed => return Ok(TaskOutcome::Success),
+                VerifyOutcome::Failed(reason) => failure_reason = reason,
             }
-
-            self.checkpoint_save();
         }
     }
 
@@ -1257,7 +1278,7 @@ mod tests {
     use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
     use crate::task::verify::{VerificationOutcome, VerificationResult};
     use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, RecoveryPlan, TaskPath};
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
 
     #[allow(clippy::struct_field_names)]
@@ -1270,6 +1291,14 @@ mod tests {
         verify_responses: Mutex<VecDeque<VerificationResult>>,
         checkpoint_responses: Mutex<VecDeque<CheckpointDecision>>,
         checkpoint_errors: Mutex<VecDeque<String>>,
+        /// Per-task positional error injection for `verify()`.
+        /// `None` = no error (fall through to `verify_responses`), `Some(msg)` = inject error.
+        /// `None` entries are necessary to skip calls that should succeed (e.g., the initial
+        /// verification before the fix loop).
+        verify_errors: Mutex<HashMap<TaskId, VecDeque<Option<String>>>>,
+        /// Per-task positional error injection for `design_fix_subtasks()`.
+        /// Same semantics as `verify_errors`.
+        fix_subtask_errors: Mutex<HashMap<TaskId, VecDeque<Option<String>>>>,
         recovery_responses: Mutex<VecDeque<Option<String>>>,
         recovery_plan_responses: Mutex<VecDeque<RecoveryPlan>>,
         verify_models: Mutex<Vec<Model>>,
@@ -1287,11 +1316,21 @@ mod tests {
                 verify_responses: Mutex::new(VecDeque::new()),
                 checkpoint_responses: Mutex::new(VecDeque::new()),
                 checkpoint_errors: Mutex::new(VecDeque::new()),
+                verify_errors: Mutex::new(HashMap::new()),
+                fix_subtask_errors: Mutex::new(HashMap::new()),
                 recovery_responses: Mutex::new(VecDeque::new()),
                 recovery_plan_responses: Mutex::new(VecDeque::new()),
                 verify_models: Mutex::new(Vec::new()),
                 decompose_models: Mutex::new(Vec::new()),
             }
+        }
+
+        fn push_verify_errors(&self, id: TaskId, errors: Vec<Option<String>>) {
+            self.verify_errors.lock().unwrap().entry(id).or_default().extend(errors);
+        }
+
+        fn push_fix_subtask_errors(&self, id: TaskId, errors: Vec<Option<String>>) {
+            self.fix_subtask_errors.lock().unwrap().entry(id).or_default().extend(errors);
         }
     }
 
@@ -1349,11 +1388,20 @@ mod tests {
 
         async fn design_fix_subtasks(
             &self,
-            _ctx: &TaskContext,
+            ctx: &TaskContext,
             _model: Model,
             _verification_issues: &str,
             _round: u32,
         ) -> anyhow::Result<DecompositionResult> {
+            let injected = self
+                .fix_subtask_errors
+                .lock()
+                .unwrap()
+                .get_mut(&ctx.task.id)
+                .and_then(VecDeque::pop_front);
+            if let Some(Some(msg)) = injected {
+                return Err(anyhow::anyhow!(msg));
+            }
             Ok(self
                 .fix_subtask_responses
                 .lock()
@@ -1364,9 +1412,18 @@ mod tests {
 
         async fn verify(
             &self,
-            _ctx: &TaskContext,
+            ctx: &TaskContext,
             model: Model,
         ) -> anyhow::Result<VerificationResult> {
+            let injected = self
+                .verify_errors
+                .lock()
+                .unwrap()
+                .get_mut(&ctx.task.id)
+                .and_then(VecDeque::pop_front);
+            if let Some(Some(msg)) = injected {
+                return Err(anyhow::anyhow!(msg));
+            }
             self.verify_models.lock().unwrap().push(model);
             Ok(self
                 .verify_responses
@@ -1465,6 +1522,7 @@ mod tests {
         }
     }
 
+    // Root gets TaskId(0); subtasks get sequential IDs (TaskId(1), TaskId(2), ...) in creation order.
     fn make_orchestrator(
         mock: MockAgentService,
     ) -> (Orchestrator<MockAgentService>, TaskId, EventReceiver) {
@@ -2365,6 +2423,31 @@ mod tests {
             }],
             rationale: "targeted fix".into(),
         }
+    }
+
+    /// Push mock responses for: root decomposes to 1 leaf child that succeeds
+    /// and passes verification, then root verification fails with `root_fail_reason`.
+    fn setup_branch_with_failing_root_verify(mock: &MockAgentService, root_fail_reason: &str) {
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification(root_fail_reason));
     }
 
     /// Branch fix loop: root verification fails → fix subtask created → re-verify passes.
@@ -5987,5 +6070,354 @@ mod tests {
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
         assert_eq!(orch.state.task_count(), 3);
+    }
+
+    /// Leaf fix loop: `verify()` returns Err on first attempt, succeeds on second.
+    #[tokio::test]
+    async fn leaf_fix_verify_error_retries() {
+        let mock = MockAgentService::new();
+
+        // Root branches, 1 subtask.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        // Child assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child execution succeeds.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Initial verification fails (triggers fix loop).
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("tests fail"));
+
+        // Fix attempt 1 succeeds, but verify() returns Err.
+        mock.fix_leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.push_verify_errors(TaskId(1), vec![
+            None, // initial verify uses verify_responses
+            Some("transient API error".into()),
+        ]);
+
+        // Fix attempt 2 succeeds, verify() passes.
+        mock.fix_leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Root verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
+        let child = orch.state.get(child_id).unwrap();
+        assert_eq!(child.phase, TaskPhase::Completed);
+        assert_eq!(child.fix_attempts.len(), 2);
+    }
+
+    /// Branch fix loop: `design_fix_subtasks()` returns Err on round 1, succeeds on round 2.
+    #[tokio::test]
+    async fn branch_fix_design_error_retries() {
+        let mock = MockAgentService::new();
+        setup_branch_with_failing_root_verify(&mock, "root check failed");
+
+        // Round 1: design_fix_subtasks returns Err (consumes the round).
+        mock.push_fix_subtask_errors(TaskId(0), vec![Some("LLM timeout".into())]);
+
+        // Round 2: design_fix_subtasks succeeds.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+
+        // Fix subtask: assessed as leaf, executes, succeeds.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Fix subtask verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Root re-verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.phase, TaskPhase::Completed);
+        // Round 1 (error) + round 2 (success) = 2 fix rounds consumed.
+        assert_eq!(root.verification_fix_rounds, 2);
+    }
+
+    /// Branch fix loop: `verify()` returns Err on round 1 re-verification, passes on round 2.
+    #[tokio::test]
+    async fn branch_fix_verify_error_retries() {
+        let mock = MockAgentService::new();
+        setup_branch_with_failing_root_verify(&mock, "root check failed");
+
+        // Round 1: design succeeds, fix subtask succeeds, verify() returns Err.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification()); // fix subtask verification
+        mock.push_verify_errors(TaskId(0), vec![
+            None, // initial root verify uses verify_responses
+            Some("transient verify error".into()),
+        ]);
+
+        // Round 2: design succeeds, fix subtask succeeds, verify() passes.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification()); // fix subtask verification
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification()); // root re-verify passes
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.phase, TaskPhase::Completed);
+        assert_eq!(root.verification_fix_rounds, 2);
+    }
+
+    /// Branch fix loop: mixed error types across rounds.
+    /// Round 1: `design_fix_subtasks` Err. Round 2: verify Err. Round 3: success.
+    #[tokio::test]
+    async fn branch_fix_mixed_errors_then_success() {
+        let mock = MockAgentService::new();
+        setup_branch_with_failing_root_verify(&mock, "root check failed");
+
+        // Round 1: design_fix_subtasks returns Err (consumes the round).
+        mock.push_fix_subtask_errors(TaskId(0), vec![Some("LLM timeout".into())]);
+
+        // Round 2: design succeeds, fix subtask succeeds, verify() returns Err.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification()); // fix subtask verification
+        mock.push_verify_errors(TaskId(0), vec![
+            None, // initial root verify uses verify_responses
+            Some("transient verify error".into()),
+        ]);
+
+        // Round 3: design succeeds, fix subtask succeeds, verify() passes.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification()); // fix subtask verification
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification()); // root re-verify passes
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.phase, TaskPhase::Completed);
+        assert_eq!(root.verification_fix_rounds, 3);
+    }
+
+    /// All `root_fix_rounds` consumed by `design_fix_subtasks` errors → Failed.
+    #[tokio::test]
+    async fn branch_fix_design_error_exhausts_budget() {
+        let mock = MockAgentService::new();
+        setup_branch_with_failing_root_verify(&mock, "root check failed");
+
+        // Both rounds: design_fix_subtasks returns Err.
+        mock.push_fix_subtask_errors(TaskId(0), vec![
+            Some("LLM timeout round 1".into()),
+            Some("LLM timeout round 2".into()),
+        ]);
+
+        // Recovery assessment for branch failure.
+        mock.recovery_responses.lock().unwrap().push_back(None);
+
+        let limits = LimitsConfig {
+            root_fix_rounds: 2,
+            ..LimitsConfig::default()
+        };
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        orch.limits = limits;
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { .. }));
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.phase, TaskPhase::Failed);
+        assert_eq!(root.verification_fix_rounds, 2);
+    }
+
+    /// All leaf fix retries across all tiers fail verification → Failed.
+    #[tokio::test]
+    async fn leaf_fix_verify_error_exhausts_budget() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Initial verification fails (triggers fix loop).
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("tests fail"));
+
+        // 3 tiers (Haiku, Sonnet, Opus) × 3 retries = 9 fix attempts.
+        // Each fix_leaf succeeds but verify returns Err.
+        let child_id = TaskId(1);
+        let mut errors: Vec<Option<String>> = vec![None]; // initial verify uses verify_responses
+        errors.extend(std::iter::repeat_n(
+            Some("persistent verify error".into()),
+            9,
+        ));
+        mock.push_verify_errors(child_id, errors);
+        for _ in 0..9 {
+            mock.fix_leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_success());
+        }
+
+        // Recovery assessment for leaf failure.
+        mock.recovery_responses.lock().unwrap().push_back(None);
+        // Recovery for root after child fails.
+        mock.recovery_responses.lock().unwrap().push_back(None);
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert!(matches!(result, TaskOutcome::Failed { .. }));
+
+        let actual_child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
+        let child = orch.state.get(actual_child_id).unwrap();
+        assert_eq!(child.phase, TaskPhase::Failed);
+        assert_eq!(child.fix_attempts.len(), 9);
+    }
+
+    /// Initial `verify()` returning `Err` in `finalize_task` (outside any fix loop)
+    /// must propagate as `Err` from `run()`, not be swallowed into `Ok(Failed)`.
+    #[tokio::test]
+    async fn initial_verify_error_is_fatal() {
+        let mock = MockAgentService::new();
+
+        // Root decomposes to 1 leaf child.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Child executes successfully.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Initial verify() for child returns Err (agent error, not verification failure).
+        mock.push_verify_errors(TaskId(1), vec![Some("agent crashed".into())]);
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await;
+        assert!(result.is_err());
     }
 }

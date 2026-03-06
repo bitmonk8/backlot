@@ -86,7 +86,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
 | Critical | 0 | 0 |
-| Major | 76 | 8 |
+| Major | 74 | 8 |
 | Minor | 224 | 7 |
 | Note | 164 | 3 |
 | **Total** | **464** | **15** |
@@ -98,7 +98,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
 | Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~67 | 0 | ~9 |
-| Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~45 | 0 | ~8 |
+| Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~43 | 0 | ~6 |
 | Dead code/stubs (unused ToolGrant flags, usage tracking) | ~21 | 0 | ~3 |
 | Design intent gaps (prompt content, tool grants, missing review phase) | ~40 | 0 | ~10 |
 | Doc drift (TUI event names, CLI syntax, type mismatches) | ~25 | 0 | ~5 |
@@ -113,7 +113,7 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 ---
 
-## Major Findings (76 still valid, 8 partially resolved)
+## Major Findings (74 still valid, 8 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
@@ -181,8 +181,8 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 | Ref | Finding | Location |
 |-----|---------|----------|
-| B4#1 | `verify()` errors are fatal inside fix loops — should be best-effort like recovery | `orchestrator.rs` |
-| B4#2 | `design_fix_subtasks` errors are fatal — inconsistent with best-effort `design_recovery_subtasks` | `orchestrator.rs` |
+| ~~B4#1~~ | ~~`verify()` errors are fatal inside fix loops — should be best-effort like recovery~~ | *Resolved 2026-03-06: `verify()` errors in fix loops now treated as failed attempts* |
+| ~~B4#2~~ | ~~`design_fix_subtasks` errors are fatal — inconsistent with best-effort `design_recovery_subtasks`~~ | *Resolved 2026-03-06: `design_fix_subtasks` errors now treated as failed attempts* |
 | U11-R1#1 | `read_line()` in init silently discards I/O errors | `init.rs` |
 | U12-R1#1 | TUI abort path does not save state — user loses progress on Ctrl-C during TUI mode | `main.rs` |
 | U5-R3#1 | Bash timeout doesn't explicitly kill child — resources leak on timeout (also correctness) | `tools.rs` |
@@ -237,6 +237,5 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 ## Recommended Action Items (Priority Order)
 
 1. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
-2. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-3. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-4. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.
+2. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+3. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.

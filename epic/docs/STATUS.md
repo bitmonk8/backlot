@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (156 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, and stale documentation remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (163 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, and stale documentation remediated; continuing hardening.
 
 ## Milestones
 
@@ -51,11 +51,18 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 1. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
-2. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-3. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-4. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
+2. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+3. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
 
 ## Decisions Made
+
+### 2026-03-06: Best-effort error handling in fix loops
+
+**Scope:** `src/orchestrator.rs` modified. 163 tests passing, 0 clippy warnings.
+
+**Changes:** Three call sites in fix loops changed from error-propagating (`?`) to best-effort (`match`). `verify()` errors in `leaf_retry_loop` and `branch_fix_loop`, and `design_fix_subtasks` errors in `branch_fix_loop`, now treat agent/infrastructure failures as failed attempts — the loop consumes a round and continues or exhausts its budget gracefully. Extracted `try_verify` helper with `VerifyOutcome` enum to deduplicate verification logic across both loops. Matches the existing pattern in `attempt_recovery` and `checkpoint`. Resolves audit findings B4#1 and B4#2.
+
+**Tests (7 new, 163 total):** `leaf_fix_verify_error_retries` (verify Err in leaf fix, retries and passes), `branch_fix_design_error_retries` (design_fix_subtasks Err round 1, succeeds round 2), `branch_fix_verify_error_retries` (verify Err round 1, passes round 2), `branch_fix_design_error_exhausts_budget` (all rounds consumed by design errors → Failed), `leaf_fix_verify_error_exhausts_budget` (9 fix attempts all fail verify → Failed), `branch_fix_mixed_errors_then_success` (design error round 1, verify error round 2, success round 3), `initial_verify_error_is_fatal` (confirms initial verify errors propagate, not absorbed).
 
 ### 2026-03-06: Add cycle detection to `dfs_order`
 
