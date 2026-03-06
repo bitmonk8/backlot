@@ -29,51 +29,7 @@
 └─────────────────────────────────────────────┘
 ```
 
-## Tech Stack
-
-| Concern | Choice | Crate(s) |
-|---|---|---|
-| Async runtime | tokio | `tokio` |
-| Error handling | thiserror at module boundaries, anyhow for propagation | `thiserror`, `anyhow` |
-| Serialization | serde ecosystem | `serde`, `serde_json`, `toml` |
-| Agent runtime | Flick (library crate dependency) | `flick` (git dependency) |
-| TUI | ratatui + crossterm, read-only monitoring for v1 | `ratatui`, `crossterm` |
-| Config format | TOML | `toml` |
-
-## Module Structure (Preliminary)
-
-```
-src/
-├── main.rs                  # Entry point, CLI parsing
-├── orchestrator.rs          # Recursive task execution
-├── task/
-│   ├── mod.rs               # ProblemSolverTask definition
-│   ├── assess.rs            # Assessment (path + model selection)
-│   ├── leaf.rs              # Leaf execution path
-│   ├── branch.rs            # Branch execution path (decompose + delegate)
-│   └── verify.rs            # Verification (leaf and branch variants)
-├── agent/
-│   ├── mod.rs               # Agent abstraction
-│   ├── tools.rs             # Tool access flags
-│   ├── models.rs            # Model selection and escalation
-│   └── prompts.rs           # Prompt templates and assembly
-├── services/
-│   ├── research.rs          # Research service (DocumentStore + exploration)
-│   ├── verification.rs      # Build/lint/test execution
-│   └── document_store.rs    # File-based (markdown) knowledge store; librarian via Flick agent
-├── tui/
-│   ├── mod.rs               # TUI application (read-only monitoring for v1)
-│   ├── task_tree.rs         # Task tree widget
-│   ├── worklog.rs           # Worklog panel (event-level updates, no token streaming)
-│   └── metrics.rs           # Metrics display
-├── config/
-│   ├── mod.rs               # Configuration loading (TOML; ~/.config/epic/config.toml + project epic.toml)
-│   └── project.rs           # Per-project verification config
-├── git.rs                   # Git operations (commit, rollback, diff)
-├── state.rs                 # EpicState persistence and resume
-├── events.rs                # Event system
-└── metrics.rs               # Token/cost tracking
-```
+See [README.md](../README.md) for tech stack (Dependencies) and module structure.
 
 ## Data Flow
 

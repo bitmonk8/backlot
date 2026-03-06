@@ -79,25 +79,25 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 **Completed:** 2026-03-05. All 95 review cells executed. 541 original findings.
 
-**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, and stale documentation — resolving 52 findings fully and 18 partially.
+**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, and container setup documentation — resolving 53 findings fully and 15 partially.
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
-| Critical | 3 | 0 |
+| Critical | 2 | 0 |
 | Major | 80 | 8 |
 | Minor | 224 | 7 |
 | Note | 164 | 3 |
-| **Total** | **471** | **18** |
+| **Total** | **470** | **15** |
 
-Note: The original audit counted unsandboxed bash as 2 critical findings (security + tools review cells). Per [SANDBOXING.md](SANDBOXING.md), this is now split: security isolation (C1, critical — partially addressed — startup detection implemented, container setup docs remain) and operational correctness (C2, major — solved by Frida-based runtime interception).
+Note: The original audit counted unsandboxed bash as 2 critical findings (security + tools review cells). Per [SANDBOXING.md](SANDBOXING.md), this is now split: security isolation (C1, resolved — startup detection + README documentation both complete) and operational correctness (C2, major — solved by Frida-based runtime interception).
 
 ### Remaining Findings by Category
 
 | Category | Approx count | Critical | Major |
 |---|---|---|---|
-| Security isolation (container/VM guidance, startup detection) | ~2 | 1 | 0 |
+| ~~Security isolation (container/VM guidance, startup detection)~~ | 0 | 0 | 0 |
 | Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
 | Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~70 | 0 | ~10 |
@@ -113,15 +113,12 @@ Note: The original audit counted unsandboxed bash as 2 critical findings (securi
 
 ## Critical Findings (4)
 
-### C1. Security isolation: container/VM setup documentation pending
+### ~~C1. Security isolation: container/VM setup documentation~~ — RESOLVED
 **Refs:** U2-R2#1, U5-R2#1 (security aspect)
 
-LLM agents execute arbitrary shell commands via `tool_bash` (`sh -c`). No amount of in-process checking can fully prevent escape. Per [SANDBOXING.md](SANDBOXING.md), the only robust security boundary is running epic inside a user-managed VM or container. Epic's responsibility is guidance, not enforcement:
-
-1. **Startup detection** (done) — `sandbox::detect_virtualization()` performs best-effort container/VM detection at startup, emitting a stderr warning when not detected. Suppressible via `--no-sandbox-warn` or `EPIC_NO_SANDBOX_WARN`.
-2. **Documentation** (remaining) — README.md must explicitly guide users toward Docker/Podman/VM with recommended configurations (bind-mount project only, restrict network, drop capabilities).
-
-Epic will not implement OS-level sandboxing and will not refuse to run outside a container.
+Both parts complete:
+1. **Startup detection** — `sandbox::detect_virtualization()` performs best-effort container/VM detection at startup, emitting a stderr warning when not detected. Suppressible via `--no-sandbox-warn`.
+2. **Documentation** — [README.md](../README.md) Sandboxing section guides users toward container/VM usage with recommended configuration (bind-mounted project directory, restricted network access).
 
 ### C2. Operational correctness: no per-phase access enforcement (Major)
 **Refs:** U2-R2#1, U5-R2#1 (correctness aspect)
@@ -279,7 +276,7 @@ No CI configuration exists. No automated build, test, clippy, or fmt checks. The
 
 ## Recommended Action Items (Priority Order)
 
-1. **Security isolation: container setup documentation.** Startup detection is implemented (`sandbox::detect_virtualization()`). Remaining work: Add Docker/Podman/VM setup documentation to README.md with recommended configurations (Dockerfile examples, bind-mount guidance, network policy). See [SANDBOXING.md](SANDBOXING.md) Concern 1.
+1. ~~**Security isolation: container setup documentation.**~~ Resolved. README.md created with sandboxing guidance. See C1 above.
 2. **Add CI pipeline.** GitHub Actions with build, test, clippy, fmt. Pin Flick dependency to a rev/tag. Add `rust-toolchain.toml`.
 3. **Extract `main()` into testable function.** Replace `process::exit` with `bail!`, extract `async fn run()`.
 4. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.

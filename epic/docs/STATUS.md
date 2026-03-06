@@ -49,7 +49,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 ## Next Work Candidates
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
-1. **Add container setup documentation to README** — Docker/Podman/VM setup guidance with recommended configurations, bind-mount patterns, network policy. Completes the security isolation guidance from SANDBOXING.md Concern 1.
+1. ~~**Add container setup documentation to README**~~ — Done. README.md created in project root with full documentation including sandboxing guidance.
 2. **Add CI pipeline** — GitHub Actions with build, test, clippy, fmt. Pin Flick dependency to a rev/tag. Add `rust-toolchain.toml`.
 3. **Extract main() into testable function** — Replace `process::exit` with `bail!`, extract `async fn run()`. Unblocks integration testing.
 4. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
@@ -62,6 +62,20 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 11. **Pin Flick git dependency** — Add `rev = "..."` or `tag = "..."` to `Cargo.toml`.
 
 ## Decisions Made
+
+### 2026-03-06: README.md and documentation deduplication
+
+**Scope:** Created `README.md` as primary project documentation. Trimmed redundant content from 4 design documents. Updated AUDIT.md to reflect C1 resolution.
+
+**README.md (new):** Project overview, design philosophy, architecture summary (recursive problem-solver, model selection, tool access, verification, fix loops, recovery, scope circuit breaker, state persistence, event system), CLI usage (init/run/resume/status with global options), TUI keybindings, sandboxing guidance, configuration reference, module structure, dependencies, lineage comparison with fds2_epic, troubleshooting. Adapted structure and philosophy section from fds2_epic's README.
+
+**Documentation deduplication:** Removed content from design docs that is now covered by the README:
+- `OVERVIEW.md` — Removed purpose statement, lineage table, design decisions list, repository links, status line. Now a thin navigation hub pointing to README.
+- `ARCHITECTURE.md` — Removed tech stack table and module structure listing. Retained system layers diagram, data flow, dependency injection.
+- `VERIFICATION.md` — Replaced leaf fix loop and scope circuit breaker detail with references to README and FIX_LOOP_SPEC.md. Retained struct definitions, branch verification, error handling.
+- `AGENT_DESIGN.md` — Removed agent execution overview, model selection table, bitflags code block. Retained per-phase tool grants, prompt assembly, structured output.
+
+**AUDIT.md:** C1 (security isolation documentation) marked resolved. Findings count updated (470 still valid, 2 critical remaining).
 
 ### 2026-03-06: Container/VM startup detection implemented
 

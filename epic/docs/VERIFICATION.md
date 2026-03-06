@@ -18,27 +18,9 @@ struct VerificationConfig {
 
 ## Leaf Verification
 
-Leaf tasks produce code changes. Verification is concrete and mechanical:
+See [README.md](../README.md) for overview of fix loops and scope circuit breaker.
 
-1. **Build/lint/test gates** — Run all configured verification steps sequentially
-2. **File-level review** — Agent reviews actual source files against intended changes
-3. **Local simplification review** — Spot redundancy, cleanup opportunities in touched files
-4. **Fix loop** — On failure: fix → re-verify (3 retries per model tier)
-
-Model for leaf verification: `max(Haiku, implementing_model)` capped at Sonnet.
-
-### Fix Loop
-
-- 3 retries per model tier (4 total attempts: 1 initial + 3 retries)
-- Each attempt sees previous failures
-- On exhaustion: escalate to next model tier (Haiku→Sonnet→Opus)
-- Terminal failure at Opus: rollback all changes, fail to parent
-
-### Scope Circuit Breaker
-
-Parent sets magnitude estimate (max lines modified/added/deleted, +50% conservative).
-During implementation, measure actual diff via `git diff --numstat`.
-If any metric exceeds 3x estimate: immediate rollback, SCOPE_EXCEEDED failure.
+Model for leaf verification: `max(Haiku, implementing_model)` capped at Sonnet. See [FIX_LOOP_SPEC.md](FIX_LOOP_SPEC.md) for implementation details.
 
 ## Branch Verification
 
