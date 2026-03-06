@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (145 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, and stale documentation remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (156 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, and stale documentation remediated; continuing hardening.
 
 ## Milestones
 
@@ -51,12 +51,19 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 1. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
-2. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files.
-3. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-4. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-5. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
+2. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+3. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+4. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
 
 ## Decisions Made
+
+### 2026-03-06: Add cycle detection to `dfs_order`
+
+**Scope:** `src/state.rs` modified. 156 tests passing, 0 clippy warnings.
+
+**Changes:** `dfs_order` now maintains a `HashSet<TaskId>` of visited nodes. Already-visited IDs are skipped, preventing infinite loops from cyclic `subtask_ids` in corrupted state files. Each ID appears at most once (cycles and shared children are deduplicated). Resolves audit findings U8-R1#2 and U8-R2#1.
+
+**Tests (11 new, 156 total):** `dfs_order_self_cycle` (task references itself), `dfs_order_mutual_cycle` (A → B → A), `dfs_order_three_node_cycle` (A → B → C → A), `dfs_order_acyclic` (normal traversal unchanged), `dfs_order_diamond_deduplicates` (shared child visited once), `dfs_order_leaf_only` (single node, no children), `dfs_order_missing_root` (nonexistent root), `dfs_order_dangling_subtask` (subtask ID not in state), `dfs_order_duplicate_in_subtask_ids` (same child listed twice), `dfs_order_excludes_unreachable` (disconnected node absent), `dfs_order_wide_fanout` (3+ children, declaration order preserved).
 
 ### 2026-03-06: Deduplicate retry/escalation loop
 

@@ -3,7 +3,7 @@
 use crate::task::{Task, TaskId};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -41,13 +41,18 @@ impl EpicState {
     }
 
     /// DFS-ordered list of task IDs starting from the given root.
+    /// Each ID appears at most once (cycles and shared children are deduplicated).
     pub fn dfs_order(&self, root: TaskId) -> Vec<TaskId> {
         let mut result = Vec::new();
+        let mut visited = HashSet::new();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
             result.push(id);
             if let Some(task) = self.tasks.get(&id) {
-                // Push in reverse so leftmost child is visited first.
+                // Preserve declaration order in output (stack is LIFO).
                 for child_id in task.subtask_ids.iter().rev().copied() {
                     stack.push(child_id);
                 }
@@ -138,6 +143,155 @@ mod tests {
         assert_eq!(order, vec![root_id, child_id]);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dfs_order_self_cycle() {
+        let mut state = EpicState::new();
+        let id = TaskId(0);
+        let mut t = Task::new(id, None, "self-ref".into(), vec![], 0);
+        t.subtask_ids.push(id);
+        state.insert(t);
+        let order = state.dfs_order(id);
+        assert_eq!(order, vec![id]);
+    }
+
+    #[test]
+    fn dfs_order_mutual_cycle() {
+        let mut state = EpicState::new();
+        let a = TaskId(0);
+        let b = TaskId(1);
+        let mut ta = Task::new(a, None, "a".into(), vec![], 0);
+        ta.subtask_ids.push(b);
+        let mut tb = Task::new(b, Some(a), "b".into(), vec![], 1);
+        tb.subtask_ids.push(a);
+        state.insert(ta);
+        state.insert(tb);
+        let order = state.dfs_order(a);
+        assert_eq!(order, vec![a, b]);
+    }
+
+    #[test]
+    fn dfs_order_acyclic() {
+        let mut state = EpicState::new();
+        let a = TaskId(0);
+        let b = TaskId(1);
+        let c = TaskId(2);
+        let mut ta = Task::new(a, None, "a".into(), vec![], 0);
+        ta.subtask_ids.push(b);
+        ta.subtask_ids.push(c);
+        state.insert(ta);
+        state.insert(Task::new(b, Some(a), "b".into(), vec![], 1));
+        state.insert(Task::new(c, Some(a), "c".into(), vec![], 1));
+        let order = state.dfs_order(a);
+        assert_eq!(order, vec![a, b, c]);
+    }
+
+    #[test]
+    fn dfs_order_diamond_deduplicates() {
+        let mut state = EpicState::new();
+        let (a, b, c, d) = (TaskId(0), TaskId(1), TaskId(2), TaskId(3));
+        let mut ta = Task::new(a, None, "a".into(), vec![], 0);
+        ta.subtask_ids.push(b);
+        ta.subtask_ids.push(c);
+        let mut tb = Task::new(b, Some(a), "b".into(), vec![], 1);
+        tb.subtask_ids.push(d);
+        let mut tc = Task::new(c, Some(a), "c".into(), vec![], 1);
+        tc.subtask_ids.push(d);
+        state.insert(ta);
+        state.insert(tb);
+        state.insert(tc);
+        state.insert(Task::new(d, Some(b), "d".into(), vec![], 2));
+        let order = state.dfs_order(a);
+        // D appears once despite being referenced by both B and C.
+        assert_eq!(order, vec![a, b, d, c]);
+    }
+
+    #[test]
+    fn dfs_order_three_node_cycle() {
+        let mut state = EpicState::new();
+        let (a, b, c) = (TaskId(0), TaskId(1), TaskId(2));
+        let mut ta = Task::new(a, None, "a".into(), vec![], 0);
+        ta.subtask_ids.push(b);
+        let mut tb = Task::new(b, Some(a), "b".into(), vec![], 1);
+        tb.subtask_ids.push(c);
+        let mut tc = Task::new(c, Some(b), "c".into(), vec![], 2);
+        tc.subtask_ids.push(a);
+        state.insert(ta);
+        state.insert(tb);
+        state.insert(tc);
+        let order = state.dfs_order(a);
+        assert_eq!(order, vec![a, b, c]);
+    }
+
+    #[test]
+    fn dfs_order_leaf_only() {
+        let mut state = EpicState::new();
+        let id = TaskId(0);
+        state.insert(Task::new(id, None, "leaf".into(), vec![], 0));
+        assert_eq!(state.dfs_order(id), vec![id]);
+    }
+
+    #[test]
+    fn dfs_order_missing_root() {
+        let state = EpicState::new();
+        let order = state.dfs_order(TaskId(99));
+        // Nonexistent root still appears (no children to traverse).
+        assert_eq!(order, vec![TaskId(99)]);
+    }
+
+    #[test]
+    fn dfs_order_dangling_subtask() {
+        let mut state = EpicState::new();
+        let a = TaskId(0);
+        let mut ta = Task::new(a, None, "a".into(), vec![], 0);
+        ta.subtask_ids.push(TaskId(99)); // not in state
+        state.insert(ta);
+        let order = state.dfs_order(a);
+        // Dangling ref appears in output (no panic), but has no children.
+        assert_eq!(order, vec![a, TaskId(99)]);
+    }
+
+    #[test]
+    fn dfs_order_duplicate_in_subtask_ids() {
+        let mut state = EpicState::new();
+        let (a, b) = (TaskId(0), TaskId(1));
+        let mut ta = Task::new(a, None, "a".into(), vec![], 0);
+        ta.subtask_ids.push(b);
+        ta.subtask_ids.push(b); // duplicate
+        state.insert(ta);
+        state.insert(Task::new(b, Some(a), "b".into(), vec![], 1));
+        let order = state.dfs_order(a);
+        assert_eq!(order, vec![a, b]);
+    }
+
+    #[test]
+    fn dfs_order_excludes_unreachable() {
+        let mut state = EpicState::new();
+        let (a, b, c) = (TaskId(0), TaskId(1), TaskId(2));
+        let mut ta = Task::new(a, None, "a".into(), vec![], 0);
+        ta.subtask_ids.push(b);
+        state.insert(ta);
+        state.insert(Task::new(b, Some(a), "b".into(), vec![], 1));
+        state.insert(Task::new(c, None, "unreachable".into(), vec![], 0));
+        let order = state.dfs_order(a);
+        assert_eq!(order, vec![a, b]);
+    }
+
+    #[test]
+    fn dfs_order_wide_fanout() {
+        let mut state = EpicState::new();
+        let (a, b, c, d) = (TaskId(0), TaskId(1), TaskId(2), TaskId(3));
+        let mut ta = Task::new(a, None, "a".into(), vec![], 0);
+        ta.subtask_ids.push(b);
+        ta.subtask_ids.push(c);
+        ta.subtask_ids.push(d);
+        state.insert(ta);
+        state.insert(Task::new(b, Some(a), "b".into(), vec![], 1));
+        state.insert(Task::new(c, Some(a), "c".into(), vec![], 1));
+        state.insert(Task::new(d, Some(a), "d".into(), vec![], 1));
+        let order = state.dfs_order(a);
+        assert_eq!(order, vec![a, b, c, d]);
     }
 
     #[test]

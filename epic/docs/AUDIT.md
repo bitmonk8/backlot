@@ -102,7 +102,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Dead code/stubs (unused ToolGrant flags, usage tracking) | ~21 | 0 | ~3 |
 | Design intent gaps (prompt content, tool grants, missing review phase) | ~40 | 0 | ~10 |
 | Doc drift (TUI event names, CLI syntax, type mismatches) | ~25 | 0 | ~5 |
-| Correctness (empty subtask validation, cycle detection, phase transitions) | ~30 | 0 | ~8 |
+| Correctness (empty subtask validation, cycle detection, phase transitions) | ~30 | 0 | ~7 |
 | Other (clippy, naming, notes) | ~128 | 0 | 0 |
 
 ---
@@ -113,7 +113,7 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 ---
 
-## Major Findings (77 still valid, 8 partially resolved)
+## Major Findings (76 still valid, 8 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
@@ -138,7 +138,6 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 | U3-R1#1 | `DecompositionWire::try_from` accepts empty `subtasks` vec — creates branch with no children | `config_gen.rs` |
 | U3-R1#2 | `RecoveryPlanWire::try_from` accepts empty `subtasks` vec — creates recovery with no work | `config_gen.rs` |
 | U8-R1#1 | `load()` does not validate `next_id > max(existing task IDs)` — ID collision on resume | `state.rs` |
-| U8-R1#2 | `dfs_order` has no cycle detection — infinite loop on corrupted state files | `state.rs` |
 | U5-R3#1 | Bash timeout doesn't explicitly kill child/process group — resources leak | `tools.rs` |
 | U5-R3#2 | `tool_bash` returns `Ok` for non-zero exit status — callers may misinterpret failures | `tools.rs` |
 | U2-R1#1 | `run_structured` does not guard against `ToolCallsPending` status from Flick | `flick.rs` |
@@ -238,7 +237,6 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 ## Recommended Action Items (Priority Order)
 
 1. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
-2. **Add cycle detection to `dfs_order`.** Infinite loop on corrupted state files.
-3. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-4. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-5. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.
+2. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+3. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+4. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.
