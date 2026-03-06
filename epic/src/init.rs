@@ -81,7 +81,10 @@ fn present_and_confirm(
         return Ok((Vec::new(), Vec::new()));
     }
 
-    println!("\nDetected {} verification step(s):\n", findings.steps.len());
+    println!(
+        "\nDetected {} verification step(s):\n",
+        findings.steps.len()
+    );
 
     let mut accepted = Vec::new();
     let mut declined = Vec::new();
@@ -137,10 +140,7 @@ fn present_and_confirm(
         drop(lines);
     }
 
-    println!(
-        "\n{} verification step(s) configured.",
-        accepted.len()
-    );
+    println!("\n{} verification step(s) configured.", accepted.len());
     Ok((accepted, declined))
 }
 
@@ -221,7 +221,10 @@ fn prompt_custom_step(
 fn prompt_models() -> anyhow::Result<ModelConfig> {
     let defaults = ModelConfig::default();
     println!("\nModel preferences (press Enter to accept defaults):");
-    println!("  fast={}, balanced={}, strong={}", defaults.fast, defaults.balanced, defaults.strong);
+    println!(
+        "  fast={}, balanced={}, strong={}",
+        defaults.fast, defaults.balanced, defaults.strong
+    );
     print!("  Accept defaults? [Y/n] ");
     io::stdout().flush()?;
 
@@ -244,7 +247,11 @@ fn prompt_models() -> anyhow::Result<ModelConfig> {
     io::stdout().flush()?;
     let strong = read_line_or_default(&mut lines, &defaults.strong);
     drop(lines);
-    Ok(ModelConfig { fast, balanced, strong })
+    Ok(ModelConfig {
+        fast,
+        balanced,
+        strong,
+    })
 }
 
 fn prompt_limits() -> anyhow::Result<LimitsConfig> {
@@ -252,7 +259,10 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
     println!("\nDepth/budget limits (press Enter to accept defaults):");
     println!(
         "  max_depth={}, max_recovery_rounds={}, retry_budget={}, max_total_tasks={}",
-        defaults.max_depth, defaults.max_recovery_rounds, defaults.retry_budget, defaults.max_total_tasks
+        defaults.max_depth,
+        defaults.max_recovery_rounds,
+        defaults.retry_budget,
+        defaults.max_total_tasks
     );
     print!("  Accept defaults? [Y/n] ");
     io::stdout().flush()?;
@@ -273,9 +283,10 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
         .unwrap_or(defaults.max_depth);
     print!("  Max recovery rounds [{}]: ", defaults.max_recovery_rounds);
     io::stdout().flush()?;
-    let max_recovery_rounds = read_line_or_default(&mut lines, &defaults.max_recovery_rounds.to_string())
-        .parse()
-        .unwrap_or(defaults.max_recovery_rounds);
+    let max_recovery_rounds =
+        read_line_or_default(&mut lines, &defaults.max_recovery_rounds.to_string())
+            .parse()
+            .unwrap_or(defaults.max_recovery_rounds);
     print!("  Retry budget [{}]: ", defaults.retry_budget);
     io::stdout().flush()?;
     let retry_budget = read_line_or_default(&mut lines, &defaults.retry_budget.to_string())
@@ -287,7 +298,13 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
         .parse()
         .unwrap_or(defaults.max_total_tasks);
     drop(lines);
-    Ok(LimitsConfig { max_depth, max_recovery_rounds, retry_budget, max_total_tasks, ..Default::default() })
+    Ok(LimitsConfig {
+        max_depth,
+        max_recovery_rounds,
+        retry_budget,
+        max_total_tasks,
+        ..Default::default()
+    })
 }
 
 /// Read a line, returning an error on I/O failure or EOF.
@@ -325,5 +342,9 @@ fn read_line_or_default(
     default: &str,
 ) -> String {
     let line = read_line(lines);
-    if line.is_empty() { default.to_owned() } else { line }
+    if line.is_empty() {
+        default.to_owned()
+    } else {
+        line
+    }
 }

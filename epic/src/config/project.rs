@@ -71,23 +71,52 @@ pub struct VerificationStep {
 
 // Defaults
 
-fn default_root() -> String { ".".into() }
-fn default_epic_dir() -> String { ".epic".into() }
-fn default_fast_model() -> String { "claude-haiku-4-5-20251001".into() }
-fn default_balanced_model() -> String { "claude-sonnet-4-6".into() }
-fn default_strong_model() -> String { "claude-opus-4-6".into() }
-const fn default_max_depth() -> u32 { 8 }
-const fn default_max_recovery_rounds() -> u32 { 2 }
-const fn default_retry_budget() -> u32 { 3 }
-const fn default_branch_fix_rounds() -> u32 { 3 }
-const fn default_root_fix_rounds() -> u32 { 4 }
-const fn default_max_total_tasks() -> u32 { 100 }
-fn default_runtime() -> String { "flick".into() }
-const fn default_timeout() -> u32 { 300 }
+fn default_root() -> String {
+    ".".into()
+}
+fn default_epic_dir() -> String {
+    ".epic".into()
+}
+fn default_fast_model() -> String {
+    "claude-haiku-4-5-20251001".into()
+}
+fn default_balanced_model() -> String {
+    "claude-sonnet-4-6".into()
+}
+fn default_strong_model() -> String {
+    "claude-opus-4-6".into()
+}
+const fn default_max_depth() -> u32 {
+    8
+}
+const fn default_max_recovery_rounds() -> u32 {
+    2
+}
+const fn default_retry_budget() -> u32 {
+    3
+}
+const fn default_branch_fix_rounds() -> u32 {
+    3
+}
+const fn default_root_fix_rounds() -> u32 {
+    4
+}
+const fn default_max_total_tasks() -> u32 {
+    100
+}
+fn default_runtime() -> String {
+    "flick".into()
+}
+const fn default_timeout() -> u32 {
+    300
+}
 
 impl Default for ProjectConfig {
     fn default() -> Self {
-        Self { root: default_root(), epic_dir: default_epic_dir() }
+        Self {
+            root: default_root(),
+            epic_dir: default_epic_dir(),
+        }
     }
 }
 
@@ -116,7 +145,9 @@ impl Default for LimitsConfig {
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { runtime: default_runtime() }
+        Self {
+            runtime: default_runtime(),
+        }
     }
 }
 
@@ -168,10 +199,10 @@ timeout = 600
 
     #[test]
     fn max_total_tasks_round_trips() {
-        let toml_str = r#"
+        let toml_str = r"
 [limits]
 max_total_tasks = 42
-"#;
+";
         let config: EpicConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.limits.max_total_tasks, 42);
 

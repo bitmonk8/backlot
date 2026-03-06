@@ -207,10 +207,7 @@ fn safe_path(raw: &str, project_root: &Path, allow_new_file: bool) -> Result<Pat
     };
 
     if !resolved.starts_with(&root_canon) {
-        return Err(format!(
-            "path escapes project root: {}",
-            resolved.display()
-        ));
+        return Err(format!("path escapes project root: {}", resolved.display()));
     }
 
     Ok(resolved)
@@ -528,10 +525,7 @@ async fn tool_edit_file(input: &JsonValue, project_root: &Path) -> Result<String
 
     let count = content.matches(old_string).count();
     if count == 0 {
-        return Err(format!(
-            "old_string not found in {}",
-            path.display()
-        ));
+        return Err(format!("old_string not found in {}", path.display()));
     }
     if count > 1 {
         return Err(format!(
@@ -756,7 +750,7 @@ mod tests {
     async fn test_read_file_truncation() {
         let tmp = TempDir::new().unwrap();
         // Write a file larger than MAX_READ_BYTES
-        let big = "x".repeat(MAX_READ_BYTES as usize + 100);
+        let big = "x".repeat(usize::try_from(MAX_READ_BYTES).unwrap() + 100);
         std::fs::write(tmp.path().join("big.txt"), &big).unwrap();
         let result = execute_tool(
             "tu_1".into(),
@@ -812,8 +806,11 @@ mod tests {
     #[tokio::test]
     async fn test_grep_matches() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("code.rs"), "fn main() {\n    println!(\"hello\");\n}\n")
-            .unwrap();
+        std::fs::write(
+            tmp.path().join("code.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
         std::fs::write(tmp.path().join("data.txt"), "no match here\n").unwrap();
         let result = execute_tool(
             "tu_1".into(),

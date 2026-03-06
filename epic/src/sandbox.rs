@@ -98,7 +98,11 @@ mod platform {
     fn powershell_model_check() -> bool {
         // wmic is deprecated on Windows 11; use PowerShell CIM query instead.
         let result = Command::new("powershell")
-            .args(["-NoProfile", "-Command", "(Get-CimInstance Win32_ComputerSystem).Model"])
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_ComputerSystem).Model",
+            ])
             .output();
         match result {
             Ok(output) => {
@@ -139,19 +143,25 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn cgroup_detects_docker() {
-        assert!(platform::cgroup_indicates_container("12:blkio:/docker/abc123\n"));
+        assert!(platform::cgroup_indicates_container(
+            "12:blkio:/docker/abc123\n"
+        ));
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn cgroup_detects_containerd() {
-        assert!(platform::cgroup_indicates_container("0::/system.slice/containerd.service\n"));
+        assert!(platform::cgroup_indicates_container(
+            "0::/system.slice/containerd.service\n"
+        ));
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn cgroup_detects_podman() {
-        assert!(platform::cgroup_indicates_container("0::/machine.slice/libpod-abc.scope\npodman\n"));
+        assert!(platform::cgroup_indicates_container(
+            "0::/machine.slice/libpod-abc.scope\npodman\n"
+        ));
     }
 
     #[test]
@@ -171,13 +181,17 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn version_detects_wsl_case_insensitive() {
-        assert!(platform::version_indicates_wsl("Linux version 5.15 Microsoft"));
+        assert!(platform::version_indicates_wsl(
+            "Linux version 5.15 Microsoft"
+        ));
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn version_bare_metal() {
-        assert!(!platform::version_indicates_wsl("Linux version 6.5.0-generic"));
+        assert!(!platform::version_indicates_wsl(
+            "Linux version 6.5.0-generic"
+        ));
     }
 
     #[test]
@@ -195,7 +209,9 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn model_detects_vmware() {
-        assert!(platform::model_indicates_vm("Model=VMware Virtual Platform\r\n"));
+        assert!(platform::model_indicates_vm(
+            "Model=VMware Virtual Platform\r\n"
+        ));
     }
 
     #[test]
@@ -219,13 +235,17 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn model_detects_kvm() {
-        assert!(platform::model_indicates_vm("Model=Standard PC (Q35 + ICH9) KVM\r\n"));
+        assert!(platform::model_indicates_vm(
+            "Model=Standard PC (Q35 + ICH9) KVM\r\n"
+        ));
     }
 
     #[test]
     #[cfg(target_os = "windows")]
     fn model_detects_qemu() {
-        assert!(platform::model_indicates_vm("Model=Standard PC (i440FX + PIIX, 1996) QEMU\r\n"));
+        assert!(platform::model_indicates_vm(
+            "Model=Standard PC (i440FX + PIIX, 1996) QEMU\r\n"
+        ));
     }
 
     #[test]

@@ -5,14 +5,15 @@ use crate::config::project::LimitsConfig;
 use crate::events::{Event, EventSender};
 use crate::state::EpicState;
 use crate::task::assess::AssessmentResult;
-use crate::task::verify::VerificationOutcome;
 use crate::task::branch::{CheckpointDecision, SubtaskSpec};
-use crate::task::{Attempt, LeafResult, Magnitude, Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
+use crate::task::verify::VerificationOutcome;
+use crate::task::{
+    Attempt, LeafResult, Magnitude, Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase,
+};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use thiserror::Error;
-
 
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
@@ -25,7 +26,11 @@ pub enum OrchestratorError {
 #[derive(Debug, PartialEq, Eq)]
 enum ScopeCheck {
     WithinBounds,
-    Exceeded { metric: String, actual: u64, limit: u64 },
+    Exceeded {
+        metric: String,
+        actual: u64,
+        limit: u64,
+    },
 }
 
 fn evaluate_scope(numstat_output: &str, magnitude: &Magnitude) -> ScopeCheck {
@@ -39,8 +44,12 @@ fn evaluate_scope(numstat_output: &str, magnitude: &Magnitude) -> ScopeCheck {
             continue;
         }
         // Binary files show "-" for counts; skip them.
-        let Ok(added) = parts[0].parse::<u64>() else { continue };
-        let Ok(deleted) = parts[1].parse::<u64>() else { continue };
+        let Ok(added) = parts[0].parse::<u64>() else {
+            continue;
+        };
+        let Ok(deleted) = parts[1].parse::<u64>() else {
+            continue;
+        };
         let modified = added.min(deleted);
         total_added += added - modified;
         total_deleted += deleted - modified;
@@ -94,7 +103,7 @@ impl<A: AgentService> Orchestrator<A> {
         }
     }
 
-    pub fn with_limits(mut self, limits: LimitsConfig) -> Self {
+    pub const fn with_limits(mut self, limits: LimitsConfig) -> Self {
         self.limits = limits;
         self
     }
@@ -198,7 +207,10 @@ impl<A: AgentService> Orchestrator<A> {
         let max = self.limits.max_total_tasks as usize;
         if current + count > max {
             self.emit(Event::TaskLimitReached { task_id: parent_id });
-            Some(format!("task limit reached ({current} tasks, max {})", self.limits.max_total_tasks))
+            Some(format!(
+                "task limit reached ({current} tasks, max {})",
+                self.limits.max_total_tasks
+            ))
         } else {
             None
         }
@@ -495,7 +507,10 @@ impl<A: AgentService> Orchestrator<A> {
     }
 
     fn verification_model(&self, id: TaskId) -> Result<Model, OrchestratorError> {
-        let task = self.state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
+        let task = self
+            .state
+            .get(id)
+            .ok_or(OrchestratorError::TaskNotFound(id))?;
         match task.path {
             Some(TaskPath::Leaf) => {
                 let impl_model = task.current_model.unwrap_or(Model::Haiku);
@@ -526,13 +541,19 @@ impl<A: AgentService> Orchestrator<A> {
                         passed: false,
                     });
 
-                    let task = self.state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
+                    let task = self
+                        .state
+                        .get(id)
+                        .ok_or(OrchestratorError::TaskNotFound(id))?;
                     let is_leaf = task.path == Some(TaskPath::Leaf);
 
                     if is_leaf {
                         self.leaf_fix_loop(id, &reason).await
                     } else {
-                        let task = self.state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
+                        let task = self
+                            .state
+                            .get(id)
+                            .ok_or(OrchestratorError::TaskNotFound(id))?;
                         let is_fix_task = task.is_fix_task;
 
                         if is_fix_task {
@@ -600,7 +621,11 @@ impl<A: AgentService> Orchestrator<A> {
             // Scope circuit breaker check.
             match self.check_scope_circuit_breaker(id).await? {
                 ScopeCheck::WithinBounds => {}
-                ScopeCheck::Exceeded { metric, actual, limit } => {
+                ScopeCheck::Exceeded {
+                    metric,
+                    actual,
+                    limit,
+                } => {
                     return self.fail_task(
                         id,
                         format!("SCOPE_EXCEEDED: {metric} actual={actual} limit={limit}"),
@@ -608,7 +633,8 @@ impl<A: AgentService> Orchestrator<A> {
                 }
             }
 
-            #[allow(clippy::cast_possible_truncation)] // Fix attempts capped at 9 (3 tiers × 3 retries).
+            #[allow(clippy::cast_possible_truncation)]
+            // Fix attempts capped at 9 (3 tiers × 3 retries).
             let attempt_number = self
                 .state
                 .get(id)
@@ -624,7 +650,10 @@ impl<A: AgentService> Orchestrator<A> {
             });
 
             let ctx = self.build_context(id)?;
-            let LeafResult { outcome, discoveries } = self
+            let LeafResult {
+                outcome,
+                discoveries,
+            } = self
                 .agent
                 .fix_leaf(&ctx, fix_model, &failure_reason, attempt_number)
                 .await?;
@@ -646,10 +675,7 @@ impl<A: AgentService> Orchestrator<A> {
                 if !discoveries.is_empty() {
                     let count = discoveries.len();
                     task.discoveries.extend(discoveries);
-                    self.emit(Event::DiscoveriesRecorded {
-                        task_id: id,
-                        count,
-                    });
+                    self.emit(Event::DiscoveriesRecorded { task_id: id, count });
                 }
             }
 
@@ -722,7 +748,11 @@ impl<A: AgentService> Orchestrator<A> {
             .parent_id
             .is_none();
 
-        let max_rounds = if is_root { self.limits.root_fix_rounds } else { self.limits.branch_fix_rounds };
+        let max_rounds = if is_root {
+            self.limits.root_fix_rounds
+        } else {
+            self.limits.branch_fix_rounds
+        };
         let mut failure_reason = initial_failure.to_owned();
 
         loop {
@@ -747,11 +777,19 @@ impl<A: AgentService> Orchestrator<A> {
             };
 
             // Sonnet for rounds 1-3, Opus for round 4 (root only).
-            let model = if round <= 3 { Model::Sonnet } else { Model::Opus };
+            let model = if round <= 3 {
+                Model::Sonnet
+            } else {
+                Model::Opus
+            };
 
             match self.check_scope_circuit_breaker(id).await? {
                 ScopeCheck::WithinBounds => {}
-                ScopeCheck::Exceeded { metric, actual, limit } => {
+                ScopeCheck::Exceeded {
+                    metric,
+                    actual,
+                    limit,
+                } => {
                     return self.fail_task(
                         id,
                         format!("SCOPE_EXCEEDED: {metric} actual={actual} limit={limit}"),
@@ -781,7 +819,8 @@ impl<A: AgentService> Orchestrator<A> {
                 return self.fail_task(id, reason);
             }
 
-            let fix_child_ids = self.create_subtasks(id, decomposition.subtasks, true, true, None)?;
+            let fix_child_ids =
+                self.create_subtasks(id, decomposition.subtasks, true, true, None)?;
             self.emit(Event::FixSubtasksCreated {
                 task_id: id,
                 count: fix_child_ids.len(),
@@ -886,10 +925,7 @@ impl<A: AgentService> Orchestrator<A> {
                 if !discoveries.is_empty() {
                     let count = discoveries.len();
                     task.discoveries.extend(discoveries);
-                    self.emit(Event::DiscoveriesRecorded {
-                        task_id: id,
-                        count,
-                    });
+                    self.emit(Event::DiscoveriesRecorded { task_id: id, count });
                 }
             }
 
@@ -942,10 +978,16 @@ impl<A: AgentService> Orchestrator<A> {
             .clone();
 
         if existing_subtasks.is_empty() {
-            let task = self.state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
+            let task = self
+                .state
+                .get(id)
+                .ok_or(OrchestratorError::TaskNotFound(id))?;
             let decompose_model = task.current_model.unwrap_or(Model::Sonnet);
             let ctx = self.build_context(id)?;
-            let decomposition = self.agent.design_and_decompose(&ctx, decompose_model).await?;
+            let decomposition = self
+                .agent
+                .design_and_decompose(&ctx, decompose_model)
+                .await?;
 
             {
                 let task = self
@@ -959,7 +1001,8 @@ impl<A: AgentService> Orchestrator<A> {
                 return Ok(TaskOutcome::Failed { reason });
             }
 
-            let new_child_ids = self.create_subtasks(id, decomposition.subtasks, false, false, None)?;
+            let new_child_ids =
+                self.create_subtasks(id, decomposition.subtasks, false, false, None)?;
             self.emit(Event::SubtasksCreated {
                 parent_id: id,
                 child_ids: new_child_ids,
@@ -1018,16 +1061,20 @@ impl<A: AgentService> Orchestrator<A> {
                                 .state
                                 .get_mut(id)
                                 .ok_or(OrchestratorError::TaskNotFound(id))?;
-                            task.checkpoint_guidance = Some(match task.checkpoint_guidance.take() {
-                                Some(existing) => format!("{existing}\n{guidance}"),
-                                None => guidance,
-                            });
+                            task.checkpoint_guidance =
+                                Some(match task.checkpoint_guidance.take() {
+                                    Some(existing) => format!("{existing}\n{guidance}"),
+                                    None => guidance,
+                                });
                             self.checkpoint_save();
                         }
                         CheckpointDecision::Escalate => {
                             self.emit(Event::CheckpointEscalate { task_id: id });
                             {
-                                let task = self.state.get_mut(id).ok_or(OrchestratorError::TaskNotFound(id))?;
+                                let task = self
+                                    .state
+                                    .get_mut(id)
+                                    .ok_or(OrchestratorError::TaskNotFound(id))?;
                                 task.checkpoint_guidance = None;
                             }
                             let escalation_reason = format!(
@@ -1046,9 +1093,7 @@ impl<A: AgentService> Orchestrator<A> {
                 }
 
                 if let TaskOutcome::Failed { ref reason } = child_outcome {
-                    if let Some(recovery_outcome) =
-                        self.attempt_recovery(id, reason).await?
-                    {
+                    if let Some(recovery_outcome) = self.attempt_recovery(id, reason).await? {
                         // Recovery failed or not possible — propagate failure.
                         return Ok(recovery_outcome);
                     }
@@ -1093,9 +1138,7 @@ impl<A: AgentService> Orchestrator<A> {
         let max_recovery = self.limits.max_recovery_rounds;
         if task.recovery_rounds >= max_recovery {
             return Ok(Some(TaskOutcome::Failed {
-                reason: format!(
-                    "recovery rounds exhausted ({max_recovery}): {failure_reason}"
-                ),
+                reason: format!("recovery rounds exhausted ({max_recovery}): {failure_reason}"),
             }));
         }
 
@@ -1348,7 +1391,11 @@ mod tests {
                 .expect("no fix_subtask response queued"))
         }
 
-        async fn verify(&self, _ctx: &TaskContext, model: Model) -> anyhow::Result<VerificationResult> {
+        async fn verify(
+            &self,
+            _ctx: &TaskContext,
+            model: Model,
+        ) -> anyhow::Result<VerificationResult> {
             self.verify_models.lock().unwrap().push(model);
             Ok(self
                 .verify_responses
@@ -1363,7 +1410,8 @@ mod tests {
             _ctx: &TaskContext,
             _discoveries: &[String],
         ) -> anyhow::Result<CheckpointDecision> {
-            if let Some(msg) = self.checkpoint_errors.lock().unwrap().pop_front() {
+            let front = self.checkpoint_errors.lock().unwrap().pop_front();
+            if let Some(msg) = front {
                 return Err(anyhow::anyhow!(msg));
             }
             Ok(self
@@ -1640,10 +1688,7 @@ mod tests {
         }
 
         // Recovery assessment called once (budget=2, but branch fails immediately).
-        mock.recovery_responses
-            .lock()
-            .unwrap()
-            .push_back(None);
+        mock.recovery_responses.lock().unwrap().push_back(None);
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -1787,7 +1832,7 @@ mod tests {
         );
     }
 
-    /// Resume: existing subtask_ids on root skips decomposition.
+    /// Resume: existing `subtask_ids` on root skips decomposition.
     #[tokio::test]
     async fn resume_skips_decomposition_when_subtasks_exist() {
         let mock = MockAgentService::new();
@@ -1880,7 +1925,13 @@ mod tests {
         root.subtask_ids = vec![mid_id];
 
         // Mid: Executing, Branch, has grandchild. Was mid-execution when killed.
-        let mut mid = Task::new(mid_id, Some(root_id), "mid".into(), vec!["mid passes".into()], 1);
+        let mut mid = Task::new(
+            mid_id,
+            Some(root_id),
+            "mid".into(),
+            vec!["mid passes".into()],
+            1,
+        );
         mid.path = Some(TaskPath::Branch);
         mid.current_model = Some(Model::Sonnet);
         mid.phase = TaskPhase::Executing;
@@ -1959,7 +2010,10 @@ mod tests {
         assert_eq!(result, TaskOutcome::Success);
 
         // Child went straight to verification, not re-execution.
-        assert_eq!(orch.state.get(child_id).unwrap().phase, TaskPhase::Completed);
+        assert_eq!(
+            orch.state.get(child_id).unwrap().phase,
+            TaskPhase::Completed
+        );
         // No attempts added — leaf was not re-executed.
         assert!(orch.state.get(child_id).unwrap().attempts.is_empty());
     }
@@ -2098,10 +2152,13 @@ mod tests {
                 found_discoveries_event = true;
             }
         }
-        assert!(found_discoveries_event, "DiscoveriesRecorded event not found");
+        assert!(
+            found_discoveries_event,
+            "DiscoveriesRecorded event not found"
+        );
     }
 
-    /// Task with magnitude set but no git repo → WithinBounds (best-effort).
+    /// Task with magnitude set but no git repo → `WithinBounds` (best-effort).
     #[tokio::test]
     async fn scope_check_within_bounds() {
         let mock = MockAgentService::new();
@@ -2124,7 +2181,7 @@ mod tests {
         assert!(matches!(result, ScopeCheck::WithinBounds));
     }
 
-    /// Task with no magnitude → WithinBounds (skip check).
+    /// Task with no magnitude → `WithinBounds` (skip check).
     #[tokio::test]
     async fn scope_check_skipped_no_magnitude() {
         let mock = MockAgentService::new();
@@ -2149,7 +2206,7 @@ mod tests {
         }
     }
 
-    /// Leaf fix loop: verification fails → fix_leaf succeeds → re-verification passes.
+    /// Leaf fix loop: verification fails → `fix_leaf` succeeds → re-verification passes.
     #[tokio::test]
     async fn leaf_fix_passes_on_retry() {
         let mock = MockAgentService::new();
@@ -2316,10 +2373,7 @@ mod tests {
         }
 
         // Recovery assessment for branch failure.
-        mock.recovery_responses
-            .lock()
-            .unwrap()
-            .push_back(None);
+        mock.recovery_responses.lock().unwrap().push_back(None);
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -2424,26 +2478,28 @@ mod tests {
         let mock = MockAgentService::new();
 
         // Root branches into mid (a branch).
-        mock.decompose_responses.lock().unwrap().push_back(
-            DecompositionResult {
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
                 subtasks: vec![SubtaskSpec {
                     goal: "mid branch".into(),
                     verification_criteria: vec!["mid passes".into()],
                     magnitude_estimate: MagnitudeEstimate::Medium,
                 }],
                 rationale: "one mid branch".into(),
-            },
-        );
+            });
 
         // Mid is assessed as branch.
-        mock.assess_responses.lock().unwrap().push_back(
-            AssessmentResult {
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(AssessmentResult {
                 path: TaskPath::Branch,
                 model: Model::Sonnet,
                 rationale: "needs decomposition".into(),
                 magnitude: None,
-            },
-        );
+            });
 
         // Mid decomposes into 1 leaf child.
         mock.decompose_responses
@@ -2501,10 +2557,7 @@ mod tests {
         }
 
         // Mid fails → recovery assessment for root.
-        mock.recovery_responses
-            .lock()
-            .unwrap()
-            .push_back(None);
+        mock.recovery_responses.lock().unwrap().push_back(None);
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -2551,26 +2604,28 @@ mod tests {
             .push_back(fail_verification("root check failed"));
 
         // Branch fix round 1: design_fix_subtasks returns 1 fix subtask that will be assessed as branch.
-        mock.fix_subtask_responses.lock().unwrap().push_back(
-            DecompositionResult {
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
                 subtasks: vec![SubtaskSpec {
                     goal: "complex fix".into(),
                     verification_criteria: vec!["fix passes".into()],
                     magnitude_estimate: MagnitudeEstimate::Medium,
                 }],
                 rationale: "complex fix needed".into(),
-            },
-        );
+            });
 
         // Fix subtask assessed as branch.
-        mock.assess_responses.lock().unwrap().push_back(
-            AssessmentResult {
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(AssessmentResult {
                 path: TaskPath::Branch,
                 model: Model::Sonnet,
                 rationale: "needs decomposition".into(),
                 magnitude: None,
-            },
-        );
+            });
 
         // Fix subtask decomposes into 1 grandchild leaf.
         mock.decompose_responses
@@ -2674,7 +2729,11 @@ mod tests {
         // 100 added > 30 (3×10).
         let result = evaluate_scope(output, &magnitude);
         match result {
-            ScopeCheck::Exceeded { metric, actual, limit } => {
+            ScopeCheck::Exceeded {
+                metric,
+                actual,
+                limit,
+            } => {
                 assert_eq!(metric, "lines_added");
                 assert_eq!(actual, 100);
                 assert_eq!(limit, 30);
@@ -2706,7 +2765,7 @@ mod tests {
         assert_eq!(evaluate_scope("", &magnitude), ScopeCheck::WithinBounds);
     }
 
-    /// Resume mid-fix-loop: pre-existing fix_attempts are counted so retries_at_tier is correct.
+    /// Resume mid-fix-loop: pre-existing `fix_attempts` are counted so `retries_at_tier` is correct.
     #[tokio::test]
     async fn leaf_fix_persists_and_resumes() {
         let mock = MockAgentService::new();
@@ -2758,8 +2817,16 @@ mod tests {
         child.current_model = Some(Model::Haiku);
         child.phase = TaskPhase::Verifying;
         child.fix_attempts = vec![
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("fail1".into()) },
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("fail2".into()) },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("fail1".into()),
+            },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("fail2".into()),
+            },
         ];
 
         state.insert(root);
@@ -2828,9 +2895,21 @@ mod tests {
         child.current_model = Some(Model::Haiku); // Not yet escalated.
         child.phase = TaskPhase::Verifying;
         child.fix_attempts = vec![
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("f1".into()) },
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("f2".into()) },
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("f3".into()) },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("f1".into()),
+            },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("f2".into()),
+            },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("f3".into()),
+            },
         ];
 
         state.insert(root);
@@ -2851,11 +2930,21 @@ mod tests {
         // Verify escalation event.
         let mut saw_escalation = false;
         while let Ok(event) = rx.try_recv() {
-            if matches!(event, Event::FixModelEscalated { from: Model::Haiku, to: Model::Sonnet, .. }) {
+            if matches!(
+                event,
+                Event::FixModelEscalated {
+                    from: Model::Haiku,
+                    to: Model::Sonnet,
+                    ..
+                }
+            ) {
                 saw_escalation = true;
             }
         }
-        assert!(saw_escalation, "FixModelEscalated Haiku→Sonnet expected on immediate escalation");
+        assert!(
+            saw_escalation,
+            "FixModelEscalated Haiku→Sonnet expected on immediate escalation"
+        );
     }
 
     /// Branch fix loop: root gets 4th round at Opus after 3 Sonnet rounds fail.
@@ -2940,7 +3029,12 @@ mod tests {
         // Check BranchFixRound events: rounds 1-3 at Sonnet, round 4 at Opus.
         let mut branch_fix_rounds: Vec<(u32, Model)> = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let Event::BranchFixRound { task_id, round, model } = event {
+            if let Event::BranchFixRound {
+                task_id,
+                round,
+                model,
+            } = event
+            {
                 if task_id == root_id {
                     branch_fix_rounds.push((round, model));
                 }
@@ -3007,27 +3101,60 @@ mod tests {
             });
 
         // Child A: assessed as leaf, fails terminally (9 attempts).
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("A failed"));
         }
 
         // Recovery: assess says recoverable, plan is incremental.
-        mock.recovery_responses.lock().unwrap().push_back(Some("retry differently".into()));
-        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("retry differently".into()));
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(incremental_recovery_plan());
 
         // Recovery subtask: assessed as leaf, succeeds.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         // Child B (still pending, runs after recovery): assessed as leaf, succeeds.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         // Root verification passes.
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -3039,12 +3166,18 @@ mod tests {
         assert_eq!(root.recovery_rounds, 1);
 
         // Child A should be Failed.
-        let child_a_id = root.subtask_ids[0];
-        assert_eq!(orch.state.get(child_a_id).unwrap().phase, TaskPhase::Failed);
+        let first_child_id = root.subtask_ids[0];
+        assert_eq!(
+            orch.state.get(first_child_id).unwrap().phase,
+            TaskPhase::Failed
+        );
 
         // Child B (pending sibling) should have completed after recovery.
-        let child_b_id = root.subtask_ids[1];
-        assert_eq!(orch.state.get(child_b_id).unwrap().phase, TaskPhase::Completed);
+        let second_child_id = root.subtask_ids[1];
+        assert_eq!(
+            orch.state.get(second_child_id).unwrap().phase,
+            TaskPhase::Completed
+        );
 
         // Recovery subtask should have completed and not be marked is_fix_task.
         let recovery_id = root.subtask_ids[2];
@@ -3079,22 +3212,46 @@ mod tests {
             });
 
         // Child A: assessed as leaf, fails terminally.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("A failed"));
         }
 
         // Recovery: full re-decomposition.
-        mock.recovery_responses.lock().unwrap().push_back(Some("redo everything".into()));
-        mock.recovery_plan_responses.lock().unwrap().push_back(full_recovery_plan());
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("redo everything".into()));
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(full_recovery_plan());
 
         // Recovery subtask: assessed as leaf, succeeds.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         // Root verification passes.
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -3114,52 +3271,87 @@ mod tests {
     async fn recovery_round_limit_exhausted() {
         let mock = MockAgentService::new();
 
-        mock.decompose_responses.lock().unwrap().push_back(DecompositionResult {
-            subtasks: vec![SubtaskSpec {
-                goal: "child A".into(),
-                verification_criteria: vec!["A passes".into()],
-                magnitude_estimate: MagnitudeEstimate::Small,
-            }],
-            rationale: "one subtask".into(),
-        });
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![SubtaskSpec {
+                    goal: "child A".into(),
+                    verification_criteria: vec!["A passes".into()],
+                    magnitude_estimate: MagnitudeEstimate::Small,
+                }],
+                rationale: "one subtask".into(),
+            });
 
         // Child A fails terminally.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("A failed"));
         }
 
         // Round 1: recovery with incremental plan.
-        mock.recovery_responses.lock().unwrap().push_back(Some("try again".into()));
-        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("try again".into()));
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(incremental_recovery_plan());
 
         // Recovery subtask 1: fails terminally.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("recovery 1 failed"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("recovery 1 failed"));
         }
 
         // Round 2: another recovery attempt.
-        mock.recovery_responses.lock().unwrap().push_back(Some("try again".into()));
-        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("try again".into()));
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(incremental_recovery_plan());
 
         // Recovery subtask 2: also fails terminally.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("recovery 2 failed"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("recovery 2 failed"));
         }
 
         // Round 3 would exceed limit — no more recovery responses needed.
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
-        assert!(matches!(result, TaskOutcome::Failed { reason } if reason.contains("recovery rounds exhausted")));
+        assert!(
+            matches!(result, TaskOutcome::Failed { reason } if reason.contains("recovery rounds exhausted"))
+        );
         assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 2);
     }
 
     /// Fix tasks do not attempt recovery (prevents recursive recovery chains).
     /// A fix task that is a branch with a failing child should propagate failure
-    /// without calling assess_recovery.
+    /// without calling `assess_recovery`.
     #[tokio::test]
     async fn recovery_not_attempted_for_fix_tasks() {
         // Directly test attempt_recovery by creating a task marked is_fix_task=true.
@@ -3167,13 +3359,7 @@ mod tests {
         let mut state = EpicState::new();
 
         let root_id = state.next_task_id();
-        let mut root = Task::new(
-            root_id,
-            None,
-            "fix parent".into(),
-            vec!["passes".into()],
-            0,
-        );
+        let mut root = Task::new(root_id, None, "fix parent".into(), vec!["passes".into()], 0);
         root.is_fix_task = true;
         root.path = Some(TaskPath::Branch);
         state.insert(root);
@@ -3187,15 +3373,24 @@ mod tests {
         assert!(matches!(result.unwrap(), TaskOutcome::Failed { .. }));
     }
 
-    /// assess_recovery returns None → child failure propagates immediately.
+    /// `assess_recovery` returns None → child failure propagates immediately.
     #[tokio::test]
     async fn recovery_not_attempted_when_unrecoverable() {
         let mock = MockAgentService::new();
 
-        mock.decompose_responses.lock().unwrap().push_back(one_subtask_decomposition());
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("terminal"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("terminal"));
         }
 
         // Recovery assessment: not recoverable.
@@ -3212,23 +3407,50 @@ mod tests {
     async fn recovery_rounds_persisted() {
         let mock = MockAgentService::new();
 
-        mock.decompose_responses.lock().unwrap().push_back(one_subtask_decomposition());
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("A failed"));
         }
 
         // Round 1 recovery.
-        mock.recovery_responses.lock().unwrap().push_back(Some("try again".into()));
-        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("try again".into()));
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(incremental_recovery_plan());
 
         // Recovery subtask succeeds.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         // Root verification passes.
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -3249,19 +3471,34 @@ mod tests {
     async fn recovery_empty_plan_fails() {
         let mock = MockAgentService::new();
 
-        mock.decompose_responses.lock().unwrap().push_back(one_subtask_decomposition());
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("broke"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("broke"));
         }
 
         // Recovery: assess says recoverable, but plan has no subtasks.
-        mock.recovery_responses.lock().unwrap().push_back(Some("try something".into()));
-        mock.recovery_plan_responses.lock().unwrap().push_back(RecoveryPlan {
-            full_redecomposition: false,
-            subtasks: vec![],
-            rationale: "empty plan".into(),
-        });
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("try something".into()));
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(RecoveryPlan {
+                full_redecomposition: false,
+                subtasks: vec![],
+                rationale: "empty plan".into(),
+            });
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -3277,49 +3514,85 @@ mod tests {
         let mock = MockAgentService::new();
 
         // Root decomposes into 3 children.
-        mock.decompose_responses.lock().unwrap().push_back(DecompositionResult {
-            subtasks: vec![
-                SubtaskSpec {
-                    goal: "child A".into(),
-                    verification_criteria: vec!["A passes".into()],
-                    magnitude_estimate: MagnitudeEstimate::Small,
-                },
-                SubtaskSpec {
-                    goal: "child B".into(),
-                    verification_criteria: vec!["B passes".into()],
-                    magnitude_estimate: MagnitudeEstimate::Small,
-                },
-                SubtaskSpec {
-                    goal: "child C".into(),
-                    verification_criteria: vec!["C passes".into()],
-                    magnitude_estimate: MagnitudeEstimate::Small,
-                },
-            ],
-            rationale: "three subtasks".into(),
-        });
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![
+                    SubtaskSpec {
+                        goal: "child A".into(),
+                        verification_criteria: vec!["A passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child B".into(),
+                        verification_criteria: vec!["B passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                    SubtaskSpec {
+                        goal: "child C".into(),
+                        verification_criteria: vec!["C passes".into()],
+                        magnitude_estimate: MagnitudeEstimate::Small,
+                    },
+                ],
+                rationale: "three subtasks".into(),
+            });
 
         // Child A: succeeds.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         // Child B: fails terminally.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("B failed"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("B failed"));
         }
 
         // Recovery: full re-decomposition.
-        mock.recovery_responses.lock().unwrap().push_back(Some("redo".into()));
-        mock.recovery_plan_responses.lock().unwrap().push_back(full_recovery_plan());
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("redo".into()));
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(full_recovery_plan());
 
         // Recovery subtask: succeeds.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         // Root verification passes.
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -3330,13 +3603,25 @@ mod tests {
         assert_eq!(root.subtask_ids.len(), 4);
 
         // A: Completed (untouched by full re-decomposition).
-        assert_eq!(orch.state.get(root.subtask_ids[0]).unwrap().phase, TaskPhase::Completed);
+        assert_eq!(
+            orch.state.get(root.subtask_ids[0]).unwrap().phase,
+            TaskPhase::Completed
+        );
         // B: Failed (the one that triggered recovery).
-        assert_eq!(orch.state.get(root.subtask_ids[1]).unwrap().phase, TaskPhase::Failed);
+        assert_eq!(
+            orch.state.get(root.subtask_ids[1]).unwrap().phase,
+            TaskPhase::Failed
+        );
         // C: Failed (superseded — was Pending when full re-decomposition ran).
-        assert_eq!(orch.state.get(root.subtask_ids[2]).unwrap().phase, TaskPhase::Failed);
+        assert_eq!(
+            orch.state.get(root.subtask_ids[2]).unwrap().phase,
+            TaskPhase::Failed
+        );
         // Recovery subtask: Completed.
-        assert_eq!(orch.state.get(root.subtask_ids[3]).unwrap().phase, TaskPhase::Completed);
+        assert_eq!(
+            orch.state.get(root.subtask_ids[3]).unwrap().phase,
+            TaskPhase::Completed
+        );
     }
 
     /// Recovery events are emitted correctly.
@@ -3344,22 +3629,49 @@ mod tests {
     async fn recovery_emits_events() {
         let mock = MockAgentService::new();
 
-        mock.decompose_responses.lock().unwrap().push_back(one_subtask_decomposition());
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("broke"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("broke"));
         }
 
-        mock.recovery_responses.lock().unwrap().push_back(Some("fix it".into()));
-        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("fix it".into()));
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(incremental_recovery_plan());
 
         // Recovery subtask succeeds.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         // Root verification.
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -3376,12 +3688,19 @@ mod tests {
                     assert_eq!(round, 1);
                     saw_recovery_started = true;
                 }
-                Event::RecoveryPlanSelected { task_id, ref approach } => {
+                Event::RecoveryPlanSelected {
+                    task_id,
+                    ref approach,
+                } => {
                     assert_eq!(task_id, root_id);
                     assert_eq!(approach, "incremental");
                     saw_recovery_plan = true;
                 }
-                Event::RecoverySubtasksCreated { task_id, count, round } => {
+                Event::RecoverySubtasksCreated {
+                    task_id,
+                    count,
+                    round,
+                } => {
                     assert_eq!(task_id, root_id);
                     assert_eq!(count, 1);
                     assert_eq!(round, 1);
@@ -3646,10 +3965,7 @@ mod tests {
             .push_back(CheckpointDecision::Escalate);
 
         // Recovery assess: not recoverable.
-        mock.recovery_responses
-            .lock()
-            .unwrap()
-            .push_back(None);
+        mock.recovery_responses.lock().unwrap().push_back(None);
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -3712,7 +4028,11 @@ mod tests {
 
         // No checkpoint_guidance should be stored on the parent.
         assert!(
-            orch.state.get(root_id).unwrap().checkpoint_guidance.is_none(),
+            orch.state
+                .get(root_id)
+                .unwrap()
+                .checkpoint_guidance
+                .is_none(),
             "checkpoint_guidance should be None when agent errors out"
         );
     }
@@ -3782,7 +4102,11 @@ mod tests {
         let json = serde_json::to_string(&orch.state).unwrap();
         let restored: EpicState = serde_json::from_str(&json).unwrap();
         assert_eq!(
-            restored.get(root_id).unwrap().checkpoint_guidance.as_deref(),
+            restored
+                .get(root_id)
+                .unwrap()
+                .checkpoint_guidance
+                .as_deref(),
             Some("use new approach")
         );
     }
@@ -3891,11 +4215,14 @@ mod tests {
                 adjust_count += 1;
             }
         }
-        assert_eq!(adjust_count, 2, "expected exactly 2 CheckpointAdjust events");
+        assert_eq!(
+            adjust_count, 2,
+            "expected exactly 2 CheckpointAdjust events"
+        );
     }
 
     /// When a fix task's child discoveries trigger Escalate, recovery is rejected
-    /// because attempt_recovery refuses fix tasks, so the branch fails immediately.
+    /// because `attempt_recovery` refuses fix tasks, so the branch fails immediately.
     #[tokio::test]
     async fn checkpoint_escalate_on_fix_task_fails() {
         let mock = MockAgentService::new();
@@ -3989,25 +4316,25 @@ mod tests {
             0,
         );
 
-        let child_a_id = state.next_task_id();
+        let first_child_id = state.next_task_id();
         let child_a = Task::new(
-            child_a_id,
+            first_child_id,
             Some(root_id),
             "child A goal".into(),
             vec!["A passes".into()],
             1,
         );
 
-        let child_b_id = state.next_task_id();
+        let second_child_id = state.next_task_id();
         let child_b = Task::new(
-            child_b_id,
+            second_child_id,
             Some(root_id),
             "child B goal".into(),
             vec!["B passes".into()],
             1,
         );
 
-        root.subtask_ids = vec![child_a_id, child_b_id];
+        root.subtask_ids = vec![first_child_id, second_child_id];
         root.checkpoint_guidance = Some("use API v2".into());
         state.insert(root);
 
@@ -4020,7 +4347,7 @@ mod tests {
         state.insert(child_b);
 
         let orch = Orchestrator::new(mock, state, tx);
-        let ctx = orch.build_context(child_b_id).unwrap();
+        let ctx = orch.build_context(second_child_id).unwrap();
 
         assert_eq!(
             ctx.checkpoint_guidance.as_deref(),
@@ -4029,7 +4356,7 @@ mod tests {
         );
     }
 
-    /// Checkpoint escalation when recovery rounds are already at max_recovery_rounds
+    /// Checkpoint escalation when recovery rounds are already at `max_recovery_rounds`
     /// results in immediate failure without starting a new recovery round.
     #[tokio::test]
     async fn checkpoint_escalate_recovery_rounds_exhausted() {
@@ -4112,6 +4439,7 @@ mod tests {
 
     /// Checkpoint escalate after prior adjust: guidance is cleared before recovery runs.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn checkpoint_escalate_clears_prior_guidance() {
         let mock = MockAgentService::new();
 
@@ -4236,7 +4564,11 @@ mod tests {
 
         // Guidance cleared by escalation.
         assert!(
-            orch.state.get(root_id).unwrap().checkpoint_guidance.is_none(),
+            orch.state
+                .get(root_id)
+                .unwrap()
+                .checkpoint_guidance
+                .is_none(),
             "checkpoint_guidance should be None after escalation clears prior adjust guidance"
         );
 
@@ -4266,7 +4598,7 @@ mod tests {
         assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 1);
     }
 
-    /// Resume mid-leaf-retry: pre-existing attempts are counted so retries_at_tier is correct.
+    /// Resume mid-leaf-retry: pre-existing attempts are counted so `retries_at_tier` is correct.
     #[tokio::test]
     async fn leaf_retry_counter_persists_on_resume() {
         let mock = MockAgentService::new();
@@ -4318,8 +4650,16 @@ mod tests {
         child.current_model = Some(Model::Haiku);
         child.phase = TaskPhase::Executing;
         child.attempts = vec![
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("fail1".into()) },
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("fail2".into()) },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("fail1".into()),
+            },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("fail2".into()),
+            },
         ];
 
         state.insert(root);
@@ -4342,14 +4682,24 @@ mod tests {
         // Verify escalation event was emitted (Haiku → Sonnet).
         let mut saw_escalation = false;
         while let Ok(event) = rx.try_recv() {
-            if matches!(event, Event::ModelEscalated { from: Model::Haiku, to: Model::Sonnet, .. }) {
+            if matches!(
+                event,
+                Event::ModelEscalated {
+                    from: Model::Haiku,
+                    to: Model::Sonnet,
+                    ..
+                }
+            ) {
                 saw_escalation = true;
             }
         }
-        assert!(saw_escalation, "ModelEscalated event should be emitted after 3 Haiku failures");
+        assert!(
+            saw_escalation,
+            "ModelEscalated event should be emitted after 3 Haiku failures"
+        );
     }
 
-    /// Resume at Sonnet tier with pre-existing Sonnet attempts: retries_at_tier counts
+    /// Resume at Sonnet tier with pre-existing Sonnet attempts: `retries_at_tier` counts
     /// only trailing Sonnet attempts, not prior Haiku attempts.
     #[tokio::test]
     async fn leaf_retry_counter_resume_at_sonnet_tier() {
@@ -4402,11 +4752,31 @@ mod tests {
         child.current_model = Some(Model::Sonnet);
         child.phase = TaskPhase::Executing;
         child.attempts = vec![
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("h1".into()) },
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("h2".into()) },
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("h3".into()) },
-            Attempt { model: Model::Sonnet, succeeded: false, error: Some("s1".into()) },
-            Attempt { model: Model::Sonnet, succeeded: false, error: Some("s2".into()) },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("h1".into()),
+            },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("h2".into()),
+            },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("h3".into()),
+            },
+            Attempt {
+                model: Model::Sonnet,
+                succeeded: false,
+                error: Some("s1".into()),
+            },
+            Attempt {
+                model: Model::Sonnet,
+                succeeded: false,
+                error: Some("s2".into()),
+            },
         ];
 
         state.insert(root);
@@ -4429,7 +4799,14 @@ mod tests {
         // Verify escalation Sonnet → Opus.
         let mut saw_escalation = false;
         while let Ok(event) = rx.try_recv() {
-            if matches!(event, Event::ModelEscalated { from: Model::Sonnet, to: Model::Opus, .. }) {
+            if matches!(
+                event,
+                Event::ModelEscalated {
+                    from: Model::Sonnet,
+                    to: Model::Opus,
+                    ..
+                }
+            ) {
                 saw_escalation = true;
             }
         }
@@ -4483,9 +4860,21 @@ mod tests {
         child.current_model = Some(Model::Haiku); // Not yet escalated.
         child.phase = TaskPhase::Executing;
         child.attempts = vec![
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("f1".into()) },
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("f2".into()) },
-            Attempt { model: Model::Haiku, succeeded: false, error: Some("f3".into()) },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("f1".into()),
+            },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("f2".into()),
+            },
+            Attempt {
+                model: Model::Haiku,
+                succeeded: false,
+                error: Some("f3".into()),
+            },
         ];
 
         state.insert(root);
@@ -4506,14 +4895,24 @@ mod tests {
         // Verify escalation event was emitted.
         let mut saw_escalation = false;
         while let Ok(event) = rx.try_recv() {
-            if matches!(event, Event::ModelEscalated { from: Model::Haiku, to: Model::Sonnet, .. }) {
+            if matches!(
+                event,
+                Event::ModelEscalated {
+                    from: Model::Haiku,
+                    to: Model::Sonnet,
+                    ..
+                }
+            ) {
                 saw_escalation = true;
             }
         }
-        assert!(saw_escalation, "ModelEscalated Haiku→Sonnet expected on immediate escalation");
+        assert!(
+            saw_escalation,
+            "ModelEscalated Haiku→Sonnet expected on immediate escalation"
+        );
     }
 
-    /// Leaf retry attempts are persisted to disk via checkpoint_save.
+    /// Leaf retry attempts are persisted to disk via `checkpoint_save`.
     #[tokio::test]
     async fn leaf_retry_attempts_persisted_to_disk() {
         let mock = MockAgentService::new();
@@ -4560,11 +4959,7 @@ mod tests {
 
         // The child's attempts are persisted (2 attempts: 1 failed + 1 succeeded).
         let loaded_state = EpicState::load(&state_path).unwrap();
-        let child_id = orch
-            .state
-            .get(root_id)
-            .unwrap()
-            .subtask_ids[0];
+        let child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
         let child = loaded_state.get(child_id).unwrap();
         assert_eq!(child.attempts.len(), 2);
         assert!(!child.attempts[0].succeeded);
@@ -4575,7 +4970,7 @@ mod tests {
     // Config wiring tests: verify non-default config values change behavior
     // -----------------------------------------------------------------------
 
-    /// Custom max_depth=2: root at depth 1, child at depth 2 is forced to Leaf without assess.
+    /// Custom `max_depth`=2: root at depth 1, child at depth 2 is forced to Leaf without assess.
     #[tokio::test]
     async fn custom_max_depth_forces_leaf() {
         let mock = MockAgentService::new();
@@ -4604,8 +4999,10 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
-        let mut limits = LimitsConfig::default();
-        limits.max_depth = 2;
+        let limits = LimitsConfig {
+            max_depth: 2,
+            ..LimitsConfig::default()
+        };
 
         let mut state = EpicState::new();
         let root_id = state.next_task_id();
@@ -4623,7 +5020,7 @@ mod tests {
         assert_eq!(child.depth, 2);
     }
 
-    /// Custom retry_budget=1: Haiku fails once → immediately escalates to Sonnet.
+    /// Custom `retry_budget`=1: Haiku fails once → immediately escalates to Sonnet.
     #[tokio::test]
     async fn custom_retry_budget_escalates_early() {
         let mock = MockAgentService::new();
@@ -4658,8 +5055,10 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
-        let mut limits = LimitsConfig::default();
-        limits.retry_budget = 1;
+        let limits = LimitsConfig {
+            retry_budget: 1,
+            ..LimitsConfig::default()
+        };
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
@@ -4674,50 +5073,75 @@ mod tests {
         assert_eq!(child.current_model, Some(Model::Sonnet));
     }
 
-    /// Custom max_recovery_rounds=1: recovery attempted once, refused on second failure.
+    /// Custom `max_recovery_rounds`=1: recovery attempted once, refused on second failure.
     #[tokio::test]
     async fn custom_max_recovery_rounds_limits_recovery() {
         let mock = MockAgentService::new();
 
-        mock.decompose_responses.lock().unwrap().push_back(DecompositionResult {
-            subtasks: vec![SubtaskSpec {
-                goal: "child A".into(),
-                verification_criteria: vec!["A passes".into()],
-                magnitude_estimate: MagnitudeEstimate::Small,
-            }],
-            rationale: "one subtask".into(),
-        });
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(DecompositionResult {
+                subtasks: vec![SubtaskSpec {
+                    goal: "child A".into(),
+                    verification_criteria: vec!["A passes".into()],
+                    magnitude_estimate: MagnitudeEstimate::Small,
+                }],
+                rationale: "one subtask".into(),
+            });
 
         // Child A fails terminally (9 attempts: 3 per tier).
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("A failed"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("A failed"));
         }
 
         // Round 1: recovery with incremental plan.
-        mock.recovery_responses.lock().unwrap().push_back(Some("try again".into()));
-        mock.recovery_plan_responses.lock().unwrap().push_back(incremental_recovery_plan());
+        mock.recovery_responses
+            .lock()
+            .unwrap()
+            .push_back(Some("try again".into()));
+        mock.recovery_plan_responses
+            .lock()
+            .unwrap()
+            .push_back(incremental_recovery_plan());
 
         // Recovery subtask 1: also fails terminally.
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
         for _ in 0..9 {
-            mock.leaf_responses.lock().unwrap().push_back(leaf_failed("recovery failed"));
+            mock.leaf_responses
+                .lock()
+                .unwrap()
+                .push_back(leaf_failed("recovery failed"));
         }
 
         // Round 2 would exceed limit (max_recovery_rounds=1) — no more recovery responses needed.
 
-        let mut limits = LimitsConfig::default();
-        limits.max_recovery_rounds = 1;
+        let limits = LimitsConfig {
+            max_recovery_rounds: 1,
+            ..LimitsConfig::default()
+        };
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
 
         let result = orch.run(root_id).await.unwrap();
-        assert!(matches!(result, TaskOutcome::Failed { reason } if reason.contains("recovery rounds exhausted")));
+        assert!(
+            matches!(result, TaskOutcome::Failed { reason } if reason.contains("recovery rounds exhausted"))
+        );
         assert_eq!(orch.state.get(root_id).unwrap().recovery_rounds, 1);
     }
 
-    /// Custom root_fix_rounds=1: root verification fails → 1 fix round → still fails → task fails.
+    /// Custom `root_fix_rounds`=1: root verification fails → 1 fix round → still fails → task fails.
     #[tokio::test]
     async fn custom_root_fix_rounds_limits_fix_attempts() {
         let mock = MockAgentService::new();
@@ -4775,8 +5199,10 @@ mod tests {
 
         // With root_fix_rounds=1, no more rounds allowed — task fails.
 
-        let mut limits = LimitsConfig::default();
-        limits.root_fix_rounds = 1;
+        let limits = LimitsConfig {
+            root_fix_rounds: 1,
+            ..LimitsConfig::default()
+        };
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
@@ -4789,7 +5215,7 @@ mod tests {
         assert_eq!(root.phase, TaskPhase::Failed);
     }
 
-    /// Custom branch_fix_rounds=1: non-root branch verification fails → 1 fix round → fails.
+    /// Custom `branch_fix_rounds`=1: non-root branch verification fails → 1 fix round → fails.
     #[tokio::test]
     async fn custom_branch_fix_rounds_limits_fix_attempts() {
         let mock = MockAgentService::new();
@@ -4871,13 +5297,12 @@ mod tests {
 
         // Child fails with branch_fix_rounds=1.
         // Root: recovery for child failure — not recoverable.
-        mock.recovery_responses
-            .lock()
-            .unwrap()
-            .push_back(None);
+        mock.recovery_responses.lock().unwrap().push_back(None);
 
-        let mut limits = LimitsConfig::default();
-        limits.branch_fix_rounds = 1;
+        let limits = LimitsConfig {
+            branch_fix_rounds: 1,
+            ..LimitsConfig::default()
+        };
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
@@ -4891,7 +5316,7 @@ mod tests {
         assert_eq!(child.phase, TaskPhase::Failed);
     }
 
-    /// retry_budget=0 is clamped to 1: leaf still gets at least one attempt.
+    /// `retry_budget`=0 is clamped to 1: leaf still gets at least one attempt.
     #[tokio::test]
     async fn zero_retry_budget_clamped_to_one() {
         let mock = MockAgentService::new();
@@ -4926,8 +5351,10 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
-        let mut limits = LimitsConfig::default();
-        limits.retry_budget = 0; // Should be clamped to 1.
+        let limits = LimitsConfig {
+            retry_budget: 0, // Should be clamped to 1.
+            ..LimitsConfig::default()
+        };
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
@@ -4952,18 +5379,30 @@ mod tests {
             .unwrap()
             .push_back(one_subtask_decomposition());
 
-        mock.assess_responses.lock().unwrap().push_back(AssessmentResult {
-            path: TaskPath::Leaf,
-            model: Model::Haiku,
-            rationale: "simple".into(),
-            magnitude: None,
-        });
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(AssessmentResult {
+                path: TaskPath::Leaf,
+                model: Model::Haiku,
+                rationale: "simple".into(),
+                magnitude: None,
+            });
 
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
 
         // Child verify + root verify.
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -4984,17 +5423,29 @@ mod tests {
             .unwrap()
             .push_back(one_subtask_decomposition());
 
-        mock.assess_responses.lock().unwrap().push_back(AssessmentResult {
-            path: TaskPath::Leaf,
-            model: Model::Sonnet,
-            rationale: "medium".into(),
-            magnitude: None,
-        });
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(AssessmentResult {
+                path: TaskPath::Leaf,
+                model: Model::Sonnet,
+                rationale: "medium".into(),
+                magnitude: None,
+            });
 
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
 
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -5014,17 +5465,29 @@ mod tests {
             .unwrap()
             .push_back(one_subtask_decomposition());
 
-        mock.assess_responses.lock().unwrap().push_back(AssessmentResult {
-            path: TaskPath::Leaf,
-            model: Model::Opus,
-            rationale: "hard leaf".into(),
-            magnitude: None,
-        });
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(AssessmentResult {
+                path: TaskPath::Leaf,
+                model: Model::Opus,
+                rationale: "hard leaf".into(),
+                magnitude: None,
+            });
 
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
 
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -5045,12 +5508,24 @@ mod tests {
             .unwrap()
             .push_back(one_subtask_decomposition());
 
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
 
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
 
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -5072,12 +5547,24 @@ mod tests {
             .unwrap()
             .push_back(one_subtask_decomposition());
 
-        mock.assess_responses.lock().unwrap().push_back(leaf_assessment());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
 
-        mock.leaf_responses.lock().unwrap().push_back(leaf_success());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
 
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
-        mock.verify_responses.lock().unwrap().push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
@@ -5134,11 +5621,15 @@ mod tests {
                 limit_events.push(task_id);
             }
         }
-        assert_eq!(limit_events.len(), 1, "expected exactly one TaskLimitReached event");
+        assert_eq!(
+            limit_events.len(),
+            1,
+            "expected exactly one TaskLimitReached event"
+        );
         assert_eq!(limit_events[0], root_id);
     }
 
-    /// Fix subtask creation blocked by task limit (branch_fix_loop path).
+    /// Fix subtask creation blocked by task limit (`branch_fix_loop` path).
     #[tokio::test]
     async fn task_limit_blocks_fix_subtasks() {
         // Execution flow:
@@ -5262,7 +5753,7 @@ mod tests {
         );
     }
 
-    /// Recovery subtasks inherit parent's recovery_rounds (no fresh budget).
+    /// Recovery subtasks inherit parent's `recovery_rounds` (no fresh budget).
     #[tokio::test]
     async fn recovery_depth_inherited_not_fresh() {
         let mock = MockAgentService::new();
@@ -5392,8 +5883,10 @@ mod tests {
 
         // No second recovery response needed: budget exhausted (recovery_rounds=1 >= max=1).
 
-        let mut limits = LimitsConfig::default();
-        limits.max_recovery_rounds = 1;
+        let limits = LimitsConfig {
+            max_recovery_rounds: 1,
+            ..LimitsConfig::default()
+        };
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
