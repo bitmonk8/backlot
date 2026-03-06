@@ -79,25 +79,22 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 **Completed:** 2026-03-05. All 95 review cells executed. 541 original findings.
 
-**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, and container setup documentation — resolving 53 findings fully and 15 partially.
+**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, and main.rs testability — resolving 58 findings fully and 15 partially.
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
-| Critical | 2 | 0 |
-| Major | 80 | 8 |
+| Critical | 0 | 0 |
+| Major | 77 | 8 |
 | Minor | 224 | 7 |
 | Note | 164 | 3 |
-| **Total** | **470** | **15** |
-
-Note: The original audit counted unsandboxed bash as 2 critical findings (security + tools review cells). Per [SANDBOXING.md](SANDBOXING.md), this is now split: security isolation (C1, resolved — startup detection + README documentation both complete) and operational correctness (C2, major — solved by Frida-based runtime interception).
+| **Total** | **465** | **15** |
 
 ### Remaining Findings by Category
 
 | Category | Approx count | Critical | Major |
 |---|---|---|---|
-| ~~Security isolation (container/VM guidance, startup detection)~~ | 0 | 0 | 0 |
 | Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
 | Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~70 | 0 | ~10 |
@@ -106,42 +103,17 @@ Note: The original audit counted unsandboxed bash as 2 critical findings (securi
 | Design intent gaps (prompt content, tool grants, missing review phase) | ~40 | 0 | ~10 |
 | Doc drift (TUI event names, CLI syntax, type mismatches) | ~25 | 0 | ~5 |
 | Correctness (empty subtask validation, cycle detection, phase transitions) | ~30 | 0 | ~8 |
-| CI pipeline | ~8 | 0 | ~3 |
 | Other (clippy, naming, notes) | ~128 | 0 | 0 |
 
 ---
 
-## Critical Findings (4)
+## Critical Findings (all resolved)
 
-### ~~C1. Security isolation: container/VM setup documentation~~ — RESOLVED
-**Refs:** U2-R2#1, U5-R2#1 (security aspect)
-
-Both parts complete:
-1. **Startup detection** — `sandbox::detect_virtualization()` performs best-effort container/VM detection at startup, emitting a stderr warning when not detected. Suppressible via `--no-sandbox-warn`.
-2. **Documentation** — [README.md](../README.md) Sandboxing section guides users toward container/VM usage with recommended configuration (bind-mounted project directory, restricted network access).
-
-### C2. Operational correctness: no per-phase access enforcement (Major)
-**Refs:** U2-R2#1, U5-R2#1 (correctness aspect)
-
-Separate from security isolation, each epic phase (assess, decompose, execute, verify) has a defined contract for what it should access. Currently these contracts are enforced only at the prompt level (`ToolGrant` bitflags) and via `safe_path()` containment — both of which are bypassed by bash commands. A read-only phase can write files; an execute phase can modify files outside its scope.
-
-Per [SANDBOXING.md](SANDBOXING.md), the solution is Frida-based runtime interception (frida-gum for in-process, frida-core for child processes) to enforce per-phase access policies at the syscall level. This is complex, has open questions (child process injection latency, tokio thread interaction, write set derivation), and should start in audit mode before enforcement mode.
-
-This is not a security boundary — it is an operational correctness mechanism. Severity: Major.
-
-### C3. No CI pipeline
-**Ref:** X4#1
-
-No CI configuration exists. No automated build, test, clippy, or fmt checks. The Flick git dependency is unpinned. No `rust-toolchain.toml`.
-
-### C4. main.rs untestable
-**Ref:** U12-R6#1
-
-`main.rs` uses `process::exit()` in multiple error paths, accepts no dependency injection, and has zero test coverage. Cannot integration-test the entry point without extracting an `async fn run()` that returns `Result`.
+All 4 original critical findings have been resolved: C1 (security isolation documentation — README + startup detection), C2 (operational correctness — reclassified as Major, tracked below), C3 (CI pipeline — GitHub Actions added), C4 (main.rs untestable — `run()` extracted).
 
 ---
 
-## Major Findings (79 still valid, 8 partially resolved)
+## Major Findings (77 still valid, 8 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
@@ -205,7 +177,6 @@ No CI configuration exists. No automated build, test, clippy, or fmt checks. The
 | U3-R6#1 | `build_config` monolith couples JSON assembly to `flick::Config::from_str` | `config_gen.rs` |
 | B3#1 | `VerificationStarted`/`VerificationComplete` event pair — redundant with `TaskCompleted`/`TaskFailed` | `events.rs`, `orchestrator.rs` |
 | B3#2 | `SubtasksCreated` emitted redundantly alongside `RecoverySubtasksCreated`/`FixSubtasksCreated` | `events.rs`, `orchestrator.rs` |
-| U12-R5 | Duplicated state-load sequences in `main.rs` (multiple findings) | `main.rs` |
 
 ### Error Handling
 
@@ -215,7 +186,6 @@ No CI configuration exists. No automated build, test, clippy, or fmt checks. The
 | B4#2 | `design_fix_subtasks` errors are fatal — inconsistent with best-effort `design_recovery_subtasks` | `orchestrator.rs` |
 | U11-R1#1 | `read_line()` in init silently discards I/O errors | `init.rs` |
 | U12-R1#1 | TUI abort path does not save state — user loses progress on Ctrl-C during TUI mode | `main.rs` |
-| U12-R3 | `process::exit()` used in multiple error paths — prevents cleanup and testability (multiple findings) | `main.rs` |
 | U5-R3#1 | Bash timeout doesn't explicitly kill child — resources leak on timeout (also correctness) | `tools.rs` |
 
 ### Dead Code & Stubs
@@ -252,13 +222,6 @@ No CI configuration exists. No automated build, test, clippy, or fmt checks. The
 | U17-R8#14 | TUI_DESIGN.md event names don't match actual Event enum variants | `TUI_DESIGN.md` |
 | U17-R8#15 | TUI_DESIGN.md `VerificationResult` vs actual `VerificationComplete` | `TUI_DESIGN.md` |
 
-### CI & Build
-
-| Ref | Finding | Location |
-|-----|---------|----------|
-| X1#1 | Flick git dependency has no pinned rev/tag — builds are not reproducible | `Cargo.toml` |
-| X4 | No CI pipeline — no automated build, test, clippy, or fmt checks (multiple findings) | — |
-
 ### Partially Resolved Majors
 
 | Ref | Finding | Status |
@@ -276,14 +239,10 @@ No CI configuration exists. No automated build, test, clippy, or fmt checks. The
 
 ## Recommended Action Items (Priority Order)
 
-1. ~~**Security isolation: container setup documentation.**~~ Resolved. README.md created with sandboxing guidance. See C1 above.
-2. **Add CI pipeline.** GitHub Actions with build, test, clippy, fmt. Pin Flick dependency to a rev/tag. Add `rust-toolchain.toml`.
-3. **Extract `main()` into testable function.** Replace `process::exit` with `bail!`, extract `async fn run()`.
-4. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
-5. **Remove dead modules.** `git.rs`, `metrics.rs`, `services/*.rs`.
-6. **Deduplicate retry/escalation loop.** Extract shared state machine from `execute_leaf` and `leaf_fix_loop`.
-7. **Add cycle detection to `dfs_order`.** Infinite loop on corrupted state files.
-8. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-9. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-10. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.
-11. **Pin Flick git dependency.** Add `rev = "..."` or `tag = "..."` to `Cargo.toml`.
+1. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
+2. **Remove dead modules.** `git.rs`, `metrics.rs`, `services/*.rs`.
+3. **Deduplicate retry/escalation loop.** Extract shared state machine from `execute_leaf` and `leaf_fix_loop`.
+4. **Add cycle detection to `dfs_order`.** Infinite loop on corrupted state files.
+5. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+6. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+7. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.

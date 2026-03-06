@@ -50,17 +50,13 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 ## Next Work Candidates
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
-1. ~~**Add container setup documentation to README**~~ — Done. README.md created in project root with full documentation including sandboxing guidance.
-2. ~~**Add CI pipeline**~~ — Done. GitHub Actions (fmt, clippy, test, build). Flick pinned to rev `8bf1d79`. `rust-toolchain.toml` pins Rust 1.93.1. PR #1.
-3. ~~**Extract main() into testable function**~~ — Done. `main()` is now a thin wrapper calling `async fn run()`. All `process::exit` replaced with `bail!`. 145 tests passing.
-4. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
-5. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs.
-6. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code.
-7. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files.
-8. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-9. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-10. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
-11. ~~**Pin Flick git dependency**~~ — Done. Pinned to rev `8bf1d79` in Cargo.toml (part of CI pipeline work).
+1. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
+2. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs.
+3. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code.
+4. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files.
+5. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+6. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+7. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
 
 ## Decisions Made
 
@@ -68,7 +64,7 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 
 **Scope:** `src/main.rs` refactored. 1 file modified, 145 tests passing, 0 clippy warnings.
 
-**Changes:** Extracted body of `main()` into `async fn run() -> anyhow::Result<()>`. `main()` is now a thin wrapper that calls `run()`, prints errors via `eprintln!("Error: {e:#}")`, and calls `process::exit(1)` on failure. Replaced all 10 `eprintln!` + `process::exit(1)` patterns with `bail!(...)`. `print_status` now returns `anyhow::Result<()>` instead of calling `process::exit`. Unblocks integration testing.
+**Changes:** Extracted body of `main()` into `pub(crate) async fn run() -> anyhow::Result<()>`. `main()` is a thin wrapper that calls `run()`, prints errors via `eprintln!("Error: {e:#}")`, and calls `process::exit(1)` on failure — the only remaining `process::exit` in the file. Replaced all 10 error-path `eprintln!` + `process::exit(1)` patterns with `bail!(...)`. Extracted `load_and_validate_state()` helper, deduplicating ~30 lines of identical state loading between `Command::Run` and `Command::Resume`. `print_status` returns `anyhow::Result<()>` and reuses the same helper. Unblocks integration testing.
 
 ### 2026-03-06: CI pipeline and clippy/fmt remediation
 
@@ -96,7 +92,7 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 - `VERIFICATION.md` — Replaced leaf fix loop and scope circuit breaker detail with references to README and FIX_LOOP_SPEC.md. Retained struct definitions, branch verification, error handling.
 - `AGENT_DESIGN.md` — Removed agent execution overview, model selection table, bitflags code block. Retained per-phase tool grants, prompt assembly, structured output.
 
-**AUDIT.md:** C1 (security isolation documentation) marked resolved. Findings count updated (470 still valid, 2 critical remaining).
+**AUDIT.md:** Updated to reflect resolved findings (all 4 criticals resolved, CI & main.rs findings resolved).
 
 ### 2026-03-06: Container/VM startup detection implemented
 
