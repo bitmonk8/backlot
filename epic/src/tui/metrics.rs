@@ -77,10 +77,7 @@ impl Widget for MetricsWidget<'_> {
             ]),
             Line::from(vec![
                 Span::styled("Failed:      ", Style::default()),
-                Span::styled(
-                    failed.to_string(),
-                    Style::default().fg(Color::Red).bold(),
-                ),
+                Span::styled(failed.to_string(), Style::default().fg(Color::Red).bold()),
             ]),
         ];
 

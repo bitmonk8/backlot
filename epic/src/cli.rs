@@ -1,13 +1,21 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "epic", about = "AI agent orchestration for software engineering tasks")]
+#[command(
+    name = "epic",
+    about = "AI agent orchestration for software engineering tasks"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
     /// Credential name passed to Flick.
-    #[arg(long, env = "EPIC_CREDENTIAL", default_value = "anthropic", global = true)]
+    #[arg(
+        long,
+        env = "EPIC_CREDENTIAL",
+        default_value = "anthropic",
+        global = true
+    )]
     pub credential: String,
 
     /// Disable the TUI; run headless with event output to stderr.

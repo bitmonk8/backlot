@@ -49,7 +49,6 @@ impl Model {
             Self::Opus => None,
         }
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

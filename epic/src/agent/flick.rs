@@ -31,7 +31,7 @@ pub struct FlickAgent {
 }
 
 impl FlickAgent {
-    pub fn new(
+    pub const fn new(
         project_root: PathBuf,
         credential_name: String,
         call_timeout: Duration,
@@ -51,10 +51,7 @@ impl FlickAgent {
     // Core: build a FlickClient from a Config
     // -----------------------------------------------------------------------
 
-    async fn build_client(
-        &self,
-        config: flick::Config,
-    ) -> anyhow::Result<flick::FlickClient> {
+    async fn build_client(&self, config: flick::Config) -> anyhow::Result<flick::FlickClient> {
         let provider = flick::resolve_provider(&config)
             .await
             .map_err(|e| anyhow::anyhow!("failed to resolve provider: {e}"))?;
@@ -73,13 +70,10 @@ impl FlickAgent {
         let client = self.build_client(config).await?;
         let mut context = flick::Context::default();
 
-        let result = tokio::time::timeout(
-            self.call_timeout,
-            client.run(query, &mut context),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("flick call timed out after {:?}", self.call_timeout))?
-        .map_err(|e| anyhow::anyhow!("flick call failed: {e}"))?;
+        let result = tokio::time::timeout(self.call_timeout, client.run(query, &mut context))
+            .await
+            .map_err(|_| anyhow::anyhow!("flick call timed out after {:?}", self.call_timeout))?
+            .map_err(|e| anyhow::anyhow!("flick call failed: {e}"))?;
 
         check_error(&result)?;
 
@@ -102,13 +96,10 @@ impl FlickAgent {
         let mut context = flick::Context::default();
 
         // Initial call (not counted toward MAX_TOOL_ROUNDS; the limit applies to resume rounds).
-        let mut result = tokio::time::timeout(
-            self.call_timeout,
-            client.run(query, &mut context),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("flick call timed out after {:?}", self.call_timeout))?
-        .map_err(|e| anyhow::anyhow!("flick call failed: {e}"))?;
+        let mut result = tokio::time::timeout(self.call_timeout, client.run(query, &mut context))
+            .await
+            .map_err(|_| anyhow::anyhow!("flick call timed out after {:?}", self.call_timeout))?
+            .map_err(|e| anyhow::anyhow!("flick call failed: {e}"))?;
 
         for _round in 1..=MAX_TOOL_ROUNDS {
             if !matches!(result.status, ResultStatus::ToolCallsPending) {
@@ -118,14 +109,8 @@ impl FlickAgent {
             let tool_calls = extract_tool_calls(&result)?;
             let mut tool_results = Vec::with_capacity(tool_calls.len());
             for (id, name, input) in &tool_calls {
-                let r = tools::execute_tool(
-                    id.clone(),
-                    name,
-                    input,
-                    &self.project_root,
-                    grant,
-                )
-                .await;
+                let r =
+                    tools::execute_tool(id.clone(), name, input, &self.project_root, grant).await;
                 tool_results.push(flick::ContentBlock::ToolResult {
                     tool_use_id: r.tool_use_id,
                     content: r.content,
@@ -133,13 +118,13 @@ impl FlickAgent {
                 });
             }
 
-            result = tokio::time::timeout(
-                self.call_timeout,
-                client.resume(&mut context, tool_results),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("flick call timed out after {:?}", self.call_timeout))?
-            .map_err(|e| anyhow::anyhow!("flick resume failed: {e}"))?;
+            result =
+                tokio::time::timeout(self.call_timeout, client.resume(&mut context, tool_results))
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("flick call timed out after {:?}", self.call_timeout)
+                    })?
+                    .map_err(|e| anyhow::anyhow!("flick resume failed: {e}"))?;
         }
 
         if matches!(result.status, ResultStatus::ToolCallsPending) {
@@ -160,9 +145,7 @@ impl FlickAgent {
 
 impl FlickAgent {
     /// Run the init exploration agent to detect project build/test/lint setup.
-    pub async fn explore_for_init(
-        &self,
-    ) -> anyhow::Result<config_gen::InitFindingsWire> {
+    pub async fn explore_for_init(&self) -> anyhow::Result<config_gen::InitFindingsWire> {
         let system_prompt = "\
 You are a project analyzer. Explore the project directory to detect its build system, \
 test framework, linters, and formatters.
@@ -214,11 +197,7 @@ impl AgentService for FlickAgent {
         AssessmentResult::try_from(wire)
     }
 
-    async fn execute_leaf(
-        &self,
-        ctx: &TaskContext,
-        model: Model,
-    ) -> anyhow::Result<LeafResult> {
+    async fn execute_leaf(&self, ctx: &TaskContext, model: Model) -> anyhow::Result<LeafResult> {
         let pair = prompts::build_execute_leaf(ctx);
         let grant = tools::phase_tools(AgentMethod::Execute);
         let config = config_gen::build_execute_leaf_config(
@@ -229,9 +208,7 @@ impl AgentService for FlickAgent {
             &self.model_config,
         )?;
 
-        let wire: TaskOutcomeWire = self
-            .run_with_tools(config, &pair.query, grant)
-            .await?;
+        let wire: TaskOutcomeWire = self.run_with_tools(config, &pair.query, grant).await?;
         LeafResult::try_from(wire)
     }
 
@@ -252,9 +229,7 @@ impl AgentService for FlickAgent {
             &self.model_config,
         )?;
 
-        let wire: TaskOutcomeWire = self
-            .run_with_tools(config, &pair.query, grant)
-            .await?;
+        let wire: TaskOutcomeWire = self.run_with_tools(config, &pair.query, grant).await?;
         LeafResult::try_from(wire)
     }
 
@@ -273,9 +248,7 @@ impl AgentService for FlickAgent {
             &self.model_config,
         )?;
 
-        let wire: DecompositionWire = self
-            .run_with_tools(config, &pair.query, grant)
-            .await?;
+        let wire: DecompositionWire = self.run_with_tools(config, &pair.query, grant).await?;
         DecompositionResult::try_from(wire)
     }
 
@@ -296,9 +269,7 @@ impl AgentService for FlickAgent {
             &self.model_config,
         )?;
 
-        let wire: DecompositionWire = self
-            .run_with_tools(config, &pair.query, grant)
-            .await?;
+        let wire: DecompositionWire = self.run_with_tools(config, &pair.query, grant).await?;
         DecompositionResult::try_from(wire)
     }
 
@@ -313,9 +284,7 @@ impl AgentService for FlickAgent {
             &self.model_config,
         )?;
 
-        let wire: VerificationWire = self
-            .run_with_tools(config, &pair.query, grant)
-            .await?;
+        let wire: VerificationWire = self.run_with_tools(config, &pair.query, grant).await?;
         VerificationResult::try_from(wire)
     }
 
@@ -360,7 +329,8 @@ impl AgentService for FlickAgent {
         strategy: &str,
         recovery_round: u32,
     ) -> anyhow::Result<RecoveryPlan> {
-        let pair = prompts::build_design_recovery_subtasks(ctx, failure_reason, strategy, recovery_round);
+        let pair =
+            prompts::build_design_recovery_subtasks(ctx, failure_reason, strategy, recovery_round);
         let grant = tools::phase_tools(AgentMethod::Decompose);
         let config = config_gen::build_recovery_plan_config(
             &pair.system_prompt,
@@ -370,9 +340,7 @@ impl AgentService for FlickAgent {
             &self.model_config,
         )?;
 
-        let wire: RecoveryPlanWire = self
-            .run_with_tools(config, &pair.query, grant)
-            .await?;
+        let wire: RecoveryPlanWire = self.run_with_tools(config, &pair.query, grant).await?;
         RecoveryPlan::try_from(wire)
     }
 }
@@ -405,7 +373,9 @@ fn extract_text(result: &flick::FlickResult) -> anyhow::Result<String> {
         .context("no text block found in flick output")
 }
 
-fn extract_tool_calls(result: &flick::FlickResult) -> anyhow::Result<Vec<(String, String, JsonValue)>> {
+fn extract_tool_calls(
+    result: &flick::FlickResult,
+) -> anyhow::Result<Vec<(String, String, JsonValue)>> {
     let calls: Vec<_> = result
         .content
         .iter()

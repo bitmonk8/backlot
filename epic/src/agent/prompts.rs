@@ -63,9 +63,7 @@ fn format_context(ctx: &TaskContext) -> String {
     let guidance_section = ctx
         .checkpoint_guidance
         .as_deref()
-        .map_or_else(String::new, |g| {
-            format!("\n\n## Checkpoint Guidance\n{g}")
-        });
+        .map_or_else(String::new, |g| format!("\n\n## Checkpoint Guidance\n{g}"));
 
     format!(
         "## Task\nGoal: {goal}\nVerification criteria:\n- {criteria}\n\n\
@@ -195,7 +193,11 @@ Respond with the required JSON schema when done."
     }
 }
 
-pub fn build_design_fix_subtasks(ctx: &TaskContext, verification_issues: &str, round: u32) -> PromptPair {
+pub fn build_design_fix_subtasks(
+    ctx: &TaskContext,
+    verification_issues: &str,
+    round: u32,
+) -> PromptPair {
     let system_prompt = "\
 You are a task decomposer in a recursive problem-solving system.
 
@@ -454,7 +456,7 @@ mod tests {
         let pair = build_fix_leaf(&ctx, "test X not passing", 2);
         assert!(pair.query.contains("implement feature X"));
         assert!(pair.query.contains("test X not passing"));
-        assert!(pair.query.contains("2"));
+        assert!(pair.query.contains('2'));
         assert!(pair.system_prompt.contains("fix"));
         assert!(pair.system_prompt.contains("rewriting from scratch"));
     }
@@ -490,7 +492,7 @@ mod tests {
         let pair = build_design_recovery_subtasks(&ctx, "child crashed", "retry with fallback", 1);
         assert!(pair.query.contains("child crashed"));
         assert!(pair.query.contains("retry with fallback"));
-        assert!(pair.query.contains("1"));
+        assert!(pair.query.contains('1'));
         assert!(pair.query.contains("implement feature X"));
         assert!(pair.system_prompt.contains("recovery"));
         assert!(pair.system_prompt.contains("incremental"));
@@ -519,7 +521,7 @@ mod tests {
         let ctx = test_context();
         let pair = build_design_fix_subtasks(&ctx, "lint errors in module X", 2);
         assert!(pair.query.contains("lint errors in module X"));
-        assert!(pair.query.contains("2"));
+        assert!(pair.query.contains('2'));
         assert!(pair.query.contains("implement feature X"));
         assert!(pair.system_prompt.contains("fix"));
     }

@@ -12,7 +12,7 @@ use crate::tui::worklog::{WorklogEntry, WorklogWidget};
 use anyhow::Result;
 use crossterm::event::{self as ct_event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -200,10 +200,7 @@ impl TuiApp {
                 child_ids,
             } => {
                 self.worklog.push(WorklogEntry::info(
-                    format!(
-                        "{parent_id} decomposed into {} subtasks",
-                        child_ids.len()
-                    ),
+                    format!("{parent_id} decomposed into {} subtasks", child_ids.len()),
                     self.session_start,
                 ));
             }
@@ -323,7 +320,10 @@ impl TuiApp {
                     self.session_start,
                 ));
             }
-            Event::RecoveryPlanSelected { task_id, ref approach } => {
+            Event::RecoveryPlanSelected {
+                task_id,
+                ref approach,
+            } => {
                 self.worklog.push(WorklogEntry::warn(
                     format!("{task_id} recovery approach: {approach}"),
                     self.session_start,
@@ -415,12 +415,7 @@ impl TuiApp {
 
             self.render_task_tree(frame, columns[0]);
             self.render_worklog(frame, columns[1]);
-            frame.render_widget(
-                MetricsWidget {
-                    tasks: &self.tasks,
-                },
-                columns[2],
-            );
+            frame.render_widget(MetricsWidget { tasks: &self.tasks }, columns[2]);
         } else {
             // Two columns: tree | worklog.
             let columns = Layout::default()

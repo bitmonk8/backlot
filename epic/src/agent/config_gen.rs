@@ -5,7 +5,9 @@ use crate::config::project::{ModelConfig, VerificationStep};
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
 use crate::task::verify::{VerificationOutcome, VerificationResult};
-use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, Model, RecoveryPlan, TaskOutcome, TaskPath};
+use crate::task::{
+    LeafResult, Magnitude, MagnitudeEstimate, Model, RecoveryPlan, TaskOutcome, TaskPath,
+};
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -168,7 +170,11 @@ pub struct RecoveryWire {
 
 impl RecoveryWire {
     pub fn into_strategy(self) -> Option<String> {
-        if self.recoverable { Some(self.strategy.unwrap_or_default()) } else { None }
+        if self.recoverable {
+            Some(self.strategy.unwrap_or_default())
+        } else {
+            None
+        }
     }
 }
 
@@ -383,8 +389,7 @@ fn build_config(
         json["output_schema"] = serde_json::json!({ "schema": schema });
     }
 
-    let json_str = serde_json::to_string(&json)
-        .context("failed to serialize config JSON")?;
+    let json_str = serde_json::to_string(&json).context("failed to serialize config JSON")?;
     flick::Config::from_str(&json_str, flick::ConfigFormat::Json)
         .map_err(|e| anyhow::anyhow!("failed to parse flick config: {e}"))
 }
@@ -398,7 +403,14 @@ pub fn build_assess_config(
 ) -> anyhow::Result<flick::Config> {
     let tools = tool_definitions(grant);
     let schema = assessment_schema();
-    build_config(system_prompt, model, credential, &tools, Some(&schema), model_config)
+    build_config(
+        system_prompt,
+        model,
+        credential,
+        &tools,
+        Some(&schema),
+        model_config,
+    )
 }
 
 pub fn build_execute_leaf_config(
@@ -410,7 +422,14 @@ pub fn build_execute_leaf_config(
 ) -> anyhow::Result<flick::Config> {
     let tools = tool_definitions(grant);
     let schema = task_outcome_schema();
-    build_config(system_prompt, model, credential, &tools, Some(&schema), model_config)
+    build_config(
+        system_prompt,
+        model,
+        credential,
+        &tools,
+        Some(&schema),
+        model_config,
+    )
 }
 
 pub fn build_decompose_config(
@@ -422,7 +441,14 @@ pub fn build_decompose_config(
 ) -> anyhow::Result<flick::Config> {
     let tools = tool_definitions(grant);
     let schema = decomposition_schema();
-    build_config(system_prompt, model, credential, &tools, Some(&schema), model_config)
+    build_config(
+        system_prompt,
+        model,
+        credential,
+        &tools,
+        Some(&schema),
+        model_config,
+    )
 }
 
 pub fn build_verify_config(
@@ -434,7 +460,14 @@ pub fn build_verify_config(
 ) -> anyhow::Result<flick::Config> {
     let tools = tool_definitions(grant);
     let schema = verification_schema();
-    build_config(system_prompt, model, credential, &tools, Some(&schema), model_config)
+    build_config(
+        system_prompt,
+        model,
+        credential,
+        &tools,
+        Some(&schema),
+        model_config,
+    )
 }
 
 pub fn build_checkpoint_config(
@@ -444,7 +477,14 @@ pub fn build_checkpoint_config(
     model_config: &ModelConfig,
 ) -> anyhow::Result<flick::Config> {
     let schema = checkpoint_schema();
-    build_config(system_prompt, model, credential, &[], Some(&schema), model_config)
+    build_config(
+        system_prompt,
+        model,
+        credential,
+        &[],
+        Some(&schema),
+        model_config,
+    )
 }
 
 pub fn build_recovery_config(
@@ -454,7 +494,14 @@ pub fn build_recovery_config(
     model_config: &ModelConfig,
 ) -> anyhow::Result<flick::Config> {
     let schema = recovery_schema();
-    build_config(system_prompt, model, credential, &[], Some(&schema), model_config)
+    build_config(
+        system_prompt,
+        model,
+        credential,
+        &[],
+        Some(&schema),
+        model_config,
+    )
 }
 
 pub fn build_recovery_plan_config(
@@ -466,7 +513,14 @@ pub fn build_recovery_plan_config(
 ) -> anyhow::Result<flick::Config> {
     let tools = tool_definitions(grant);
     let schema = recovery_plan_schema();
-    build_config(system_prompt, model, credential, &tools, Some(&schema), model_config)
+    build_config(
+        system_prompt,
+        model,
+        credential,
+        &tools,
+        Some(&schema),
+        model_config,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +605,14 @@ pub fn build_init_config(
 ) -> anyhow::Result<flick::Config> {
     let tools = tool_definitions(grant);
     let schema = init_findings_schema();
-    build_config(system_prompt, Model::Sonnet, credential, &tools, Some(&schema), model_config)
+    build_config(
+        system_prompt,
+        Model::Sonnet,
+        credential,
+        &tools,
+        Some(&schema),
+        model_config,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -611,7 +672,10 @@ mod tests {
         };
         let result = DecompositionResult::try_from(wire).unwrap();
         assert_eq!(result.subtasks.len(), 1);
-        assert_eq!(result.subtasks[0].magnitude_estimate, MagnitudeEstimate::Small);
+        assert_eq!(
+            result.subtasks[0].magnitude_estimate,
+            MagnitudeEstimate::Small
+        );
     }
 
     #[test]
@@ -646,7 +710,10 @@ mod tests {
         };
         let result = LeafResult::try_from(wire).unwrap();
         assert_eq!(result.outcome, TaskOutcome::Success);
-        assert_eq!(result.discoveries, vec!["found API v2", "cache layer exists"]);
+        assert_eq!(
+            result.discoveries,
+            vec!["found API v2", "cache layer exists"]
+        );
     }
 
     #[test]
@@ -689,7 +756,10 @@ mod tests {
             recoverable: true,
             strategy: Some("retry with different approach".into()),
         };
-        assert_eq!(recoverable.into_strategy(), Some("retry with different approach".into()));
+        assert_eq!(
+            recoverable.into_strategy(),
+            Some("retry with different approach".into())
+        );
 
         let not_recoverable = RecoveryWire {
             recoverable: false,
@@ -736,8 +806,12 @@ mod tests {
         // Verify the JSON structure matches expectations
         assert_eq!(json["model"]["name"], "claude-sonnet-4-6");
         assert_eq!(json["provider"]["anthropic"]["credential"], "anthropic_key");
-        let tool_names: Vec<&str> = json["tools"].as_array().unwrap()
-            .iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let tool_names: Vec<&str> = json["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert!(tool_names.contains(&"read_file"));
         assert!(tool_names.contains(&"glob"));
         assert!(tool_names.contains(&"grep"));
@@ -797,7 +871,10 @@ mod tests {
         let result = RecoveryPlan::try_from(wire).unwrap();
         assert!(!result.full_redecomposition);
         assert_eq!(result.subtasks.len(), 1);
-        assert_eq!(result.subtasks[0].magnitude_estimate, MagnitudeEstimate::Small);
+        assert_eq!(
+            result.subtasks[0].magnitude_estimate,
+            MagnitudeEstimate::Small
+        );
     }
 
     #[test]
@@ -840,9 +917,18 @@ mod tests {
     #[test]
     fn resolve_model_name_default_config_matches_flick_ids() {
         let default_cfg = ModelConfig::default();
-        assert_eq!(resolve_model_name(Model::Haiku, &default_cfg), "claude-haiku-4-5-20251001");
-        assert_eq!(resolve_model_name(Model::Sonnet, &default_cfg), "claude-sonnet-4-6");
-        assert_eq!(resolve_model_name(Model::Opus, &default_cfg), "claude-opus-4-6");
+        assert_eq!(
+            resolve_model_name(Model::Haiku, &default_cfg),
+            "claude-haiku-4-5-20251001"
+        );
+        assert_eq!(
+            resolve_model_name(Model::Sonnet, &default_cfg),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            resolve_model_name(Model::Opus, &default_cfg),
+            "claude-opus-4-6"
+        );
     }
 
     #[test]

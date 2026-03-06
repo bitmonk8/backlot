@@ -33,18 +33,20 @@ async fn main() -> anyhow::Result<()> {
     let work_dir = project_root.join(".epic");
     let state_path = work_dir.join("state.json");
 
-    if let Command::Status = &cli.command {
-        return print_status(&state_path);
+    if matches!(&cli.command, Command::Status) {
+        print_status(&state_path);
+        return Ok(());
     }
 
-    if matches!(&cli.command, Command::Run { .. } | Command::Resume) && !cli.no_sandbox_warn {
-        if !sandbox::detect_virtualization() {
-            eprintln!(
-                "Warning: No container or VM detected. Running epic outside an isolated environment \
-                 is not recommended — agents execute arbitrary shell commands. See epic documentation \
-                 for container setup guidance."
-            );
-        }
+    if matches!(&cli.command, Command::Run { .. } | Command::Resume)
+        && !cli.no_sandbox_warn
+        && !sandbox::detect_virtualization()
+    {
+        eprintln!(
+            "Warning: No container or VM detected. Running epic outside an isolated environment \
+             is not recommended — agents execute arbitrary shell commands. See epic documentation \
+             for container setup guidance."
+        );
     }
 
     // Check epic.toml existence before constructing agent (avoids requiring credentials for this error).
@@ -96,26 +98,21 @@ async fn main() -> anyhow::Result<()> {
                         std::process::exit(1);
                     }
                 };
-                let rid = match existing.root_id() {
-                    Some(id) => id,
-                    None => {
-                        eprintln!(
-                            "State file at {} is corrupt (no root task). Delete it to start fresh.",
-                            state_path.display()
-                        );
-                        std::process::exit(1);
-                    }
+                let Some(rid) = existing.root_id() else {
+                    eprintln!(
+                        "State file at {} is corrupt (no root task). Delete it to start fresh.",
+                        state_path.display()
+                    );
+                    std::process::exit(1);
                 };
-                let persisted_goal = match existing.get(rid) {
-                    Some(t) => t.goal.clone(),
-                    None => {
-                        eprintln!(
-                            "State file at {} is corrupt (root task missing). Delete it to start fresh.",
-                            state_path.display()
-                        );
-                        std::process::exit(1);
-                    }
+                let Some(root_task) = existing.get(rid) else {
+                    eprintln!(
+                        "State file at {} is corrupt (root task missing). Delete it to start fresh.",
+                        state_path.display()
+                    );
+                    std::process::exit(1);
                 };
+                let persisted_goal = root_task.goal.clone();
                 if *goal != persisted_goal {
                     eprintln!(
                         "State file exists with different goal: \"{persisted_goal}\". \
@@ -142,7 +139,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Resume => {
             if !state_path.exists() {
-                eprintln!("No state file found at {}. Nothing to resume.", state_path.display());
+                eprintln!(
+                    "No state file found at {}. Nothing to resume.",
+                    state_path.display()
+                );
                 std::process::exit(1);
             }
             let state = match EpicState::load(&state_path) {
@@ -155,26 +155,21 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
-            let root_id = match state.root_id() {
-                Some(id) => id,
-                None => {
-                    eprintln!(
-                        "State file at {} is corrupt (no root task). Delete it to start fresh.",
-                        state_path.display()
-                    );
-                    std::process::exit(1);
-                }
+            let Some(root_id) = state.root_id() else {
+                eprintln!(
+                    "State file at {} is corrupt (no root task). Delete it to start fresh.",
+                    state_path.display()
+                );
+                std::process::exit(1);
             };
-            let goal_text = match state.get(root_id) {
-                Some(t) => t.goal.clone(),
-                None => {
-                    eprintln!(
-                        "State file at {} is corrupt (root task missing). Delete it to start fresh.",
-                        state_path.display()
-                    );
-                    std::process::exit(1);
-                }
+            let Some(root_task) = state.get(root_id) else {
+                eprintln!(
+                    "State file at {} is corrupt (root task missing). Delete it to start fresh.",
+                    state_path.display()
+                );
+                std::process::exit(1);
             };
+            let goal_text = root_task.goal.clone();
             eprintln!("Resuming from {}", state_path.display());
             (state, root_id, goal_text)
         }
@@ -202,8 +197,7 @@ async fn main() -> anyhow::Result<()> {
             (result, state)
         });
 
-        let tui_result =
-            tokio::task::spawn_blocking(move || tui_app.run(rx)).await?;
+        let tui_result = tokio::task::spawn_blocking(move || tui_app.run(rx)).await?;
 
         let abort_handle = orch_handle.abort_handle();
         match tokio::time::timeout(Duration::from_secs(2), orch_handle).await {
@@ -230,10 +224,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_status(state_path: &std::path::Path) -> anyhow::Result<()> {
+fn print_status(state_path: &std::path::Path) {
     if !state_path.exists() {
         println!("No active run (no state file at {}).", state_path.display());
-        return Ok(());
+        return;
     }
     let state = match EpicState::load(state_path) {
         Ok(s) => s,
@@ -247,11 +241,11 @@ fn print_status(state_path: &std::path::Path) -> anyhow::Result<()> {
     };
     let Some(root_id) = state.root_id() else {
         println!("State file exists but has no root task.");
-        return Ok(());
+        return;
     };
     let Some(root) = state.get(root_id) else {
         println!("State file exists but root task is missing.");
-        return Ok(());
+        return;
     };
 
     println!("Goal: {}", root.goal);
@@ -275,7 +269,7 @@ fn print_status(state_path: &std::path::Path) -> anyhow::Result<()> {
     }
 
     let total = ids.len();
-    println!("Tasks: {total} total, {completed} completed, {in_progress} in-progress, {pending} pending, {failed} failed");
-
-    Ok(())
+    println!(
+        "Tasks: {total} total, {completed} completed, {in_progress} in-progress, {pending} pending, {failed} failed"
+    );
 }
