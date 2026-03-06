@@ -21,12 +21,20 @@ use state::EpicState;
 use task::Task;
 use tui::TuiApp;
 
+use anyhow::bail;
 use clap::Parser;
 use std::time::Duration;
 
 #[tokio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("Error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
 #[allow(clippy::too_many_lines)]
-async fn main() -> anyhow::Result<()> {
+pub(crate) async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let project_root = std::env::current_dir()?;
@@ -34,8 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let state_path = work_dir.join("state.json");
 
     if matches!(&cli.command, Command::Status) {
-        print_status(&state_path);
-        return Ok(());
+        return print_status(&state_path);
     }
 
     if matches!(&cli.command, Command::Run { .. } | Command::Resume)
@@ -53,11 +60,10 @@ async fn main() -> anyhow::Result<()> {
     if matches!(&cli.command, Command::Init) {
         let config_path = project_root.join("epic.toml");
         if config_path.exists() {
-            eprintln!(
+            bail!(
                 "epic.toml already exists at {}. Delete it first to reinitialize.",
                 config_path.display()
             );
-            std::process::exit(1);
         }
     }
 
@@ -88,37 +94,12 @@ async fn main() -> anyhow::Result<()> {
     let (state, root_id, goal_text) = match &cli.command {
         Command::Run { goal } => {
             if state_path.exists() {
-                let existing = match EpicState::load(&state_path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to load state from {}: {e}. Delete the file to start fresh or fix the JSON.",
-                            state_path.display()
-                        );
-                        std::process::exit(1);
-                    }
-                };
-                let Some(rid) = existing.root_id() else {
-                    eprintln!(
-                        "State file at {} is corrupt (no root task). Delete it to start fresh.",
-                        state_path.display()
-                    );
-                    std::process::exit(1);
-                };
-                let Some(root_task) = existing.get(rid) else {
-                    eprintln!(
-                        "State file at {} is corrupt (root task missing). Delete it to start fresh.",
-                        state_path.display()
-                    );
-                    std::process::exit(1);
-                };
-                let persisted_goal = root_task.goal.clone();
+                let (existing, rid, persisted_goal) = load_and_validate_state(&state_path)?;
                 if *goal != persisted_goal {
-                    eprintln!(
+                    bail!(
                         "State file exists with different goal: \"{persisted_goal}\". \
                          Use `epic resume` to continue, or delete .epic/state.json to start fresh."
                     );
-                    std::process::exit(1);
                 }
                 eprintln!("Resuming from {}", state_path.display());
                 (existing, rid, persisted_goal)
@@ -139,37 +120,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Resume => {
             if !state_path.exists() {
-                eprintln!(
+                bail!(
                     "No state file found at {}. Nothing to resume.",
                     state_path.display()
                 );
-                std::process::exit(1);
             }
-            let state = match EpicState::load(&state_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!(
-                        "Failed to load state from {}: {e}. Delete the file to start fresh or fix the JSON.",
-                        state_path.display()
-                    );
-                    std::process::exit(1);
-                }
-            };
-            let Some(root_id) = state.root_id() else {
-                eprintln!(
-                    "State file at {} is corrupt (no root task). Delete it to start fresh.",
-                    state_path.display()
-                );
-                std::process::exit(1);
-            };
-            let Some(root_task) = state.get(root_id) else {
-                eprintln!(
-                    "State file at {} is corrupt (root task missing). Delete it to start fresh.",
-                    state_path.display()
-                );
-                std::process::exit(1);
-            };
-            let goal_text = root_task.goal.clone();
+            let (state, root_id, goal_text) = load_and_validate_state(&state_path)?;
             eprintln!("Resuming from {}", state_path.display());
             (state, root_id, goal_text)
         }
@@ -224,29 +180,38 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_status(state_path: &std::path::Path) {
+fn load_and_validate_state(
+    state_path: &std::path::Path,
+) -> anyhow::Result<(EpicState, task::TaskId, String)> {
+    let state = EpicState::load(state_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to load state from {}: {e}. Delete the file to start fresh or fix the JSON.",
+            state_path.display()
+        )
+    })?;
+    let Some(root_id) = state.root_id() else {
+        bail!(
+            "State file at {} is corrupt (no root task). Delete it to start fresh.",
+            state_path.display()
+        );
+    };
+    let Some(root_task) = state.get(root_id) else {
+        bail!(
+            "State file at {} is corrupt (root task missing). Delete it to start fresh.",
+            state_path.display()
+        );
+    };
+    let goal = root_task.goal.clone();
+    Ok((state, root_id, goal))
+}
+
+fn print_status(state_path: &std::path::Path) -> anyhow::Result<()> {
     if !state_path.exists() {
         println!("No active run (no state file at {}).", state_path.display());
-        return;
+        return Ok(());
     }
-    let state = match EpicState::load(state_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "Failed to load state from {}: {e}. Delete the file to start fresh or fix the JSON.",
-                state_path.display()
-            );
-            std::process::exit(1);
-        }
-    };
-    let Some(root_id) = state.root_id() else {
-        println!("State file exists but has no root task.");
-        return;
-    };
-    let Some(root) = state.get(root_id) else {
-        println!("State file exists but root task is missing.");
-        return;
-    };
+    let (state, root_id, _) = load_and_validate_state(state_path)?;
+    let root = state.get(root_id).expect("validated by load_and_validate_state");
 
     println!("Goal: {}", root.goal);
     println!("Root status: {:?}", root.phase);
@@ -272,4 +237,6 @@ fn print_status(state_path: &std::path::Path) {
     println!(
         "Tasks: {total} total, {completed} completed, {in_progress} in-progress, {pending} pending, {failed} failed"
     );
+
+    Ok(())
 }

@@ -52,7 +52,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 1. ~~**Add container setup documentation to README**~~ — Done. README.md created in project root with full documentation including sandboxing guidance.
 2. ~~**Add CI pipeline**~~ — Done. GitHub Actions (fmt, clippy, test, build). Flick pinned to rev `8bf1d79`. `rust-toolchain.toml` pins Rust 1.93.1. PR #1.
-3. **Extract main() into testable function** — Replace `process::exit` with `bail!`, extract `async fn run()`. Unblocks integration testing.
+3. ~~**Extract main() into testable function**~~ — Done. `main()` is now a thin wrapper calling `async fn run()`. All `process::exit` replaced with `bail!`. 145 tests passing.
 4. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
 5. **Remove dead modules** — `git.rs`, `metrics.rs`, `services/*.rs` are empty stubs.
 6. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code.
@@ -63,6 +63,12 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 11. ~~**Pin Flick git dependency**~~ — Done. Pinned to rev `8bf1d79` in Cargo.toml (part of CI pipeline work).
 
 ## Decisions Made
+
+### 2026-03-06: Extract main() into testable function
+
+**Scope:** `src/main.rs` refactored. 1 file modified, 145 tests passing, 0 clippy warnings.
+
+**Changes:** Extracted body of `main()` into `async fn run() -> anyhow::Result<()>`. `main()` is now a thin wrapper that calls `run()`, prints errors via `eprintln!("Error: {e:#}")`, and calls `process::exit(1)` on failure. Replaced all 10 `eprintln!` + `process::exit(1)` patterns with `bail!(...)`. `print_status` now returns `anyhow::Result<()>` instead of calling `process::exit`. Unblocks integration testing.
 
 ### 2026-03-06: CI pipeline and clippy/fmt remediation
 
