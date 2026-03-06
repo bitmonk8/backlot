@@ -15,6 +15,15 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use thiserror::Error;
 
+/// Distinguishes first-execution from fix-loop retry behavior.
+/// Keeps the shared retry-with-escalation loop in one place.
+enum LeafRetryMode {
+    /// First attempt at a leaf task (no prior failure context).
+    Execute,
+    /// Re-executing after a verification failure.
+    Fix { initial_failure: String },
+}
+
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
     #[error("task not found: {0}")]
@@ -548,7 +557,13 @@ impl<A: AgentService> Orchestrator<A> {
                     let is_leaf = task.path == Some(TaskPath::Leaf);
 
                     if is_leaf {
-                        self.leaf_fix_loop(id, &reason).await
+                        self.leaf_retry_loop(
+                            id,
+                            LeafRetryMode::Fix {
+                                initial_failure: reason,
+                            },
+                        )
+                        .await
                     } else {
                         let task = self
                             .state
@@ -574,89 +589,117 @@ impl<A: AgentService> Orchestrator<A> {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // Single loop with distinct phases; splitting adds indirection.
-    async fn leaf_fix_loop(
+    /// Shared retry-with-escalation loop for both first execution and fix loops.
+    /// Haiku→Sonnet→Opus escalation, retries-at-tier counting, checkpoint saves,
+    /// attempt recording, and event emission are handled uniformly; the mode enum
+    /// controls which agent call, events, attempt list, and success/exhaustion
+    /// handling to use.
+    #[allow(clippy::too_many_lines)]
+    async fn leaf_retry_loop(
         &mut self,
         id: TaskId,
-        initial_failure: &str,
+        mode: LeafRetryMode,
     ) -> Result<TaskOutcome, OrchestratorError> {
-        // Resume-safe: read current model and count consecutive trailing fix
+        let is_fix = matches!(mode, LeafRetryMode::Fix { .. });
+        let mut failure_reason = match &mode {
+            LeafRetryMode::Fix { initial_failure } => Some(initial_failure.clone()),
+            LeafRetryMode::Execute => None,
+        };
+
+        // Resume-safe: read current model and count consecutive trailing
         // attempts at that tier so we don't grant extra retries after a crash.
         let task = self
             .state
             .get(id)
             .ok_or(OrchestratorError::TaskNotFound(id))?;
-        let mut fix_model = task.current_model.unwrap_or(Model::Haiku);
+        let mut current_model = task.current_model.unwrap_or(Model::Haiku);
+        let attempts_list = if is_fix {
+            &task.fix_attempts
+        } else {
+            &task.attempts
+        };
         #[allow(clippy::cast_possible_truncation)]
-        let mut fix_retries_at_tier: u32 = task
-            .fix_attempts
+        let mut retries_at_tier: u32 = attempts_list
             .iter()
             .rev()
-            .take_while(|a| a.model == fix_model)
+            .take_while(|a| a.model == current_model)
             .count() as u32;
-        let mut failure_reason = initial_failure.to_owned();
 
         // Drain any stale tier exhaustion from a crash before escalation.
-        while fix_retries_at_tier >= self.limits.retry_budget {
-            if let Some(next_model) = fix_model.escalate() {
-                self.emit(Event::FixModelEscalated {
-                    task_id: id,
-                    from: fix_model,
-                    to: next_model,
-                });
+        while retries_at_tier >= self.limits.retry_budget {
+            if let Some(next_model) = current_model.escalate() {
+                self.emit_escalation(id, current_model, next_model, is_fix);
                 let task = self
                     .state
                     .get_mut(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
                 task.current_model = Some(next_model);
-                fix_model = next_model;
-                fix_retries_at_tier = 0;
+                current_model = next_model;
+                retries_at_tier = 0;
                 self.checkpoint_save();
+            } else if is_fix {
+                return self.fail_task(
+                    id,
+                    failure_reason.unwrap_or_else(|| "all tiers exhausted".into()),
+                );
             } else {
-                return self.fail_task(id, failure_reason);
+                let last_error = self
+                    .state
+                    .get(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?
+                    .attempts
+                    .last()
+                    .and_then(|a| a.error.clone())
+                    .unwrap_or_else(|| "all tiers exhausted".into());
+                return Ok(TaskOutcome::Failed { reason: last_error });
             }
         }
 
         loop {
-            // Scope circuit breaker check.
-            match self.check_scope_circuit_breaker(id).await? {
-                ScopeCheck::WithinBounds => {}
-                ScopeCheck::Exceeded {
-                    metric,
-                    actual,
-                    limit,
-                } => {
-                    return self.fail_task(
-                        id,
-                        format!("SCOPE_EXCEEDED: {metric} actual={actual} limit={limit}"),
-                    );
+            // Scope circuit breaker (fix mode only — first execution hasn't
+            // produced changes yet).
+            if is_fix {
+                match self.check_scope_circuit_breaker(id).await? {
+                    ScopeCheck::WithinBounds => {}
+                    ScopeCheck::Exceeded {
+                        metric,
+                        actual,
+                        limit,
+                    } => {
+                        return self.fail_task(
+                            id,
+                            format!("SCOPE_EXCEEDED: {metric} actual={actual} limit={limit}"),
+                        );
+                    }
                 }
             }
 
-            #[allow(clippy::cast_possible_truncation)]
-            // Fix attempts capped at 9 (3 tiers × 3 retries).
-            let attempt_number = self
-                .state
-                .get(id)
-                .ok_or(OrchestratorError::TaskNotFound(id))?
-                .fix_attempts
-                .len() as u32
-                + 1;
-
-            self.emit(Event::FixAttempt {
-                task_id: id,
-                attempt: attempt_number,
-                model: fix_model,
-            });
-
+            // Agent call — execute_leaf or fix_leaf.
             let ctx = self.build_context(id)?;
             let LeafResult {
                 outcome,
                 discoveries,
-            } = self
-                .agent
-                .fix_leaf(&ctx, fix_model, &failure_reason, attempt_number)
-                .await?;
+            } = if is_fix {
+                let reason = failure_reason.as_deref().unwrap_or("unknown failure");
+                #[allow(clippy::cast_possible_truncation)]
+                let attempt_number = self
+                    .state
+                    .get(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?
+                    .fix_attempts
+                    .len() as u32
+                    + 1;
+                self.emit(Event::FixAttempt {
+                    task_id: id,
+                    attempt: attempt_number,
+                    model: current_model,
+                });
+                self.agent
+                    .fix_leaf(&ctx, current_model, reason, attempt_number)
+                    .await?
+            } else {
+                self.agent.execute_leaf(&ctx, current_model).await?
+            };
 
             // Record attempt and discoveries.
             {
@@ -664,14 +707,19 @@ impl<A: AgentService> Orchestrator<A> {
                     .state
                     .get_mut(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
-                task.fix_attempts.push(Attempt {
-                    model: fix_model,
+                let attempt = Attempt {
+                    model: current_model,
                     succeeded: outcome == TaskOutcome::Success,
                     error: match &outcome {
                         TaskOutcome::Success => None,
                         TaskOutcome::Failed { reason } => Some(reason.clone()),
                     },
-                });
+                };
+                if is_fix {
+                    task.fix_attempts.push(attempt);
+                } else {
+                    task.attempts.push(attempt);
+                }
                 if !discoveries.is_empty() {
                     let count = discoveries.len();
                     task.discoveries.extend(discoveries);
@@ -679,59 +727,89 @@ impl<A: AgentService> Orchestrator<A> {
                 }
             }
 
-            // Persist fix attempt before verification so it survives a crash.
             self.checkpoint_save();
 
+            // Handle success.
             if outcome == TaskOutcome::Success {
-                // Re-verify after successful fix.
-                self.emit(Event::VerificationStarted { task_id: id });
-                let verify_model = self.verification_model(id)?;
-                let ctx = self.build_context(id)?;
-                let verify_result = self.agent.verify(&ctx, verify_model).await?;
-
-                match verify_result.outcome {
-                    VerificationOutcome::Pass => {
-                        return self.complete_task_verified(id);
+                if is_fix {
+                    // Re-verify after successful fix.
+                    self.emit(Event::VerificationStarted { task_id: id });
+                    let verify_model = self.verification_model(id)?;
+                    let ctx = self.build_context(id)?;
+                    let verify_result = self.agent.verify(&ctx, verify_model).await?;
+                    match verify_result.outcome {
+                        VerificationOutcome::Pass => {
+                            return self.complete_task_verified(id);
+                        }
+                        VerificationOutcome::Fail { reason } => {
+                            self.emit(Event::VerificationComplete {
+                                task_id: id,
+                                passed: false,
+                            });
+                            failure_reason = Some(reason);
+                            self.checkpoint_save();
+                        }
                     }
-                    VerificationOutcome::Fail { reason } => {
-                        self.emit(Event::VerificationComplete {
-                            task_id: id,
-                            passed: false,
-                        });
-                        failure_reason = reason;
-                    }
+                } else {
+                    return Ok(outcome);
                 }
-            } else if let TaskOutcome::Failed { reason } = &outcome {
-                failure_reason = reason.clone();
+            } else if is_fix {
+                if let TaskOutcome::Failed { reason } = &outcome {
+                    failure_reason = Some(reason.clone());
+                }
             }
 
-            self.checkpoint_save();
+            retries_at_tier += 1;
 
-            fix_retries_at_tier += 1;
-
-            if fix_retries_at_tier < self.limits.retry_budget {
+            if retries_at_tier < self.limits.retry_budget {
+                // Retry event (execute mode only).
+                if !is_fix {
+                    self.emit(Event::RetryAttempt {
+                        task_id: id,
+                        attempt: retries_at_tier,
+                        model: current_model,
+                    });
+                }
                 continue;
             }
 
             // Escalate model tier.
-            if let Some(next_model) = fix_model.escalate() {
-                self.emit(Event::FixModelEscalated {
-                    task_id: id,
-                    from: fix_model,
-                    to: next_model,
-                });
+            if let Some(next_model) = current_model.escalate() {
+                self.emit_escalation(id, current_model, next_model, is_fix);
                 let task = self
                     .state
                     .get_mut(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
                 task.current_model = Some(next_model);
-                fix_model = next_model;
-                fix_retries_at_tier = 0;
+                current_model = next_model;
+                retries_at_tier = 0;
                 continue;
             }
 
             // All tiers exhausted — terminal failure.
-            return self.fail_task(id, failure_reason);
+            if is_fix {
+                return self.fail_task(
+                    id,
+                    failure_reason.unwrap_or_else(|| "all tiers exhausted".into()),
+                );
+            }
+            return Ok(outcome);
+        }
+    }
+
+    fn emit_escalation(&self, id: TaskId, from: Model, to: Model, is_fix: bool) {
+        if is_fix {
+            self.emit(Event::FixModelEscalated {
+                task_id: id,
+                from,
+                to,
+            });
+        } else {
+            self.emit(Event::ModelEscalated {
+                task_id: id,
+                from,
+                to,
+            });
         }
     }
 
@@ -857,114 +935,7 @@ impl<A: AgentService> Orchestrator<A> {
     }
 
     async fn execute_leaf(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
-        // Resume-safe: read current model and count consecutive trailing attempts
-        // at that tier so we don't grant extra retries after a crash mid-retry-loop.
-        let task = self
-            .state
-            .get(id)
-            .ok_or(OrchestratorError::TaskNotFound(id))?;
-        let mut current_model = task.current_model.unwrap_or(Model::Haiku);
-        #[allow(clippy::cast_possible_truncation)]
-        let mut retries_at_tier: u32 = task
-            .attempts
-            .iter()
-            .rev()
-            .take_while(|a| a.model == current_model)
-            .count() as u32;
-
-        // Drain any stale tier exhaustion from a crash before escalation.
-        while retries_at_tier >= self.limits.retry_budget {
-            if let Some(next_model) = current_model.escalate() {
-                self.emit(Event::ModelEscalated {
-                    task_id: id,
-                    from: current_model,
-                    to: next_model,
-                });
-                let task = self
-                    .state
-                    .get_mut(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?;
-                task.current_model = Some(next_model);
-                current_model = next_model;
-                retries_at_tier = 0;
-                self.checkpoint_save();
-            } else {
-                // All tiers exhausted — terminal failure.
-                let last_error = self
-                    .state
-                    .get(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?
-                    .attempts
-                    .last()
-                    .and_then(|a| a.error.clone())
-                    .unwrap_or_else(|| "all tiers exhausted".into());
-                return Ok(TaskOutcome::Failed { reason: last_error });
-            }
-        }
-
-        loop {
-            let ctx = self.build_context(id)?;
-            let LeafResult {
-                outcome,
-                discoveries,
-            } = self.agent.execute_leaf(&ctx, current_model).await?;
-
-            {
-                let task = self
-                    .state
-                    .get_mut(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?;
-                task.attempts.push(Attempt {
-                    model: current_model,
-                    succeeded: outcome == TaskOutcome::Success,
-                    error: match &outcome {
-                        TaskOutcome::Success => None,
-                        TaskOutcome::Failed { reason } => Some(reason.clone()),
-                    },
-                });
-                if !discoveries.is_empty() {
-                    let count = discoveries.len();
-                    task.discoveries.extend(discoveries);
-                    self.emit(Event::DiscoveriesRecorded { task_id: id, count });
-                }
-            }
-
-            self.checkpoint_save();
-
-            if outcome == TaskOutcome::Success {
-                return Ok(outcome);
-            }
-
-            retries_at_tier += 1;
-
-            if retries_at_tier < self.limits.retry_budget {
-                self.emit(Event::RetryAttempt {
-                    task_id: id,
-                    attempt: retries_at_tier,
-                    model: current_model,
-                });
-                continue;
-            }
-
-            if let Some(next_model) = current_model.escalate() {
-                self.emit(Event::ModelEscalated {
-                    task_id: id,
-                    from: current_model,
-                    to: next_model,
-                });
-                let task = self
-                    .state
-                    .get_mut(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?;
-                task.current_model = Some(next_model);
-                current_model = next_model;
-                retries_at_tier = 0;
-                continue;
-            }
-
-            // All tiers exhausted — terminal failure.
-            return Ok(outcome);
-        }
+        self.leaf_retry_loop(id, LeafRetryMode::Execute).await
     }
 
     #[allow(clippy::too_many_lines)] // Linear sequence of branch steps; splitting adds indirection.
@@ -2771,8 +2742,8 @@ mod tests {
         let mock = MockAgentService::new();
 
         // The child is already in Verifying with 2 fix_attempts at Haiku.
-        // execute_task sees Verifying → finalize_task(Success) → verify → fail → leaf_fix_loop.
-        // leaf_fix_loop initializes fix_retries_at_tier=2 from the 2 existing attempts.
+        // execute_task sees Verifying → finalize_task(Success) → verify → fail → leaf_retry_loop(Fix).
+        // leaf_retry_loop initializes retries_at_tier=2 from the 2 existing fix_attempts.
         // Loop: scope check (WithinBounds, no magnitude) → fix(success) → record(#3) → verify(pass).
 
         // Mock sequence: verify(child fail) → fix_leaf(success) → verify(child pass) → verify(root pass).

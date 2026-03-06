@@ -70,9 +70,9 @@ verify() -> Pass -> Completed
                      if branch: enter branch fix loop (Phase 2)
 ```
 
-New method `leaf_fix_loop(&mut self, id: TaskId, initial_failure: &str) -> Result<TaskOutcome>`:
+Leaf fix loop (now handled by `leaf_retry_loop` with `LeafRetryMode::Fix`):
 
-- Tracks `fix_retries_at_tier: u32` and `fix_model: Model` (starting at the model that executed the leaf).
+- Tracks `retries_at_tier: u32` and `current_model: Model` (starting at the model that executed the leaf).
 - Loop: scope check -> fix_leaf() -> verify() -> pass/fail/retry/escalate.
 - Emits events at each step.
 - Checkpoints after each fix attempt.
@@ -112,7 +112,7 @@ FixModelEscalated { task_id: TaskId, from: Model, to: Model }
 
 ### Estimated Scope
 
-- `orchestrator.rs`: +50-70 lines (new `leaf_fix_loop` method, modify `finalize_task`)
+- `orchestrator.rs`: +50-70 lines (fix retry logic in `leaf_retry_loop`, modify `finalize_task`)
 - `agent/mod.rs`: +5 lines (trait method)
 - `agent/flick.rs`: +30-40 lines (implement `fix_leaf`)
 - `agent/prompts.rs`: +25-35 lines (fix prompt builder)

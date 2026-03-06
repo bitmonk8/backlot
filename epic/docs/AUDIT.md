@@ -79,17 +79,17 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 **Completed:** 2026-03-05. All 95 review cells executed. 541 original findings.
 
-**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, and dead stub removal — resolving 62 findings fully and 15 partially.
+**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, dead stub removal, and retry/escalation deduplication — resolving 65 findings fully and 15 partially.
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
 | Critical | 0 | 0 |
-| Major | 77 | 8 |
+| Major | 76 | 8 |
 | Minor | 224 | 7 |
 | Note | 164 | 3 |
-| **Total** | **461** | **15** |
+| **Total** | **464** | **15** |
 
 ### Remaining Findings by Category
 
@@ -97,7 +97,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 |---|---|---|---|
 | Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
 | Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
-| Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~70 | 0 | ~10 |
+| Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~67 | 0 | ~9 |
 | Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~45 | 0 | ~8 |
 | Dead code/stubs (unused ToolGrant flags, usage tracking) | ~21 | 0 | ~3 |
 | Design intent gaps (prompt content, tool grants, missing review phase) | ~40 | 0 | ~10 |
@@ -170,7 +170,7 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 | Ref | Finding | Location |
 |-----|---------|----------|
-| U1-R5#1, B1#1, B5#1 | `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical retry-escalation state machine | `orchestrator.rs` |
+| ~~U1-R5#1, B1#1, B5#1~~ | ~~`execute_leaf` and `leaf_fix_loop` share ~120 lines of identical retry-escalation state machine~~ | *Resolved 2026-03-06: extracted `leaf_retry_loop` with `LeafRetryMode` enum* |
 | U2-R5#2 | `execute_leaf` and `fix_leaf` in FlickAgent have identical bodies after prompt line | `flick.rs` |
 | U2-R5#3 | `design_and_decompose` and `design_fix_subtasks` in FlickAgent share identical tail | `flick.rs` |
 | U3-R5#1 | Subtask schema duplicated between `decomposition_schema` and `recovery_plan_schema` | `config_gen.rs` |
@@ -238,8 +238,7 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 ## Recommended Action Items (Priority Order)
 
 1. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
-2. **Deduplicate retry/escalation loop.** Extract shared state machine from `execute_leaf` and `leaf_fix_loop`.
-3. **Add cycle detection to `dfs_order`.** Infinite loop on corrupted state files.
-4. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-5. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-6. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.
+2. **Add cycle detection to `dfs_order`.** Infinite loop on corrupted state files.
+3. **Fix error handling consistency in fix loops.** Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+4. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+5. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.

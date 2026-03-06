@@ -51,13 +51,18 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 1. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
-2. **Deduplicate retry/escalation loop** — `execute_leaf` and `leaf_fix_loop` share ~120 lines of identical code.
-3. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files.
-4. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
-5. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-6. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
+2. **Add cycle detection to `dfs_order`** — Infinite loop on corrupted state files.
+3. **Fix error handling consistency in fix loops** — Make `verify()` and `design_fix_subtasks` errors best-effort within fix loops, matching recovery pattern.
+4. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
+5. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
 
 ## Decisions Made
+
+### 2026-03-06: Deduplicate retry/escalation loop
+
+**Scope:** Pure refactor of `orchestrator.rs`. Extracted shared retry-with-escalation state machine from `execute_leaf` and `leaf_fix_loop` into unified `leaf_retry_loop` method. 1 file modified, 145 tests passing, 0 clippy warnings.
+
+**Changes:** New `LeafRetryMode` enum (`Execute` vs `Fix { initial_failure }`) controls behavioral differences. `leaf_retry_loop` handles resume-safe model + retries-at-tier initialization, stale tier exhaustion draining, scope check (fix only), agent call dispatch, attempt recording, discovery handling, checkpoint saves, retry counting, model escalation, and terminal failure. `emit_escalation` helper emits the correct event variant based on mode. `execute_leaf` reduced to a one-liner delegation; `leaf_fix_loop` removed entirely (call inlined in `finalize_task`). ~110 lines of duplication eliminated.
 
 ### 2026-03-06: Remove dead stub modules
 
@@ -188,13 +193,15 @@ See [SANDBOXING.md](SANDBOXING.md) for full design document.
 
 **Scope:** Two deferred polish items resolved, plus two review passes (correctness fix, simplification). 1 file modified, 5 new tests (110 total).
 
-**Leaf retry counter persistence:** `execute_leaf` now initializes `retries_at_tier` from persisted `attempts` (counting consecutive trailing attempts at the current model tier), matching the pattern already used in `leaf_fix_loop`. On resume, a leaf that used 2 of 3 retries no longer gets a fresh counter.
+*Note: The logic described below now lives in the unified `leaf_retry_loop` method (see 2026-03-06 deduplication decision).*
 
-**Leaf retry checkpoint:** `execute_leaf` now calls `checkpoint_save()` after recording each attempt. On crash mid-retry, persisted attempts survive and the retry counter correctly resumes.
+**Leaf retry counter persistence:** `execute_leaf` now initializes `retries_at_tier` from persisted `attempts` (counting consecutive trailing attempts at the current model tier). On resume, a leaf that used 2 of 3 retries no longer gets a fresh counter.
 
-**Top-of-loop escalation guard (review pass):** Both `execute_leaf` and `leaf_fix_loop` now check `retries_at_tier >= RETRIES_PER_TIER` at the top of the loop, before calling the agent. Fixes an edge case where a crash after recording the Nth failure but before escalation would cause one extra attempt at the exhausted tier on resume. Pre-loop `state.get()` calls collapsed from two to one in both methods.
+**Leaf retry checkpoint:** Checkpoint saved after recording each attempt. On crash mid-retry, persisted attempts survive and the retry counter correctly resumes.
 
-**Review pass — pre-loop drain (simplification):** Extracted the top-of-loop escalation guard into a `while` loop before the main loop in both methods. Eliminates duplicated escalation logic. `execute_leaf` now uses a local `current_model` variable (matching `leaf_fix_loop`'s `fix_model` pattern) instead of re-reading from state each iteration.
+**Top-of-loop escalation guard (review pass):** Pre-loop drain checks `retries_at_tier >= retry_budget` before entering the main loop. Fixes an edge case where a crash after recording the Nth failure but before escalation would cause one extra attempt at the exhausted tier on resume.
+
+**Review pass — pre-loop drain (simplification):** Extracted the top-of-loop escalation guard into a `while` loop before the main loop. Eliminates duplicated escalation logic.
 
 **Tests (5 new, 110 total):** `leaf_retry_counter_persists_on_resume` (resume with 2 Haiku failures → escalates after 1 more), `leaf_retry_counter_resume_at_sonnet_tier` (resume at Sonnet tier with mixed Haiku+Sonnet attempts → counts only trailing Sonnet), `leaf_retry_resume_escalates_immediately_when_tier_exhausted` (3 Haiku failures persisted, current_model still Haiku → escalates without extra attempt), `leaf_fix_resume_escalates_immediately_when_tier_exhausted` (same scenario for fix loop), `leaf_retry_attempts_persisted_to_disk` (state file contains attempts after fail+succeed).
 
@@ -269,7 +276,7 @@ See [SANDBOXING.md](SANDBOXING.md) for full design document.
 
 **Scope circuit breaker:** `Magnitude` struct (max_lines_added/modified/deleted) on `Task`. `check_scope_circuit_breaker()` runs `git diff --numstat HEAD`, compares against 3x magnitude estimate. Best-effort (skipped if no magnitude, no project root, or git fails). `evaluate_scope()` extracted as pure function for testability. `AssessmentWire` extended with optional magnitude fields.
 
-**Leaf fix loop:** `fix_leaf` added to `AgentService` trait. `leaf_fix_loop()` in orchestrator: retry/escalate with model tier progression (starting at the model that wrote the code). Scope check before each attempt. Fix attempts tracked separately in `task.fix_attempts`. Resume correctness: `fix_retries_at_tier` initialized from persisted `fix_attempts`. New events: `FixAttempt`, `FixModelEscalated`.
+**Leaf fix loop:** `fix_leaf` added to `AgentService` trait. Retry/escalate with model tier progression (starting at the model that wrote the code). Scope check before each attempt. Fix attempts tracked separately in `task.fix_attempts`. Resume correctness: retries-at-tier initialized from persisted `fix_attempts`. New events: `FixAttempt`, `FixModelEscalated`. *(Now unified with execute-leaf retry logic in `leaf_retry_loop` — see 2026-03-06 deduplication decision.)*
 
 **Branch fix loop:** `design_fix_subtasks` added to `AgentService` trait. `branch_fix_loop()` in orchestrator: max 3 rounds (Sonnet) for non-root, 4 rounds (3 Sonnet + 1 Opus) for root. Each round creates fix subtasks (marked `is_fix_task = true`), executes them through full pipeline, then re-verifies. Fix subtasks CAN use leaf fix loop but CANNOT trigger branch fix loop (prevents recursive chains). Empty subtask list handled as round failure. New events: `BranchFixRound`, `FixSubtasksCreated`. New fields on Task: `verification_fix_rounds`, `is_fix_task`.
 
@@ -388,7 +395,7 @@ See [SANDBOXING.md](SANDBOXING.md) for full design document.
 - `agent/mod.rs` — `execute_leaf` return type changed to `LeafResult`
 - `agent/config_gen.rs` — `TryFrom<TaskOutcomeWire>` now produces `LeafResult`, extracting discoveries from wire format
 - `agent/flick.rs` — `FlickAgent::execute_leaf` returns `LeafResult`
-- `orchestrator.rs` — `execute_leaf` destructures `LeafResult`, stores discoveries on task, emits `DiscoveriesRecorded` event
+- `orchestrator.rs` — `leaf_retry_loop` destructures `LeafResult`, stores discoveries on task, emits `DiscoveriesRecorded` event
 - `events.rs` — Added `DiscoveriesRecorded { task_id, count }` variant
 - `tui/mod.rs` — Handles `DiscoveriesRecorded` in worklog
 
