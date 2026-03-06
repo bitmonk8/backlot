@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (163 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, and stale documentation remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (166 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, stale documentation, empty-subtask validation, and bash process group kill remediated; continuing hardening.
 
 ## Milestones
 
@@ -51,10 +51,18 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 1. **Operational correctness sandboxing (Frida)** — Per-phase access policy enforcement via runtime interception. Complex, multiple open questions — start with prototype. See [SANDBOXING.md](SANDBOXING.md) Concern 2.
-2. **Add empty-subtask validation** — `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-3. **Kill process group on bash timeout** — Current code only kills the direct child, orphaning grandchildren.
 
 ## Decisions Made
+
+### 2026-03-06: Empty-subtask validation and bash process group kill
+
+**Scope:** `src/agent/config_gen.rs` and `src/agent/tools.rs` modified. `Cargo.toml` updated (added `libc` Unix dependency). 166 tests passing, 0 clippy warnings.
+
+**Empty-subtask validation (config_gen.rs):** `DecompositionWire::try_from` and `RecoveryPlanWire::try_from` now reject empty subtask lists with `bail!`. Resolves audit findings U3-R1#1 and U3-R1#2.
+
+**Bash process group kill (tools.rs):** Child process spawned in its own session/process group. Unix: `pre_exec` with `libc::setsid()`, timeout kills via `libc::kill(-pid, SIGKILL)`. Windows: `CREATE_NEW_PROCESS_GROUP` creation flag, timeout kills via `taskkill /F /T /PID`. `kill_on_drop(true)` retained as fallback. Extracted `kill_process_tree` (platform-specific) and `format_bash_output` helpers. Resolves audit findings U5-R1#2, U5-R2#6, U5-R3#1.
+
+**Tests (3 new, 166 total):** `decomposition_wire_empty_subtasks_rejected`, `recovery_plan_wire_empty_subtasks_rejected`, `recovery_plan_wire_full_approach_empty_subtasks_rejected`. Plus Unix-only `test_bash_timeout_kills_process_group` and `test_bash_timeout_kill_stale_pid`.
 
 ### 2026-03-06: Best-effort error handling in fix loops
 

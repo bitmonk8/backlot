@@ -5,6 +5,8 @@ use globset::GlobBuilder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -558,14 +560,69 @@ async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<String, Str
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
+    // Put child in its own session so we can kill the whole tree via process group.
+    #[cfg(unix)]
+    {
+        // SAFETY: setsid() is async-signal-safe and has no preconditions
+        // that could cause UB. pre_exec runs between fork and exec.
+        #[allow(unsafe_code)]
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    // Prevents Ctrl+C propagation to the child, ensuring the parent can
+    // manage child lifetime independently. taskkill /F /T handles tree kill
+    // via parent-child relationship regardless.
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
     let child = cmd.spawn().map_err(|e| format!("spawn error: {e}"))?;
+    let child_pid = child.id();
 
     let timeout_dur = std::time::Duration::from_secs(timeout_secs);
-    let output = tokio::time::timeout(timeout_dur, child.wait_with_output())
-        .await
-        .map_err(|_| format!("command timed out after {timeout_secs}s"))?
-        .map_err(|e| format!("command failed: {e}"))?;
+    if let Ok(wait_result) = tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
+        let output = wait_result.map_err(|e| format!("command failed: {e}"))?;
+        Ok(format_bash_output(&output))
+    } else {
+        // Timeout: kill the entire process group, not just the direct child.
+        if let Some(pid) = child_pid {
+            kill_process_tree(pid);
+        }
+        Err(format!("command timed out after {timeout_secs}s"))
+    }
+}
 
+/// Kill the entire process tree rooted at the given PID.
+#[cfg(unix)]
+fn kill_process_tree(pid: u32) {
+    let Some(pid) = i32::try_from(pid).ok() else { return };
+    // SAFETY: kill with negative pid targets the process group. The pid came
+    // from a child we spawned into its own session via setsid().
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn kill_process_tree(pid: u32) {
+    // taskkill /F /T kills the process and all children.
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn format_bash_output(output: &std::process::Output) -> String {
     let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
@@ -612,7 +669,7 @@ async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<String, Str
         result.push_str("[no output]");
     }
 
-    Ok(result)
+    result
 }
 
 #[cfg(test)]
@@ -925,5 +982,52 @@ mod tests {
         .await;
         assert!(!result.is_error); // bash tool reports exit code in content, not as error
         assert!(result.content.contains("[exit code: 42]"));
+    }
+
+    /// Verify that calling kill_process_tree with a stale (already-exited) PID
+    /// does not panic.
+    #[cfg(unix)]
+    #[test]
+    fn test_bash_timeout_kill_stale_pid() {
+        // Use a PID that almost certainly does not exist.
+        let stale_pid: u32 = u32::MAX - 1;
+        kill_process_tree(stale_pid);
+        // Reaching here without panic is the assertion.
+    }
+
+    /// Verify that on timeout, grandchild processes are killed along with the
+    /// direct child (process group kill).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_bash_timeout_kills_process_group() {
+        let tmp = TempDir::new().unwrap();
+        let marker = tmp.path().join("bg_alive");
+
+        // Spawn a command that starts a background child which writes a marker
+        // file every 0.2s. On timeout, both sh and the background loop must die.
+        let cmd = format!(
+            "(while true; do touch {}; sleep 0.2; done) & sleep 60",
+            marker.display()
+        );
+
+        let result = execute_tool(
+            "tu_1".into(),
+            "bash",
+            &serde_json::json!({"command": cmd, "timeout": 2}),
+            tmp.path(),
+            ToolGrant::BASH,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("timed out"));
+
+        // Remove the marker and wait briefly; if the bg process is still alive
+        // it will recreate the file.
+        let _ = std::fs::remove_file(&marker);
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert!(
+            !marker.exists(),
+            "background process survived timeout — process group kill failed"
+        );
     }
 }

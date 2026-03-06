@@ -82,6 +82,9 @@ fn parse_subtask_wire(s: SubtaskWire) -> anyhow::Result<SubtaskSpec> {
 impl TryFrom<DecompositionWire> for DecompositionResult {
     type Error = anyhow::Error;
     fn try_from(w: DecompositionWire) -> anyhow::Result<Self> {
+        if w.subtasks.is_empty() {
+            bail!("decomposition must contain at least one subtask");
+        }
         let subtasks = w
             .subtasks
             .into_iter()
@@ -193,6 +196,9 @@ impl TryFrom<RecoveryPlanWire> for RecoveryPlan {
             "full" => true,
             other => bail!("invalid recovery approach: {other}"),
         };
+        if w.subtasks.is_empty() {
+            bail!("recovery plan must contain at least one subtask");
+        }
         let subtasks = w
             .subtasks
             .into_iter()
@@ -896,7 +902,11 @@ mod tests {
     fn recovery_plan_wire_invalid_approach() {
         let wire = RecoveryPlanWire {
             approach: "partial".into(),
-            subtasks: vec![],
+            subtasks: vec![SubtaskWire {
+                goal: "g".into(),
+                verification_criteria: vec!["c".into()],
+                magnitude: "small".into(),
+            }],
             rationale: "x".into(),
         };
         assert!(RecoveryPlan::try_from(wire).is_err());
@@ -954,6 +964,38 @@ mod tests {
         assert_eq!(default_max_tokens(Model::Haiku), 8192);
         assert_eq!(default_max_tokens(Model::Sonnet), 8192);
         assert_eq!(default_max_tokens(Model::Opus), 16384);
+    }
+
+    #[test]
+    fn decomposition_wire_empty_subtasks_rejected() {
+        let wire = DecompositionWire {
+            subtasks: vec![],
+            rationale: "empty".into(),
+        };
+        let err = DecompositionResult::try_from(wire).unwrap_err();
+        assert!(err.to_string().contains("at least one subtask"));
+    }
+
+    #[test]
+    fn recovery_plan_wire_empty_subtasks_rejected() {
+        let wire = RecoveryPlanWire {
+            approach: "incremental".into(),
+            subtasks: vec![],
+            rationale: "empty".into(),
+        };
+        let err = RecoveryPlan::try_from(wire).unwrap_err();
+        assert!(err.to_string().contains("at least one subtask"));
+    }
+
+    #[test]
+    fn recovery_plan_wire_full_approach_empty_subtasks_rejected() {
+        let wire = RecoveryPlanWire {
+            approach: "full".into(),
+            subtasks: vec![],
+            rationale: "empty".into(),
+        };
+        let err = RecoveryPlan::try_from(wire).unwrap_err();
+        assert!(err.to_string().contains("at least one subtask"));
     }
 
     #[test]

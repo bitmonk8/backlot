@@ -79,17 +79,17 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 **Completed:** 2026-03-05. All 95 review cells executed. 541 original findings.
 
-**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, dead stub removal, and retry/escalation deduplication — resolving 65 findings fully and 15 partially.
+**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, dead stub removal, retry/escalation deduplication, empty-subtask validation, and bash process group kill — resolving 70 findings fully and 15 partially.
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
 | Critical | 0 | 0 |
-| Major | 74 | 8 |
-| Minor | 224 | 7 |
+| Major | 70 | 8 |
+| Minor | 223 | 7 |
 | Note | 164 | 3 |
-| **Total** | **464** | **15** |
+| **Total** | **459** | **15** |
 
 ### Remaining Findings by Category
 
@@ -98,11 +98,11 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
 | Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~67 | 0 | ~9 |
-| Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~43 | 0 | ~6 |
+| Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~42 | 0 | ~5 |
 | Dead code/stubs (unused ToolGrant flags, usage tracking) | ~21 | 0 | ~3 |
 | Design intent gaps (prompt content, tool grants, missing review phase) | ~40 | 0 | ~10 |
 | Doc drift (TUI event names, CLI syntax, type mismatches) | ~25 | 0 | ~5 |
-| Correctness (empty subtask validation, cycle detection, phase transitions) | ~30 | 0 | ~7 |
+| Correctness (cycle detection, phase transitions) | ~27 | 0 | ~5 |
 | Other (clippy, naming, notes) | ~128 | 0 | 0 |
 
 ---
@@ -113,7 +113,7 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 ---
 
-## Major Findings (74 still valid, 8 partially resolved)
+## Major Findings (70 still valid, 8 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
@@ -123,7 +123,6 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 | U5-R2#3 | No write-content size limit on `write_file` — agent can exhaust disk | `tools.rs` |
 | U5-R2#4 | No regex pattern size/complexity limit in `tool_grep` — ReDoS vector | `tools.rs` |
 | U5-R1#1 | TOCTOU symlink race in `safe_path` with `allow_new_file` — race between validation and open | `tools.rs` |
-| U5-R1#2 | Bash timeout does not kill process group — grandchild processes orphaned | `tools.rs` |
 | U5-R1#3 | Glob filter bypass when `strip_prefix` fails in `tool_grep` — files outside root may be searched | `tools.rs` |
 | U2-R2#2 | TOCTOU in `write_file` path validation — path validated then file written non-atomically | `tools.rs` |
 | U2-R2#3 | TOCTOU in `edit_file` between read and write — file may change between operations | `tools.rs` |
@@ -135,10 +134,7 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 | Ref | Finding | Location |
 |-----|---------|----------|
 | U1-R1#1 | `execute_branch` can report Success when all children failed after recovery exhaustion | `orchestrator.rs` |
-| U3-R1#1 | `DecompositionWire::try_from` accepts empty `subtasks` vec — creates branch with no children | `config_gen.rs` |
-| U3-R1#2 | `RecoveryPlanWire::try_from` accepts empty `subtasks` vec — creates recovery with no work | `config_gen.rs` |
 | U8-R1#1 | `load()` does not validate `next_id > max(existing task IDs)` — ID collision on resume | `state.rs` |
-| U5-R3#1 | Bash timeout doesn't explicitly kill child/process group — resources leak | `tools.rs` |
 | U5-R3#2 | `tool_bash` returns `Ok` for non-zero exit status — callers may misinterpret failures | `tools.rs` |
 | U2-R1#1 | `run_structured` does not guard against `ToolCallsPending` status from Flick | `flick.rs` |
 | U7-R3#1 | `Task::path` and `current_model` are `Option` with no safe accessor — callers unwrap unsafely | `task/mod.rs` |
@@ -169,7 +165,6 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 | Ref | Finding | Location |
 |-----|---------|----------|
-| ~~U1-R5#1, B1#1, B5#1~~ | ~~`execute_leaf` and `leaf_fix_loop` share ~120 lines of identical retry-escalation state machine~~ | *Resolved 2026-03-06: extracted `leaf_retry_loop` with `LeafRetryMode` enum* |
 | U2-R5#2 | `execute_leaf` and `fix_leaf` in FlickAgent have identical bodies after prompt line | `flick.rs` |
 | U2-R5#3 | `design_and_decompose` and `design_fix_subtasks` in FlickAgent share identical tail | `flick.rs` |
 | U3-R5#1 | Subtask schema duplicated between `decomposition_schema` and `recovery_plan_schema` | `config_gen.rs` |
@@ -177,15 +172,15 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 | B3#1 | `VerificationStarted`/`VerificationComplete` event pair — redundant with `TaskCompleted`/`TaskFailed` | `events.rs`, `orchestrator.rs` |
 | B3#2 | `SubtasksCreated` emitted redundantly alongside `RecoverySubtasksCreated`/`FixSubtasksCreated` | `events.rs`, `orchestrator.rs` |
 
+*Resolved: U1-R5#1/B1#1/B5#1 (retry loop dedup) — extracted `leaf_retry_loop` 2026-03-06.*
+
 ### Error Handling
 
 | Ref | Finding | Location |
 |-----|---------|----------|
-| ~~B4#1~~ | ~~`verify()` errors are fatal inside fix loops — should be best-effort like recovery~~ | *Resolved 2026-03-06: `verify()` errors in fix loops now treated as failed attempts* |
-| ~~B4#2~~ | ~~`design_fix_subtasks` errors are fatal — inconsistent with best-effort `design_recovery_subtasks`~~ | *Resolved 2026-03-06: `design_fix_subtasks` errors now treated as failed attempts* |
 | U11-R1#1 | `read_line()` in init silently discards I/O errors | `init.rs` |
 | U12-R1#1 | TUI abort path does not save state — user loses progress on Ctrl-C during TUI mode | `main.rs` |
-| U5-R3#1 | Bash timeout doesn't explicitly kill child — resources leak on timeout (also correctness) | `tools.rs` |
+*Resolved: U5-R3#1 (bash process group kill), B4#1, B4#2 — all resolved 2026-03-06.*
 
 ### Dead Code & Stubs
 
@@ -237,5 +232,5 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 ## Recommended Action Items (Priority Order)
 
 1. **Operational correctness sandboxing (Frida).** Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. Complex, multiple open questions — start with prototype.
-2. **Add empty-subtask validation.** `DecompositionWire` and `RecoveryPlanWire` should reject empty subtask lists.
-3. **Kill process group on bash timeout.** Current code only kills the direct child, orphaning grandchildren.
+
+*Resolved: #2 (empty-subtask validation), #3 (bash process group kill) — 2026-03-06.*
