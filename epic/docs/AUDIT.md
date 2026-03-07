@@ -71,24 +71,24 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ## Audit Results Summary
 
-541 original findings. 99 resolved fully, 10 partially (3 remaining partial).
+541 original findings. 103 resolved fully, 10 partially resolved (7 minor, 3 note — 0 major partial remain).
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
 | Critical | 0 | 0 |
-| Major | 41 | 3 |
+| Major | 37 | 0 |
 | Minor | 223 | 7 |
 | Note | 164 | 3 |
-| **Total** | **428** | **13** |
+| **Total** | **424** | **10** |
 
 ### Remaining Findings by Category
 
 | Category | Approx count | Critical | Major |
 |---|---|---|---|
 | Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
-| Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
+| Testability (no injection seams, zero coverage in init/TUI/main/state) | ~64 | 0 | ~16 |
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~61 | 0 | ~3 |
 | Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~40 | 0 | ~3 |
 | Dead code/stubs (unused ToolGrant flags) | ~20 | 0 | ~2 |
@@ -99,7 +99,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ---
 
-## Major Findings (41 still valid, 3 partially resolved)
+## Major Findings (37 still valid, 0 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
@@ -125,7 +125,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | U7-R6#3 | Zero unit tests in task module | `task/` |
 | U8-R6#1 | `save`/`load` coupled to real filesystem — no abstraction for test isolation | `state.rs` |
 | U8-R6#2 | No error/failure path tests for save/load | `state.rs` |
-| U10-R6#1 | No `PartialEq` derive on config structs — cannot assert equality in tests | `config/` |
+| ~~U10-R6#1~~ | ~~No `PartialEq` derive on config structs~~ | **Resolved** — `PartialEq`+`Eq` derives added |
 | U10-R6#4 | `init.rs` prompt functions read from `io::stdin()` directly — untestable | `init.rs` |
 | U11-R6 | Zero test coverage for entire init module (multiple findings) | `init.rs` |
 | U13-R6 | Zero test coverage for entire TUI module (multiple findings) | `tui/` |
@@ -150,31 +150,31 @@ All 6 majors resolved.
 |-----|---------|--------|
 | U2-R7#5 | `result.usage` never read | **Resolved** — added `log_usage` helper to surface token/cost data |
 
-### Partially Resolved Majors
+### ~~Partially Resolved Majors~~ — ALL RESOLVED
 
 | Ref | Finding | Status |
 |-----|---------|--------|
-| U10-R1#2 | `LimitsConfig` values used but no comprehensive validation | Some fields clamped to min 1, but no full validate() method |
-| U10-R6#2 | Config validation incomplete | Clamping added for some fields; no comprehensive boundary checks |
-| U10-R6#3 | No dedicated config `load()` with filesystem abstraction | Config loaded in main.rs directly; no config-module-level load function |
+| U10-R1#2 | `LimitsConfig` values used but no comprehensive validation | **Resolved** — `EpicConfig::validate()` with bounds checking, called from `load()` |
+| U10-R6#2 | Config validation incomplete | **Resolved** — `PartialEq`+`Eq` derives on all config structs, 14 boundary tests |
+| U10-R6#3 | No dedicated config `load()` with filesystem abstraction | **Resolved** — `EpicConfig::load(path)` replaces inline loading in main.rs |
 
 ---
 
 ## Recommended Action Items (Priority Order)
 
-### ~~1. Simplification (6 majors + 1 dead code)~~ — RESOLVED
+### ~~Simplification (6 majors + 1 dead code)~~ — RESOLVED
 
 All 7 issues resolved. See Simplification & Dead Code sections above.
 
-### 1. Config validation (3 partially resolved)
+### ~~Config validation (3 partially resolved)~~ — RESOLVED
 
-| Ref | Summary | Fix |
-|-----|---------|-----|
-| U10-R1#2 | `LimitsConfig` has no comprehensive validation | Add `validate()` with bounds checking |
-| U10-R6#2 | Config validation incomplete — no boundary tests | Add `PartialEq` derives and boundary tests |
-| U10-R6#3 | No dedicated config `load()` abstraction | Add `EpicConfig::load(path)` in config module |
+| Ref | Summary | Status |
+|-----|---------|--------|
+| U10-R1#2 | `LimitsConfig` has no comprehensive validation | **Resolved** — `EpicConfig::validate()` with bounds checking |
+| U10-R6#2 | Config validation incomplete — no boundary tests | **Resolved** — `PartialEq`+`Eq` derives, 14 boundary tests |
+| U10-R6#3 | No dedicated config `load()` abstraction | **Resolved** — `EpicConfig::load(path)` in config module |
 
-### 2. Testability (16 majors)
+### 1. Testability (16 majors)
 
 Injection seams, test isolation, and missing coverage. Largest group — can be addressed incrementally.
 
@@ -192,13 +192,13 @@ Injection seams, test isolation, and missing coverage. Largest group — can be 
 | U7-R6#3 | Zero unit tests in task module | Add tests |
 | U8-R6#1 | `save`/`load` coupled to real filesystem | Add abstraction or test helpers |
 | U8-R6#2 | No error/failure path tests for save/load | Add failure path tests |
-| U10-R6#1 | No `PartialEq` derive on config structs | Add derive |
+| ~~U10-R6#1~~ | ~~No `PartialEq` derive on config structs~~ | **Resolved** |
 | U10-R6#4 | `init.rs` prompt functions read from `io::stdin()` directly | Accept `Read` trait param |
 | U11-R6 | Zero test coverage for init module | Add tests |
 | U13-R6 | Zero test coverage for TUI module | Add tests |
 | U14-R6 | git module empty; scope check hardwired with no trait boundary | Add git trait |
 
-### 3. Operational correctness sandboxing (Frida)
+### 2. Operational correctness sandboxing (Frida)
 
 TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement. Deferred until items 1–2 are addressed.
 

@@ -67,12 +67,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     std::fs::create_dir_all(&work_dir)?;
 
     let config_path = project_root.join("epic.toml");
-    let epic_config = if config_path.exists() {
-        let contents = std::fs::read_to_string(&config_path)?;
-        toml::from_str::<EpicConfig>(&contents)?
-    } else {
-        EpicConfig::default()
-    };
+    let epic_config = EpicConfig::load(&config_path)?;
 
     let timeout = Duration::from_secs(300);
 

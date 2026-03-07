@@ -1,9 +1,12 @@
 // Per-project configuration: verification steps, model preferences, paths, limits.
 
+use std::path::Path;
+
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 /// Top-level project configuration, serialized as `epic.toml`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpicConfig {
     #[serde(default)]
     pub project: ProjectConfig,
@@ -21,7 +24,7 @@ pub struct EpicConfig {
     pub verification_steps: Vec<VerificationStep>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectConfig {
     #[serde(default = "default_root")]
     pub root: String,
@@ -29,7 +32,7 @@ pub struct ProjectConfig {
     pub epic_dir: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelConfig {
     #[serde(default = "default_fast_model")]
     pub fast: String,
@@ -39,7 +42,7 @@ pub struct ModelConfig {
     pub strong: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LimitsConfig {
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
@@ -55,13 +58,13 @@ pub struct LimitsConfig {
     pub max_total_tasks: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentConfig {
     #[serde(default = "default_runtime")]
     pub runtime: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationStep {
     pub name: String,
     pub command: Vec<String>,
@@ -151,6 +154,85 @@ impl Default for AgentConfig {
     }
 }
 
+impl EpicConfig {
+    /// Load config from the given path, returning defaults if the file does not exist.
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e)
+                        .context(format!("reading config from {}", path.display())),
+                );
+            }
+        };
+        let config: Self = toml::from_str(&contents)
+            .with_context(|| format!("parsing config from {}", path.display()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate all config fields have reasonable values.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let l = &self.limits;
+
+        if l.max_depth < 1 {
+            anyhow::bail!("limits.max_depth must be >= 1, got {}", l.max_depth);
+        }
+        if l.max_depth > 32 {
+            anyhow::bail!("limits.max_depth must be <= 32, got {}", l.max_depth);
+        }
+        if l.max_recovery_rounds < 1 {
+            anyhow::bail!(
+                "limits.max_recovery_rounds must be >= 1, got {}",
+                l.max_recovery_rounds
+            );
+        }
+        if l.retry_budget < 1 {
+            anyhow::bail!("limits.retry_budget must be >= 1, got {}", l.retry_budget);
+        }
+        if l.branch_fix_rounds < 1 {
+            anyhow::bail!(
+                "limits.branch_fix_rounds must be >= 1, got {}",
+                l.branch_fix_rounds
+            );
+        }
+        if l.root_fix_rounds < 1 {
+            anyhow::bail!(
+                "limits.root_fix_rounds must be >= 1, got {}",
+                l.root_fix_rounds
+            );
+        }
+        if l.max_total_tasks < 1 {
+            anyhow::bail!(
+                "limits.max_total_tasks must be >= 1, got {}",
+                l.max_total_tasks
+            );
+        }
+        if l.max_total_tasks > 10_000 {
+            anyhow::bail!(
+                "limits.max_total_tasks must be <= 10000, got {}",
+                l.max_total_tasks
+            );
+        }
+
+        for (i, step) in self.verification_steps.iter().enumerate() {
+            if step.command.is_empty() {
+                anyhow::bail!("verification[{i}].command must not be empty");
+            }
+            if step.timeout < 1 {
+                anyhow::bail!(
+                    "verification[{}].timeout must be >= 1, got {}",
+                    i, step.timeout
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +280,19 @@ timeout = 600
     }
 
     #[test]
+    fn load_nonexistent_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent").join("epic.toml");
+        let config = EpicConfig::load(&path).unwrap();
+        assert_eq!(config, EpicConfig::default());
+    }
+
+    #[test]
+    fn default_config_partial_eq() {
+        assert_eq!(EpicConfig::default(), EpicConfig::default());
+    }
+
+    #[test]
     fn max_total_tasks_round_trips() {
         let toml_str = r"
 [limits]
@@ -209,5 +304,172 @@ max_total_tasks = 42
         let serialized = toml::to_string_pretty(&config).unwrap();
         let reparsed: EpicConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.limits.max_total_tasks, 42);
+    }
+
+    #[test]
+    fn validate_default_config_passes() {
+        EpicConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn validate_max_depth_zero() {
+        let mut config = EpicConfig::default();
+        config.limits.max_depth = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("max_depth"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn validate_max_depth_too_large() {
+        let mut config = EpicConfig::default();
+        config.limits.max_depth = 33;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("max_depth"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn validate_max_depth_at_upper_bound() {
+        let mut config = EpicConfig::default();
+        config.limits.max_depth = 32;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_max_recovery_rounds_zero() {
+        let mut config = EpicConfig::default();
+        config.limits.max_recovery_rounds = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("max_recovery_rounds"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn validate_retry_budget_zero() {
+        let mut config = EpicConfig::default();
+        config.limits.retry_budget = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("retry_budget"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn validate_branch_fix_rounds_zero() {
+        let mut config = EpicConfig::default();
+        config.limits.branch_fix_rounds = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("branch_fix_rounds"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn validate_root_fix_rounds_zero() {
+        let mut config = EpicConfig::default();
+        config.limits.root_fix_rounds = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("root_fix_rounds"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn validate_max_total_tasks_zero() {
+        let mut config = EpicConfig::default();
+        config.limits.max_total_tasks = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("max_total_tasks"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn validate_max_total_tasks_too_large() {
+        let mut config = EpicConfig::default();
+        config.limits.max_total_tasks = 10_001;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("max_total_tasks"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn validate_max_total_tasks_at_upper_bound() {
+        let mut config = EpicConfig::default();
+        config.limits.max_total_tasks = 10_000;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_verification_timeout_zero() {
+        let mut config = EpicConfig::default();
+        config.verification_steps.push(VerificationStep {
+            name: "test".into(),
+            command: vec!["cargo".into(), "test".into()],
+            timeout: 0,
+        });
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("timeout"), "error should name the field: {err}");
+    }
+
+    #[test]
+    fn load_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epic.toml");
+        std::fs::write(
+            &path,
+            r#"
+[limits]
+max_depth = 4
+max_total_tasks = 50
+"#,
+        )
+        .unwrap();
+        let config = EpicConfig::load(&path).unwrap();
+        assert_eq!(config.limits.max_depth, 4);
+        assert_eq!(config.limits.max_total_tasks, 50);
+    }
+
+    #[test]
+    fn load_malformed_toml_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epic.toml");
+        std::fs::write(&path, "not valid [[ toml %%%").unwrap();
+        let err = EpicConfig::load(&path).unwrap_err();
+        assert!(err.to_string().contains("parsing config"), "{err}");
+    }
+
+    #[test]
+    fn load_invalid_values_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epic.toml");
+        std::fs::write(&path, "[limits]\nmax_depth = 0\n").unwrap();
+        let err = EpicConfig::load(&path).unwrap_err();
+        assert!(err.to_string().contains("max_depth"), "{err}");
+    }
+
+    #[test]
+    fn validate_verification_second_step_invalid() {
+        let mut config = EpicConfig::default();
+        config.verification_steps.push(VerificationStep {
+            name: "ok".into(),
+            command: vec!["true".into()],
+            timeout: 60,
+        });
+        config.verification_steps.push(VerificationStep {
+            name: "bad".into(),
+            command: vec!["false".into()],
+            timeout: 0,
+        });
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("verification[1]"), "should report index 1: {err}");
+    }
+
+    #[test]
+    fn load_directory_path_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = EpicConfig::load(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("reading config"), "{err}");
+    }
+
+    #[test]
+    fn validate_verification_empty_command() {
+        let mut config = EpicConfig::default();
+        config.verification_steps.push(VerificationStep {
+            name: "empty".into(),
+            command: vec![],
+            timeout: 60,
+        });
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("command"), "error should mention command: {err}");
     }
 }
