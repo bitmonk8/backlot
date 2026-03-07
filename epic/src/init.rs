@@ -162,13 +162,13 @@ fn edit_step(
 
     print!("  Name [{}]: ", original.name);
     io::stdout().flush()?;
-    let name = read_line_or_default(lines, &original.name);
+    let name = read_line_or_default(lines, &original.name)?;
 
     // Note: whitespace-split does not handle quoted arguments. Commands with spaces
     // in arguments should be edited directly in epic.toml after generation.
     print!("  Command [{default_cmd}]: ");
     io::stdout().flush()?;
-    let cmd_input = read_line_or_default(lines, &default_cmd);
+    let cmd_input = read_line_or_default(lines, &default_cmd)?;
 
     let command: Vec<String> = cmd_input.split_whitespace().map(String::from).collect();
 
@@ -178,7 +178,7 @@ fn edit_step(
 
     print!("  Timeout [{default_timeout}]: ");
     io::stdout().flush()?;
-    let timeout_str = read_line_or_default(lines, &default_timeout.to_string());
+    let timeout_str = read_line_or_default(lines, &default_timeout.to_string())?;
     let timeout = timeout_str.parse().unwrap_or(default_timeout);
 
     Ok(Some(VerificationStep {
@@ -193,14 +193,14 @@ fn prompt_custom_step(
 ) -> anyhow::Result<Option<VerificationStep>> {
     print!("  Name: ");
     io::stdout().flush()?;
-    let name = read_line(lines);
+    let name = read_line(lines)?;
     if name.is_empty() {
         return Ok(None);
     }
 
     print!("  Command: ");
     io::stdout().flush()?;
-    let cmd_input = read_line(lines);
+    let cmd_input = read_line(lines)?;
     let command: Vec<String> = cmd_input.split_whitespace().map(String::from).collect();
     if command.is_empty() {
         return Ok(None);
@@ -208,7 +208,7 @@ fn prompt_custom_step(
 
     print!("  Timeout [300]: ");
     io::stdout().flush()?;
-    let timeout_str = read_line_or_default(lines, "300");
+    let timeout_str = read_line_or_default(lines, "300")?;
     let timeout = timeout_str.parse().unwrap_or(300);
 
     Ok(Some(VerificationStep {
@@ -239,13 +239,13 @@ fn prompt_models() -> anyhow::Result<ModelConfig> {
 
     print!("  Fast model [{}]: ", defaults.fast);
     io::stdout().flush()?;
-    let fast = read_line_or_default(&mut lines, &defaults.fast);
+    let fast = read_line_or_default(&mut lines, &defaults.fast)?;
     print!("  Balanced model [{}]: ", defaults.balanced);
     io::stdout().flush()?;
-    let balanced = read_line_or_default(&mut lines, &defaults.balanced);
+    let balanced = read_line_or_default(&mut lines, &defaults.balanced)?;
     print!("  Strong model [{}]: ", defaults.strong);
     io::stdout().flush()?;
-    let strong = read_line_or_default(&mut lines, &defaults.strong);
+    let strong = read_line_or_default(&mut lines, &defaults.strong)?;
     drop(lines);
     Ok(ModelConfig {
         fast,
@@ -278,23 +278,23 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
 
     print!("  Max depth [{}]: ", defaults.max_depth);
     io::stdout().flush()?;
-    let max_depth = read_line_or_default(&mut lines, &defaults.max_depth.to_string())
+    let max_depth = read_line_or_default(&mut lines, &defaults.max_depth.to_string())?
         .parse()
         .unwrap_or(defaults.max_depth);
     print!("  Max recovery rounds [{}]: ", defaults.max_recovery_rounds);
     io::stdout().flush()?;
     let max_recovery_rounds =
-        read_line_or_default(&mut lines, &defaults.max_recovery_rounds.to_string())
+        read_line_or_default(&mut lines, &defaults.max_recovery_rounds.to_string())?
             .parse()
             .unwrap_or(defaults.max_recovery_rounds);
     print!("  Retry budget [{}]: ", defaults.retry_budget);
     io::stdout().flush()?;
-    let retry_budget = read_line_or_default(&mut lines, &defaults.retry_budget.to_string())
+    let retry_budget = read_line_or_default(&mut lines, &defaults.retry_budget.to_string())?
         .parse()
         .unwrap_or(defaults.retry_budget);
     print!("  Max total tasks [{}]: ", defaults.max_total_tasks);
     io::stdout().flush()?;
-    let max_total_tasks = read_line_or_default(&mut lines, &defaults.max_total_tasks.to_string())
+    let max_total_tasks = read_line_or_default(&mut lines, &defaults.max_total_tasks.to_string())?
         .parse()
         .unwrap_or(defaults.max_total_tasks);
     drop(lines);
@@ -307,44 +307,49 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
     })
 }
 
+/// Shared helper: reads one line, trims it, optionally lowercases, optionally bails on EOF.
+fn read_line_raw(
+    lines: &mut impl Iterator<Item = io::Result<String>>,
+    bail_on_eof: bool,
+    lowercase: bool,
+) -> anyhow::Result<String> {
+    match lines.next() {
+        Some(Ok(line)) => {
+            let trimmed = line.trim();
+            Ok(if lowercase { trimmed.to_lowercase() } else { trimmed.to_owned() })
+        }
+        Some(Err(e)) => bail!("stdin read error: {e}"),
+        None if bail_on_eof => bail!("unexpected end of input"),
+        None => Ok(String::new()),
+    }
+}
+
 /// Read a line, returning an error on I/O failure or EOF.
 fn read_line_checked(
     lines: &mut impl Iterator<Item = io::Result<String>>,
 ) -> anyhow::Result<String> {
-    match lines.next() {
-        Some(Ok(line)) => Ok(line.trim().to_lowercase()),
-        Some(Err(e)) => bail!("stdin read error: {e}"),
-        None => bail!("unexpected end of input"),
-    }
+    read_line_raw(lines, true, true)
 }
 
 /// Read a line for optional prompts. Returns empty string on EOF, propagates I/O errors.
 fn read_line_or_eof(
     lines: &mut impl Iterator<Item = io::Result<String>>,
 ) -> anyhow::Result<String> {
-    match lines.next() {
-        Some(Ok(line)) => Ok(line.trim().to_lowercase()),
-        Some(Err(e)) => bail!("stdin read error: {e}"),
-        None => Ok(String::new()),
-    }
+    read_line_raw(lines, false, true)
 }
 
-fn read_line(lines: &mut impl Iterator<Item = io::Result<String>>) -> String {
-    lines
-        .next()
-        .and_then(Result::ok)
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default()
+fn read_line(lines: &mut impl Iterator<Item = io::Result<String>>) -> anyhow::Result<String> {
+    read_line_raw(lines, false, false)
 }
 
 fn read_line_or_default(
     lines: &mut impl Iterator<Item = io::Result<String>>,
     default: &str,
-) -> String {
-    let line = read_line(lines);
+) -> anyhow::Result<String> {
+    let line = read_line(lines)?;
     if line.is_empty() {
-        default.to_owned()
+        Ok(default.to_owned())
     } else {
-        line
+        Ok(line)
     }
 }

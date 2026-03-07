@@ -27,9 +27,6 @@ The audit is organized as a **review matrix**: review types on one axis, code un
 | U11 | init | `init.rs` | Agent-driven interactive scaffolding |
 | U12 | cli + main | `cli.rs`, `main.rs` | Clap CLI, wiring, TUI/headless split, shutdown |
 | U13 | tui | `tui/*.rs` | TuiApp, task tree, worklog, metrics panels |
-| U14 | git | `git.rs` | git diff --numstat, scope circuit breaker support (stub removed) |
-| U15 | metrics | `metrics.rs` | Token/cost tracking (stub removed) |
-| U16 | services | `services/*.rs` | Stubs: document_store, research, verification (removed) |
 | U17 | docs | `docs/*.md` | Design documents |
 
 ## Review Types
@@ -66,9 +63,6 @@ Each cell is one focused agent task. All 95 cells complete. Detailed findings in
 | **U11** init | [x] | -- | [x] | [x] | [x] | [x] | -- | -- |
 | **U12** cli + main | [x] | [x] | [x] | [x] | [x] | [x] | -- | -- |
 | **U13** tui | [x] | -- | [x] | [x] | [x] | [x] | -- | -- |
-| **U14** git | [x] | -- | [x] | [x] | -- | [x] | -- | -- |
-| **U15** metrics | [x] | -- | [x] | [x] | -- | -- | -- | -- |
-| **U16** services | -- | -- | -- | [x] | -- | -- | -- | -- |
 | **U17** docs | -- | -- | -- | [x] | -- | -- | [x] | [x] |
 
 Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4 (CI readiness), X5 (global patterns), X6 (constants vs config). Broad-lens: B1–B4 (simplification), B5–B8 (design).
@@ -77,19 +71,17 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ## Audit Results Summary
 
-**Completed:** 2026-03-05. All 95 review cells executed. 541 original findings.
-
-**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, dead stub removal, retry/escalation deduplication, empty-subtask validation, bash process group kill, correctness fixes (branch-success guard, next_id validation, bash exit code, ToolCallsPending guard, safe Option accessors), input validation & resource limits, design intent alignment, and documentation drift — resolving 90 findings fully and 10 partially (3 remaining partial: U10-R1#2, U10-R6#2, U10-R6#3).
+541 original findings. 92 resolved fully, 10 partially (3 remaining partial).
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
 | Critical | 0 | 0 |
-| Major | 50 | 3 |
+| Major | 48 | 3 |
 | Minor | 223 | 7 |
 | Note | 164 | 3 |
-| **Total** | **437** | **13** |
+| **Total** | **435** | **13** |
 
 ### Remaining Findings by Category
 
@@ -98,7 +90,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
 | Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~67 | 0 | ~9 |
-| Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~42 | 0 | ~5 |
+| Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~40 | 0 | ~3 |
 | Dead code/stubs (unused ToolGrant flags, usage tracking) | ~21 | 0 | ~3 |
 | Design intent gaps (prompt content, tool grants, missing review phase) | ~27 | 0 | 0 |
 | Doc drift (TUI event names, CLI syntax, type mismatches) | ~19 | 0 | 0 |
@@ -107,27 +99,15 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ---
 
-## Critical Findings (all resolved)
-
-All 4 original critical findings have been resolved: C1 (security isolation documentation — README + startup detection), C2 (operational correctness — reclassified as Major, tracked below), C3 (CI pipeline — GitHub Actions added), C4 (main.rs untestable — `run()` extracted).
-
----
-
-## Major Findings (50 still valid, 3 partially resolved)
+## Major Findings (48 still valid, 3 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
 | Ref | Finding | Location |
 |-----|---------|----------|
-*Resolved 2026-03-06: U5-R2#2 (bash env filtering), U5-R2#3 (write size limit), U5-R2#4 (regex complexity limit), U5-R1#3 (glob filter bypass), U1-R2#2 (git diff timeout), U2-R2#4 (credential redaction).*
-
 | U5-R1#1 | TOCTOU symlink race in `safe_path` with `allow_new_file` — race between validation and open | `tools.rs` |
 | U2-R2#2 | TOCTOU in `write_file` path validation — path validated then file written non-atomically | `tools.rs` |
 | U2-R2#3 | TOCTOU in `edit_file` between read and write — file may change between operations | `tools.rs` |
-
-### Correctness
-
-*All 5 correctness majors resolved 2026-03-06: U1-R1#1 (branch-success guard), U8-R1#1 (next_id validation), U5-R3#2 (bash exit code), U2-R1#1 (ToolCallsPending guard), U7-R3#1 (pattern match guard replacing unsafe unwrap).*
 
 ### Testability
 
@@ -149,7 +129,7 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 | U10-R6#4 | `init.rs` prompt functions read from `io::stdin()` directly — untestable | `init.rs` |
 | U11-R6 | Zero test coverage for entire init module (multiple findings) | `init.rs` |
 | U13-R6 | Zero test coverage for entire TUI module (multiple findings) | `tui/` |
-| U14-R6 | git module empty; scope check hardwired in orchestrator with no trait boundary (multiple findings) | `git.rs`, `orchestrator.rs` |
+| U14-R6 | git module empty; scope check hardwired in orchestrator with no trait boundary (multiple findings) | `orchestrator.rs` |
 
 ### Simplification & Deduplication
 
@@ -162,69 +142,25 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 | B3#1 | `VerificationStarted`/`VerificationComplete` event pair — redundant with `TaskCompleted`/`TaskFailed` | `events.rs`, `orchestrator.rs` |
 | B3#2 | `SubtasksCreated` emitted redundantly alongside `RecoverySubtasksCreated`/`FixSubtasksCreated` | `events.rs`, `orchestrator.rs` |
 
-*Resolved: U1-R5#1/B1#1/B5#1 (retry loop dedup) — extracted `leaf_retry_loop` 2026-03-06.*
-
-### Error Handling
-
-| Ref | Finding | Location |
-|-----|---------|----------|
-| U11-R1#1 | `read_line()` in init silently discards I/O errors | `init.rs` |
-| U12-R1#1 | TUI abort path does not save state — user loses progress on Ctrl-C during TUI mode | `main.rs` |
-*Resolved: U5-R3#1 (bash process group kill), B4#1, B4#2 — all resolved 2026-03-06.*
-
 ### Dead Code & Stubs
 
 | Ref | Finding | Location |
 |-----|---------|----------|
 | U2-R7#5 | No usage/cost tracking — `result.usage` never read in production code | `flick.rs` |
 
-*Resolved: U14-R4#1 (`git.rs`), U15-R4#1 (`metrics.rs`), U16-R4#1 (`services/*.rs`), X5#1/X5#2 (mod declarations) — all removed 2026-03-06.*
-
-### ~~Design Intent~~ — All resolved 2026-03-07
-
-*Resolved: design intent alignment (U2-R7#4, U4-R7#1, U4-R7#2, U4-R7#3, U7-R7#3, B2#1, B8#1, B8#2, B7#1) — 2026-03-07.*
-
-### ~~Documentation Drift~~ — All resolved 2026-03-07
-
-*Resolved: documentation drift (U17-R8#9, U17-R8#10, U17-R8#11, U17-R8#14, U17-R8#15, U17-R8#6) — 2026-03-07.*
-
 ### Partially Resolved Majors
 
 | Ref | Finding | Status |
 |-----|---------|--------|
-| ~~U1-R7#5~~ | ~~`build_context` missing `parent_decomposition_rationale` and `parent_discoveries`~~ | *Resolved 2026-03-07 — both fields added to TaskContext* |
-| ~~U4-R7#4~~ | ~~`verify()` prompt not split into leaf vs branch variants~~ | *Resolved 2026-03-07 — leaf/branch-specific verification guidance added* |
-| ~~U6-R1#1~~ | ~~`assess()` calls `run_structured` with tools config that won't be handled~~ | *Resolved 2026-03-07 — tool config removed from assess* |
 | U10-R1#2 | `LimitsConfig` values used but no comprehensive validation | Some fields clamped to min 1, but no full validate() method |
 | U10-R6#2 | Config validation incomplete | Clamping added for some fields; no comprehensive boundary checks |
 | U10-R6#3 | No dedicated config `load()` with filesystem abstraction | Config loaded in main.rs directly; no config-module-level load function |
-| ~~U17-R8#6~~ | ~~CONFIGURATION.md CLI section still shows old syntax~~ | *Resolved 2026-03-07 — CLI section rewritten to match actual subcommands* |
-| ~~B7#2~~ | ~~Recovery subtasks get fresh budgets enabling cost growth~~ | *Resolved 2026-03-07 — recovery depth inherited + max_total_tasks cap* |
 
 ---
 
 ## Recommended Action Items (Priority Order)
 
-*Resolved: empty-subtask validation, bash process group kill — 2026-03-06.*
-*Resolved: correctness fixes (U1-R1#1, U8-R1#1, U5-R3#2, U2-R1#1, U7-R3#1) — 2026-03-06.*
-*Resolved: input validation & resource limits (U5-R2#2, U5-R2#3, U5-R2#4, U5-R1#3, U1-R2#2, U2-R2#4) — 2026-03-06.*
-*Resolved: design intent alignment (U2-R7#4, U4-R7#1, U4-R7#2, U4-R7#3, U7-R7#3, B2#1, B8#1, B8#2, B7#1, U1-R7#5, U4-R7#4, U6-R1#1, B7#2) — 2026-03-07.*
-*Resolved: documentation drift (U17-R8#9, U17-R8#10, U17-R8#11, U17-R8#14, U17-R8#15, U17-R8#6) — 2026-03-07.*
-
-### ~~1. Input validation & resource limits (6 majors)~~ — All resolved 2026-03-06
-
-### ~~2. Design intent alignment (9 majors + 4 partially resolved)~~ — All resolved 2026-03-07
-
-### ~~3. Documentation drift (5 majors + 1 partially resolved)~~ — All resolved 2026-03-07
-
-### 4. Error handling (2 majors)
-
-| Ref | Summary | Fix |
-|-----|---------|-----|
-| U11-R1#1 | `read_line()` in init silently discards I/O errors | Propagate or log the error |
-| U12-R1#1 | TUI abort path does not save state — user loses progress on Ctrl-C | Save state in TUI shutdown handler |
-
-### 5. Simplification (6 majors + 1 dead code)
+### 1. Simplification (6 majors + 1 dead code)
 
 Reduce duplication and remove unused code.
 
@@ -238,7 +174,7 @@ Reduce duplication and remove unused code.
 | B3#2 | `SubtasksCreated` emitted redundantly alongside variant-specific events | Remove or merge |
 | U2-R7#5 | No usage/cost tracking — `result.usage` never read | Remove dead field or implement tracking |
 
-### 6. Config validation (3 partially resolved)
+### 2. Config validation (3 partially resolved)
 
 | Ref | Summary | Fix |
 |-----|---------|-----|
@@ -246,7 +182,7 @@ Reduce duplication and remove unused code.
 | U10-R6#2 | Config validation incomplete — no boundary tests | Add `PartialEq` derives and boundary tests |
 | U10-R6#3 | No dedicated config `load()` abstraction | Add `EpicConfig::load(path)` in config module |
 
-### 7. Testability (16 majors)
+### 3. Testability (16 majors)
 
 Injection seams, test isolation, and missing coverage. Largest group — can be addressed incrementally.
 
@@ -270,9 +206,9 @@ Injection seams, test isolation, and missing coverage. Largest group — can be 
 | U13-R6 | Zero test coverage for TUI module | Add tests |
 | U14-R6 | git module empty; scope check hardwired with no trait boundary | Add git trait |
 
-### 8. Operational correctness sandboxing (Frida)
+### 4. Operational correctness sandboxing (Frida)
 
-TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement. Deferred until items 1–7 are addressed.
+TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement. Deferred until items 1–3 are addressed.
 
 | Ref | Summary |
 |-----|---------|

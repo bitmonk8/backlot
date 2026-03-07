@@ -153,9 +153,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         let tui_result = tokio::task::spawn_blocking(move || tui_app.run(rx)).await?;
 
         let abort_handle = orch_handle.abort_handle();
+        let mut saved = false;
         match tokio::time::timeout(Duration::from_secs(2), orch_handle).await {
             Ok(Ok((result, state))) => {
                 state.save(&state_path)?;
+                saved = true;
                 if let Ok(outcome) = result {
                     println!("Epic completed: {outcome:?}");
                 } else if let Err(e) = result {
@@ -169,6 +171,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
                 abort_handle.abort();
                 eprintln!("Orchestrator still running after timeout, aborted.");
             }
+        }
+        if !saved {
+            eprintln!("State was preserved up to the last checkpoint.");
+            eprintln!("Resume with: epic resume");
         }
 
         tui_result?;
