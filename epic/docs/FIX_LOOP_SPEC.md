@@ -108,7 +108,7 @@ FixAttempt { task_id: TaskId, attempt: u32, model: Model }
 FixModelEscalated { task_id: TaskId, from: Model, to: Model }
 ```
 
-`VerificationComplete` (existing) is emitted after each re-verification. `TaskCompleted` (existing) is emitted on terminal pass or fail.
+`TaskCompleted` (existing) is emitted on terminal pass or fail.
 
 ### Estimated Scope
 

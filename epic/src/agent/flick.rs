@@ -90,6 +90,7 @@ impl FlickAgent {
             .map_err(|e| anyhow::anyhow!("flick call failed: {e}"))?;
 
         check_error(&result)?;
+        log_usage(&result);
 
         // No tools are configured; a ToolCallsPending status means the model
         // hallucinated tool use and the response likely isn't valid JSON.
@@ -152,10 +153,47 @@ impl FlickAgent {
         }
 
         check_error(&result)?;
+        log_usage(&result);
 
         let text = extract_text(&result)?;
         serde_json::from_str(&text)
             .with_context(|| format!("failed to parse structured output: {text}"))
+    }
+
+    async fn run_leaf_task(
+        &self,
+        pair: prompts::PromptPair,
+        model: Model,
+    ) -> anyhow::Result<LeafResult> {
+        let grant = tools::phase_tools(AgentMethod::Execute);
+        let config = config_gen::build_execute_leaf_config(
+            &pair.system_prompt,
+            model,
+            &self.credential_name.0,
+            grant,
+            &self.model_config,
+        )?;
+
+        let wire: TaskOutcomeWire = self.run_with_tools(config, &pair.query, grant).await?;
+        LeafResult::try_from(wire)
+    }
+
+    async fn decompose_with_prompt(
+        &self,
+        pair: &prompts::PromptPair,
+        model: Model,
+    ) -> anyhow::Result<DecompositionResult> {
+        let grant = tools::phase_tools(AgentMethod::Decompose);
+        let config = config_gen::build_decompose_config(
+            &pair.system_prompt,
+            model,
+            &self.credential_name.0,
+            grant,
+            &self.model_config,
+        )?;
+
+        let wire: DecompositionWire = self.run_with_tools(config, &pair.query, grant).await?;
+        DecompositionResult::try_from(wire)
     }
 }
 
@@ -217,17 +255,7 @@ impl AgentService for FlickAgent {
 
     async fn execute_leaf(&self, ctx: &TaskContext, model: Model) -> anyhow::Result<LeafResult> {
         let pair = prompts::build_execute_leaf(ctx);
-        let grant = tools::phase_tools(AgentMethod::Execute);
-        let config = config_gen::build_execute_leaf_config(
-            &pair.system_prompt,
-            model,
-            &self.credential_name.0,
-            grant,
-            &self.model_config,
-        )?;
-
-        let wire: TaskOutcomeWire = self.run_with_tools(config, &pair.query, grant).await?;
-        LeafResult::try_from(wire)
+        self.run_leaf_task(pair, model).await
     }
 
     async fn fix_leaf(
@@ -238,17 +266,7 @@ impl AgentService for FlickAgent {
         attempt: u32,
     ) -> anyhow::Result<LeafResult> {
         let pair = prompts::build_fix_leaf(ctx, failure_reason, attempt);
-        let grant = tools::phase_tools(AgentMethod::Execute);
-        let config = config_gen::build_execute_leaf_config(
-            &pair.system_prompt,
-            model,
-            &self.credential_name.0,
-            grant,
-            &self.model_config,
-        )?;
-
-        let wire: TaskOutcomeWire = self.run_with_tools(config, &pair.query, grant).await?;
-        LeafResult::try_from(wire)
+        self.run_leaf_task(pair, model).await
     }
 
     async fn design_and_decompose(
@@ -257,17 +275,7 @@ impl AgentService for FlickAgent {
         model: Model,
     ) -> anyhow::Result<DecompositionResult> {
         let pair = prompts::build_design_and_decompose(ctx);
-        let grant = tools::phase_tools(AgentMethod::Decompose);
-        let config = config_gen::build_decompose_config(
-            &pair.system_prompt,
-            model,
-            &self.credential_name.0,
-            grant,
-            &self.model_config,
-        )?;
-
-        let wire: DecompositionWire = self.run_with_tools(config, &pair.query, grant).await?;
-        DecompositionResult::try_from(wire)
+        self.decompose_with_prompt(&pair, model).await
     }
 
     async fn design_fix_subtasks(
@@ -278,17 +286,7 @@ impl AgentService for FlickAgent {
         round: u32,
     ) -> anyhow::Result<DecompositionResult> {
         let pair = prompts::build_design_fix_subtasks(ctx, verification_issues, round);
-        let grant = tools::phase_tools(AgentMethod::Decompose);
-        let config = config_gen::build_decompose_config(
-            &pair.system_prompt,
-            model,
-            &self.credential_name.0,
-            grant,
-            &self.model_config,
-        )?;
-
-        let wire: DecompositionWire = self.run_with_tools(config, &pair.query, grant).await?;
-        DecompositionResult::try_from(wire)
+        self.decompose_with_prompt(&pair, model).await
     }
 
     async fn verify(&self, ctx: &TaskContext, model: Model) -> anyhow::Result<VerificationResult> {
@@ -366,6 +364,15 @@ impl AgentService for FlickAgent {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn log_usage(result: &flick::FlickResult) {
+    if let Some(u) = &result.usage {
+        eprintln!(
+            "[flick] tokens in={} out={} cost=${:.4}",
+            u.input_tokens, u.output_tokens, u.cost_usd
+        );
+    }
+}
 
 fn check_error(result: &flick::FlickResult) -> anyhow::Result<()> {
     if matches!(result.status, ResultStatus::Error) {

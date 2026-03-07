@@ -41,13 +41,6 @@ pub enum Event {
         attempt: u32,
         model: Model,
     },
-    VerificationStarted {
-        task_id: TaskId,
-    },
-    VerificationComplete {
-        task_id: TaskId,
-        passed: bool,
-    },
     DiscoveriesRecorded {
         task_id: TaskId,
         count: usize,

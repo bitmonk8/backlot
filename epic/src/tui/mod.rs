@@ -241,25 +241,6 @@ impl TuiApp {
                     self.session_start,
                 ));
             }
-            Event::VerificationStarted { task_id } => {
-                self.worklog.push(WorklogEntry::info(
-                    format!("{task_id} verifying…"),
-                    self.session_start,
-                ));
-            }
-            Event::VerificationComplete { task_id, passed } => {
-                if passed {
-                    self.worklog.push(WorklogEntry::success(
-                        format!("{task_id} verification passed"),
-                        self.session_start,
-                    ));
-                } else {
-                    self.worklog.push(WorklogEntry::error(
-                        format!("{task_id} verification failed"),
-                        self.session_start,
-                    ));
-                }
-            }
             Event::DiscoveriesRecorded { task_id, count } => {
                 self.worklog.push(WorklogEntry::info(
                     format!("{task_id} recorded {count} discovery(ies)"),

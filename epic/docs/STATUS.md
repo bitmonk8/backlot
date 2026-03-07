@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (193 tests passing, 0 clippy warnings). Full codebase audit complete (95 review cells, 541 findings). Remediation ongoing; 4 groups remain.
+**Audit remediation in progress** — All v1 features implemented (193 tests passing, 0 clippy warnings). Full codebase audit complete (95 review cells, 541 findings). Remediation ongoing; 3 groups remain.
 
 ## What Exists
 
@@ -34,7 +34,6 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 
-1. **Simplification** (6 majors + 1 dead code) — FlickAgent method dedup, schema dedup, event consolidation, usage tracking.
-2. **Config validation** (3 partial) — LimitsConfig bounds checking, PartialEq derives, load abstraction.
-3. **Testability** (16 majors) — Injection seams, FS/process abstractions, mock sharing, missing test coverage. Largest group — incremental.
-4. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. Deferred until 1–3 addressed. See [SANDBOXING.md](SANDBOXING.md).
+1. **Config validation** (3 partial) — LimitsConfig bounds checking, PartialEq derives, load abstraction.
+2. **Testability** (16 majors) — Injection seams, FS/process abstractions, mock sharing, missing test coverage. Largest group — incremental.
+3. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. Deferred until 1–2 addressed. See [SANDBOXING.md](SANDBOXING.md).

@@ -71,17 +71,17 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ## Audit Results Summary
 
-541 original findings. 92 resolved fully, 10 partially (3 remaining partial).
+541 original findings. 99 resolved fully, 10 partially (3 remaining partial).
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
 | Critical | 0 | 0 |
-| Major | 48 | 3 |
+| Major | 41 | 3 |
 | Minor | 223 | 7 |
 | Note | 164 | 3 |
-| **Total** | **435** | **13** |
+| **Total** | **428** | **13** |
 
 ### Remaining Findings by Category
 
@@ -89,9 +89,9 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 |---|---|---|---|
 | Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
 | Testability (no injection seams, zero coverage in init/TUI/main/state) | ~65 | 0 | ~15 |
-| Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~67 | 0 | ~9 |
+| Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~61 | 0 | ~3 |
 | Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~40 | 0 | ~3 |
-| Dead code/stubs (unused ToolGrant flags, usage tracking) | ~21 | 0 | ~3 |
+| Dead code/stubs (unused ToolGrant flags) | ~20 | 0 | ~2 |
 | Design intent gaps (prompt content, tool grants, missing review phase) | ~27 | 0 | 0 |
 | Doc drift (TUI event names, CLI syntax, type mismatches) | ~19 | 0 | 0 |
 | Correctness (cycle detection, phase transitions) | ~22 | 0 | 0 |
@@ -99,7 +99,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ---
 
-## Major Findings (48 still valid, 3 partially resolved)
+## Major Findings (41 still valid, 3 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
@@ -133,20 +133,22 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ### Simplification & Deduplication
 
-| Ref | Finding | Location |
-|-----|---------|----------|
-| U2-R5#2 | `execute_leaf` and `fix_leaf` in FlickAgent have identical bodies after prompt line | `flick.rs` |
-| U2-R5#3 | `design_and_decompose` and `design_fix_subtasks` in FlickAgent share identical tail | `flick.rs` |
-| U3-R5#1 | Subtask schema duplicated between `decomposition_schema` and `recovery_plan_schema` | `config_gen.rs` |
-| U3-R6#1 | `build_config` monolith couples JSON assembly to `flick::Config::from_str` | `config_gen.rs` |
-| B3#1 | `VerificationStarted`/`VerificationComplete` event pair — redundant with `TaskCompleted`/`TaskFailed` | `events.rs`, `orchestrator.rs` |
-| B3#2 | `SubtasksCreated` emitted redundantly alongside `RecoverySubtasksCreated`/`FixSubtasksCreated` | `events.rs`, `orchestrator.rs` |
+All 6 majors resolved.
+
+| Ref | Finding | Status |
+|-----|---------|--------|
+| U2-R5#2 | `execute_leaf`/`fix_leaf` dedup | **Resolved** — extracted `run_leaf_task` helper |
+| U2-R5#3 | `design_and_decompose`/`design_fix_subtasks` dedup | **Resolved** — extracted `decompose_with_prompt` helper |
+| U3-R5#1 | Subtask schema duplication | **Resolved** — extracted `subtask_schema()` helper |
+| U3-R6#1 | `build_config` monolith | **Resolved** — split into `build_config_json` + thin wrapper |
+| B3#1 | Redundant `VerificationStarted`/`VerificationComplete` events | **Resolved** — removed; `TaskCompleted`/`PhaseTransition` suffice |
+| B3#2 | Redundant `SubtasksCreated` alongside recovery events | **Resolved** — removed redundant emission at recovery site |
 
 ### Dead Code & Stubs
 
-| Ref | Finding | Location |
-|-----|---------|----------|
-| U2-R7#5 | No usage/cost tracking — `result.usage` never read in production code | `flick.rs` |
+| Ref | Finding | Status |
+|-----|---------|--------|
+| U2-R7#5 | `result.usage` never read | **Resolved** — added `log_usage` helper to surface token/cost data |
 
 ### Partially Resolved Majors
 
@@ -160,21 +162,11 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ## Recommended Action Items (Priority Order)
 
-### 1. Simplification (6 majors + 1 dead code)
+### ~~1. Simplification (6 majors + 1 dead code)~~ — RESOLVED
 
-Reduce duplication and remove unused code.
+All 7 issues resolved. See Simplification & Dead Code sections above.
 
-| Ref | Summary | Fix |
-|-----|---------|-----|
-| U2-R5#2 | `execute_leaf` and `fix_leaf` in FlickAgent have identical bodies | Extract shared implementation |
-| U2-R5#3 | `design_and_decompose` and `design_fix_subtasks` share identical tail | Extract shared implementation |
-| U3-R5#1 | Subtask schema duplicated between decomposition and recovery | Extract shared schema builder |
-| U3-R6#1 | `build_config` monolith couples JSON assembly to `flick::Config::from_str` | Split JSON assembly from parsing |
-| B3#1 | `VerificationStarted`/`VerificationComplete` events redundant with task events | Remove or merge |
-| B3#2 | `SubtasksCreated` emitted redundantly alongside variant-specific events | Remove or merge |
-| U2-R7#5 | No usage/cost tracking — `result.usage` never read | Remove dead field or implement tracking |
-
-### 2. Config validation (3 partially resolved)
+### 1. Config validation (3 partially resolved)
 
 | Ref | Summary | Fix |
 |-----|---------|-----|
@@ -182,7 +174,7 @@ Reduce duplication and remove unused code.
 | U10-R6#2 | Config validation incomplete — no boundary tests | Add `PartialEq` derives and boundary tests |
 | U10-R6#3 | No dedicated config `load()` abstraction | Add `EpicConfig::load(path)` in config module |
 
-### 3. Testability (16 majors)
+### 2. Testability (16 majors)
 
 Injection seams, test isolation, and missing coverage. Largest group — can be addressed incrementally.
 
@@ -206,9 +198,9 @@ Injection seams, test isolation, and missing coverage. Largest group — can be 
 | U13-R6 | Zero test coverage for TUI module | Add tests |
 | U14-R6 | git module empty; scope check hardwired with no trait boundary | Add git trait |
 
-### 4. Operational correctness sandboxing (Frida)
+### 3. Operational correctness sandboxing (Frida)
 
-TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement. Deferred until items 1–3 are addressed.
+TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement. Deferred until items 1–2 are addressed.
 
 | Ref | Summary |
 |-----|---------|

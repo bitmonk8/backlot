@@ -203,10 +203,6 @@ impl<A: AgentService> Orchestrator<A> {
 
     fn complete_task_verified(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
         self.transition(id, TaskPhase::Completed)?;
-        self.emit(Event::VerificationComplete {
-            task_id: id,
-            passed: true,
-        });
         self.emit(Event::TaskCompleted {
             task_id: id,
             outcome: TaskOutcome::Success,
@@ -219,7 +215,6 @@ impl<A: AgentService> Orchestrator<A> {
         &mut self,
         id: TaskId,
     ) -> Result<VerifyOutcome, OrchestratorError> {
-        self.emit(Event::VerificationStarted { task_id: id });
         let verify_model = self.verification_model(id)?;
         let ctx = self.build_context(id)?;
         match self.agent.verify(&ctx, verify_model).await {
@@ -229,20 +224,12 @@ impl<A: AgentService> Orchestrator<A> {
                     Ok(VerifyOutcome::Passed)
                 }
                 VerificationOutcome::Fail { reason } => {
-                    self.emit(Event::VerificationComplete {
-                        task_id: id,
-                        passed: false,
-                    });
                     self.checkpoint_save();
                     Ok(VerifyOutcome::Failed(reason))
                 }
             },
             Err(e) => {
                 eprintln!("warning: verify failed: {e}");
-                self.emit(Event::VerificationComplete {
-                    task_id: id,
-                    passed: false,
-                });
                 self.checkpoint_save();
                 Ok(VerifyOutcome::Failed(format!("verification error: {e}")))
             }
@@ -615,7 +602,6 @@ impl<A: AgentService> Orchestrator<A> {
     ) -> Result<TaskOutcome, OrchestratorError> {
         if outcome == TaskOutcome::Success {
             self.transition(id, TaskPhase::Verifying)?;
-            self.emit(Event::VerificationStarted { task_id: id });
 
             let verify_model = self.verification_model(id)?;
             let ctx = self.build_context(id)?;
@@ -624,11 +610,6 @@ impl<A: AgentService> Orchestrator<A> {
             match verify_result.outcome {
                 VerificationOutcome::Pass => self.complete_task_verified(id),
                 VerificationOutcome::Fail { reason } => {
-                    self.emit(Event::VerificationComplete {
-                        task_id: id,
-                        passed: false,
-                    });
-
                     let task = self
                         .state
                         .get(id)
@@ -1301,17 +1282,12 @@ impl<A: AgentService> Orchestrator<A> {
             .get(parent_id)
             .ok_or(OrchestratorError::TaskNotFound(parent_id))?
             .recovery_rounds;
-        let recovery_child_ids =
-            self.create_subtasks(parent_id, plan.subtasks, false, true, Some(parent_rounds))?;
+        self.create_subtasks(parent_id, plan.subtasks, false, true, Some(parent_rounds))?;
 
         self.emit(Event::RecoverySubtasksCreated {
             task_id: parent_id,
             count,
             round,
-        });
-        self.emit(Event::SubtasksCreated {
-            parent_id,
-            child_ids: recovery_child_ids,
         });
 
         // Return None to signal caller should restart the child loop.

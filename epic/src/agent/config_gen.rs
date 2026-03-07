@@ -231,24 +231,28 @@ pub fn assessment_schema() -> JsonValue {
     })
 }
 
+fn subtask_schema() -> JsonValue {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "goal": { "type": "string" },
+            "verification_criteria": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "magnitude": { "type": "string", "enum": ["small", "medium", "large"] }
+        },
+        "required": ["goal", "verification_criteria", "magnitude"]
+    })
+}
+
 pub fn decomposition_schema() -> JsonValue {
     serde_json::json!({
         "type": "object",
         "properties": {
             "subtasks": {
                 "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "goal": { "type": "string" },
-                        "verification_criteria": {
-                            "type": "array",
-                            "items": { "type": "string" }
-                        },
-                        "magnitude": { "type": "string", "enum": ["small", "medium", "large"] }
-                    },
-                    "required": ["goal", "verification_criteria", "magnitude"]
-                }
+                "items": subtask_schema()
             },
             "rationale": { "type": "string" }
         },
@@ -312,18 +316,7 @@ pub fn recovery_plan_schema() -> JsonValue {
             "approach": { "type": "string", "enum": ["incremental", "full"] },
             "subtasks": {
                 "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "goal": { "type": "string" },
-                        "verification_criteria": {
-                            "type": "array",
-                            "items": { "type": "string" }
-                        },
-                        "magnitude": { "type": "string", "enum": ["small", "medium", "large"] }
-                    },
-                    "required": ["goal", "verification_criteria", "magnitude"]
-                }
+                "items": subtask_schema()
             },
             "rationale": { "type": "string" }
         },
@@ -352,14 +345,14 @@ fn resolve_model_name(model: Model, model_config: &ModelConfig) -> &str {
     }
 }
 
-fn build_config(
+fn build_config_json(
     system_prompt: &str,
     model: Model,
     credential_name: &str,
     tools: &[FlickToolDef],
     output_schema: Option<&JsonValue>,
     model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
+) -> JsonValue {
     let model_name = resolve_model_name(model, model_config);
     let mut json = serde_json::json!({
         "system_prompt": system_prompt,
@@ -395,6 +388,18 @@ fn build_config(
         json["output_schema"] = serde_json::json!({ "schema": schema });
     }
 
+    json
+}
+
+fn build_config(
+    system_prompt: &str,
+    model: Model,
+    credential_name: &str,
+    tools: &[FlickToolDef],
+    output_schema: Option<&JsonValue>,
+    model_config: &ModelConfig,
+) -> anyhow::Result<flick::Config> {
+    let json = build_config_json(system_prompt, model, credential_name, tools, output_schema, model_config);
     let json_str = serde_json::to_string(&json).context("failed to serialize config JSON")?;
     flick::Config::from_str(&json_str, flick::ConfigFormat::Json).map_err(|e| {
         let msg = e.to_string().replace(credential_name, "[REDACTED]");

@@ -67,8 +67,6 @@ The orchestrator emits events consumed by the TUI:
 - `SubtasksCreated { parent_id, child_ids }`
 - `TaskCompleted { task_id, outcome }`
 - `RetryAttempt { task_id, attempt, model }`
-- `VerificationStarted { task_id }`
-- `VerificationComplete { task_id, passed }`
 - `DiscoveriesRecorded { task_id, count }`
 - `CheckpointAdjust { task_id }`
 - `CheckpointEscalate { task_id }`
