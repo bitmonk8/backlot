@@ -33,6 +33,6 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
+Audit remediation is complete. Operational correctness sandboxing has been delegated to the **[lot](https://github.com/bitmonk8/lot)** project — a standalone cross-platform process sandboxing library. Epic will consume lot as a dependency once it is ready. See [SANDBOXING.md](SANDBOXING.md) for context and [LOT_SPEC.md](LOT_SPEC.md) for the lot design spec.
 
-1. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. See [SANDBOXING.md](SANDBOXING.md).
+No remaining epic-internal work candidates at this time.
