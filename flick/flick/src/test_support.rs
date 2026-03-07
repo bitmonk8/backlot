@@ -79,6 +79,46 @@ impl DynProvider for SingleShotProvider {
     }
 }
 
+/// Multi-shot provider: returns canned responses in call order, errors when exhausted.
+pub struct MultiShotProvider {
+    responses: Mutex<Vec<ModelResponse>>,
+}
+
+impl MultiShotProvider {
+    /// Takes responses in call-order; first element is returned on the first call.
+    pub fn new(mut responses: Vec<ModelResponse>) -> Box<Self> {
+        responses.reverse();
+        Box::new(Self {
+            responses: Mutex::new(responses),
+        })
+    }
+}
+
+impl DynProvider for MultiShotProvider {
+    fn call_boxed<'a>(
+        &'a self,
+        _params: RequestParams<'a>,
+    ) -> Pin<
+        Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>,
+    > {
+        #[allow(clippy::expect_used)]
+        let result = self
+            .responses
+            .lock()
+            .expect("mutex poisoned")
+            .pop()
+            .ok_or_else(|| ProviderError::ResponseParse("MultiShotProvider exhausted".into()));
+        Box::pin(async move { result })
+    }
+
+    fn build_request(
+        &self,
+        _params: RequestParams<'_>,
+    ) -> Result<serde_json::Value, ProviderError> {
+        Ok(serde_json::json!({"model": "test"}))
+    }
+}
+
 /// Build-only provider: implements `build_request` with a stub value and panics
 /// on `call_boxed`. Useful for dry-run / request-building tests.
 pub struct StubBuildProvider;
