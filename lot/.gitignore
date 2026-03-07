@@ -1,0 +1,16 @@
+# Rust build artifacts
+/target
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude Code
+.claude/
+._*
