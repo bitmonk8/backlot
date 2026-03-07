@@ -1,9 +1,14 @@
 mod appcontainer;
 mod job;
 
-use crate::{PlatformCapabilities, Result};
+pub use appcontainer::WindowsSandboxedChild;
 
-pub const fn probe() -> PlatformCapabilities {
+use crate::command::SandboxCommand;
+use crate::policy::SandboxPolicy;
+use crate::{PlatformCapabilities, Result, SandboxedChild};
+
+#[allow(clippy::missing_const_for_fn)] // Matches non-const signature on other platforms.
+pub fn probe() -> PlatformCapabilities {
     PlatformCapabilities {
         namespaces: false,
         seccomp: false,
@@ -12,6 +17,10 @@ pub const fn probe() -> PlatformCapabilities {
         appcontainer: appcontainer::available(),
         job_objects: job::available(),
     }
+}
+
+pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<SandboxedChild> {
+    appcontainer::spawn(policy, command)
 }
 
 pub fn cleanup_stale() -> Result<()> {
