@@ -114,21 +114,36 @@ If no project markers are detected, scaffold a minimal `epic.toml` with empty `[
 
 ## CLI Interface
 
+### Subcommands
+
 ```
-epic init                      # Interactive — agent-driven config scaffolding
-epic                           # Interactive — capture problem + requirements
-epic "problem description"     # Direct — start with problem statement
-epic --resume                  # Resume interrupted epic
-epic --config path/to/config   # Explicit config file
+epic init                      # Agent-driven interactive config scaffolding
+epic run <goal>                # Start a new run with the given goal
+epic resume                   # Resume a previously interrupted run from .epic/state.json
+epic status                   # Show the current status of a run
+```
+
+### Global Options
+
+| Flag                | Env var                | Default        | Description                                      |
+|---------------------|------------------------|----------------|--------------------------------------------------|
+| `--credential`      | `EPIC_CREDENTIAL`      | `anthropic`    | Credential name passed to Flick                  |
+| `--no-tui`          | `EPIC_NO_TUI`          | off            | Disable the TUI; run headless with event output to stderr |
+| `--no-sandbox-warn` | `EPIC_NO_SANDBOX_WARN` | off            | Suppress the warning when no container/VM is detected |
+
+Global options go before the subcommand:
+
+```
+epic --no-tui run "fix the login bug"
+epic --credential my-key resume
 ```
 
 ## Configuration Resolution
 
 Project config (highest priority wins):
-1. Explicit `--config` flag
-2. `epic.toml` in current directory
-3. `.epic/config.toml` in current directory
-4. Defaults (no verification steps — warn and proceed)
+1. `epic.toml` in current directory
+2. `.epic/config.toml` in current directory
+3. Defaults (no verification steps — warn and proceed)
 
 User-level defaults (`~/.config/epic/config.toml`) are loaded first and overridden field-by-field by the project config above.
 

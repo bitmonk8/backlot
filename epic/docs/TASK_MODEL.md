@@ -49,7 +49,7 @@ Root task is always forced to branch (guarantees recovery machinery exists).
 
 1. Implement (model chosen by assessment: Haiku/Sonnet/Opus)
    - Research Service available as a tool
-   - Structured output via `submit_result` tool (see [Agent Design](AGENT_DESIGN.md))
+   - Structured output via Flick `output_schema` (see [Agent Design](AGENT_DESIGN.md))
 2. Verification gates — configurable per-project via `epic.toml` (build, lint, test, etc.)
 3. File-level review — model: max(Haiku, implementing model), capped at Sonnet
 4. Local simplification review — same model as file-level review

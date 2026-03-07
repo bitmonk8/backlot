@@ -79,17 +79,17 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 **Completed:** 2026-03-05. All 95 review cells executed. 541 original findings.
 
-**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, dead stub removal, retry/escalation deduplication, empty-subtask validation, bash process group kill, and correctness fixes (branch-success guard, next_id validation, bash exit code, ToolCallsPending guard, safe Option accessors) — resolving 75 findings fully and 15 partially.
+**Post-audit remediation** addressed model selection, config wiring, task/recovery caps, retry persistence, checkpoint adjust/escalate, stale documentation, container setup documentation, CI pipeline, Flick dependency pinning, main.rs testability, dead stub removal, retry/escalation deduplication, empty-subtask validation, bash process group kill, correctness fixes (branch-success guard, next_id validation, bash exit code, ToolCallsPending guard, safe Option accessors), input validation & resource limits, design intent alignment, and documentation drift — resolving 90 findings fully and 10 partially (3 remaining partial: U10-R1#2, U10-R6#2, U10-R6#3).
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
 | Critical | 0 | 0 |
-| Major | 65 | 8 |
+| Major | 50 | 3 |
 | Minor | 223 | 7 |
 | Note | 164 | 3 |
-| **Total** | **454** | **15** |
+| **Total** | **437** | **13** |
 
 ### Remaining Findings by Category
 
@@ -100,8 +100,8 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~67 | 0 | ~9 |
 | Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~42 | 0 | ~5 |
 | Dead code/stubs (unused ToolGrant flags, usage tracking) | ~21 | 0 | ~3 |
-| Design intent gaps (prompt content, tool grants, missing review phase) | ~40 | 0 | ~10 |
-| Doc drift (TUI event names, CLI syntax, type mismatches) | ~25 | 0 | ~5 |
+| Design intent gaps (prompt content, tool grants, missing review phase) | ~27 | 0 | 0 |
+| Doc drift (TUI event names, CLI syntax, type mismatches) | ~19 | 0 | 0 |
 | Correctness (cycle detection, phase transitions) | ~22 | 0 | 0 |
 | Other (clippy, naming, notes) | ~128 | 0 | 0 |
 
@@ -113,7 +113,7 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 ---
 
-## Major Findings (64 still valid, 8 partially resolved)
+## Major Findings (50 still valid, 3 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
@@ -180,42 +180,26 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 
 *Resolved: U14-R4#1 (`git.rs`), U15-R4#1 (`metrics.rs`), U16-R4#1 (`services/*.rs`), X5#1/X5#2 (mod declarations) — all removed 2026-03-06.*
 
-### Design Intent
+### ~~Design Intent~~ — All resolved 2026-03-07
 
-| Ref | Finding | Location |
-|-----|---------|----------|
-| U2-R7#4 | Decompose tool grant is READ-only — AGENT_DESIGN.md specifies EXPLORE (READ\|EXECUTE\|WEB) | `flick.rs` |
-| U4-R7#1 | No cost/scope guardrails in any prompt — agents have no budget awareness | `prompts.rs` |
-| U4-R7#2 | Assessment prompt omits tie-breaking bias toward branch (EPIC_DESIGN2 specifies prefer-branch) | `prompts.rs` |
-| U4-R7#3 | Assessment prompt omits root-is-always-branch rule | `prompts.rs` |
-| U7-R7#3 | File-level review and simplification review phases not implemented | `orchestrator.rs` |
-| B2#1 | `assess` config includes tool definitions but `run_structured` ignores tool calls | `flick.rs`, `config_gen.rs` |
-| B8#1 | Checkpoint agent cannot see child subtasks — classifies without knowing the plan structure | `orchestrator.rs`, `prompts.rs` |
-| B8#2 | Decomposition rationale promised in prompt but not delivered to recovery agent | `prompts.rs` |
-| B7#1 | Leaf fix loop runs unchecked on fix subtasks — no guard prevents recursive fix-loop-within-fix-loop | `orchestrator.rs` |
+*Resolved: design intent alignment (U2-R7#4, U4-R7#1, U4-R7#2, U4-R7#3, U7-R7#3, B2#1, B8#1, B8#2, B7#1) — 2026-03-07.*
 
-### Documentation Drift
+### ~~Documentation Drift~~ — All resolved 2026-03-07
 
-| Ref | Finding | Location |
-|-----|---------|----------|
-| U17-R8#9 | VERIFICATION.md `timeout_secs: u64` vs code `timeout: u32` | `VERIFICATION.md` |
-| U17-R8#10 | TASK_MODEL.md references `submit_result` tool — no such tool exists | `TASK_MODEL.md` |
-| U17-R8#11 | Assessment uses `run_structured` (no tools), but AGENT_DESIGN.md says READ tools | `AGENT_DESIGN.md` |
-| U17-R8#14 | TUI_DESIGN.md event names don't match actual Event enum variants | `TUI_DESIGN.md` |
-| U17-R8#15 | TUI_DESIGN.md `VerificationResult` vs actual `VerificationComplete` | `TUI_DESIGN.md` |
+*Resolved: documentation drift (U17-R8#9, U17-R8#10, U17-R8#11, U17-R8#14, U17-R8#15, U17-R8#6) — 2026-03-07.*
 
 ### Partially Resolved Majors
 
 | Ref | Finding | Status |
 |-----|---------|--------|
-| U1-R7#5 | `build_context` missing `parent_decomposition_rationale` and `parent_discoveries` | Decomposition rationale stored on Task but not propagated to context |
-| U4-R7#4 | `verify()` prompt not split into leaf vs branch variants | verify() now accepts `model: Model` param, but prompt text is still identical |
-| U6-R1#1 | `assess()` calls `run_structured` with tools config that won't be handled | Model corrected to Haiku, but tool config still passed to non-tool runner |
+| ~~U1-R7#5~~ | ~~`build_context` missing `parent_decomposition_rationale` and `parent_discoveries`~~ | *Resolved 2026-03-07 — both fields added to TaskContext* |
+| ~~U4-R7#4~~ | ~~`verify()` prompt not split into leaf vs branch variants~~ | *Resolved 2026-03-07 — leaf/branch-specific verification guidance added* |
+| ~~U6-R1#1~~ | ~~`assess()` calls `run_structured` with tools config that won't be handled~~ | *Resolved 2026-03-07 — tool config removed from assess* |
 | U10-R1#2 | `LimitsConfig` values used but no comprehensive validation | Some fields clamped to min 1, but no full validate() method |
 | U10-R6#2 | Config validation incomplete | Clamping added for some fields; no comprehensive boundary checks |
 | U10-R6#3 | No dedicated config `load()` with filesystem abstraction | Config loaded in main.rs directly; no config-module-level load function |
-| U17-R8#6 | CONFIGURATION.md CLI section still shows old syntax | Actual subcommands are run/resume/status/init; doc shows `epic "problem"`, `epic --resume` |
-| B7#2 | Recovery subtasks get fresh budgets enabling cost growth | `max_total_tasks` cap provides a global safeguard; recovery depth inherited; but per-branch budgets still reset |
+| ~~U17-R8#6~~ | ~~CONFIGURATION.md CLI section still shows old syntax~~ | *Resolved 2026-03-07 — CLI section rewritten to match actual subcommands* |
+| ~~B7#2~~ | ~~Recovery subtasks get fresh budgets enabling cost growth~~ | *Resolved 2026-03-07 — recovery depth inherited + max_total_tasks cap* |
 
 ---
 
@@ -225,25 +209,13 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 *Resolved: correctness fixes (U1-R1#1, U8-R1#1, U5-R3#2, U2-R1#1, U7-R3#1) — 2026-03-06.*
 *Resolved: input validation & resource limits (U5-R2#2, U5-R2#3, U5-R2#4, U5-R1#3, U1-R2#2, U2-R2#4) — 2026-03-06.*
 *Resolved: design intent alignment (U2-R7#4, U4-R7#1, U4-R7#2, U4-R7#3, U7-R7#3, B2#1, B8#1, B8#2, B7#1, U1-R7#5, U4-R7#4, U6-R1#1, B7#2) — 2026-03-07.*
+*Resolved: documentation drift (U17-R8#9, U17-R8#10, U17-R8#11, U17-R8#14, U17-R8#15, U17-R8#6) — 2026-03-07.*
 
 ### ~~1. Input validation & resource limits (6 majors)~~ — All resolved 2026-03-06
 
 ### ~~2. Design intent alignment (9 majors + 4 partially resolved)~~ — All resolved 2026-03-07
 
-*Resolved: design intent alignment (U2-R7#4, U4-R7#1, U4-R7#2, U4-R7#3, U7-R7#3, B2#1, B8#1, B8#2, B7#1, U1-R7#5, U4-R7#4, U6-R1#1, B7#2) — 2026-03-07.*
-
-### 3. Documentation drift (5 majors + 1 partially resolved)
-
-Design docs out of sync with implementation.
-
-| Ref | Summary | Fix |
-|-----|---------|-----|
-| U17-R8#9 | VERIFICATION.md `timeout_secs: u64` vs code `timeout: u32` | Update doc to match code type |
-| U17-R8#10 | TASK_MODEL.md references `submit_result` tool — no such tool | Remove or replace reference |
-| U17-R8#11 | Assessment uses `run_structured` (no tools), but AGENT_DESIGN.md says READ tools | Update doc to reflect actual no-tools approach |
-| U17-R8#14 | TUI_DESIGN.md event names don't match actual Event enum variants | Update event names in doc |
-| U17-R8#15 | TUI_DESIGN.md `VerificationResult` vs actual `VerificationComplete` | Update doc |
-| U17-R8#6 | *(partial)* CONFIGURATION.md CLI section still shows old syntax | Rewrite CLI section to match `run`/`resume`/`status`/`init` |
+### ~~3. Documentation drift (5 majors + 1 partially resolved)~~ — All resolved 2026-03-07
 
 ### 4. Error handling (2 majors)
 

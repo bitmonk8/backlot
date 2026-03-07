@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (193 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, stale documentation, empty-subtask validation, bash process group kill, correctness fixes, input validation & resource limits, and design intent alignment remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (193 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, stale documentation, empty-subtask validation, bash process group kill, correctness fixes, input validation & resource limits, design intent alignment, and documentation drift remediated; continuing hardening.
 
 ## Milestones
 
@@ -53,7 +53,7 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 
 1. ~~**Input validation & resource limits** (6 majors)~~ — **Resolved 2026-03-06.**
 2. ~~**Design intent alignment** (9 majors + 4 partial)~~ — **Resolved 2026-03-07.**
-3. **Documentation drift** (5 majors + 1 partial) — Type mismatches, stale tool/event names, CLI syntax.
+3. ~~**Documentation drift** (5 majors + 1 partial)~~ — **Resolved 2026-03-07.**
 4. **Error handling** (2 majors) — Init I/O error swallowing, TUI abort state loss.
 5. **Simplification** (6 majors + 1 dead code) — FlickAgent method dedup, schema dedup, event consolidation, usage tracking.
 6. **Config validation** (3 partial) — LimitsConfig bounds checking, PartialEq derives, load abstraction.
@@ -61,6 +61,20 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 8. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. Deferred until 1–7 addressed. See [SANDBOXING.md](SANDBOXING.md).
 
 ## Decisions Made
+
+### 2026-03-07: Documentation drift (5 majors + 1 partial resolved)
+
+**Scope:** 5 design documents updated. 193 tests passing, 0 clippy warnings. Docs-only change — no code modified.
+
+**U17-R8#9 — Timeout type (VERIFICATION.md):** Changed `timeout_secs: u64` to `timeout: u32` to match `VerificationStep` in `config/project.rs`.
+
+**U17-R8#10 — submit_result tool (TASK_MODEL.md):** Replaced nonexistent `submit_result` tool reference with `Flick output_schema`, matching the actual structured output mechanism.
+
+**U17-R8#11 — Assess tool grant (AGENT_DESIGN.md):** Changed assessment tool access from `READ` to `NONE`. Assessment uses `run_structured` with no tool definitions — pure classification call.
+
+**U17-R8#14 + U17-R8#15 — Event names (TUI_DESIGN.md):** Replaced all 9 stale event names with the 21 actual `Event` enum variants. Removed 3 nonexistent events (`AgentOutput`, `MetricsUpdated`, `ErrorOccurred`). Added 15 missing events (checkpoint, fix loop, recovery, task limit variants).
+
+**U17-R8#6 — CLI syntax (CONFIGURATION.md):** Rewrote CLI section with correct subcommands (`init`, `run <goal>`, `resume`, `status`), global options table (`--credential`, `--no-tui`, `--no-sandbox-warn` with env vars), and syntax examples.
 
 ### 2026-03-07: Design intent alignment (9 majors + 4 partial resolved)
 

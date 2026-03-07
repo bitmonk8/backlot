@@ -59,14 +59,26 @@ Token usage per model tier, session cost, task count (completed/total).
 ## Event System
 
 The orchestrator emits events consumed by the TUI:
-- `TaskStarted { id, goal }`
-- `PhaseChanged { task_id, phase }`
-- `AgentOutput { task_id, text }` (event-level, not token-streamed)
-- `VerificationResult { task_id, step, passed }`
-- `TaskCompleted { id, outcome }`
-- `DiscoveryRecorded { task_id, summary }`
-- `MetricsUpdated { tokens, cost }`
-- `ErrorOccurred { task_id, error }`
-- `FixLoopIteration { task_id, attempt, model }`
+- `TaskRegistered { task_id, parent_id, goal, depth }`
+- `PhaseTransition { task_id, phase }`
+- `PathSelected { task_id, path }`
+- `ModelSelected { task_id, model }`
+- `ModelEscalated { task_id, from, to }`
+- `SubtasksCreated { parent_id, child_ids }`
+- `TaskCompleted { task_id, outcome }`
+- `RetryAttempt { task_id, attempt, model }`
+- `VerificationStarted { task_id }`
+- `VerificationComplete { task_id, passed }`
+- `DiscoveriesRecorded { task_id, count }`
+- `CheckpointAdjust { task_id }`
+- `CheckpointEscalate { task_id }`
+- `FixAttempt { task_id, attempt, model }`
+- `FixModelEscalated { task_id, from, to }`
+- `BranchFixRound { task_id, round, model }`
+- `FixSubtasksCreated { task_id, count, round }`
+- `RecoveryStarted { task_id, round }`
+- `RecoveryPlanSelected { task_id, approach }`
+- `RecoverySubtasksCreated { task_id, count, round }`
+- `TaskLimitReached { task_id }`
 
 Events also feed file logging (structured JSONL) for post-run analysis.

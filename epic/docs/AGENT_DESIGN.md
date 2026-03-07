@@ -8,7 +8,7 @@ This document covers per-phase tool grants, prompt assembly, and structured outp
 
 | Task Path | Phase | Tools | Purpose |
 |---|---|---|---|
-| Any | Assess | READ | Read-only analysis |
+| Any | Assess | NONE | Pure classification call via `run_structured` (no tools) |
 | Leaf | Implement | READ \| WRITE \| EXECUTE | Code changes |
 | Leaf | Verify | READ | Read-only analysis |
 | Branch | Design + Decompose | READ \| BASH | Research + exploration, no writes |

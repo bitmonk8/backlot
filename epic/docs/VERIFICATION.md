@@ -8,7 +8,7 @@ Unlike fds2_epic which hardcodes `please.py build/lint/test`, verification steps
 struct VerificationStep {
     name: String,           // "Build", "Lint", "Test"
     command: Vec<String>,   // e.g., ["cargo", "build"]
-    timeout_secs: u64,
+    timeout: u32,
 }
 
 struct VerificationConfig {
