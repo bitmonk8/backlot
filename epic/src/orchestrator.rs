@@ -1,6 +1,6 @@
 // Recursive task execution, DFS traversal, state persistence, resume.
 
-use crate::agent::{AgentService, SiblingSummary, TaskContext};
+use crate::agent::{AgentService, ChildStatus, ChildSummary, SiblingSummary, TaskContext};
 use crate::config::project::LimitsConfig;
 use crate::events::{Event, EventSender};
 use crate::state::EpicState;
@@ -326,6 +326,7 @@ impl<A: AgentService> Orchestrator<A> {
         Ok(child_ids)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn build_context(&self, id: TaskId) -> Result<TaskContext, OrchestratorError> {
         let task = self
             .state
@@ -333,10 +334,9 @@ impl<A: AgentService> Orchestrator<A> {
             .ok_or(OrchestratorError::TaskNotFound(id))?
             .clone();
 
-        let parent_goal = task
-            .parent_id
-            .and_then(|pid| self.state.get(pid))
-            .map(|p| p.goal.clone());
+        let parent = task.parent_id.and_then(|pid| self.state.get(pid));
+
+        let parent_goal = parent.map(|p| p.goal.clone());
 
         let mut ancestor_goals = Vec::new();
         let mut cursor = task.parent_id;
@@ -349,9 +349,7 @@ impl<A: AgentService> Orchestrator<A> {
             }
         }
 
-        let (completed_siblings, pending_sibling_goals) = task
-            .parent_id
-            .and_then(|pid| self.state.get(pid))
+        let (completed_siblings, pending_sibling_goals) = parent
             .map_or_else(
                 || (Vec::new(), Vec::new()),
                 |parent| {
@@ -397,10 +395,42 @@ impl<A: AgentService> Orchestrator<A> {
             );
 
         // Checkpoint guidance: look at the parent task's stored guidance.
-        let checkpoint_guidance = task
-            .parent_id
-            .and_then(|pid| self.state.get(pid))
+        let checkpoint_guidance = parent
             .and_then(|p| p.checkpoint_guidance.clone());
+
+        // Build child summaries for branch tasks.
+        let children = task
+            .subtask_ids
+            .iter()
+            .filter_map(|&cid| {
+                let child = self.state.get(cid)?;
+                let status = match child.phase {
+                    TaskPhase::Completed => ChildStatus::Completed,
+                    TaskPhase::Failed => {
+                        let reason = child
+                            .attempts
+                            .iter()
+                            .rev()
+                            .find_map(|a| a.error.clone())
+                            .unwrap_or_else(|| "unknown".into());
+                        ChildStatus::Failed { reason }
+                    }
+                    TaskPhase::Pending => ChildStatus::Pending,
+                    _ => ChildStatus::InProgress,
+                };
+                Some(ChildSummary {
+                    goal: child.goal.clone(),
+                    status,
+                    discoveries: child.discoveries.clone(),
+                })
+            })
+            .collect();
+
+        // Parent discoveries and decomposition rationale for recovery context.
+        let parent_discoveries = parent
+            .map_or_else(Vec::new, |p| p.discoveries.clone());
+        let parent_decomposition_rationale = parent
+            .and_then(|p| p.decomposition_rationale.clone());
 
         Ok(TaskContext {
             task,
@@ -409,6 +439,9 @@ impl<A: AgentService> Orchestrator<A> {
             completed_siblings,
             pending_sibling_goals,
             checkpoint_guidance,
+            children,
+            parent_discoveries,
+            parent_decomposition_rationale,
         })
     }
 
@@ -601,8 +634,12 @@ impl<A: AgentService> Orchestrator<A> {
                         .get(id)
                         .ok_or(OrchestratorError::TaskNotFound(id))?;
                     let is_leaf = task.path == Some(TaskPath::Leaf);
+                    let is_fix_task = task.is_fix_task;
 
-                    if is_leaf {
+                    if is_fix_task {
+                        // Fix tasks (leaf or branch) cannot trigger fix loops — prevents recursive fix chains.
+                        self.fail_task(id, reason)
+                    } else if is_leaf {
                         self.leaf_retry_loop(
                             id,
                             LeafRetryMode::Fix {
@@ -611,18 +648,7 @@ impl<A: AgentService> Orchestrator<A> {
                         )
                         .await
                     } else {
-                        let task = self
-                            .state
-                            .get(id)
-                            .ok_or(OrchestratorError::TaskNotFound(id))?;
-                        let is_fix_task = task.is_fix_task;
-
-                        if is_fix_task {
-                            // Fix subtasks cannot trigger branch fix loop (prevents recursive fix chains).
-                            self.fail_task(id, reason)
-                        } else {
-                            self.branch_fix_loop(id, &reason).await
-                        }
+                        self.branch_fix_loop(id, &reason).await
                     }
                 }
             }
@@ -2775,6 +2801,189 @@ mod tests {
         let fix1 = orch.state.get(fix1_id).unwrap();
         assert!(fix1.is_fix_task);
         assert_eq!(fix1.phase, TaskPhase::Failed);
+    }
+
+    /// Leaf fix subtask that fails verification does NOT enter leaf fix loop.
+    /// Fix tasks (leaf or branch) fail immediately to prevent recursive fix-within-fix.
+    #[tokio::test]
+    async fn leaf_fix_subtask_no_recursive_fix_loop() {
+        let mock = MockAgentService::new();
+
+        // Root branches into 1 subtask (original child).
+        setup_branch_with_failing_root_verify(&mock, "root check failed");
+
+        // Branch fix round 1: design_fix_subtasks returns 1 fix subtask (assessed as leaf).
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+
+        // Fix subtask assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Fix subtask executes successfully.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Fix subtask verification FAILS — must NOT enter leaf fix loop since is_fix_task.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("fix leaf failed"));
+
+        // Root re-verification after round 1 (fix subtask failed, re-verify anyway).
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("root still failing"));
+
+        // Round 2: simple fix subtask that succeeds and passes verification.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Root re-verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.verification_fix_rounds, 2);
+
+        // The leaf fix subtask from round 1 should be marked as fix and failed.
+        let fix1_id = root.subtask_ids[1];
+        let fix1 = orch.state.get(fix1_id).unwrap();
+        assert!(fix1.is_fix_task);
+        assert_eq!(fix1.path, Some(TaskPath::Leaf));
+        assert_eq!(fix1.phase, TaskPhase::Failed);
+        // Must have zero fix attempts — it should NOT have entered the leaf fix loop.
+        assert_eq!(fix1.fix_attempts.len(), 0);
+    }
+
+    /// Branch fix subtask that fails verification is failed immediately (no recursive `branch_fix_loop`).
+    #[tokio::test]
+    async fn branch_fix_subtask_no_recursive_fix_loop() {
+        let mock = MockAgentService::new();
+
+        // Root branches into 1 child (original child succeeds, root verification fails).
+        setup_branch_with_failing_root_verify(&mock, "root check failed");
+
+        // Branch fix round 1: design_fix_subtasks returns 1 fix subtask.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+
+        // Fix subtask assessed as BRANCH (not leaf).
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(AssessmentResult {
+                path: TaskPath::Branch,
+                model: Model::Sonnet,
+                rationale: "needs decomposition".into(),
+                magnitude: None,
+            });
+
+        // Fix subtask decomposes into 1 grandchild.
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        // Grandchild assessed as leaf, executes, succeeds.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Grandchild verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Branch fix subtask verification FAILS — must fail immediately (is_fix_task guard).
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("branch fix subtask failed"));
+
+        // Root re-verification after round 1 (fix subtask failed).
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("root still failing"));
+
+        // Round 2: simple fix subtask that succeeds and passes verification.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Root re-verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.verification_fix_rounds, 2);
+
+        // The branch fix subtask from round 1 should be marked as fix and failed.
+        let fix1_id = root.subtask_ids[1];
+        let fix1 = orch.state.get(fix1_id).unwrap();
+        assert!(fix1.is_fix_task);
+        assert_eq!(fix1.path, Some(TaskPath::Branch));
+        assert_eq!(fix1.phase, TaskPhase::Failed);
+        // Must have zero verification_fix_rounds — should NOT have entered branch_fix_loop.
+        assert_eq!(
+            fix1.verification_fix_rounds, 0,
+            "branch fix subtask should not enter its own branch_fix_loop"
+        );
     }
 
     // --- evaluate_scope pure function tests ---
@@ -6557,5 +6766,227 @@ mod tests {
 
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
+    }
+
+    /// `build_context` populates `parent_decomposition_rationale`, `parent_discoveries`, and `children`.
+    #[test]
+    fn build_context_populates_parent_fields_and_children() {
+        let mut state = EpicState::new();
+        let parent_id = state.next_task_id(); // T0
+        let child_id = state.next_task_id(); // T1
+
+        let mut parent = Task::new(
+            parent_id,
+            None,
+            "parent goal".into(),
+            vec!["parent passes".into()],
+            0,
+        );
+        parent.decomposition_rationale = Some("split by module".into());
+        parent.discoveries = vec!["API uses v2".into(), "config moved".into()];
+        parent.subtask_ids = vec![child_id];
+
+        let mut child = Task::new(
+            child_id,
+            Some(parent_id),
+            "child goal".into(),
+            vec!["child passes".into()],
+            1,
+        );
+        child.phase = TaskPhase::Completed;
+        child.discoveries = vec!["found bug".into()];
+
+        state.insert(parent);
+        state.insert(child);
+
+        let mock = MockAgentService::new();
+        let (tx, _rx) = events::event_channel();
+        let orch = Orchestrator::new(mock, state, tx);
+
+        // Build context for the child — should pull parent fields.
+        let ctx = orch.build_context(child_id).unwrap();
+        assert_eq!(
+            ctx.parent_decomposition_rationale.as_deref(),
+            Some("split by module"),
+        );
+        assert_eq!(ctx.parent_discoveries, vec!["API uses v2", "config moved"]);
+
+        // Build context for the parent — should have children populated.
+        let parent_ctx = orch.build_context(parent_id).unwrap();
+        assert_eq!(parent_ctx.children.len(), 1);
+        assert_eq!(parent_ctx.children[0].goal, "child goal");
+        assert!(matches!(
+            parent_ctx.children[0].status,
+            ChildStatus::Completed
+        ));
+    }
+
+    /// `build_context` maps all `TaskPhase` variants to correct `ChildStatus`.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn build_context_child_status_mapping_all_phases() {
+        let mut state = EpicState::new();
+        let parent_id = state.next_task_id(); // T0
+        let completed_id = state.next_task_id(); // T1
+        let failed_id = state.next_task_id(); // T2
+        let pending_id = state.next_task_id(); // T3
+        let executing_id = state.next_task_id(); // T4
+        let assessing_id = state.next_task_id(); // T5
+        let verifying_id = state.next_task_id(); // T6
+
+        let mut parent = Task::new(
+            parent_id,
+            None,
+            "parent".into(),
+            vec!["passes".into()],
+            0,
+        );
+        parent.subtask_ids = vec![
+            completed_id,
+            failed_id,
+            pending_id,
+            executing_id,
+            assessing_id,
+            verifying_id,
+        ];
+
+        let mut completed_child = Task::new(
+            completed_id,
+            Some(parent_id),
+            "completed child".into(),
+            vec!["done".into()],
+            1,
+        );
+        completed_child.phase = TaskPhase::Completed;
+
+        let mut failed_child = Task::new(
+            failed_id,
+            Some(parent_id),
+            "failed child".into(),
+            vec!["done".into()],
+            1,
+        );
+        failed_child.phase = TaskPhase::Failed;
+        failed_child.attempts.push(Attempt {
+            model: Model::Haiku,
+            succeeded: false,
+            error: Some("compile error".into()),
+        });
+
+        let pending_child = Task::new(
+            pending_id,
+            Some(parent_id),
+            "pending child".into(),
+            vec!["done".into()],
+            1,
+        );
+        // pending_child.phase is Pending by default.
+
+        let mut executing_child = Task::new(
+            executing_id,
+            Some(parent_id),
+            "executing child".into(),
+            vec!["done".into()],
+            1,
+        );
+        executing_child.phase = TaskPhase::Executing;
+
+        let mut assessing_child = Task::new(
+            assessing_id,
+            Some(parent_id),
+            "assessing child".into(),
+            vec!["done".into()],
+            1,
+        );
+        assessing_child.phase = TaskPhase::Assessing;
+
+        let mut verifying_child = Task::new(
+            verifying_id,
+            Some(parent_id),
+            "verifying child".into(),
+            vec!["done".into()],
+            1,
+        );
+        verifying_child.phase = TaskPhase::Verifying;
+
+        state.insert(parent);
+        state.insert(completed_child);
+        state.insert(failed_child);
+        state.insert(pending_child);
+        state.insert(executing_child);
+        state.insert(assessing_child);
+        state.insert(verifying_child);
+
+        let mock = MockAgentService::new();
+        let (tx, _rx) = events::event_channel();
+        let orch = Orchestrator::new(mock, state, tx);
+
+        let ctx = orch.build_context(parent_id).unwrap();
+        assert_eq!(ctx.children.len(), 6);
+
+        assert!(
+            matches!(ctx.children[0].status, ChildStatus::Completed),
+            "Completed phase should map to ChildStatus::Completed"
+        );
+        match &ctx.children[1].status {
+            ChildStatus::Failed { reason } => {
+                assert_eq!(reason, "compile error");
+            }
+            other => panic!("Failed phase should map to ChildStatus::Failed, got {other:?}"),
+        }
+        assert!(
+            matches!(ctx.children[2].status, ChildStatus::Pending),
+            "Pending phase should map to ChildStatus::Pending"
+        );
+        assert!(
+            matches!(ctx.children[3].status, ChildStatus::InProgress),
+            "Executing phase should map to ChildStatus::InProgress"
+        );
+        assert!(
+            matches!(ctx.children[4].status, ChildStatus::InProgress),
+            "Assessing phase should map to ChildStatus::InProgress"
+        );
+        assert!(
+            matches!(ctx.children[5].status, ChildStatus::InProgress),
+            "Verifying phase should map to ChildStatus::InProgress"
+        );
+    }
+
+    /// `build_context` silently skips subtask IDs that don't exist in state.
+    #[test]
+    fn build_context_skips_dangling_subtask_id() {
+        let mut state = EpicState::new();
+        let parent_id = state.next_task_id(); // T0
+        let real_child_id = state.next_task_id(); // T1
+        let dangling_id = state.next_task_id(); // T2 — never inserted
+
+        let mut parent = Task::new(
+            parent_id,
+            None,
+            "parent".into(),
+            vec!["passes".into()],
+            0,
+        );
+        parent.subtask_ids = vec![real_child_id, dangling_id];
+
+        let real_child = Task::new(
+            real_child_id,
+            Some(parent_id),
+            "real child".into(),
+            vec!["child passes".into()],
+            1,
+        );
+
+        state.insert(parent);
+        state.insert(real_child);
+        // dangling_id is NOT inserted
+
+        let mock = MockAgentService::new();
+        let (tx, _rx) = events::event_channel();
+        let orch = Orchestrator::new(mock, state, tx);
+
+        let ctx = orch.build_context(parent_id).unwrap();
+        assert_eq!(ctx.children.len(), 1, "should skip dangling subtask ID");
+        assert_eq!(ctx.children[0].goal, "real child");
     }
 }

@@ -1,8 +1,8 @@
 // Prompt templates and assembly for agent system prompts.
 
-use crate::agent::TaskContext;
+use crate::agent::{ChildStatus, TaskContext};
 use crate::config::project::VerificationStep;
-use crate::task::TaskOutcome;
+use crate::task::{TaskOutcome, TaskPath};
 
 /// A system prompt + user query pair for a Flick call.
 pub struct PromptPair {
@@ -63,15 +63,21 @@ fn format_context(ctx: &TaskContext) -> String {
     let guidance_section = ctx
         .checkpoint_guidance
         .as_deref()
-        .map_or_else(String::new, |g| format!("\n\n## Checkpoint Guidance\n{g}"));
+        .map(|g| format!("\n\n## Checkpoint Guidance\n{g}"))
+        .unwrap_or_default();
 
     format!(
         "## Task\nGoal: {goal}\nVerification criteria:\n- {criteria}\n\n\
          ## Position\nDepth: {depth}\nParent goal: {parent}\nAncestor chain:\n{ancestors}\n\n\
-         ## Siblings\nCompleted:\n{completed}\nPending:\n{pending}{guidance_section}",
+         ## Siblings\nCompleted:\n{completed}\nPending:\n{pending}{guidance_section}{rationale_section}",
         goal = ctx.task.goal,
         depth = ctx.task.depth,
         parent = parent_line,
+        rationale_section = ctx
+            .parent_decomposition_rationale
+            .as_deref()
+            .map(|r| format!("\n\n## Parent Decomposition Rationale\n{r}"))
+            .unwrap_or_default(),
     )
 }
 
@@ -85,6 +91,8 @@ Also select the appropriate model tier: haiku (simple/routine), sonnet (moderate
 Guidelines:
 - Leaf tasks should be achievable in a single focused session with tool access.
 - Branch tasks are too large or complex for a single session and need decomposition.
+- The root task (depth 0, no parent) is always assessed as branch — never leaf.
+- When unsure between leaf and branch, prefer branch. Decomposition is safer — a subtask can always be assessed as a leaf.
 - Use haiku for straightforward, well-defined tasks.
 - Use sonnet for tasks requiring moderate reasoning or multi-step solutions.
 - Use opus for tasks requiring deep analysis, complex architecture, or critical decisions.
@@ -116,6 +124,7 @@ Guidelines:
 - Make minimal, focused changes that address the task goal.
 - Verify your changes compile/work before reporting success.
 - Report any discoveries (unexpected findings, architectural insights) in the discoveries field.
+- Work within the scope of this single task. Do not refactor unrelated code or expand scope beyond the stated goal.
 
 Respond with the required JSON schema when done."
         .into();
@@ -144,6 +153,7 @@ Guidelines:
 - Order subtasks so dependencies are resolved first.
 - Use magnitude estimates: small (< 1 session), medium (1-2 sessions), large (multiple sessions / further decomposition likely).
 - Aim for 2-5 subtasks. Fewer is better if the work can be cleanly divided.
+- Each subtask should represent the minimum scope needed. Avoid over-decomposing into too many subtasks.
 - Explore the codebase with tools before decomposing to understand the current state.
 
 Respond with the required JSON schema."
@@ -174,6 +184,7 @@ Guidelines:
 - Make minimal, targeted changes that address the identified issues.
 - Verify your fixes compile/work before reporting success.
 - Report any discoveries (unexpected findings, architectural insights) in the discoveries field.
+- Focus narrowly on fixing the specific verification failure. Do not expand scope.
 
 Respond with the required JSON schema when done."
         .into();
@@ -245,6 +256,15 @@ pub fn build_verify(ctx: &TaskContext, verification_steps: &[VerificationStep]) 
         )
     };
 
+    let path_guidance = match ctx.task.path {
+        Some(TaskPath::Leaf) => "\n\nThis is a leaf task. Verify that the code changes are correct and complete. \
+Check that the implementation matches the verification criteria. Run verification commands if available.",
+        Some(TaskPath::Branch) => "\n\nThis is a branch task. Verify that all subtasks' results collectively \
+satisfy the branch goal. Check integration between subtask outputs. Verify no gaps or conflicts between \
+subtask implementations.",
+        None => "",
+    };
+
     let system_prompt = format!(
         "You are a task verifier in a recursive problem-solving system.\n\
          \n\
@@ -255,7 +275,8 @@ pub fn build_verify(ctx: &TaskContext, verification_steps: &[VerificationStep]) 
          - Read relevant files and run verification commands.\n\
          - Check each verification criterion independently.\n\
          - Report pass only if ALL criteria are met.\n\
-         - Provide detailed explanation of what was checked and findings.{steps_section}\n\
+         - Provide detailed explanation of what was checked and findings.{steps_section}\
+{path_guidance}\n\
          \n\
          Respond with the required JSON schema."
     );
@@ -290,10 +311,34 @@ Respond with the required JSON schema."
         .collect::<Vec<_>>()
         .join("\n");
 
+    let children_text = if ctx.children.is_empty() {
+        "None".into()
+    } else {
+        ctx.children
+            .iter()
+            .map(|c| {
+                let status_label = match &c.status {
+                    ChildStatus::Completed => "COMPLETED".to_string(),
+                    ChildStatus::Failed { reason } => format!("FAILED: {reason}"),
+                    ChildStatus::Pending => "PENDING".to_string(),
+                    ChildStatus::InProgress => "IN-PROGRESS".to_string(),
+                };
+                let disc = if c.discoveries.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | Discoveries: {}", c.discoveries.join(", "))
+                };
+                format!("- [{}] {}{disc}", status_label, c.goal)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     let query = format!(
         "{context}\n\n\
+         ## Child Subtasks\n{children_text}\n\n\
          ## Recent Discoveries\n{disc_text}\n\n\
-         Review these discoveries and decide how to proceed.",
+         Review the child subtask status and discoveries, then decide how to proceed.",
         context = format_context(ctx),
     );
 
@@ -333,12 +378,32 @@ Guidelines:
 Respond with the required JSON schema."
         .into();
 
+    let rationale_section = ctx
+        .task
+        .decomposition_rationale
+        .as_deref()
+        .map(|r| format!("\nDecomposition rationale: {r}\n"))
+        .unwrap_or_default();
+
+    let parent_discoveries_section = if ctx.parent_discoveries.is_empty() {
+        String::new()
+    } else {
+        let items = ctx
+            .parent_discoveries
+            .iter()
+            .map(|d| format!("- {d}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n## Parent Discoveries\n{items}\n")
+    };
+
     let query = format!(
         "{context}\n\n\
          ## Recovery Context\n\
          Recovery round: {recovery_round}\n\
          Child failure reason: {failure_reason}\n\
-         Recovery strategy: {strategy}\n\n\
+         Recovery strategy: {strategy}\n\
+{rationale_section}{parent_discoveries_section}\n\
          Design recovery subtasks. Choose incremental or full approach based on the failure nature.",
         context = format_context(ctx),
     );
@@ -374,7 +439,7 @@ Respond with the required JSON schema."
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::SiblingSummary;
+    use crate::agent::{ChildSummary, SiblingSummary};
     use crate::task::{Task, TaskId};
 
     fn test_context() -> TaskContext {
@@ -396,6 +461,9 @@ mod tests {
             }],
             pending_sibling_goals: vec!["write docs".into()],
             checkpoint_guidance: None,
+            children: Vec::new(),
+            parent_discoveries: Vec::new(),
+            parent_decomposition_rationale: None,
         }
     }
 
@@ -479,6 +547,9 @@ mod tests {
             completed_siblings: Vec::new(),
             pending_sibling_goals: Vec::new(),
             checkpoint_guidance: None,
+            children: Vec::new(),
+            parent_discoveries: Vec::new(),
+            parent_decomposition_rationale: None,
         };
         let text = format_context(&ctx);
         assert!(text.contains("None (root task)"));
@@ -497,6 +568,33 @@ mod tests {
         assert!(pair.system_prompt.contains("recovery"));
         assert!(pair.system_prompt.contains("incremental"));
         assert!(pair.system_prompt.contains("full"));
+    }
+
+    #[test]
+    fn recovery_prompt_includes_rationale_and_parent_discoveries() {
+        let mut ctx = test_context();
+        ctx.task.decomposition_rationale =
+            Some("Split by module boundary for isolation".into());
+        ctx.parent_discoveries =
+            vec!["API uses v2 format".into(), "Config path changed".into()];
+        let pair =
+            build_design_recovery_subtasks(&ctx, "compile error", "incremental", 2);
+        assert!(
+            pair.query.contains("Split by module boundary for isolation"),
+            "query should contain decomposition rationale"
+        );
+        assert!(
+            pair.query.contains("## Parent Discoveries"),
+            "query should contain parent discoveries header"
+        );
+        assert!(
+            pair.query.contains("API uses v2 format"),
+            "query should contain parent discovery items"
+        );
+        assert!(
+            pair.query.contains("Config path changed"),
+            "query should contain all parent discovery items"
+        );
     }
 
     #[test]
@@ -524,5 +622,177 @@ mod tests {
         assert!(pair.query.contains('2'));
         assert!(pair.query.contains("implement feature X"));
         assert!(pair.system_prompt.contains("fix"));
+    }
+
+    #[test]
+    fn checkpoint_prompt_with_populated_children() {
+        let mut ctx = test_context();
+        ctx.children = vec![
+            ChildSummary {
+                goal: "setup DB".into(),
+                status: ChildStatus::Completed,
+                discoveries: vec![],
+            },
+            ChildSummary {
+                goal: "write migration".into(),
+                status: ChildStatus::Failed {
+                    reason: "syntax error".into(),
+                },
+                discoveries: vec![],
+            },
+            ChildSummary {
+                goal: "add indexes".into(),
+                status: ChildStatus::Pending,
+                discoveries: vec![],
+            },
+            ChildSummary {
+                goal: "run tests".into(),
+                status: ChildStatus::InProgress,
+                discoveries: vec![],
+            },
+        ];
+        let pair = build_checkpoint(&ctx, &["discovered issue".into()]);
+        assert!(
+            pair.query.contains("## Child Subtasks"),
+            "query should contain child subtasks header"
+        );
+        assert!(
+            pair.query.contains("[COMPLETED] setup DB"),
+            "query should show COMPLETED status"
+        );
+        assert!(
+            pair.query.contains("[FAILED: syntax error] write migration"),
+            "query should show FAILED status with reason"
+        );
+        assert!(
+            pair.query.contains("[PENDING] add indexes"),
+            "query should show PENDING status"
+        );
+        assert!(
+            pair.query.contains("[IN-PROGRESS] run tests"),
+            "query should show IN-PROGRESS status"
+        );
+    }
+
+    #[test]
+    fn format_context_includes_parent_decomposition_rationale() {
+        let mut ctx = test_context();
+        ctx.parent_decomposition_rationale =
+            Some("Split by module boundary for isolation".into());
+        let text = format_context(&ctx);
+        assert!(
+            text.contains("## Parent Decomposition Rationale"),
+            "should contain rationale header"
+        );
+        assert!(
+            text.contains("Split by module boundary for isolation"),
+            "should contain rationale text"
+        );
+    }
+
+    #[test]
+    fn recovery_prompt_omits_empty_rationale_and_discoveries() {
+        let mut ctx = test_context();
+        ctx.task.decomposition_rationale = None;
+        ctx.parent_discoveries = Vec::new();
+        let pair =
+            build_design_recovery_subtasks(&ctx, "child crashed", "retry", 1);
+        assert!(
+            !pair.query.contains("Decomposition rationale"),
+            "should not contain rationale when None"
+        );
+        assert!(
+            !pair.query.contains("## Parent Discoveries"),
+            "should not contain parent discoveries when empty"
+        );
+    }
+
+    #[test]
+    fn assess_prompt_contains_root_task_and_prefer_branch() {
+        let ctx = test_context();
+        let pair = build_assess(&ctx);
+        assert!(
+            pair.system_prompt.contains("root task"),
+            "assess system prompt should mention 'root task', got: {}",
+            pair.system_prompt,
+        );
+        assert!(
+            pair.system_prompt.contains("prefer branch"),
+            "assess system prompt should mention 'prefer branch', got: {}",
+            pair.system_prompt,
+        );
+    }
+
+    #[test]
+    fn scope_limiting_instructions_in_prompts() {
+        let ctx = test_context();
+
+        let execute_pair = build_execute_leaf(&ctx);
+        assert!(
+            execute_pair.system_prompt.contains("scope of this single task"),
+            "execute_leaf system prompt should contain 'scope of this single task', got: {}",
+            execute_pair.system_prompt,
+        );
+
+        let decompose_pair = build_design_and_decompose(&ctx);
+        assert!(
+            decompose_pair.system_prompt.contains("minimum scope"),
+            "design_and_decompose system prompt should contain 'minimum scope', got: {}",
+            decompose_pair.system_prompt,
+        );
+
+        let fix_pair = build_fix_leaf(&ctx, "test failed", 1);
+        assert!(
+            fix_pair.system_prompt.contains("Do not expand scope"),
+            "fix_leaf system prompt should contain 'Do not expand scope', got: {}",
+            fix_pair.system_prompt,
+        );
+    }
+
+    #[test]
+    fn checkpoint_prompt_failed_child_includes_reason_string() {
+        let mut ctx = test_context();
+        ctx.children = vec![ChildSummary {
+            goal: "compile module".into(),
+            status: ChildStatus::Failed {
+                reason: "compile error".into(),
+            },
+            discoveries: vec![],
+        }];
+        let pair = build_checkpoint(&ctx, &["discovered issue".into()]);
+        assert!(
+            pair.query.contains("FAILED: compile error"),
+            "checkpoint query should contain 'FAILED: compile error', got: {}",
+            pair.query,
+        );
+    }
+
+    #[test]
+    fn verify_prompt_leaf_vs_branch_guidance() {
+        let mut ctx = test_context();
+
+        ctx.task.path = Some(TaskPath::Leaf);
+        let pair = build_verify(&ctx, &[]);
+        assert!(
+            pair.system_prompt.contains("leaf task"),
+            "leaf prompt should contain 'leaf task', got: {}",
+            pair.system_prompt,
+        );
+
+        ctx.task.path = Some(TaskPath::Branch);
+        let pair = build_verify(&ctx, &[]);
+        assert!(
+            pair.system_prompt.contains("branch task"),
+            "branch prompt should contain 'branch task', got: {}",
+            pair.system_prompt,
+        );
+
+        ctx.task.path = None;
+        let pair = build_verify(&ctx, &[]);
+        assert!(
+            !pair.system_prompt.contains("leaf task")
+                && !pair.system_prompt.contains("branch task"),
+            "no-path prompt should not contain path-specific guidance",
+        );
     }
 }

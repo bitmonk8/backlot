@@ -406,16 +406,14 @@ pub fn build_assess_config(
     system_prompt: &str,
     model: Model,
     credential: &str,
-    grant: ToolGrant,
     model_config: &ModelConfig,
 ) -> anyhow::Result<flick::Config> {
-    let tools = tool_definitions(grant);
     let schema = assessment_schema();
     build_config(
         system_prompt,
         model,
         credential,
-        &tools,
+        &[],
         Some(&schema),
         model_config,
     )
@@ -785,7 +783,6 @@ mod tests {
 
     #[test]
     fn config_builds_with_correct_content() {
-        let tools = tool_definitions(ToolGrant::READ);
         let schema = assessment_schema();
         let json = serde_json::json!({
             "system_prompt": "You are an assessor.",
@@ -801,29 +798,14 @@ mod tests {
                     "credential": "anthropic_key"
                 }
             },
-            "tools": tools.iter().map(|t| {
-                serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters
-                })
-            }).collect::<Vec<_>>(),
             "output_schema": { "schema": schema }
         });
 
         // Verify the JSON structure matches expectations
         assert_eq!(json["model"]["name"], "claude-sonnet-4-6");
         assert_eq!(json["provider"]["anthropic"]["credential"], "anthropic_key");
-        let tool_names: Vec<&str> = json["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
-        assert!(tool_names.contains(&"read_file"));
-        assert!(tool_names.contains(&"glob"));
-        assert!(tool_names.contains(&"grep"));
-        assert!(!tool_names.contains(&"write_file"));
+        // assess config should have no tools
+        assert!(json.get("tools").is_none());
         assert!(json["output_schema"]["schema"]["properties"]["path"].is_object());
 
         // Verify Flick accepts it
@@ -831,7 +813,6 @@ mod tests {
             "You are an assessor.",
             Model::Sonnet,
             "anthropic_key",
-            ToolGrant::READ,
             &ModelConfig::default(),
         );
         assert!(config.is_ok());

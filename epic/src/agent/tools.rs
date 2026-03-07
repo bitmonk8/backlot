@@ -47,7 +47,8 @@ pub enum AgentMethod {
 pub fn phase_tools(method: AgentMethod) -> ToolGrant {
     match method {
         AgentMethod::Execute => ToolGrant::READ | ToolGrant::WRITE | ToolGrant::BASH,
-        AgentMethod::Analyze | AgentMethod::Decompose => ToolGrant::READ,
+        AgentMethod::Analyze => ToolGrant::READ,
+        AgentMethod::Decompose => ToolGrant::READ | ToolGrant::BASH,
     }
 }
 
@@ -748,6 +749,14 @@ mod tests {
         assert!(grant.contains(ToolGrant::READ));
         assert!(!grant.contains(ToolGrant::WRITE));
         assert!(!grant.contains(ToolGrant::BASH));
+    }
+
+    #[test]
+    fn decompose_gets_read_bash() {
+        let grant = phase_tools(AgentMethod::Decompose);
+        assert!(grant.contains(ToolGrant::READ));
+        assert!(!grant.contains(ToolGrant::WRITE));
+        assert!(grant.contains(ToolGrant::BASH));
     }
 
     #[test]

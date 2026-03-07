@@ -204,12 +204,10 @@ Respond with the required JSON schema.";
 impl AgentService for FlickAgent {
     async fn assess(&self, ctx: &TaskContext) -> anyhow::Result<AssessmentResult> {
         let pair = prompts::build_assess(ctx);
-        let grant = tools::phase_tools(AgentMethod::Analyze);
         let config = config_gen::build_assess_config(
             &pair.system_prompt,
             Model::Haiku,
             &self.credential_name.0,
-            grant,
             &self.model_config,
         )?;
 

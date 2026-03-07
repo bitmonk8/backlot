@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (179 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, stale documentation, empty-subtask validation, bash process group kill, correctness fixes, and input validation & resource limits remediated; continuing hardening.
+**Audit remediation in progress** — All v1 features implemented (193 tests passing). Full codebase audit executed (95 review cells, 541 findings). Config wiring, model selection, task/recovery caps, sandbox detection, stale documentation, empty-subtask validation, bash process group kill, correctness fixes, input validation & resource limits, and design intent alignment remediated; continuing hardening.
 
 ## Milestones
 
@@ -52,7 +52,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 
 1. ~~**Input validation & resource limits** (6 majors)~~ — **Resolved 2026-03-06.**
-2. **Design intent alignment** (9 majors + 4 partial) — Tool grant mismatch, missing prompt guardrails, assessment bias/root rules, checkpoint context, recovery rationale, fix-within-fix guard.
+2. ~~**Design intent alignment** (9 majors + 4 partial)~~ — **Resolved 2026-03-07.**
 3. **Documentation drift** (5 majors + 1 partial) — Type mismatches, stale tool/event names, CLI syntax.
 4. **Error handling** (2 majors) — Init I/O error swallowing, TUI abort state loss.
 5. **Simplification** (6 majors + 1 dead code) — FlickAgent method dedup, schema dedup, event consolidation, usage tracking.
@@ -61,6 +61,34 @@ Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-item
 8. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. Deferred until 1–7 addressed. See [SANDBOXING.md](SANDBOXING.md).
 
 ## Decisions Made
+
+### 2026-03-07: Design intent alignment (9 majors + 4 partial resolved)
+
+**Scope:** 6 files modified (`agent/prompts.rs`, `agent/config_gen.rs`, `agent/flick.rs`, `agent/tools.rs`, `agent/mod.rs`, `orchestrator.rs`). 1 doc updated (`AGENT_DESIGN.md`). 1 comment added (`task/verify.rs`). 193 tests passing, 0 clippy warnings.
+
+**U2-R7#4 — Decompose tool grant (tools.rs):** `phase_tools(AgentMethod::Decompose)` now returns `READ | BASH` instead of `READ`. Decompose agents can run commands to explore the codebase. `AGENT_DESIGN.md` updated to match. 1 new test.
+
+**U4-R7#1 — Scope guardrails (prompts.rs):** Added scope-limiting instructions to `build_execute_leaf`, `build_design_and_decompose`, and `build_fix_leaf` system prompts. Agents are now instructed to stay within task scope.
+
+**U4-R7#2 — Branch tie-breaking bias (prompts.rs):** Assessment prompt now includes "When unsure between leaf and branch, prefer branch" per EPIC_DESIGN2.
+
+**U4-R7#3 — Root-is-branch rule (prompts.rs):** Assessment prompt now states "The root task (depth 0, no parent) is always assessed as branch."
+
+**U7-R7#3 — Review phases deferred (verify.rs):** File-level review and simplification review sub-phases explicitly deferred to post-v1 with design note comment.
+
+**B2#1 + U6-R1#1 — Remove tools from assess (config_gen.rs, flick.rs):** `build_assess_config` no longer accepts a `ToolGrant` parameter; assess config includes no tool definitions. Eliminates wasted tokens sending tool schemas to a no-tool call.
+
+**B8#1 — Checkpoint child context (mod.rs, orchestrator.rs, prompts.rs):** Added `ChildSummary` struct with `ChildStatus` enum (`Completed`, `Failed`, `Pending`, `InProgress`) and `children: Vec<ChildSummary>` to `TaskContext`. `build_context` populates it from `task.subtask_ids`. `build_checkpoint` renders a `## Child Subtasks` section with status indicators, failure reasons, and discoveries.
+
+**B8#2 — Recovery rationale threading (prompts.rs):** `build_design_recovery_subtasks` now includes the parent's decomposition rationale and parent discoveries in the recovery prompt. 1 new test.
+
+**B7#1 — Fix-within-fix guard (orchestrator.rs):** `finalize_task` now checks `is_fix_task` before entering any fix loop. All fix tasks (leaf or branch) fail immediately on verification failure. 1 new test.
+
+**U1-R7#5 — Parent context fields (mod.rs, orchestrator.rs, prompts.rs):** Added `parent_decomposition_rationale: Option<String>` and `parent_discoveries: Vec<String>` to `TaskContext`. Both populated in `build_context`. `parent_decomposition_rationale` rendered in `format_context` when present.
+
+**U4-R7#4 — Verify leaf/branch split (prompts.rs):** `build_verify` now includes path-specific guidance: leaf verification focuses on code correctness, branch verification on subtask integration. 1 new test.
+
+**B7#2 — Recovery budget propagation:** Already implemented — recovery subtasks inherit parent's `recovery_rounds` via `create_subtasks`. Confirmed by existing tests.
 
 ### 2026-03-06: Input validation & resource limits (6 audit majors resolved)
 

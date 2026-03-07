@@ -224,28 +224,13 @@ All 4 original critical findings have been resolved: C1 (security isolation docu
 *Resolved: empty-subtask validation, bash process group kill — 2026-03-06.*
 *Resolved: correctness fixes (U1-R1#1, U8-R1#1, U5-R3#2, U2-R1#1, U7-R3#1) — 2026-03-06.*
 *Resolved: input validation & resource limits (U5-R2#2, U5-R2#3, U5-R2#4, U5-R1#3, U1-R2#2, U2-R2#4) — 2026-03-06.*
+*Resolved: design intent alignment (U2-R7#4, U4-R7#1, U4-R7#2, U4-R7#3, U7-R7#3, B2#1, B8#1, B8#2, B7#1, U1-R7#5, U4-R7#4, U6-R1#1, B7#2) — 2026-03-07.*
 
 ### ~~1. Input validation & resource limits (6 majors)~~ — All resolved 2026-03-06
 
-### 2. Design intent alignment (9 majors + 4 partially resolved)
+### ~~2. Design intent alignment (9 majors + 4 partially resolved)~~ — All resolved 2026-03-07
 
-Divergences from EPIC_DESIGN2.md and AGENT_DESIGN.md specs.
-
-| Ref | Summary | Fix |
-|-----|---------|-----|
-| U2-R7#4 | Decompose tool grant is READ-only — spec says EXPLORE (READ\|EXECUTE\|WEB) | Update tool grant to match AGENT_DESIGN.md |
-| U4-R7#1 | No cost/scope guardrails in any prompt | Add budget/scope awareness to prompts |
-| U4-R7#2 | Assessment prompt omits tie-breaking bias toward branch | Add prefer-branch instruction per EPIC_DESIGN2 |
-| U4-R7#3 | Assessment prompt omits root-is-always-branch rule | Add root-is-branch rule to assessment prompt |
-| U7-R7#3 | File-level review and simplification review phases not implemented | Implement or explicitly defer with rationale |
-| B2#1 | `assess` config includes tool definitions but `run_structured` ignores tool calls | Remove tool config from assess, or switch to `run_with_tools` |
-| B8#1 | Checkpoint agent cannot see child subtasks | Include child task list in checkpoint prompt context |
-| B8#2 | Decomposition rationale not delivered to recovery agent | Thread rationale through to recovery prompt |
-| B7#1 | Leaf fix loop runs unchecked on fix subtasks — recursive fix-within-fix | Add guard to skip fix loop for `is_fix_task` leaves |
-| U1-R7#5 | *(partial)* `build_context` missing `parent_decomposition_rationale` and `parent_discoveries` | Add fields to `TaskContext`, populate in `build_context()` |
-| U4-R7#4 | *(partial)* `verify()` prompt not split into leaf vs branch variants | Split `build_verify` into leaf/branch variants |
-| U6-R1#1 | *(partial)* `assess()` passes tool config to `run_structured` which ignores it | Remove tool config from assess config |
-| B7#2 | *(partial)* Recovery subtasks get fresh per-branch budgets | Propagate remaining budgets from parent |
+*Resolved: design intent alignment (U2-R7#4, U4-R7#1, U4-R7#2, U4-R7#3, U7-R7#3, B2#1, B8#1, B8#2, B7#1, U1-R7#5, U4-R7#4, U6-R1#1, B7#2) — 2026-03-07.*
 
 ### 3. Documentation drift (5 majors + 1 partially resolved)
 

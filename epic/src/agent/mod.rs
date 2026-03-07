@@ -20,6 +20,24 @@ pub struct SiblingSummary {
     pub discoveries: Vec<String>,
 }
 
+/// Status of a child subtask (pending, in-progress, completed, or failed).
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Variants used in orchestrator and prompt formatting.
+pub enum ChildStatus {
+    Completed,
+    Failed { reason: String },
+    Pending,
+    InProgress,
+}
+
+/// Summary of a child subtask, used in branch-task context.
+#[derive(Debug, Clone)]
+pub struct ChildSummary {
+    pub goal: String,
+    pub status: ChildStatus,
+    pub discoveries: Vec<String>,
+}
+
 /// Context bundle passed to every agent call.
 #[derive(Debug, Clone)]
 pub struct TaskContext {
@@ -30,6 +48,12 @@ pub struct TaskContext {
     pub pending_sibling_goals: Vec<String>,
     /// Adjustment guidance from a checkpoint decision, if any.
     pub checkpoint_guidance: Option<String>,
+    /// Child subtask summaries (populated for branch tasks).
+    pub children: Vec<ChildSummary>,
+    /// Discoveries from the parent task, useful for recovery decisions.
+    pub parent_discoveries: Vec<String>,
+    /// Rationale the parent used when decomposing into subtasks.
+    pub parent_decomposition_rationale: Option<String>,
 }
 
 /// Trait abstracting all agent interactions.

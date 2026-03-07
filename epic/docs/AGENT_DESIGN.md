@@ -11,7 +11,7 @@ This document covers per-phase tool grants, prompt assembly, and structured outp
 | Any | Assess | READ | Read-only analysis |
 | Leaf | Implement | READ \| WRITE \| EXECUTE | Code changes |
 | Leaf | Verify | READ | Read-only analysis |
-| Branch | Design + Decompose | EXPLORE | Research, no writes |
+| Branch | Design + Decompose | READ \| BASH | Research + exploration, no writes |
 | Branch | Verify | TASK | May spawn sub-agents for large diffs |
 
 ## Prompt Assembly
