@@ -11,11 +11,32 @@ use crate::task::{
     Attempt, LeafResult, Magnitude, Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase,
 };
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use thiserror::Error;
 
 const GIT_DIFF_TIMEOUT_SECS: u64 = 30;
+
+async fn git_diff_numstat(project_root: &Path) -> Option<String> {
+    let git_future = tokio::process::Command::new("git")
+        .args(["diff", "--numstat", "HEAD"])
+        .current_dir(project_root)
+        .output();
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(GIT_DIFF_TIMEOUT_SECS),
+        git_future,
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        None
+    }
+}
 
 enum VerifyOutcome {
     Passed,
@@ -451,23 +472,11 @@ impl<A: AgentService> Orchestrator<A> {
             None => return Ok(ScopeCheck::WithinBounds),
         };
 
-        let git_future = tokio::process::Command::new("git")
-            .args(["diff", "--numstat", "HEAD"])
-            .current_dir(&project_root)
-            .output();
+        let numstat = git_diff_numstat(&project_root).await;
 
-        let output = match tokio::time::timeout(
-            std::time::Duration::from_secs(GIT_DIFF_TIMEOUT_SECS),
-            git_future,
-        )
-        .await
-        {
-            Ok(Ok(o)) if o.status.success() => o,
-            _ => return Ok(ScopeCheck::WithinBounds),
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(evaluate_scope(&stdout, &magnitude))
+        Ok(numstat.map_or(ScopeCheck::WithinBounds, |stdout| {
+            evaluate_scope(&stdout, &magnitude)
+        }))
     }
 
     // Returns boxed future to support recursion (execute_task → execute_branch → execute_task).
@@ -1299,210 +1308,10 @@ impl<A: AgentService> Orchestrator<A> {
 mod tests {
     use super::*;
     use crate::events::{self, EventReceiver};
-    use crate::task::assess::AssessmentResult;
-    use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
+    use crate::task::branch::{DecompositionResult, SubtaskSpec};
     use crate::task::verify::{VerificationOutcome, VerificationResult};
     use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, RecoveryPlan, TaskPath};
-    use std::collections::{HashMap, VecDeque};
-    use std::sync::Mutex;
-
-    #[allow(clippy::struct_field_names)]
-    struct MockAgentService {
-        assess_responses: Mutex<VecDeque<AssessmentResult>>,
-        leaf_responses: Mutex<VecDeque<LeafResult>>,
-        fix_leaf_responses: Mutex<VecDeque<LeafResult>>,
-        decompose_responses: Mutex<VecDeque<DecompositionResult>>,
-        fix_subtask_responses: Mutex<VecDeque<DecompositionResult>>,
-        verify_responses: Mutex<VecDeque<VerificationResult>>,
-        checkpoint_responses: Mutex<VecDeque<CheckpointDecision>>,
-        checkpoint_errors: Mutex<VecDeque<String>>,
-        /// Per-task positional error injection for `verify()`.
-        /// `None` = no error (fall through to `verify_responses`), `Some(msg)` = inject error.
-        /// `None` entries are necessary to skip calls that should succeed (e.g., the initial
-        /// verification before the fix loop).
-        verify_errors: Mutex<HashMap<TaskId, VecDeque<Option<String>>>>,
-        /// Per-task positional error injection for `design_fix_subtasks()`.
-        /// Same semantics as `verify_errors`.
-        fix_subtask_errors: Mutex<HashMap<TaskId, VecDeque<Option<String>>>>,
-        recovery_responses: Mutex<VecDeque<Option<String>>>,
-        recovery_plan_responses: Mutex<VecDeque<RecoveryPlan>>,
-        verify_models: Mutex<Vec<Model>>,
-        decompose_models: Mutex<Vec<Model>>,
-    }
-
-    impl MockAgentService {
-        fn new() -> Self {
-            Self {
-                assess_responses: Mutex::new(VecDeque::new()),
-                leaf_responses: Mutex::new(VecDeque::new()),
-                fix_leaf_responses: Mutex::new(VecDeque::new()),
-                decompose_responses: Mutex::new(VecDeque::new()),
-                fix_subtask_responses: Mutex::new(VecDeque::new()),
-                verify_responses: Mutex::new(VecDeque::new()),
-                checkpoint_responses: Mutex::new(VecDeque::new()),
-                checkpoint_errors: Mutex::new(VecDeque::new()),
-                verify_errors: Mutex::new(HashMap::new()),
-                fix_subtask_errors: Mutex::new(HashMap::new()),
-                recovery_responses: Mutex::new(VecDeque::new()),
-                recovery_plan_responses: Mutex::new(VecDeque::new()),
-                verify_models: Mutex::new(Vec::new()),
-                decompose_models: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn push_verify_errors(&self, id: TaskId, errors: Vec<Option<String>>) {
-            self.verify_errors.lock().unwrap().entry(id).or_default().extend(errors);
-        }
-
-        fn push_fix_subtask_errors(&self, id: TaskId, errors: Vec<Option<String>>) {
-            self.fix_subtask_errors.lock().unwrap().entry(id).or_default().extend(errors);
-        }
-    }
-
-    impl AgentService for MockAgentService {
-        async fn assess(&self, _ctx: &TaskContext) -> anyhow::Result<AssessmentResult> {
-            Ok(self
-                .assess_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("no assess response queued"))
-        }
-
-        async fn execute_leaf(
-            &self,
-            _ctx: &TaskContext,
-            _model: Model,
-        ) -> anyhow::Result<LeafResult> {
-            Ok(self
-                .leaf_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("no leaf response queued"))
-        }
-
-        async fn fix_leaf(
-            &self,
-            _ctx: &TaskContext,
-            _model: Model,
-            _failure_reason: &str,
-            _attempt: u32,
-        ) -> anyhow::Result<LeafResult> {
-            Ok(self
-                .fix_leaf_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("no fix_leaf response queued"))
-        }
-
-        async fn design_and_decompose(
-            &self,
-            _ctx: &TaskContext,
-            model: Model,
-        ) -> anyhow::Result<DecompositionResult> {
-            self.decompose_models.lock().unwrap().push(model);
-            Ok(self
-                .decompose_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("no decompose response queued"))
-        }
-
-        async fn design_fix_subtasks(
-            &self,
-            ctx: &TaskContext,
-            _model: Model,
-            _verification_issues: &str,
-            _round: u32,
-        ) -> anyhow::Result<DecompositionResult> {
-            let injected = self
-                .fix_subtask_errors
-                .lock()
-                .unwrap()
-                .get_mut(&ctx.task.id)
-                .and_then(VecDeque::pop_front);
-            if let Some(Some(msg)) = injected {
-                return Err(anyhow::anyhow!(msg));
-            }
-            Ok(self
-                .fix_subtask_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("no fix_subtask response queued"))
-        }
-
-        async fn verify(
-            &self,
-            ctx: &TaskContext,
-            model: Model,
-        ) -> anyhow::Result<VerificationResult> {
-            let injected = self
-                .verify_errors
-                .lock()
-                .unwrap()
-                .get_mut(&ctx.task.id)
-                .and_then(VecDeque::pop_front);
-            if let Some(Some(msg)) = injected {
-                return Err(anyhow::anyhow!(msg));
-            }
-            self.verify_models.lock().unwrap().push(model);
-            Ok(self
-                .verify_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("no verify response queued"))
-        }
-
-        async fn checkpoint(
-            &self,
-            _ctx: &TaskContext,
-            _discoveries: &[String],
-        ) -> anyhow::Result<CheckpointDecision> {
-            let front = self.checkpoint_errors.lock().unwrap().pop_front();
-            if let Some(msg) = front {
-                return Err(anyhow::anyhow!(msg));
-            }
-            Ok(self
-                .checkpoint_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("no checkpoint response queued"))
-        }
-
-        async fn assess_recovery(
-            &self,
-            _ctx: &TaskContext,
-            _failure_reason: &str,
-        ) -> anyhow::Result<Option<String>> {
-            Ok(self
-                .recovery_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("no recovery response queued"))
-        }
-
-        async fn design_recovery_subtasks(
-            &self,
-            _ctx: &TaskContext,
-            _failure_reason: &str,
-            _strategy: &str,
-            _recovery_round: u32,
-        ) -> anyhow::Result<RecoveryPlan> {
-            Ok(self
-                .recovery_plan_responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("no recovery_plan response queued"))
-        }
-    }
+    use crate::test_support::MockAgentService;
 
     fn pass_verification() -> VerificationResult {
         VerificationResult {

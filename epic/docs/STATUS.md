@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (213 tests passing, 0 clippy warnings). Full codebase audit complete (95 review cells, 541 findings). Remediation ongoing; 2 groups remain.
+**Audit remediation in progress** — All v1 features implemented (280 tests passing, 0 new clippy warnings). Full codebase audit complete (95 review cells, 541 findings). Remediation ongoing; 1 group remains.
 
 ## What Exists
 
@@ -14,7 +14,8 @@
 - CLI via clap — `init`, `run <goal>`, `resume`, `status` subcommands
 - `epic init` — agent-driven interactive configuration scaffolding
 - Container/VM startup detection with suppressible warning
-- CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain, Flick pinned to rev `8bf1d79`
+- CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain, Flick pinned to rev `f83c56e`
+- Testability infrastructure — `ProviderResolver`/`ToolExecutor` traits (flick), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
 
 ## Design Choices (intentional constraints)
 
@@ -34,5 +35,4 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 Prioritized from audit findings (see [AUDIT.md](AUDIT.md#recommended-action-items-priority-order)):
 
-1. **Testability** (16 majors) — Injection seams, FS/process abstractions, mock sharing, missing test coverage. Largest group — incremental.
-2. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. Deferred until 1 addressed. See [SANDBOXING.md](SANDBOXING.md).
+1. **Operational correctness sandboxing (Frida)** — TOCTOU mitigations + per-phase syscall enforcement. See [SANDBOXING.md](SANDBOXING.md).

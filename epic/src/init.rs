@@ -21,9 +21,11 @@ pub async fn run_init(agent: &FlickAgent, project_root: &Path) -> anyhow::Result
     eprintln!("Scanning project for build/test/lint configuration...\n");
 
     let findings = agent.explore_for_init().await?;
-    let (steps, declined) = present_and_confirm(findings)?;
-    let models = prompt_models()?;
-    let limits = prompt_limits()?;
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+    let (steps, declined) = present_and_confirm(findings, &mut lines)?;
+    let models = prompt_models(&mut lines)?;
+    let limits = prompt_limits(&mut lines)?;
 
     let config = EpicConfig {
         verification_steps: steps,
@@ -62,10 +64,9 @@ pub async fn run_init(agent: &FlickAgent, project_root: &Path) -> anyhow::Result
     Ok(())
 }
 
-/// Present agent findings and interactively confirm each step.
-/// Returns (accepted, declined) verification steps.
 fn present_and_confirm(
     findings: InitFindingsWire,
+    lines: &mut impl Iterator<Item = io::Result<String>>,
 ) -> anyhow::Result<(Vec<VerificationStep>, Vec<VerificationStep>)> {
     println!("Detected project type: {}", findings.project_type);
 
@@ -89,55 +90,47 @@ fn present_and_confirm(
     let mut accepted = Vec::new();
     let mut declined = Vec::new();
 
-    {
-        let stdin = io::stdin();
-        let mut lines = stdin.lock().lines();
+    for step in findings.steps {
+        print_step(&step);
+        print!("  Accept? [Y/n/edit] ");
+        io::stdout().flush()?;
 
-        for step in findings.steps {
-            print_step(&step);
-            print!("  Accept? [Y/n/edit] ");
-            io::stdout().flush()?;
+        let response = read_line_checked(lines)?;
 
-            let response = read_line_checked(&mut lines)?;
-
-            match response.as_str() {
-                "n" | "no" => {
+        match response.as_str() {
+            "n" | "no" => {
+                declined.push(VerificationStep::from(step));
+                println!("  Skipped.\n");
+            }
+            "e" | "edit" => {
+                if let Some(edited) = edit_step(&step, lines)? {
+                    accepted.push(edited);
+                    println!("  Updated.\n");
+                } else {
                     declined.push(VerificationStep::from(step));
                     println!("  Skipped.\n");
                 }
-                "e" | "edit" => {
-                    if let Some(edited) = edit_step(&step, &mut lines)? {
-                        accepted.push(edited);
-                        println!("  Updated.\n");
-                    } else {
-                        declined.push(VerificationStep::from(step));
-                        println!("  Skipped.\n");
-                    }
-                }
-                _ => {
-                    accepted.push(VerificationStep::from(step));
-                    println!("  Added.\n");
-                }
             }
-        }
-
-        // Offer to add custom steps
-        loop {
-            print!("Add another step? [y/N] ");
-            io::stdout().flush()?;
-
-            let response = read_line_or_eof(&mut lines)?;
-            if response != "y" && response != "yes" {
-                break;
-            }
-
-            if let Some(custom) = prompt_custom_step(&mut lines)? {
-                accepted.push(custom);
+            _ => {
+                accepted.push(VerificationStep::from(step));
                 println!("  Added.\n");
             }
         }
+    }
 
-        drop(lines);
+    loop {
+        print!("Add another step? [y/N] ");
+        io::stdout().flush()?;
+
+        let response = read_line_or_eof(lines)?;
+        if response != "y" && response != "yes" {
+            break;
+        }
+
+        if let Some(custom) = prompt_custom_step(lines)? {
+            accepted.push(custom);
+            println!("  Added.\n");
+        }
     }
 
     println!("\n{} verification step(s) configured.", accepted.len());
@@ -218,7 +211,9 @@ fn prompt_custom_step(
     }))
 }
 
-fn prompt_models() -> anyhow::Result<ModelConfig> {
+fn prompt_models(
+    lines: &mut impl Iterator<Item = io::Result<String>>,
+) -> anyhow::Result<ModelConfig> {
     let defaults = ModelConfig::default();
     println!("\nModel preferences (press Enter to accept defaults):");
     println!(
@@ -228,25 +223,21 @@ fn prompt_models() -> anyhow::Result<ModelConfig> {
     print!("  Accept defaults? [Y/n] ");
     io::stdout().flush()?;
 
-    let stdin = io::stdin();
-    let mut lines = stdin.lock().lines();
-    let response = read_line_or_eof(&mut lines)?;
+    let response = read_line_or_eof(lines)?;
 
     if response != "n" && response != "no" {
-        drop(lines);
         return Ok(defaults);
     }
 
     print!("  Fast model [{}]: ", defaults.fast);
     io::stdout().flush()?;
-    let fast = read_line_or_default(&mut lines, &defaults.fast)?;
+    let fast = read_line_or_default(lines, &defaults.fast)?;
     print!("  Balanced model [{}]: ", defaults.balanced);
     io::stdout().flush()?;
-    let balanced = read_line_or_default(&mut lines, &defaults.balanced)?;
+    let balanced = read_line_or_default(lines, &defaults.balanced)?;
     print!("  Strong model [{}]: ", defaults.strong);
     io::stdout().flush()?;
-    let strong = read_line_or_default(&mut lines, &defaults.strong)?;
-    drop(lines);
+    let strong = read_line_or_default(lines, &defaults.strong)?;
     Ok(ModelConfig {
         fast,
         balanced,
@@ -254,7 +245,9 @@ fn prompt_models() -> anyhow::Result<ModelConfig> {
     })
 }
 
-fn prompt_limits() -> anyhow::Result<LimitsConfig> {
+fn prompt_limits(
+    lines: &mut impl Iterator<Item = io::Result<String>>,
+) -> anyhow::Result<LimitsConfig> {
     let defaults = LimitsConfig::default();
     println!("\nDepth/budget limits (press Enter to accept defaults):");
     println!(
@@ -267,37 +260,33 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
     print!("  Accept defaults? [Y/n] ");
     io::stdout().flush()?;
 
-    let stdin = io::stdin();
-    let mut lines = stdin.lock().lines();
-    let response = read_line_or_eof(&mut lines)?;
+    let response = read_line_or_eof(lines)?;
 
     if response != "n" && response != "no" {
-        drop(lines);
         return Ok(defaults);
     }
 
     print!("  Max depth [{}]: ", defaults.max_depth);
     io::stdout().flush()?;
-    let max_depth = read_line_or_default(&mut lines, &defaults.max_depth.to_string())?
+    let max_depth = read_line_or_default(lines, &defaults.max_depth.to_string())?
         .parse()
         .unwrap_or(defaults.max_depth);
     print!("  Max recovery rounds [{}]: ", defaults.max_recovery_rounds);
     io::stdout().flush()?;
     let max_recovery_rounds =
-        read_line_or_default(&mut lines, &defaults.max_recovery_rounds.to_string())?
+        read_line_or_default(lines, &defaults.max_recovery_rounds.to_string())?
             .parse()
             .unwrap_or(defaults.max_recovery_rounds);
     print!("  Retry budget [{}]: ", defaults.retry_budget);
     io::stdout().flush()?;
-    let retry_budget = read_line_or_default(&mut lines, &defaults.retry_budget.to_string())?
+    let retry_budget = read_line_or_default(lines, &defaults.retry_budget.to_string())?
         .parse()
         .unwrap_or(defaults.retry_budget);
     print!("  Max total tasks [{}]: ", defaults.max_total_tasks);
     io::stdout().flush()?;
-    let max_total_tasks = read_line_or_default(&mut lines, &defaults.max_total_tasks.to_string())?
+    let max_total_tasks = read_line_or_default(lines, &defaults.max_total_tasks.to_string())?
         .parse()
         .unwrap_or(defaults.max_total_tasks);
-    drop(lines);
     Ok(LimitsConfig {
         max_depth,
         max_recovery_rounds,
@@ -307,7 +296,6 @@ fn prompt_limits() -> anyhow::Result<LimitsConfig> {
     })
 }
 
-/// Shared helper: reads one line, trims it, optionally lowercases, optionally bails on EOF.
 fn read_line_raw(
     lines: &mut impl Iterator<Item = io::Result<String>>,
     bail_on_eof: bool,
@@ -324,14 +312,12 @@ fn read_line_raw(
     }
 }
 
-/// Read a line, returning an error on I/O failure or EOF.
 fn read_line_checked(
     lines: &mut impl Iterator<Item = io::Result<String>>,
 ) -> anyhow::Result<String> {
     read_line_raw(lines, true, true)
 }
 
-/// Read a line for optional prompts. Returns empty string on EOF, propagates I/O errors.
 fn read_line_or_eof(
     lines: &mut impl Iterator<Item = io::Result<String>>,
 ) -> anyhow::Result<String> {
@@ -351,5 +337,272 @@ fn read_line_or_default(
         Ok(default.to_owned())
     } else {
         Ok(line)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock_lines(inputs: Vec<&str>) -> impl Iterator<Item = io::Result<String>> {
+        inputs
+            .into_iter()
+            .map(|s| Ok(s.to_owned()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    fn sample_findings(steps: Vec<DetectedStepWire>) -> InitFindingsWire {
+        InitFindingsWire {
+            project_type: "rust".into(),
+            steps,
+            notes: None,
+        }
+    }
+
+    fn sample_step(name: &str, cmd: &[&str]) -> DetectedStepWire {
+        DetectedStepWire {
+            name: name.into(),
+            command: cmd.iter().map(|s| (*s).to_owned()).collect(),
+            timeout: Some(300),
+            rationale: "detected".into(),
+        }
+    }
+
+    #[test]
+    fn present_and_confirm_accept_all() {
+        let findings = sample_findings(vec![
+            sample_step("build", &["cargo", "build"]),
+            sample_step("test", &["cargo", "test"]),
+        ]);
+        let mut lines = mock_lines(vec!["y", "y", "n"]);
+        let (accepted, declined) = present_and_confirm(findings, &mut lines).unwrap();
+        assert_eq!(accepted.len(), 2);
+        assert!(declined.is_empty());
+        assert_eq!(accepted[0].name, "build");
+        assert_eq!(accepted[1].name, "test");
+    }
+
+    #[test]
+    fn present_and_confirm_decline_steps() {
+        let findings = sample_findings(vec![
+            sample_step("build", &["cargo", "build"]),
+            sample_step("test", &["cargo", "test"]),
+        ]);
+        let mut lines = mock_lines(vec!["n", "n", "n"]);
+        let (accepted, declined) = present_and_confirm(findings, &mut lines).unwrap();
+        assert!(accepted.is_empty());
+        assert_eq!(declined.len(), 2);
+    }
+
+    #[test]
+    fn present_and_confirm_empty_findings() {
+        let findings = sample_findings(vec![]);
+        let mut lines = mock_lines(vec![]);
+        let (accepted, declined) = present_and_confirm(findings, &mut lines).unwrap();
+        assert!(accepted.is_empty());
+        assert!(declined.is_empty());
+    }
+
+    #[test]
+    fn prompt_models_accept_defaults() {
+        let mut lines = mock_lines(vec![""]);
+        let models = prompt_models(&mut lines).unwrap();
+        assert_eq!(models, ModelConfig::default());
+    }
+
+    #[test]
+    fn prompt_limits_accept_defaults() {
+        let mut lines = mock_lines(vec![""]);
+        let limits = prompt_limits(&mut lines).unwrap();
+        assert_eq!(limits, LimitsConfig::default());
+    }
+
+    #[test]
+    fn edit_step_changes_values() {
+        let step = sample_step("build", &["cargo", "build"]);
+        let mut lines = mock_lines(vec!["compile", "cargo build --release", "600"]);
+        let edited = edit_step(&step, &mut lines).unwrap().unwrap();
+        assert_eq!(edited.name, "compile");
+        assert_eq!(edited.command, vec!["cargo", "build", "--release"]);
+        assert_eq!(edited.timeout, 600);
+    }
+
+    #[test]
+    fn edit_step_keeps_defaults() {
+        let step = sample_step("build", &["cargo", "build"]);
+        let mut lines = mock_lines(vec!["", "", ""]);
+        let edited = edit_step(&step, &mut lines).unwrap().unwrap();
+        assert_eq!(edited.name, "build");
+        assert_eq!(edited.command, vec!["cargo", "build"]);
+        assert_eq!(edited.timeout, 300);
+    }
+
+    #[test]
+    fn prompt_custom_step_creates_step() {
+        let mut lines = mock_lines(vec!["lint", "cargo clippy", "120"]);
+        let step = prompt_custom_step(&mut lines).unwrap().unwrap();
+        assert_eq!(step.name, "lint");
+        assert_eq!(step.command, vec!["cargo", "clippy"]);
+        assert_eq!(step.timeout, 120);
+    }
+
+    #[test]
+    fn prompt_custom_step_empty_name_returns_none() {
+        let mut lines = mock_lines(vec![""]);
+        let step = prompt_custom_step(&mut lines).unwrap();
+        assert!(step.is_none());
+    }
+
+    #[test]
+    fn present_and_confirm_edit_response() {
+        let findings = sample_findings(vec![
+            sample_step("build", &["cargo", "build"]),
+        ]);
+        // "edit" for the step, then provide name/command/timeout, then "n" to not add another
+        let mut lines = mock_lines(vec![
+            "edit",
+            "compile",
+            "cargo build --release",
+            "600",
+            "n",
+        ]);
+        let (accepted, declined) = present_and_confirm(findings, &mut lines).unwrap();
+        assert_eq!(accepted.len(), 1);
+        assert!(declined.is_empty());
+        assert_eq!(accepted[0].name, "compile");
+        assert_eq!(accepted[0].command, vec!["cargo", "build", "--release"]);
+        assert_eq!(accepted[0].timeout, 600);
+    }
+
+    #[test]
+    fn present_and_confirm_edit_keeps_defaults() {
+        let findings = sample_findings(vec![
+            sample_step("build", &["cargo", "build"]),
+        ]);
+        // "e" shorthand triggers edit, then accept all defaults with empty lines
+        let mut lines = mock_lines(vec![
+            "e",
+            "",  // keep default name
+            "",  // keep default command
+            "",  // keep default timeout
+            "n", // don't add another step
+        ]);
+        let (accepted, declined) = present_and_confirm(findings, &mut lines).unwrap();
+        assert_eq!(accepted.len(), 1);
+        assert!(declined.is_empty());
+        assert_eq!(accepted[0].name, "build");
+        assert_eq!(accepted[0].command, vec!["cargo", "build"]);
+        assert_eq!(accepted[0].timeout, 300);
+    }
+
+    #[test]
+    fn present_and_confirm_add_custom_step() {
+        let findings = sample_findings(vec![
+            sample_step("build", &["cargo", "build"]),
+        ]);
+        // Accept the detected step, then add a custom step, then stop
+        let mut lines = mock_lines(vec![
+            "y",    // accept build
+            "y",    // add another step?
+            "lint", // custom step name
+            "cargo clippy",
+            "120",
+            "y",    // add another step?
+            "fmt",  // second custom step name
+            "cargo fmt --check",
+            "",     // default timeout (300)
+            "n",    // done adding steps
+        ]);
+        let (accepted, declined) = present_and_confirm(findings, &mut lines).unwrap();
+        assert_eq!(accepted.len(), 3);
+        assert!(declined.is_empty());
+        assert_eq!(accepted[0].name, "build");
+        assert_eq!(accepted[1].name, "lint");
+        assert_eq!(accepted[1].command, vec!["cargo", "clippy"]);
+        assert_eq!(accepted[1].timeout, 120);
+        assert_eq!(accepted[2].name, "fmt");
+        assert_eq!(accepted[2].command, vec!["cargo", "fmt", "--check"]);
+        assert_eq!(accepted[2].timeout, 300);
+    }
+
+    #[test]
+    fn prompt_models_custom_values() {
+        let mut lines = mock_lines(vec![
+            "n",
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4-turbo",
+        ]);
+        let models = prompt_models(&mut lines).unwrap();
+        assert_eq!(models.fast, "gpt-4o-mini");
+        assert_eq!(models.balanced, "gpt-4o");
+        assert_eq!(models.strong, "gpt-4-turbo");
+    }
+
+    #[test]
+    fn prompt_models_custom_partial_defaults() {
+        // Answer "n" to reject defaults, then provide custom fast but accept defaults for balanced/strong
+        let defaults = ModelConfig::default();
+        let mut lines = mock_lines(vec![
+            "no",
+            "custom-fast",
+            "",  // accept default balanced
+            "",  // accept default strong
+        ]);
+        let models = prompt_models(&mut lines).unwrap();
+        assert_eq!(models.fast, "custom-fast");
+        assert_eq!(models.balanced, defaults.balanced);
+        assert_eq!(models.strong, defaults.strong);
+    }
+
+    #[test]
+    fn prompt_limits_custom_values() {
+        let mut lines = mock_lines(vec![
+            "n",
+            "10",
+            "5",
+            "8",
+            "50",
+        ]);
+        let limits = prompt_limits(&mut lines).unwrap();
+        assert_eq!(limits.max_depth, 10);
+        assert_eq!(limits.max_recovery_rounds, 5);
+        assert_eq!(limits.retry_budget, 8);
+        assert_eq!(limits.max_total_tasks, 50);
+    }
+
+    #[test]
+    fn prompt_limits_invalid_numeric_falls_back_to_defaults() {
+        let defaults = LimitsConfig::default();
+        let mut lines = mock_lines(vec![
+            "n",
+            "not_a_number",
+            "abc",
+            "xyz",
+            "!!!",
+        ]);
+        let limits = prompt_limits(&mut lines).unwrap();
+        assert_eq!(limits.max_depth, defaults.max_depth);
+        assert_eq!(limits.max_recovery_rounds, defaults.max_recovery_rounds);
+        assert_eq!(limits.retry_budget, defaults.retry_budget);
+        assert_eq!(limits.max_total_tasks, defaults.max_total_tasks);
+    }
+
+    #[test]
+    fn prompt_limits_mixed_valid_and_invalid() {
+        let defaults = LimitsConfig::default();
+        let mut lines = mock_lines(vec![
+            "n",
+            "15",       // valid
+            "invalid",  // falls back to default
+            "7",        // valid
+            "invalid",  // falls back to default
+        ]);
+        let limits = prompt_limits(&mut lines).unwrap();
+        assert_eq!(limits.max_depth, 15);
+        assert_eq!(limits.max_recovery_rounds, defaults.max_recovery_rounds);
+        assert_eq!(limits.retry_budget, 7);
+        assert_eq!(limits.max_total_tasks, defaults.max_total_tasks);
     }
 }

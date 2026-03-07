@@ -11,7 +11,7 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-flick = { git = "https://github.com/bitmonk8/flick", rev = "8bf1d79" }
+flick = { git = "https://github.com/bitmonk8/flick", rev = "f83c56e" }
 bitflags = "2"
 clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.29"
@@ -39,3 +39,4 @@ must_use_candidate = "allow"
 
 [dev-dependencies]
 tempfile = "3"
+flick = { git = "https://github.com/bitmonk8/flick", rev = "f83c56e", features = ["testing"] }

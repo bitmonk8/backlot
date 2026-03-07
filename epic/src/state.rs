@@ -360,4 +360,54 @@ mod tests {
         state.insert(t2);
         assert_eq!(state.task_count(), 2);
     }
+
+    #[test]
+    fn load_nonexistent_file_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("does_not_exist.json");
+        let err = EpicState::load(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("No such file")
+                || msg.contains("cannot find")
+                || msg.contains("not found"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_empty_file_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("empty.json");
+        std::fs::write(&path, "").unwrap();
+        assert!(EpicState::load(&path).is_err());
+    }
+
+    #[test]
+    fn load_invalid_json_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, "not json at all {{{").unwrap();
+        assert!(EpicState::load(&path).is_err());
+    }
+
+    #[test]
+    fn load_wrong_schema_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wrong_schema.json");
+        std::fs::write(&path, r#"{"unrelated_field": 42}"#).unwrap();
+        assert!(EpicState::load(&path).is_err());
+    }
+
+    #[test]
+    fn load_wrong_field_types_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wrong_types.json");
+        std::fs::write(
+            &path,
+            r#"{"tasks": "not a map", "next_id": "abc", "root_id": 123}"#,
+        )
+        .unwrap();
+        assert!(EpicState::load(&path).is_err());
+    }
 }

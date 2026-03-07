@@ -9,6 +9,9 @@ mod state;
 mod task;
 mod tui;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use agent::flick::FlickAgent;
 use cli::{Cli, Command};
 use config::project::EpicConfig;

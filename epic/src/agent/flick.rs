@@ -5,7 +5,7 @@ use crate::agent::config_gen::{
     TaskOutcomeWire, VerificationWire,
 };
 use crate::agent::prompts;
-use crate::agent::tools::{self, AgentMethod, ToolGrant};
+use crate::agent::tools::{self, AgentMethod, ToolExecResult, ToolGrant};
 use crate::agent::{AgentService, TaskContext};
 use crate::config::project::{ModelConfig, VerificationStep};
 use crate::task::assess::AssessmentResult;
@@ -16,10 +16,62 @@ use anyhow::{Context, bail};
 use flick::result::ResultStatus;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::Duration;
 
 const MAX_TOOL_ROUNDS: u32 = 50;
+
+// ---------------------------------------------------------------------------
+// Injection seams for testability
+// ---------------------------------------------------------------------------
+
+type ResolverFuture<'a> =
+    Pin<Box<dyn std::future::Future<Output = anyhow::Result<Box<dyn flick::DynProvider>>> + Send + 'a>>;
+
+pub trait ProviderResolver: Send + Sync {
+    fn resolve<'a>(&'a self, config: &'a flick::Config) -> ResolverFuture<'a>;
+}
+
+pub trait ToolExecutor: Send + Sync {
+    fn execute<'a>(
+        &'a self,
+        tool_use_id: String,
+        name: &'a str,
+        input: &'a JsonValue,
+        project_root: &'a Path,
+        grant: ToolGrant,
+    ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>>;
+}
+
+struct DefaultProviderResolver;
+
+impl ProviderResolver for DefaultProviderResolver {
+    fn resolve<'a>(&'a self, config: &'a flick::Config) -> ResolverFuture<'a> {
+        Box::pin(async {
+            flick::resolve_provider(config)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to resolve provider: {e}"))
+        })
+    }
+}
+
+struct DefaultToolExecutor;
+
+impl ToolExecutor for DefaultToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        tool_use_id: String,
+        name: &'a str,
+        input: &'a JsonValue,
+        project_root: &'a Path,
+        grant: ToolGrant,
+    ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>> {
+        Box::pin(async move {
+            tools::execute_tool(tool_use_id, name, input, project_root, grant).await
+        })
+    }
+}
 
 struct RedactedString(String);
 
@@ -42,10 +94,12 @@ pub struct FlickAgent {
     call_timeout: Duration,
     model_config: ModelConfig,
     verification_steps: Vec<VerificationStep>,
+    provider_resolver: Box<dyn ProviderResolver>,
+    tool_executor: Box<dyn ToolExecutor>,
 }
 
 impl FlickAgent {
-    pub const fn new(
+    pub fn new(
         project_root: PathBuf,
         credential_name: String,
         call_timeout: Duration,
@@ -58,6 +112,26 @@ impl FlickAgent {
             call_timeout,
             model_config,
             verification_steps,
+            provider_resolver: Box::new(DefaultProviderResolver),
+            tool_executor: Box::new(DefaultToolExecutor),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_injected(
+        project_root: PathBuf,
+        call_timeout: Duration,
+        provider_resolver: Box<dyn ProviderResolver>,
+        tool_executor: Box<dyn ToolExecutor>,
+    ) -> Self {
+        Self {
+            project_root,
+            credential_name: RedactedString(String::new()),
+            call_timeout,
+            model_config: ModelConfig::default(),
+            verification_steps: Vec::new(),
+            provider_resolver,
+            tool_executor,
         }
     }
 
@@ -66,9 +140,7 @@ impl FlickAgent {
     // -----------------------------------------------------------------------
 
     async fn build_client(&self, config: flick::Config) -> anyhow::Result<flick::FlickClient> {
-        let provider = flick::resolve_provider(&config)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to resolve provider: {e}"))?;
+        let provider = self.provider_resolver.resolve(&config).await?;
         Ok(flick::FlickClient::new(config, provider))
     }
 
@@ -130,8 +202,10 @@ impl FlickAgent {
             let tool_calls = extract_tool_calls(&result)?;
             let mut tool_results = Vec::with_capacity(tool_calls.len());
             for (id, name, input) in &tool_calls {
-                let r =
-                    tools::execute_tool(id.clone(), name, input, &self.project_root, grant).await;
+                let r = self
+                    .tool_executor
+                    .execute(id.clone(), name, input, &self.project_root, grant)
+                    .await;
                 tool_results.push(flick::ContentBlock::ToolResult {
                     tool_use_id: r.tool_use_id,
                     content: r.content,
@@ -563,5 +637,291 @@ mod tests {
         };
         let err = extract_tool_calls(&result).unwrap_err();
         assert!(err.to_string().contains("no tool_use blocks"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Injection seam tests
+    // -----------------------------------------------------------------------
+
+    use flick::test_support::{MultiShotProvider, SingleShotProvider};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// Generic resolver: wraps any `Fn() -> Box<dyn DynProvider>` factory.
+    struct FnResolver<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync>(F);
+
+    impl<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync> ProviderResolver for FnResolver<F> {
+        fn resolve<'a>(&'a self, _config: &'a flick::Config) -> ResolverFuture<'a> {
+            let provider = (self.0)();
+            Box::pin(async move { Ok(provider) })
+        }
+    }
+
+    fn mock_resolver<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync + 'static>(
+        factory: F,
+    ) -> Box<dyn ProviderResolver> {
+        Box::new(FnResolver(factory))
+    }
+
+    fn test_agent(
+        resolver: Box<dyn ProviderResolver>,
+        executor: Box<dyn ToolExecutor>,
+    ) -> FlickAgent {
+        FlickAgent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_secs(30),
+            resolver,
+            executor,
+        )
+    }
+
+    struct CountingToolExecutor {
+        call_count: Arc<AtomicU32>,
+    }
+
+    impl ToolExecutor for CountingToolExecutor {
+        fn execute<'a>(
+            &'a self,
+            tool_use_id: String,
+            _name: &'a str,
+            _input: &'a JsonValue,
+            _project_root: &'a Path,
+            _grant: ToolGrant,
+        ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>> {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                ToolExecResult {
+                    tool_use_id,
+                    content: "mock result".into(),
+                    is_error: false,
+                }
+            })
+        }
+    }
+
+    fn test_config() -> flick::Config {
+        flick::Config::parse_yaml(
+            r"
+model:
+  provider: test
+  name: test-model
+  max_tokens: 1024
+
+provider:
+  test:
+    api: messages
+",
+        )
+        .expect("test config should parse")
+    }
+
+    #[tokio::test]
+    async fn build_client_uses_injected_resolver() {
+        let agent = test_agent(
+            mock_resolver(|| SingleShotProvider::with_text(r#"{"status":"success"}"#)),
+            Box::new(DefaultToolExecutor),
+        );
+        let client = agent.build_client(test_config()).await;
+        assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_structured_with_mock_provider() {
+        let agent = test_agent(
+            mock_resolver(|| SingleShotProvider::with_text(r#"{"status":"success"}"#)),
+            Box::new(DefaultToolExecutor),
+        );
+        let result: anyhow::Result<serde_json::Value> =
+            agent.run_structured(test_config(), "test query").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["status"], "success");
+    }
+
+    fn tool_then_complete_resolver() -> Box<dyn ProviderResolver> {
+        mock_resolver(|| {
+            MultiShotProvider::new(vec![
+                flick::provider::ModelResponse {
+                    text: None,
+                    thinking: Vec::new(),
+                    tool_calls: vec![flick::provider::ToolCallResponse {
+                        call_id: "tc_1".into(),
+                        tool_name: "read_file".into(),
+                        arguments: r#"{"path":"/tmp/test"}"#.into(),
+                    }],
+                    usage: flick::provider::UsageResponse::default(),
+                },
+                flick::provider::ModelResponse {
+                    text: Some(r#"{"done":true}"#.into()),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: flick::provider::UsageResponse::default(),
+                },
+            ])
+        })
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_calls_injected_executor() {
+        let tool_calls = Arc::new(AtomicU32::new(0));
+        let agent = test_agent(
+            tool_then_complete_resolver(),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&tool_calls),
+            }),
+        );
+        let result: anyhow::Result<serde_json::Value> = agent
+            .run_with_tools(test_config(), "test", ToolGrant::READ)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["done"], true);
+        assert_eq!(tool_calls.load(Ordering::Relaxed), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue 12: MAX_TOOL_ROUNDS exceeded
+    // -----------------------------------------------------------------------
+
+    /// Provider that always returns a tool call and never completes.
+    struct AlwaysToolCallProvider;
+
+    impl flick::DynProvider for AlwaysToolCallProvider {
+        fn call_boxed<'a>(
+            &'a self,
+            _params: flick::provider::RequestParams<'a>,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            flick::provider::ModelResponse,
+                            flick::error::ProviderError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Ok(flick::provider::ModelResponse {
+                    text: None,
+                    thinking: Vec::new(),
+                    tool_calls: vec![flick::provider::ToolCallResponse {
+                        call_id: "tc_loop".into(),
+                        tool_name: "read_file".into(),
+                        arguments: r#"{"path":"/tmp/x"}"#.into(),
+                    }],
+                    usage: flick::provider::UsageResponse::default(),
+                })
+            })
+        }
+
+        fn build_request(
+            &self,
+            _params: flick::provider::RequestParams<'_>,
+        ) -> Result<serde_json::Value, flick::error::ProviderError> {
+            Ok(serde_json::json!({"model": "test"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_exceeds_max_rounds() {
+        let agent = FlickAgent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_secs(60),
+            mock_resolver(|| Box::new(AlwaysToolCallProvider) as Box<dyn flick::DynProvider>),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::new(AtomicU32::new(0)),
+            }),
+        );
+        let result: anyhow::Result<serde_json::Value> = agent
+            .run_with_tools(test_config(), "loop forever", ToolGrant::READ)
+            .await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("exceeded"),
+            "expected 'exceeded' in error, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue 13: Timeout path
+    // -----------------------------------------------------------------------
+
+    struct SlowProvider;
+
+    impl flick::DynProvider for SlowProvider {
+        fn call_boxed<'a>(
+            &'a self,
+            _params: flick::provider::RequestParams<'a>,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            flick::provider::ModelResponse,
+                            flick::error::ProviderError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok(flick::provider::ModelResponse {
+                    text: Some("never reached".into()),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: flick::provider::UsageResponse::default(),
+                })
+            })
+        }
+
+        fn build_request(
+            &self,
+            _params: flick::provider::RequestParams<'_>,
+        ) -> Result<serde_json::Value, flick::error::ProviderError> {
+            Ok(serde_json::json!({"model": "test"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_structured_times_out() {
+        let agent = FlickAgent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_millis(10),
+            mock_resolver(|| Box::new(SlowProvider) as Box<dyn flick::DynProvider>),
+            Box::new(DefaultToolExecutor),
+        );
+        let result: anyhow::Result<serde_json::Value> =
+            agent.run_structured(test_config(), "slow query").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected 'timed out' in error, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue 14: ProviderResolver failure
+    // -----------------------------------------------------------------------
+
+    struct FailingResolver;
+
+    impl ProviderResolver for FailingResolver {
+        fn resolve<'a>(&'a self, _config: &'a flick::Config) -> ResolverFuture<'a> {
+            Box::pin(async { Err(anyhow::anyhow!("resolver broke")) })
+        }
+    }
+
+    #[tokio::test]
+    async fn build_client_propagates_resolver_error() {
+        let agent = test_agent(
+            Box::new(FailingResolver),
+            Box::new(DefaultToolExecutor),
+        );
+        match agent.build_client(test_config()).await {
+            Ok(_) => panic!("expected resolver error, got Ok"),
+            Err(err) => assert!(
+                err.to_string().contains("resolver broke"),
+                "expected 'resolver broke' in error, got: {err}"
+            ),
+        }
     }
 }

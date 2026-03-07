@@ -71,24 +71,23 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ## Audit Results Summary
 
-541 original findings. 103 resolved fully, 10 partially resolved (7 minor, 3 note — 0 major partial remain).
+541 original findings. 119 resolved fully, 10 partially resolved (7 minor, 3 note — 0 major partial remain).
 
 ### Current Findings by Severity
 
 | Severity | Still Valid | Partially Resolved |
 |----------|------------|-------------------|
 | Critical | 0 | 0 |
-| Major | 37 | 0 |
+| Major | 21 | 0 |
 | Minor | 223 | 7 |
 | Note | 164 | 3 |
-| **Total** | **424** | **10** |
+| **Total** | **408** | **10** |
 
 ### Remaining Findings by Category
 
 | Category | Approx count | Critical | Major |
 |---|---|---|---|
 | Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
-| Testability (no injection seams, zero coverage in init/TUI/main/state) | ~64 | 0 | ~16 |
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~61 | 0 | ~3 |
 | Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~40 | 0 | ~3 |
 | Dead code/stubs (unused ToolGrant flags) | ~20 | 0 | ~2 |
@@ -99,7 +98,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 ---
 
-## Major Findings (37 still valid, 0 partially resolved)
+## Major Findings (21 still valid, 0 partially resolved)
 
 ### Operational Correctness & Sandboxing
 
@@ -108,28 +107,6 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 | U5-R1#1 | TOCTOU symlink race in `safe_path` with `allow_new_file` — race between validation and open | `tools.rs` |
 | U2-R2#2 | TOCTOU in `write_file` path validation — path validated then file written non-atomically | `tools.rs` |
 | U2-R2#3 | TOCTOU in `edit_file` between read and write — file may change between operations | `tools.rs` |
-
-### Testability
-
-| Ref | Finding | Location |
-|-----|---------|----------|
-| U5-R6#1 | No filesystem abstraction for tool testing — all tests require real FS | `tools.rs` |
-| U5-R6#2 | No process execution abstraction for bash testing — tests spawn real shells | `tools.rs` |
-| U2-R6#1 | `build_client` hard-codes `flick::resolve_provider` with no injection point | `flick.rs` |
-| U2-R6#2 | `run_with_tools` tool-loop logic not unit-testable — tightly coupled to FlickClient | `flick.rs` |
-| U2-R6#3 | `tools::execute_tool` called directly with no indirection for test isolation | `flick.rs` |
-| U1-R6#1 | `check_scope_circuit_breaker` shells out to `git` directly — untestable without real repo | `orchestrator.rs` |
-| U6-R6#1 | `MockAgentService` is private to `orchestrator::tests` — cannot reuse in other test modules | `orchestrator.rs` |
-| U7-R6#1 | `TaskPhase` transitions unchecked — no `try_transition` guard, any transition silently succeeds | `task/mod.rs` |
-| U7-R6#2 | `LeafResult` and `RecoveryPlan` lack `PartialEq` — cannot assert equality in tests | `task/mod.rs` |
-| U7-R6#3 | Zero unit tests in task module | `task/` |
-| U8-R6#1 | `save`/`load` coupled to real filesystem — no abstraction for test isolation | `state.rs` |
-| U8-R6#2 | No error/failure path tests for save/load | `state.rs` |
-| ~~U10-R6#1~~ | ~~No `PartialEq` derive on config structs~~ | **Resolved** — `PartialEq`+`Eq` derives added |
-| U10-R6#4 | `init.rs` prompt functions read from `io::stdin()` directly — untestable | `init.rs` |
-| U11-R6 | Zero test coverage for entire init module (multiple findings) | `init.rs` |
-| U13-R6 | Zero test coverage for entire TUI module (multiple findings) | `tui/` |
-| U14-R6 | git module empty; scope check hardwired in orchestrator with no trait boundary (multiple findings) | `orchestrator.rs` |
 
 ### Simplification & Deduplication
 
@@ -174,33 +151,9 @@ All 7 issues resolved. See Simplification & Dead Code sections above.
 | U10-R6#2 | Config validation incomplete — no boundary tests | **Resolved** — `PartialEq`+`Eq` derives, 14 boundary tests |
 | U10-R6#3 | No dedicated config `load()` abstraction | **Resolved** — `EpicConfig::load(path)` in config module |
 
-### 1. Testability (16 majors)
+### 1. Operational correctness sandboxing (Frida)
 
-Injection seams, test isolation, and missing coverage. Largest group — can be addressed incrementally.
-
-| Ref | Summary | Fix |
-|-----|---------|-----|
-| U5-R6#1 | No filesystem abstraction for tool testing | Add FS trait or test helper |
-| U5-R6#2 | No process execution abstraction for bash testing | Add process trait or test helper |
-| U2-R6#1 | `build_client` hard-codes `flick::resolve_provider` | Add injection point |
-| U2-R6#2 | `run_with_tools` tool-loop not unit-testable | Decouple from FlickClient |
-| U2-R6#3 | `tools::execute_tool` called directly with no indirection | Add trait boundary |
-| U1-R6#1 | `check_scope_circuit_breaker` shells out to `git` directly | Add git trait or injection |
-| U6-R6#1 | `MockAgentService` private to `orchestrator::tests` | Move to shared test module |
-| U7-R6#1 | `TaskPhase` transitions unchecked | Add `try_transition` guard |
-| U7-R6#2 | `LeafResult` and `RecoveryPlan` lack `PartialEq` | Add `PartialEq` derive |
-| U7-R6#3 | Zero unit tests in task module | Add tests |
-| U8-R6#1 | `save`/`load` coupled to real filesystem | Add abstraction or test helpers |
-| U8-R6#2 | No error/failure path tests for save/load | Add failure path tests |
-| ~~U10-R6#1~~ | ~~No `PartialEq` derive on config structs~~ | **Resolved** |
-| U10-R6#4 | `init.rs` prompt functions read from `io::stdin()` directly | Accept `Read` trait param |
-| U11-R6 | Zero test coverage for init module | Add tests |
-| U13-R6 | Zero test coverage for TUI module | Add tests |
-| U14-R6 | git module empty; scope check hardwired with no trait boundary | Add git trait |
-
-### 2. Operational correctness sandboxing (Frida)
-
-TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement. Deferred until items 1–2 are addressed.
+TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement.
 
 | Ref | Summary |
 |-----|---------|

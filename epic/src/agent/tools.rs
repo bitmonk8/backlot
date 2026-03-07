@@ -743,6 +743,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Helper: execute a tool in a fresh temp dir (for tests that don't need
+    /// pre-populated files).
+    async fn exec(name: &str, input: serde_json::Value, grant: ToolGrant) -> ToolExecResult {
+        let tmp = TempDir::new().unwrap();
+        execute_tool("tu_1".into(), name, &input, tmp.path(), grant).await
+    }
+
     #[test]
     fn analyze_gets_read_only() {
         let grant = phase_tools(AgentMethod::Analyze);
@@ -831,12 +838,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_grant_check_denies() {
-        let tmp = TempDir::new().unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec(
             "write_file",
-            &serde_json::json!({"path": "x.txt", "content": "hi"}),
-            tmp.path(),
+            serde_json::json!({"path": "x.txt", "content": "hi"}),
             ToolGrant::READ, // no WRITE
         )
         .await;
@@ -846,12 +850,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_grant_check_unknown_tool() {
-        let tmp = TempDir::new().unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec(
             "nonexistent_tool",
-            &serde_json::json!({}),
-            tmp.path(),
+            serde_json::json!({}),
             ToolGrant::READ | ToolGrant::WRITE | ToolGrant::BASH,
         )
         .await;
@@ -897,15 +898,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_nonexistent() {
-        let tmp = TempDir::new().unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
-            "read_file",
-            &serde_json::json!({"path": "nope.txt"}),
-            tmp.path(),
-            ToolGrant::READ,
-        )
-        .await;
+        let result = exec("read_file", serde_json::json!({"path": "nope.txt"}), ToolGrant::READ).await;
         assert!(result.is_error);
     }
 
@@ -1032,13 +1025,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_file_size_limit() {
-        let tmp = TempDir::new().unwrap();
         let big = "x".repeat(MAX_WRITE_BYTES + 1);
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec(
             "write_file",
-            &serde_json::json!({"path": "big.txt", "content": big}),
-            tmp.path(),
+            serde_json::json!({"path": "big.txt", "content": big}),
             ToolGrant::WRITE,
         )
         .await;
@@ -1048,13 +1038,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_file_at_limit() {
-        let tmp = TempDir::new().unwrap();
         let exact = "x".repeat(MAX_WRITE_BYTES);
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec(
             "write_file",
-            &serde_json::json!({"path": "exact.txt", "content": exact}),
-            tmp.path(),
+            serde_json::json!({"path": "exact.txt", "content": exact}),
             ToolGrant::WRITE,
         )
         .await;
@@ -1101,27 +1088,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_echo() {
-        let tmp = TempDir::new().unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
-            "bash",
-            &serde_json::json!({"command": "echo hello"}),
-            tmp.path(),
-            ToolGrant::BASH,
-        )
-        .await;
+        let result = exec("bash", serde_json::json!({"command": "echo hello"}), ToolGrant::BASH).await;
         assert!(!result.is_error);
         assert!(result.content.contains("hello"));
     }
 
     #[tokio::test]
     async fn test_bash_timeout() {
-        let tmp = TempDir::new().unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec(
             "bash",
-            &serde_json::json!({"command": "sleep 10", "timeout": 2}),
-            tmp.path(),
+            serde_json::json!({"command": "sleep 10", "timeout": 2}),
             ToolGrant::BASH,
         )
         .await;
@@ -1131,29 +1107,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_zero_exit_not_error() {
-        let tmp = TempDir::new().unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
-            "bash",
-            &serde_json::json!({"command": "true"}),
-            tmp.path(),
-            ToolGrant::BASH,
-        )
-        .await;
+        let result = exec("bash", serde_json::json!({"command": "true"}), ToolGrant::BASH).await;
         assert!(!result.is_error);
     }
 
     #[tokio::test]
     async fn test_bash_nonzero_exit_is_error() {
-        let tmp = TempDir::new().unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
-            "bash",
-            &serde_json::json!({"command": "exit 1"}),
-            tmp.path(),
-            ToolGrant::BASH,
-        )
-        .await;
+        let result = exec("bash", serde_json::json!({"command": "exit 1"}), ToolGrant::BASH).await;
         assert!(result.is_error);
         assert!(result.content.contains("[exit code: 1]"));
     }
@@ -1240,4 +1200,257 @@ mod tests {
         }
     }
 
+    // -- read_file edge cases --
+
+    #[tokio::test]
+    async fn test_read_file_missing_path_param() {
+        let result = exec("read_file", serde_json::json!({}), ToolGrant::READ).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_directory_rejected() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("subdir")).unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "read_file",
+            &serde_json::json!({"path": "subdir"}),
+            tmp.path(),
+            ToolGrant::READ,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("not a file"));
+    }
+
+    // -- glob edge cases --
+
+    #[tokio::test]
+    async fn test_glob_no_matches() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.txt"), "").unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "glob",
+            &serde_json::json!({"pattern": "*.rs"}),
+            tmp.path(),
+            ToolGrant::READ,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert!(result.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_glob_missing_pattern_param() {
+        let result = exec("glob", serde_json::json!({}), ToolGrant::READ).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn test_glob_invalid_pattern() {
+        let result = exec("glob", serde_json::json!({"pattern": "[invalid"}), ToolGrant::READ).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("invalid glob"));
+    }
+
+    // -- grep edge cases --
+
+    #[tokio::test]
+    async fn test_grep_no_matches() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "hello world\n").unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "grep",
+            &serde_json::json!({"pattern": "zzz_no_match"}),
+            tmp.path(),
+            ToolGrant::READ,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert!(result.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_grep_missing_pattern_param() {
+        let result = exec("grep", serde_json::json!({}), ToolGrant::READ).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_skips_binary_files() {
+        let tmp = TempDir::new().unwrap();
+        let mut binary_content = b"fn match_me\n".to_vec();
+        binary_content.extend_from_slice(&[0u8; 100]);
+        std::fs::write(tmp.path().join("bin.dat"), &binary_content).unwrap();
+        std::fs::write(tmp.path().join("text.rs"), "fn match_me\n").unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "grep",
+            &serde_json::json!({"pattern": "match_me"}),
+            tmp.path(),
+            ToolGrant::READ,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("text.rs"));
+        assert!(!result.content.contains("bin.dat"));
+    }
+
+    // -- edit_file edge cases --
+
+    #[tokio::test]
+    async fn test_edit_file_not_found() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "hello world").unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "edit_file",
+            &serde_json::json!({"path": "f.txt", "old_string": "zzz", "new_string": "aaa"}),
+            tmp.path(),
+            ToolGrant::WRITE,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_missing_params() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "hello").unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "edit_file",
+            &serde_json::json!({"path": "f.txt"}),
+            tmp.path(),
+            ToolGrant::WRITE,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_nonexistent_file() {
+        let result = exec(
+            "edit_file",
+            serde_json::json!({"path": "nope.txt", "old_string": "a", "new_string": "b"}),
+            ToolGrant::WRITE,
+        )
+        .await;
+        assert!(result.is_error);
+    }
+
+    // -- write_file edge cases --
+
+    #[tokio::test]
+    async fn test_write_file_missing_params() {
+        let result = exec(
+            "write_file",
+            serde_json::json!({"path": "f.txt"}),
+            ToolGrant::WRITE,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_overwrites() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "old content").unwrap();
+        let result = execute_tool(
+            "tu_1".into(),
+            "write_file",
+            &serde_json::json!({"path": "f.txt", "content": "new content"}),
+            tmp.path(),
+            ToolGrant::WRITE,
+        )
+        .await;
+        assert!(!result.is_error);
+        let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
+        assert_eq!(content, "new content");
+    }
+
+    // -- bash edge cases --
+
+    #[tokio::test]
+    async fn test_bash_missing_command_param() {
+        let result = exec("bash", serde_json::json!({}), ToolGrant::BASH).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn test_bash_stderr_output() {
+        let result = exec("bash", serde_json::json!({"command": "echo errout >&2"}), ToolGrant::BASH).await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("[stderr]"));
+        assert!(result.content.contains("errout"));
+    }
+
+    #[tokio::test]
+    async fn test_bash_empty_output() {
+        let result = exec("bash", serde_json::json!({"command": "true"}), ToolGrant::BASH).await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "[no output]");
+    }
+
+    #[tokio::test]
+    async fn test_bash_mixed_stdout_stderr() {
+        let result = exec(
+            "bash",
+            serde_json::json!({"command": "echo out; echo err >&2"}),
+            ToolGrant::BASH,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("out"));
+        assert!(result.content.contains("[stderr]"));
+        assert!(result.content.contains("err"));
+    }
+
+    #[tokio::test]
+    async fn test_bash_nonzero_with_stderr() {
+        let result = exec(
+            "bash",
+            serde_json::json!({"command": "echo fail >&2; exit 42"}),
+            ToolGrant::BASH,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("[stderr]"));
+        assert!(result.content.contains("fail"));
+        assert!(result.content.contains("[exit code: 42]"));
+    }
+
+    #[tokio::test]
+    async fn test_bash_custom_timeout() {
+        let result = exec(
+            "bash",
+            serde_json::json!({"command": "echo fast", "timeout": 10}),
+            ToolGrant::BASH,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("fast"));
+    }
+
+    #[tokio::test]
+    async fn test_bash_timeout_clamped_to_max() {
+        let result = exec(
+            "bash",
+            serde_json::json!({"command": "echo ok", "timeout": 99999}),
+            ToolGrant::BASH,
+        )
+        .await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("ok"));
+    }
 }

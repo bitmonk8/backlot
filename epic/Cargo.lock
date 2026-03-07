@@ -405,7 +405,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 [[package]]
 name = "flick"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/flick?rev=8bf1d79#8bf1d79fe511e1ee9a526656e20fa84256ee9327"
+source = "git+https://github.com/bitmonk8/flick?rev=f83c56e#f83c56e7f551e1f422688a31de7c042366f44c46"
 dependencies = [
  "chacha20poly1305",
  "hex",

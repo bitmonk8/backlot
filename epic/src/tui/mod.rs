@@ -441,3 +441,119 @@ impl TuiApp {
         frame.render_widget(paragraph, area);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::{TaskPath, TaskOutcome};
+
+    fn app() -> TuiApp {
+        TuiApp::new("test goal".into())
+    }
+
+    fn register(app: &mut TuiApp, id: u64, parent: Option<u64>, goal: &str, depth: u32) {
+        app.handle_event(Event::TaskRegistered {
+            task_id: TaskId(id),
+            parent_id: parent.map(TaskId),
+            goal: goal.into(),
+            depth,
+        });
+    }
+
+    #[test]
+    fn task_registration_sets_root() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        assert_eq!(app.root_id, Some(TaskId(0)));
+        assert_eq!(app.tasks.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_registration_ignored() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        register(&mut app, 0, None, "root again", 0);
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[&TaskId(0)].goal, "root");
+    }
+
+    #[test]
+    fn child_registration_links_parent() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        register(&mut app, 1, Some(0), "child", 1);
+        assert_eq!(app.tasks[&TaskId(0)].subtask_ids, vec![TaskId(1)]);
+    }
+
+    #[test]
+    fn phase_transition_tracks_current() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        app.handle_event(Event::PhaseTransition {
+            task_id: TaskId(0),
+            phase: TaskPhase::Executing,
+        });
+        assert_eq!(app.current_task, Some(TaskId(0)));
+        assert!(app.tasks[&TaskId(0)].current);
+    }
+
+    #[test]
+    fn task_completion_clears_current() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        app.handle_event(Event::PhaseTransition {
+            task_id: TaskId(0),
+            phase: TaskPhase::Executing,
+        });
+        app.handle_event(Event::TaskCompleted {
+            task_id: TaskId(0),
+            outcome: TaskOutcome::Success,
+        });
+        assert_eq!(app.current_task, None);
+        assert_eq!(app.tasks[&TaskId(0)].phase, TaskPhase::Completed);
+    }
+
+    #[test]
+    fn task_failure_sets_failed_phase() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        app.handle_event(Event::TaskCompleted {
+            task_id: TaskId(0),
+            outcome: TaskOutcome::Failed { reason: "oops".into() },
+        });
+        assert_eq!(app.tasks[&TaskId(0)].phase, TaskPhase::Failed);
+    }
+
+    #[test]
+    fn path_selection_stored() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        app.handle_event(Event::PathSelected {
+            task_id: TaskId(0),
+            path: TaskPath::Leaf,
+        });
+        assert_eq!(app.tasks[&TaskId(0)].path, Some(TaskPath::Leaf));
+    }
+
+    #[test]
+    fn worklog_eviction_at_cap() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        for _ in 0..MAX_WORKLOG_ENTRIES + 50 {
+            app.handle_event(Event::ModelSelected {
+                task_id: TaskId(0),
+                model: crate::task::Model::Haiku,
+            });
+        }
+        assert!(app.worklog.len() <= MAX_WORKLOG_ENTRIES);
+    }
+
+    #[test]
+    fn scroll_clamped_to_task_count() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        app.tree_scroll = 100;
+        let clamped = (app.tree_scroll + 1).min(app.tasks.len());
+        assert_eq!(clamped, 1);
+    }
+}

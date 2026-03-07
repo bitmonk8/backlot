@@ -3,7 +3,7 @@
 use super::MagnitudeEstimate;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubtaskSpec {
     pub goal: String,
     pub verification_criteria: Vec<String>,
