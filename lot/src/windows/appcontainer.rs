@@ -8,20 +8,20 @@ use std::os::windows::io::FromRawHandle;
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, LocalFree, BOOL, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, FALSE, HANDLE,
-    INVALID_HANDLE_VALUE, TRUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    BOOL, CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, FALSE, HANDLE, INVALID_HANDLE_VALUE,
+    LocalFree, TRUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
-    SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE,
-    SDDL_REVISION_1, SE_FILE_OBJECT, SET_ACCESS, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, EXPLICIT_ACCESS_W, GetNamedSecurityInfoW,
+    NO_MULTIPLE_TRUSTEE, SDDL_REVISION_1, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW,
+    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile,
 };
 use windows_sys::Win32::Security::{
-    AllocateAndInitializeSid, FreeSid, GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
+    ACL, AllocateAndInitializeSid, DACL_SECURITY_INFORMATION, FreeSid, GetSecurityDescriptorDacl,
     OBJECT_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
     SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SID_IDENTIFIER_AUTHORITY,
     SUB_CONTAINERS_AND_OBJECTS_INHERIT,
@@ -32,19 +32,19 @@ use windows_sys::Win32::System::Console::{
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    GetCurrentProcessId, GetExitCodeProcess, InitializeProcThreadAttributeList,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
-    STARTF_USESTDHANDLES,
+    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcessId, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows_sys::core::HRESULT;
 
+use crate::Result;
 use crate::command::{SandboxCommand, SandboxStdio};
 use crate::error::SandboxError;
 use crate::policy::SandboxPolicy;
-use crate::Result;
 
 use super::job::JobObject;
 
@@ -259,10 +259,17 @@ fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
 
     // SAFETY: sd is a valid security descriptor from the conversion above.
     let ret = unsafe {
-        GetSecurityDescriptorDacl(sd, &raw mut dacl_present, &raw mut dacl, &raw mut dacl_defaulted)
+        GetSecurityDescriptorDacl(
+            sd,
+            &raw mut dacl_present,
+            &raw mut dacl,
+            &raw mut dacl_defaulted,
+        )
     };
     if ret == FALSE {
-        unsafe { LocalFree(sd.cast()); }
+        unsafe {
+            LocalFree(sd.cast());
+        }
         return Err(io::Error::last_os_error());
     }
 
@@ -290,7 +297,9 @@ fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     };
 
     // SAFETY: sd was allocated by the conversion function.
-    unsafe { LocalFree(sd.cast()); }
+    unsafe {
+        LocalFree(sd.cast());
+    }
 
     if err != ERROR_SUCCESS {
         return Err(win32_to_io(err));
@@ -347,7 +356,9 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
     // SAFETY: Merging a new ACE into the existing DACL.
     let err = unsafe { SetEntriesInAclW(1, &raw const ea, current_dacl, &raw mut new_dacl) };
     if err != ERROR_SUCCESS {
-        unsafe { LocalFree(sd.cast()); }
+        unsafe {
+            LocalFree(sd.cast());
+        }
         return Err(win32_to_io(err));
     }
 
@@ -462,7 +473,10 @@ impl SentinelFile {
                 continue;
             }
             if let Some((path_str, sddl)) = line.split_once('\t') {
-                entries.push((PathBuf::from(Self::decode_path_field(path_str)), sddl.to_owned()));
+                entries.push((
+                    PathBuf::from(Self::decode_path_field(path_str)),
+                    sddl.to_owned(),
+                ));
             }
         }
         Ok(Self {
@@ -606,14 +620,7 @@ fn create_pipe() -> io::Result<PipeHandles> {
     // SAFETY: Creating an anonymous pipe with inheritable handles.
     // Both handles are inheritable, but PROC_THREAD_ATTRIBUTE_HANDLE_LIST
     // restricts which handles the child actually inherits.
-    let ret = unsafe {
-        CreatePipe(
-            &raw mut read_handle,
-            &raw mut write_handle,
-            &raw mut sa,
-            0,
-        )
-    };
+    let ret = unsafe { CreatePipe(&raw mut read_handle, &raw mut write_handle, &raw mut sa, 0) };
     if ret == FALSE {
         return Err(io::Error::last_os_error());
     }
@@ -640,7 +647,10 @@ fn resolve_stdio_input(spec: SandboxStdio) -> io::Result<(HANDLE, Option<HANDLE>
     }
 }
 
-fn resolve_stdio_output(spec: SandboxStdio, std_handle_id: u32) -> io::Result<(HANDLE, Option<HANDLE>)> {
+fn resolve_stdio_output(
+    spec: SandboxStdio,
+    std_handle_id: u32,
+) -> io::Result<(HANDLE, Option<HANDLE>)> {
     match spec {
         SandboxStdio::Null => Ok((INVALID_HANDLE_VALUE, None)),
         SandboxStdio::Inherit => {
@@ -822,11 +832,15 @@ impl WindowsSandboxedChild {
         });
 
         let stdout = match stdout_thread {
-            Some(t) => t.join().map_err(|_| io::Error::other("stdout reader panicked"))?,
+            Some(t) => t
+                .join()
+                .map_err(|_| io::Error::other("stdout reader panicked"))?,
             None => Ok(Vec::new()),
         }?;
         let stderr = match stderr_thread {
-            Some(t) => t.join().map_err(|_| io::Error::other("stderr reader panicked"))?,
+            Some(t) => t
+                .join()
+                .map_err(|_| io::Error::other("stderr reader panicked"))?,
             None => Ok(Vec::new()),
         }?;
 
@@ -908,19 +922,17 @@ impl Drop for WindowsSandboxedChild {
 
 /// Spawn a sandboxed process using Windows `AppContainer`.
 #[allow(clippy::too_many_lines)]
-pub fn spawn(
-    policy: &SandboxPolicy,
-    command: &SandboxCommand,
-) -> Result<crate::SandboxedChild> {
-    let (profile_name, ac_sid) = create_profile().map_err(|e| {
-        SandboxError::Setup(format!("CreateAppContainerProfile: {e}"))
-    })?;
+pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<crate::SandboxedChild> {
+    let (profile_name, ac_sid) = create_profile()
+        .map_err(|e| SandboxError::Setup(format!("CreateAppContainerProfile: {e}")))?;
 
     match spawn_inner(policy, command, &profile_name, ac_sid) {
         Ok(child) => Ok(child),
         Err(e) => {
             // SAFETY: ac_sid was allocated by CreateAppContainerProfile.
-            unsafe { FreeSid(ac_sid); }
+            unsafe {
+                FreeSid(ac_sid);
+            }
             let _ = delete_profile(&profile_name);
             Err(e)
         }
@@ -945,9 +957,8 @@ fn spawn_inner(
         .collect();
 
     // Write sentinel with original DACLs before modifying anything.
-    let sentinel = write_sentinel(profile_name, &all_paths).map_err(|e| {
-        SandboxError::Setup(format!("write sentinel: {e}"))
-    })?;
+    let sentinel = write_sentinel(profile_name, &all_paths)
+        .map_err(|e| SandboxError::Setup(format!("write sentinel: {e}")))?;
 
     // From here on, errors must restore ACLs via the sentinel.
     match spawn_with_sentinel(policy, command, profile_name, ac_sid, sentinel) {
@@ -987,7 +998,10 @@ fn spawn_with_sentinel(
     let mut capabilities: Vec<SID_AND_ATTRIBUTES> = Vec::new();
 
     if policy.allow_network {
-        let inet_sid = try_setup!(create_internet_client_sid(), "create internet capability SID");
+        let inet_sid = try_setup!(
+            create_internet_client_sid(),
+            "create internet capability SID"
+        );
         cap_sids.push(inet_sid);
         capabilities.push(SID_AND_ATTRIBUTES {
             Sid: inet_sid,
@@ -1010,18 +1024,18 @@ fn spawn_with_sentinel(
     // Create pipes before the attribute list so child handles can be listed
     // in PROC_THREAD_ATTRIBUTE_HANDLE_LIST, eliminating the race window where
     // another thread could inherit handles between CreatePipe and SetHandleInformation.
-    let (child_stdin, parent_stdin) = try_setup!(
-        resolve_stdio_input(command.stdin), "stdin pipe"
-    );
-    let (child_stdout, parent_stdout) = match resolve_stdio_output(command.stdout, STD_OUTPUT_HANDLE) {
-        Ok(v) => v,
-        Err(e) => {
-            close_optional_handle(parent_stdin);
-            close_handle_if_valid(child_stdin);
-            return Err((sentinel, SandboxError::Setup(format!("stdout pipe: {e}"))));
-        }
-    };
-    let (child_stderr, parent_stderr) = match resolve_stdio_output(command.stderr, STD_ERROR_HANDLE) {
+    let (child_stdin, parent_stdin) = try_setup!(resolve_stdio_input(command.stdin), "stdin pipe");
+    let (child_stdout, parent_stdout) =
+        match resolve_stdio_output(command.stdout, STD_OUTPUT_HANDLE) {
+            Ok(v) => v,
+            Err(e) => {
+                close_optional_handle(parent_stdin);
+                close_handle_if_valid(child_stdin);
+                return Err((sentinel, SandboxError::Setup(format!("stdout pipe: {e}"))));
+            }
+        };
+    let (child_stderr, parent_stderr) = match resolve_stdio_output(command.stderr, STD_ERROR_HANDLE)
+    {
         Ok(v) => v,
         Err(e) => {
             close_optional_handle(parent_stdin);
@@ -1053,7 +1067,10 @@ fn spawn_with_sentinel(
     // SAFETY: First call to determine required buffer size.
     unsafe {
         InitializeProcThreadAttributeList(
-            std::ptr::null_mut(), attr_count, 0, &raw mut attr_list_size,
+            std::ptr::null_mut(),
+            attr_count,
+            0,
+            &raw mut attr_list_size,
         );
     }
 
@@ -1073,7 +1090,9 @@ fn spawn_with_sentinel(
         close_handle_if_valid(child_stderr);
         for sid in &cap_sids {
             // SAFETY: Each sid from AllocateAndInitializeSid.
-            unsafe { FreeSid(*sid); }
+            unsafe {
+                FreeSid(*sid);
+            }
         }
         return Err((
             sentinel,
@@ -1107,9 +1126,14 @@ fn spawn_with_sentinel(
         // SAFETY: Cleaning up initialized attr_list and SIDs.
         unsafe {
             DeleteProcThreadAttributeList(attr_list);
-            for sid in &cap_sids { FreeSid(*sid); }
+            for sid in &cap_sids {
+                FreeSid(*sid);
+            }
         }
-        return Err((sentinel, SandboxError::Setup(format!("UpdateProcThreadAttribute: {e}"))));
+        return Err((
+            sentinel,
+            SandboxError::Setup(format!("UpdateProcThreadAttribute: {e}")),
+        ));
     }
 
     // Add explicit handle inheritance list to prevent handle leaks from racing threads.
@@ -1137,46 +1161,56 @@ fn spawn_with_sentinel(
             // SAFETY: Cleaning up.
             unsafe {
                 DeleteProcThreadAttributeList(attr_list);
-                for sid in &cap_sids { FreeSid(*sid); }
+                for sid in &cap_sids {
+                    FreeSid(*sid);
+                }
             }
-            return Err((sentinel, SandboxError::Setup(format!(
-                "UpdateProcThreadAttribute(HANDLE_LIST): {e}"
-            ))));
+            return Err((
+                sentinel,
+                SandboxError::Setup(format!("UpdateProcThreadAttribute(HANDLE_LIST): {e}")),
+            ));
         }
     }
 
     let result = create_sandboxed_process(
-        command, &job, attr_list,
-        child_stdin, parent_stdin,
-        child_stdout, parent_stdout,
-        child_stderr, parent_stderr,
+        command,
+        &job,
+        attr_list,
+        child_stdin,
+        parent_stdin,
+        child_stdout,
+        parent_stdout,
+        child_stderr,
+        parent_stderr,
     );
 
     // SAFETY: attr_list must always be freed.
-    unsafe { DeleteProcThreadAttributeList(attr_list); }
+    unsafe {
+        DeleteProcThreadAttributeList(attr_list);
+    }
 
     match result {
-        Ok((pi, stdin_file, stdout_file, stderr_file)) => {
-            Ok(crate::SandboxedChild {
-                inner: WindowsSandboxedChild {
-                    pid: pi.dwProcessId,
-                    process_handle: pi.hProcess,
-                    thread_handle: pi.hThread,
-                    _job: job,
-                    _profile_name: profile_name.to_owned(),
-                    sentinel,
-                    stdin_pipe: stdin_file,
-                    stdout_pipe: stdout_file,
-                    stderr_pipe: stderr_file,
-                    cap_sids,
-                    app_container_sid: ac_sid,
-                },
-            })
-        }
+        Ok((pi, stdin_file, stdout_file, stderr_file)) => Ok(crate::SandboxedChild {
+            inner: WindowsSandboxedChild {
+                pid: pi.dwProcessId,
+                process_handle: pi.hProcess,
+                thread_handle: pi.hThread,
+                _job: job,
+                _profile_name: profile_name.to_owned(),
+                sentinel,
+                stdin_pipe: stdin_file,
+                stdout_pipe: stdout_file,
+                stderr_pipe: stderr_file,
+                cap_sids,
+                app_container_sid: ac_sid,
+            },
+        }),
         Err(e) => {
             for sid in &cap_sids {
                 // SAFETY: Each sid from AllocateAndInitializeSid.
-                unsafe { FreeSid(*sid); }
+                unsafe {
+                    FreeSid(*sid);
+                }
             }
             Err((sentinel, e))
         }
@@ -1184,7 +1218,11 @@ fn spawn_with_sentinel(
 }
 
 /// Create the child process with pre-created pipes and `STARTUPINFOEX`.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 fn create_sandboxed_process(
     command: &SandboxCommand,
     job: &JobObject,
@@ -1196,10 +1234,14 @@ fn create_sandboxed_process(
     child_stderr: HANDLE,
     parent_stderr: Option<HANDLE>,
 ) -> std::result::Result<
-    (PROCESS_INFORMATION, Option<std::fs::File>, Option<std::fs::File>, Option<std::fs::File>),
+    (
+        PROCESS_INFORMATION,
+        Option<std::fs::File>,
+        Option<std::fs::File>,
+        Option<std::fs::File>,
+    ),
     SandboxError,
 > {
-
     // SAFETY: Zeroing a POD struct.
     let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     #[allow(clippy::cast_possible_truncation)]
@@ -1227,10 +1269,7 @@ fn create_sandboxed_process(
         Some(build_env_block(&command.env))
     };
 
-    let cwd_wide = command
-        .cwd
-        .as_ref()
-        .map(|p| path_to_wide(p));
+    let cwd_wide = command.cwd.as_ref().map(|p| path_to_wide(p));
 
     let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
     if env_block.is_some() {
@@ -1254,9 +1293,7 @@ fn create_sandboxed_process(
             env_block
                 .as_ref()
                 .map_or(std::ptr::null(), |b| b.as_ptr().cast()),
-            cwd_wide
-                .as_ref()
-                .map_or(std::ptr::null(), Vec::as_ptr),
+            cwd_wide.as_ref().map_or(std::ptr::null(), Vec::as_ptr),
             (&raw const si.StartupInfo),
             &raw mut pi,
         )
@@ -1306,7 +1343,9 @@ fn create_sandboxed_process(
 fn close_handle_if_valid(h: HANDLE) {
     if h != INVALID_HANDLE_VALUE && !h.is_null() {
         // SAFETY: Closing a valid handle.
-        unsafe { CloseHandle(h); }
+        unsafe {
+            CloseHandle(h);
+        }
     }
 }
 
@@ -1450,11 +1489,7 @@ mod tests {
 
         let content = fs::read_to_string(&target).expect("read back");
         if output.status.success() {
-            assert_eq!(
-                content.trim(),
-                "original",
-                "file should not be overwritten"
-            );
+            assert_eq!(content.trim(), "original", "file should not be overwritten");
         }
     }
 
@@ -1506,7 +1541,9 @@ mod tests {
         grant_access(sid, tmp.path(), false).expect("grant access");
 
         // SAFETY: sid was allocated by CreateAppContainerProfile.
-        unsafe { FreeSid(sid); }
+        unsafe {
+            FreeSid(sid);
+        }
 
         let modified_sddl = get_sddl(tmp.path()).expect("get modified SDDL");
         assert_ne!(original_sddl, modified_sddl, "ACL should be modified");

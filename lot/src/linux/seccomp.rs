@@ -137,10 +137,7 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     }
 
     // Scheduling — needed by glibc/Rust runtime at startup
-    for &nr in &[
-        libc::SYS_sched_yield,
-        libc::SYS_sched_getaffinity,
-    ] {
+    for &nr in &[libc::SYS_sched_yield, libc::SYS_sched_getaffinity] {
         rules.insert(nr, allow.clone());
     }
 
@@ -186,11 +183,7 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     }
 
     // Access checks
-    for &nr in &[
-        libc::SYS_access,
-        libc::SYS_faccessat,
-        libc::SYS_faccessat2,
-    ] {
+    for &nr in &[libc::SYS_access, libc::SYS_faccessat, libc::SYS_faccessat2] {
         rules.insert(nr, allow.clone());
     }
 
@@ -287,11 +280,9 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     )
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
-    let bpf: BpfProgram = filter
-        .try_into()
-        .map_err(|e: seccompiler::BackendError| {
-            io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
-        })?;
+    let bpf: BpfProgram = filter.try_into().map_err(|e: seccompiler::BackendError| {
+        io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
+    })?;
 
     Ok(bpf)
 }
@@ -301,7 +292,7 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
 /// Sets `PR_SET_NO_NEW_PRIVS` (required before loading seccomp as unprivileged)
 /// and then loads the filter via the seccomp syscall.
 pub fn apply_filter(program: &BpfProgram) -> io::Result<()> {
-    seccompiler::apply_filter(program).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    seccompiler::apply_filter(program).map_err(|e| io::Error::other(e.to_string()))
 }
 
 #[cfg(test)]
@@ -439,7 +430,7 @@ mod tests {
 
         let mut status: i32 = 0;
         // SAFETY: valid pid, valid pointer
-        unsafe { libc::waitpid(pid, &mut status, 0) };
+        unsafe { libc::waitpid(pid, &raw mut status, 0) };
 
         let result = read_fd_to_string(read_fd);
         // SAFETY: closing fd
@@ -477,9 +468,7 @@ mod tests {
                 unsafe { libc::_exit(1) };
             }
             // SAFETY: syscall args are valid; we expect it to fail with EPERM
-            let rc = unsafe {
-                libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0)
-            };
+            let rc = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
             if rc == -1 {
                 // SAFETY: reading thread-local errno
                 let errno = unsafe { *libc::__errno_location() };
@@ -506,7 +495,7 @@ mod tests {
 
         let mut status: i32 = 0;
         // SAFETY: valid pid, valid pointer
-        unsafe { libc::waitpid(pid, &mut status, 0) };
+        unsafe { libc::waitpid(pid, &raw mut status, 0) };
 
         let result = read_fd_to_string(read_fd);
         // SAFETY: closing fd

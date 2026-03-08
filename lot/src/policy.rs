@@ -237,7 +237,10 @@ mod tests {
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("read_paths"), "error should name the path list: {msg}");
+        assert!(
+            msg.contains("read_paths"),
+            "error should name the path list: {msg}"
+        );
     }
 
     #[test]
@@ -271,7 +274,10 @@ mod tests {
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
-        assert!(msg.contains("overlap"), "error should mention overlap: {msg}");
+        assert!(
+            msg.contains("overlap"),
+            "error should mention overlap: {msg}"
+        );
     }
 
     #[test]
@@ -432,7 +438,10 @@ mod tests {
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("duplicate"), "error should mention duplicate: {msg}");
+        assert!(
+            msg.contains("duplicate"),
+            "error should mention duplicate: {msg}"
+        );
     }
 
     #[test]
@@ -452,7 +461,10 @@ mod tests {
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("overlap"), "error should mention overlap: {msg}");
+        assert!(
+            msg.contains("overlap"),
+            "error should mention overlap: {msg}"
+        );
     }
 
     #[test]
@@ -468,6 +480,9 @@ mod tests {
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("duplicate"), "error should mention duplicate: {msg}");
+        assert!(
+            msg.contains("duplicate"),
+            "error should mention duplicate: {msg}"
+        );
     }
 }

@@ -44,11 +44,11 @@ fn probe_clone_newuser() -> bool {
         if pid == 0 {
             // Child: try to create a user namespace, then exit.
             let rc = libc::unshare(libc::CLONE_NEWUSER);
-            libc::_exit(if rc == 0 { 0 } else { 1 });
+            libc::_exit(i32::from(rc != 0));
         }
         // Parent: wait for child and check exit status.
         let mut status: libc::c_int = 0;
-        let waited = libc::waitpid(pid, &mut status, 0);
+        let waited = libc::waitpid(pid, &raw mut status, 0);
         if waited < 0 {
             return false;
         }
@@ -256,8 +256,12 @@ fn bind_mount_readonly(src: &str, dst: &str) -> io::Result<()> {
             std::ptr::null(),
             c_dst.as_ptr(),
             std::ptr::null(),
-            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY
-                | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            libc::MS_BIND
+                | libc::MS_REMOUNT
+                | libc::MS_RDONLY
+                | libc::MS_NOSUID
+                | libc::MS_NODEV
+                | libc::MS_NOEXEC,
             std::ptr::null(),
         )
     };
@@ -329,8 +333,7 @@ fn bind_mount_exec(src: &str, dst: &str) -> io::Result<()> {
             std::ptr::null(),
             c_dst.as_ptr(),
             std::ptr::null(),
-            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY
-                | libc::MS_NOSUID | libc::MS_NODEV,
+            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
             std::ptr::null(),
         )
     };
@@ -403,13 +406,7 @@ fn do_pivot_root(new_root: &str) -> io::Result<()> {
 
     // SAFETY: valid CString pointers; pivot_root is not in libc crate,
     // so we use syscall(SYS_pivot_root, ...) directly.
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_pivot_root,
-            c_new.as_ptr(),
-            c_old.as_ptr(),
-        )
-    };
+    let rc = unsafe { libc::syscall(libc::SYS_pivot_root, c_new.as_ptr(), c_old.as_ptr()) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }

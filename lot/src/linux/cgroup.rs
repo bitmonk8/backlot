@@ -17,9 +17,8 @@ fn is_cgroupv2() -> bool {
 
 /// Use `access(2)` to check write permission without opening the file.
 fn is_writable(path: &Path) -> bool {
-    let c_path = match CString::new(path.as_os_str().as_encoded_bytes()) {
-        Ok(p) => p,
-        Err(_) => return false,
+    let Ok(c_path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
     };
     // SAFETY: access() is a read-only check against the filesystem; the
     // CString pointer is valid for the duration of the call.
@@ -29,9 +28,8 @@ fn is_writable(path: &Path) -> bool {
 /// Check whether the user can write to their own cgroup subtree.
 /// Finds the current process's cgroup and checks for write access.
 fn has_writable_subtree() -> bool {
-    let cgroup_path = match current_cgroup_path() {
-        Some(p) => p,
-        None => return false,
+    let Some(cgroup_path) = current_cgroup_path() else {
+        return false;
     };
 
     // Heuristic: if cgroup.subtree_control is writable, delegation is set up.
@@ -46,7 +44,7 @@ fn has_writable_subtree() -> bool {
 
 /// Parse /proc/self/cgroup to find the cgroupv2 path.
 /// In a unified hierarchy the line is "0::/some/path".
-pub(crate) fn current_cgroup_path() -> Option<PathBuf> {
+pub fn current_cgroup_path() -> Option<PathBuf> {
     let contents = fs::read_to_string("/proc/self/cgroup").ok()?;
     for line in contents.lines() {
         // cgroupv2 entries start with "0::"
@@ -83,7 +81,7 @@ impl CgroupGuard {
             tv_nsec: 0,
         };
         // SAFETY: ts is a valid timespec on the stack; CLOCK_MONOTONIC is always available.
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
         let nanos = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
         // SAFETY: getpid has no preconditions
         let pid = unsafe { libc::getpid() };
@@ -137,9 +135,8 @@ impl CgroupGuard {
         // from cgroup.procs and sending SIGKILL, the process may have exited
         // and the PID may have been reassigned to an unrelated process.
         let procs_path = self.path.join("cgroup.procs");
-        let contents = match fs::read_to_string(&procs_path) {
-            Ok(c) => c,
-            Err(_) => return,
+        let Ok(contents) = fs::read_to_string(&procs_path) else {
+            return;
         };
         for line in contents.lines() {
             if let Ok(pid) = line.trim().parse::<i32>() {
@@ -179,7 +176,7 @@ impl Drop for CgroupGuard {
                             tv_sec: 0,
                             tv_nsec: 10_000_000, // 10ms
                         };
-                        libc::nanosleep(&ts, std::ptr::null_mut());
+                        libc::nanosleep(&raw const ts, std::ptr::null_mut());
                     }
                 }
             }

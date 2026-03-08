@@ -1,6 +1,6 @@
 #![allow(unsafe_code)]
 
-pub(crate) mod seatbelt;
+pub mod seatbelt;
 
 use std::cell::Cell;
 use std::io;
@@ -32,7 +32,7 @@ unsafe fn apply_resource_limits(policy: &SandboxPolicy) -> io::Result<()> {
             rlim_max: max_mem,
         };
         // SAFETY: rlim is a valid rlimit struct
-        if unsafe { libc::setrlimit(libc::RLIMIT_AS, &rlim) } != 0 {
+        if unsafe { libc::setrlimit(libc::RLIMIT_AS, &raw const rlim) } != 0 {
             return Err(io::Error::last_os_error());
         }
     }
@@ -43,7 +43,7 @@ unsafe fn apply_resource_limits(policy: &SandboxPolicy) -> io::Result<()> {
             rlim_max: u64::from(max_procs),
         };
         // SAFETY: rlim is a valid rlimit struct
-        if unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) } != 0 {
+        if unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &raw const rlim) } != 0 {
             return Err(io::Error::last_os_error());
         }
     }
@@ -54,7 +54,7 @@ unsafe fn apply_resource_limits(policy: &SandboxPolicy) -> io::Result<()> {
             rlim_max: max_cpu,
         };
         // SAFETY: rlim is a valid rlimit struct
-        if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &rlim) } != 0 {
+        if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &raw const rlim) } != 0 {
             return Err(io::Error::last_os_error());
         }
     }
@@ -256,7 +256,7 @@ impl MacSandboxedChild {
         let mut status: libc::c_int = 0;
         loop {
             // SAFETY: valid pid, valid pointer
-            let rc = unsafe { libc::waitpid(self.child_pid, &mut status, 0) };
+            let rc = unsafe { libc::waitpid(self.child_pid, &raw mut status, 0) };
             if rc < 0 {
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EINTR) {
@@ -273,7 +273,7 @@ impl MacSandboxedChild {
     pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
         let mut status: libc::c_int = 0;
         // SAFETY: valid pid, valid pointer, WNOHANG for non-blocking
-        let rc = unsafe { libc::waitpid(self.child_pid, &mut status, libc::WNOHANG) };
+        let rc = unsafe { libc::waitpid(self.child_pid, &raw mut status, libc::WNOHANG) };
         if rc < 0 {
             return Err(io::Error::last_os_error());
         }

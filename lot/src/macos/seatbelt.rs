@@ -37,7 +37,7 @@ const METADATA_SYSTEM_PATHS: &[&str] = &[
 const EXEC_SYSTEM_PATHS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
 /// Check whether Seatbelt (sandbox_init) is available.
-pub fn available() -> bool {
+pub const fn available() -> bool {
     // sandbox_init is available on all supported macOS versions.
     true
 }
@@ -77,15 +77,17 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
         append_rule(&mut profile, "file-read-metadata", "subpath", path);
     }
 
-    // Scoped process-exec: target binary + exec_paths + system bin dirs
+    // Scoped process-exec: target binary + exec_paths + system bin dirs.
+    // Each also needs file-read* so dyld can map the Mach-O binary.
     append_rule(&mut profile, "process-exec", "literal", program_path);
+    append_rule(&mut profile, "file-read*", "literal", program_path);
     for path in &policy.exec_paths {
         append_rule(&mut profile, "process-exec", "subpath", path);
     }
     for sys_path in EXEC_SYSTEM_PATHS {
-        profile.push_str("(allow process-exec (subpath \"");
-        profile.push_str(sys_path);
-        profile.push_str("\"))\n");
+        let sys = std::path::Path::new(sys_path);
+        append_rule(&mut profile, "process-exec", "subpath", sys);
+        append_rule(&mut profile, "file-read*", "subpath", sys);
     }
 
     profile.push_str("(allow process-fork)\n");
@@ -137,9 +139,8 @@ fn escape_sbpl_path(path: &Path) -> std::result::Result<String, &'static str> {
 /// Append an SBPL `(allow <op> (<filter> "<path>"))` rule.
 fn append_rule(profile: &mut String, operation: &str, filter: &str, path: &Path) {
     // escape_sbpl_path only fails on null bytes; display() never produces them
-    let escaped = match escape_sbpl_path(path) {
-        Ok(p) => p,
-        Err(_) => return,
+    let Ok(escaped) = escape_sbpl_path(path) else {
+        return;
     };
     profile.push_str("(allow ");
     profile.push_str(operation);
@@ -165,7 +166,7 @@ pub fn apply_profile(profile: &str) -> io::Result<()> {
     // SAFETY: sandbox_init is the documented macOS API for applying sandbox
     // profiles. flags=0 means the first argument is the profile string itself
     // (not a named profile). errorbuf receives error details on failure.
-    let rc = unsafe { sandbox_init(c_profile.as_ptr(), 0, &mut errorbuf) };
+    let rc = unsafe { sandbox_init(c_profile.as_ptr(), 0, &raw mut errorbuf) };
 
     if rc == -1 {
         let msg = if errorbuf.is_null() {

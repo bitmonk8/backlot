@@ -39,7 +39,7 @@ struct LinuxPreForkData {
 /// Build all C strings and data structures before forking.
 fn prepare_prefork(
     command: &SandboxCommand,
-    cgroup_guard: &Option<CgroupGuard>,
+    cgroup_guard: Option<&CgroupGuard>,
 ) -> io::Result<LinuxPreForkData> {
     let base = unix::prepare_prefork(command)?;
 
@@ -87,15 +87,12 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     // Create cgroup before forking so the helper can move itself into it.
     // If cgroups are unavailable, we proceed without resource limits.
     let cgroup_guard = if cgroup::available() {
-        match CgroupGuard::new(&policy.limits) {
-            Ok(g) => Some(g),
-            Err(_) => None,
-        }
+        CgroupGuard::new(&policy.limits).ok()
     } else {
         None
     };
 
-    let prefork = prepare_prefork(command, &cgroup_guard)
+    let prefork = prepare_prefork(command, cgroup_guard.as_ref())
         .map_err(|e| SandboxError::Setup(format!("pre-fork preparation: {e}")))?;
 
     // Build seccomp filter before forking (allocates)
@@ -268,7 +265,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // Wait for inner child
         let mut inner_status: libc::c_int = 0;
         // SAFETY: valid pid, valid pointer
-        unsafe { libc::waitpid(inner_pid, &mut inner_status, 0) };
+        unsafe { libc::waitpid(inner_pid, &raw mut inner_status, 0) };
 
         // Exit with same status as inner child
         if libc::WIFEXITED(inner_status) {
@@ -314,7 +311,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             stdout_fd: parent_stdout,
             stderr_fd: parent_stderr,
             waited: Cell::new(false),
-            cgroup_guard: cgroup_guard,
+            cgroup_guard,
         },
     })
 }
@@ -355,7 +352,7 @@ impl LinuxSandboxedChild {
         let mut status: libc::c_int = 0;
         // SAFETY: valid pid, valid pointer
         loop {
-            let rc = unsafe { libc::waitpid(self.helper_pid, &mut status, 0) };
+            let rc = unsafe { libc::waitpid(self.helper_pid, &raw mut status, 0) };
             if rc < 0 {
                 let err = io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EINTR) {
@@ -372,7 +369,7 @@ impl LinuxSandboxedChild {
     pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
         let mut status: libc::c_int = 0;
         // SAFETY: valid pid, valid pointer, WNOHANG for non-blocking
-        let rc = unsafe { libc::waitpid(self.helper_pid, &mut status, libc::WNOHANG) };
+        let rc = unsafe { libc::waitpid(self.helper_pid, &raw mut status, libc::WNOHANG) };
         if rc < 0 {
             return Err(io::Error::last_os_error());
         }

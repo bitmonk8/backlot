@@ -131,9 +131,13 @@ impl SandboxCommand {
                 // with case folding there.
                 let already_set = self.env.iter().any(|(k, _)| {
                     #[cfg(target_os = "windows")]
-                    { k.eq_ignore_ascii_case(OsStr::new(key)) }
+                    {
+                        k.eq_ignore_ascii_case(OsStr::new(key))
+                    }
                     #[cfg(not(target_os = "windows"))]
-                    { k == key }
+                    {
+                        k == key
+                    }
                 });
                 if !already_set {
                     self.env(key, val);

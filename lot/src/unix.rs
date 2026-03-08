@@ -139,7 +139,8 @@ pub fn make_pipe() -> io::Result<(i32, i32)> {
         }
     }
 
-    Ok((fds[0], fds[1]))
+    let [r, w] = fds;
+    Ok((r, w))
 }
 
 /// Set up stdio for the child process. Creates pipes as needed.
