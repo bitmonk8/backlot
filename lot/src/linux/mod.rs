@@ -4,12 +4,14 @@ mod cgroup;
 mod namespace;
 mod seccomp;
 
+use std::cell::Cell;
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::command::{SandboxCommand, SandboxStdio};
 use crate::policy::SandboxPolicy;
+use crate::unix;
 use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
 
 use cgroup::CgroupGuard;
@@ -25,17 +27,9 @@ pub fn probe() -> PlatformCapabilities {
     }
 }
 
-/// Pre-fork data: everything the child needs, converted to C types
-/// so no allocations happen after fork().
-struct PreForkData {
-    program: CString,
-    argv: Vec<CString>,
-    envp: Vec<CString>,
-    /// Pre-built pointer array for execve argv (null-terminated).
-    argv_ptrs: Vec<*const libc::c_char>,
-    /// Pre-built pointer array for execve envp (null-terminated).
-    envp_ptrs: Vec<*const libc::c_char>,
-    cwd: Option<CString>,
+/// Linux-specific pre-fork data extending the shared `PreForkData`.
+struct LinuxPreForkData {
+    base: unix::PreForkData,
     uid: u32,
     gid: u32,
     /// Path to cgroup.procs file, pre-converted for the helper to use.
@@ -44,73 +38,14 @@ struct PreForkData {
 
 /// Build all C strings and data structures before forking.
 fn prepare_prefork(
-    policy: &SandboxPolicy,
     command: &SandboxCommand,
     cgroup_guard: &Option<CgroupGuard>,
-) -> io::Result<PreForkData> {
-    let program = CString::new(command.program.as_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-    let mut argv = Vec::with_capacity(1 + command.args.len());
-    argv.push(program.clone());
-    for arg in &command.args {
-        argv.push(
-            CString::new(arg.as_bytes())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
-        );
-    }
-
-    // Build envp: combine user-supplied env with minimal defaults
-    let mut env_pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    for (k, v) in &command.env {
-        env_pairs.push((k.as_bytes().to_vec(), v.as_bytes().to_vec()));
-    }
-    // Ensure PATH is set
-    let has_path = env_pairs.iter().any(|(k, _)| k == b"PATH");
-    if !has_path {
-        env_pairs.push((
-            b"PATH".to_vec(),
-            b"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_vec(),
-        ));
-    }
-
-    let envp: Vec<CString> = env_pairs
-        .iter()
-        .map(|(k, v)| {
-            let mut entry = k.clone();
-            entry.push(b'=');
-            entry.extend_from_slice(v);
-            CString::new(entry)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-        })
-        .collect::<io::Result<_>>()?;
-
-    let cwd = match &command.cwd {
-        Some(p) => Some(
-            CString::new(p.as_os_str().as_bytes())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
-        ),
-        None => None,
-    };
+) -> io::Result<LinuxPreForkData> {
+    let base = unix::prepare_prefork(command)?;
 
     // SAFETY: getuid/getgid have no preconditions
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
-
-    let _ = policy; // policy is used later in spawn, not here
-
-    // Build pointer arrays before fork to avoid post-fork allocations.
-    // These reference the CStrings in argv/envp which live in PreForkData.
-    let argv_ptrs: Vec<*const libc::c_char> = argv
-        .iter()
-        .map(|s| s.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
-    let envp_ptrs: Vec<*const libc::c_char> = envp
-        .iter()
-        .map(|s| s.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
 
     let cgroup_procs_path = match cgroup_guard {
         Some(g) => {
@@ -123,111 +58,12 @@ fn prepare_prefork(
         None => None,
     };
 
-    Ok(PreForkData {
-        program,
-        argv,
-        envp,
-        argv_ptrs,
-        envp_ptrs,
-        cwd,
+    Ok(LinuxPreForkData {
+        base,
         uid,
         gid,
         cgroup_procs_path,
     })
-}
-
-/// Create a pipe pair, returns (read_fd, write_fd).
-fn make_pipe() -> io::Result<(i32, i32)> {
-    let mut fds = [0i32; 2];
-    // SAFETY: fds is a valid 2-element array; O_CLOEXEC prevents fd leak to exec'd process
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok((fds[0], fds[1]))
-}
-
-/// Set up stdio for the child process. Creates pipes as needed and returns
-/// the file descriptors the parent should keep.
-///
-/// Returns (child_stdin_rd, child_stdout_wr, child_stderr_wr,
-///          parent_stdin_wr, parent_stdout_rd, parent_stderr_rd)
-fn setup_stdio_pipes(
-    command: &SandboxCommand,
-) -> io::Result<(i32, i32, i32, Option<i32>, Option<i32>, Option<i32>)> {
-    let (child_stdin, parent_stdin) = match command.stdin {
-        SandboxStdio::Piped => {
-            let (r, w) = make_pipe()?;
-            (r, Some(w))
-        }
-        SandboxStdio::Null => {
-            let c_path = CString::new("/dev/null")
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            // SAFETY: valid path, O_RDONLY
-            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            (fd, None)
-        }
-        SandboxStdio::Inherit => (0, None),
-    };
-
-    let (child_stdout, parent_stdout) = match command.stdout {
-        SandboxStdio::Piped => {
-            let (r, w) = make_pipe()?;
-            (w, Some(r))
-        }
-        SandboxStdio::Null => {
-            let c_path = CString::new("/dev/null")
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            // SAFETY: valid path, O_WRONLY
-            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            (fd, None)
-        }
-        SandboxStdio::Inherit => (1, None),
-    };
-
-    let (child_stderr, parent_stderr) = match command.stderr {
-        SandboxStdio::Piped => {
-            let (r, w) = make_pipe()?;
-            (w, Some(r))
-        }
-        SandboxStdio::Null => {
-            let c_path = CString::new("/dev/null")
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            // SAFETY: valid path, O_WRONLY
-            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            (fd, None)
-        }
-        SandboxStdio::Inherit => (2, None),
-    };
-
-    Ok((
-        child_stdin,
-        child_stdout,
-        child_stderr,
-        parent_stdin,
-        parent_stdout,
-        parent_stderr,
-    ))
-}
-
-/// Close an fd if it's not one of the standard fds (0, 1, 2).
-///
-/// # Safety
-/// `fd` must be a valid open file descriptor or -1.
-unsafe fn close_if_not_std(fd: i32) {
-    if fd > 2 {
-        // SAFETY: caller guarantees fd is valid or -1
-        unsafe { libc::close(fd) };
-    }
 }
 
 /// Convert a u64 to ASCII digits in a caller-provided stack buffer.
@@ -259,7 +95,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         None
     };
 
-    let prefork = prepare_prefork(policy, command, &cgroup_guard)
+    let prefork = prepare_prefork(command, &cgroup_guard)
         .map_err(|e| SandboxError::Setup(format!("pre-fork preparation: {e}")))?;
 
     // Build seccomp filter before forking (allocates)
@@ -269,12 +105,12 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
     // Set up stdio pipes before forking
     let (child_stdin, child_stdout, child_stderr, parent_stdin, parent_stdout, parent_stderr) =
-        setup_stdio_pipes(command)
+        unix::setup_stdio_pipes(command)
             .map_err(|e| SandboxError::Setup(format!("stdio pipe setup: {e}")))?;
 
     // Error pipe: child writes errno here if anything fails before exec
     let (err_pipe_rd, err_pipe_wr) =
-        make_pipe().map_err(|e| SandboxError::Setup(format!("error pipe: {e}")))?;
+        unix::make_pipe().map_err(|e| SandboxError::Setup(format!("error pipe: {e}")))?;
 
     // SAFETY: We fork a helper process. Between fork and _exit/exec in child
     // processes, we only call async-signal-safe functions (or functions that
@@ -296,18 +132,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         }
 
         // Close parent's stdio pipe ends (not the child's — those are needed for inner child)
-        if let Some(fd) = parent_stdin {
-            // SAFETY: valid fd from pipe creation
-            unsafe { libc::close(fd) };
-        }
-        if let Some(fd) = parent_stdout {
-            // SAFETY: valid fd from pipe creation
-            unsafe { libc::close(fd) };
-        }
-        if let Some(fd) = parent_stderr {
-            // SAFETY: valid fd from pipe creation
-            unsafe { libc::close(fd) };
-        }
+        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
 
         // Macro to report error and exit from helper
         macro_rules! helper_bail {
@@ -388,25 +213,25 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 if unsafe { libc::dup2(child_stdin, 0) } < 0 {
                     helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
                 }
-                unsafe { close_if_not_std(child_stdin) };
+                unsafe { unix::close_if_not_std(child_stdin) };
             }
             if child_stdout != 1 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stdout, 1) } < 0 {
                     helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
                 }
-                unsafe { close_if_not_std(child_stdout) };
+                unsafe { unix::close_if_not_std(child_stdout) };
             }
             if child_stderr != 2 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stderr, 2) } < 0 {
                     helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
                 }
-                unsafe { close_if_not_std(child_stderr) };
+                unsafe { unix::close_if_not_std(child_stderr) };
             }
 
             // Change working directory if specified
-            if let Some(ref cwd) = prefork.cwd {
+            if let Some(ref cwd) = prefork.base.cwd {
                 // SAFETY: valid CString pointer
                 if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
                     helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
@@ -430,9 +255,9 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             // process image; if it returns, it failed.
             unsafe {
                 libc::execve(
-                    prefork.program.as_ptr(),
-                    prefork.argv_ptrs.as_ptr(),
-                    prefork.envp_ptrs.as_ptr(),
+                    prefork.base.program.as_ptr(),
+                    prefork.base.argv_ptrs.as_ptr(),
+                    prefork.base.envp_ptrs.as_ptr(),
                 );
             }
 
@@ -464,9 +289,9 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     // SAFETY: these fds are valid
     unsafe {
         libc::close(err_pipe_wr);
-        close_if_not_std(child_stdin);
-        close_if_not_std(child_stdout);
-        close_if_not_std(child_stderr);
+        unix::close_if_not_std(child_stdin);
+        unix::close_if_not_std(child_stdout);
+        unix::close_if_not_std(child_stderr);
     }
 
     // Check error pipe: if child wrote an errno, setup failed
@@ -481,16 +306,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // Reap the helper so we don't leak a zombie
         // SAFETY: valid pid, null pointer (don't need status)
         unsafe { libc::waitpid(helper_pid, std::ptr::null_mut(), 0) };
-        // Close parent stdio fds
-        if let Some(fd) = parent_stdin {
-            unsafe { libc::close(fd) };
-        }
-        if let Some(fd) = parent_stdout {
-            unsafe { libc::close(fd) };
-        }
-        if let Some(fd) = parent_stderr {
-            unsafe { libc::close(fd) };
-        }
+        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
         return Err(SandboxError::Setup(format!(
             "child namespace setup failed: {}",
             io::Error::from_raw_os_error(errno)
@@ -503,6 +319,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             stdin_fd: parent_stdin,
             stdout_fd: parent_stdout,
             stderr_fd: parent_stderr,
+            waited: Cell::new(false),
             _cgroup_guard: cgroup_guard,
         },
     })
@@ -518,6 +335,8 @@ pub struct LinuxSandboxedChild {
     stdin_fd: Option<i32>,
     stdout_fd: Option<i32>,
     stderr_fd: Option<i32>,
+    /// True once the helper has been reaped via waitpid.
+    waited: Cell<bool>,
     /// Held until drop to enforce resource limits and clean up the cgroup.
     _cgroup_guard: Option<CgroupGuard>,
 }
@@ -528,9 +347,8 @@ impl LinuxSandboxedChild {
     }
 
     pub fn kill(&self) -> io::Result<()> {
-        // Send SIGKILL to the helper process. The helper waits on the inner
-        // child, so killing it causes the inner child to be reparented and
-        // eventually cleaned up.
+        // The helper is PID namespace init; killing it collapses the
+        // namespace and kills all descendants.
         // SAFETY: valid pid, SIGKILL is a well-known signal
         let rc = unsafe { libc::kill(self.helper_pid, libc::SIGKILL) };
         if rc != 0 {
@@ -553,7 +371,8 @@ impl LinuxSandboxedChild {
             }
             break;
         }
-        Ok(exit_status_from_raw(status))
+        self.waited.set(true);
+        Ok(unix::exit_status_from_raw(status))
     }
 
     pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
@@ -566,7 +385,8 @@ impl LinuxSandboxedChild {
         if rc == 0 {
             return Ok(None);
         }
-        Ok(Some(exit_status_from_raw(status)))
+        self.waited.set(true);
+        Ok(Some(unix::exit_status_from_raw(status)))
     }
 
     pub fn wait_with_output(mut self) -> io::Result<std::process::Output> {
@@ -576,7 +396,7 @@ impl LinuxSandboxedChild {
 
         // Read both pipes concurrently via poll to avoid deadlock when one
         // pipe buffer fills while we block reading the other.
-        let (stdout, stderr) = read_two_fds(stdout_fd, stderr_fd)?;
+        let (stdout, stderr) = unix::read_two_fds(stdout_fd, stderr_fd)?;
         let status = self.wait()?;
 
         Ok(std::process::Output {
@@ -607,143 +427,48 @@ impl LinuxSandboxedChild {
         })
     }
 
-}
-
-/// Read from two optional fds concurrently using `poll`, closing each when done.
-/// Avoids deadlock when one pipe buffer fills while we block reading the other.
-fn read_two_fds(
-    fd1: Option<i32>,
-    fd2: Option<i32>,
-) -> io::Result<(Vec<u8>, Vec<u8>)> {
-    let mut buf1 = Vec::new();
-    let mut buf2 = Vec::new();
-
-    // If neither fd is present, return immediately
-    if fd1.is_none() && fd2.is_none() {
-        return Ok((buf1, buf2));
-    }
-
-    // Track which fds are still open
-    let mut active1 = fd1;
-    let mut active2 = fd2;
-    let mut tmp = [0u8; 4096];
-
-    while active1.is_some() || active2.is_some() {
-        let mut pollfds: Vec<libc::pollfd> = Vec::new();
-        // Track which index maps to which fd
-        let mut idx_map: Vec<u8> = Vec::new(); // 1 or 2
-
-        if let Some(fd) = active1 {
-            pollfds.push(libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            });
-            idx_map.push(1);
-        }
-        if let Some(fd) = active2 {
-            pollfds.push(libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            });
-            idx_map.push(2);
-        }
-
-        // SAFETY: pollfds is a valid array, -1 means wait indefinitely
-        let rc = unsafe {
-            libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, -1)
-        };
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            // Close remaining fds before returning error
-            if let Some(fd) = active1 {
-                // SAFETY: fd is valid
-                unsafe { libc::close(fd) };
-            }
-            if let Some(fd) = active2 {
-                // SAFETY: fd is valid
-                unsafe { libc::close(fd) };
-            }
-            return Err(err);
-        }
-
-        for (i, pfd) in pollfds.iter().enumerate() {
-            if pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
-                // SAFETY: fd is valid, tmp buffer is stack-allocated with correct len
-                let n = unsafe { libc::read(pfd.fd, tmp.as_mut_ptr().cast(), tmp.len()) };
-                if n < 0 {
-                    let err = io::Error::last_os_error();
-                    if err.raw_os_error() == Some(libc::EINTR) {
-                        continue;
-                    }
-                    // Close remaining fds before returning error
-                    if let Some(fd) = active1 {
-                        // SAFETY: fd is valid
-                        unsafe { libc::close(fd) };
-                    }
-                    if let Some(fd) = active2 {
-                        // SAFETY: fd is valid
-                        unsafe { libc::close(fd) };
-                    }
-                    return Err(err);
-                }
-                if n == 0 {
-                    // EOF — close this fd
-                    // SAFETY: fd is valid
-                    unsafe { libc::close(pfd.fd) };
-                    if idx_map[i] == 1 {
-                        active1 = None;
-                    } else {
-                        active2 = None;
-                    }
-                } else {
-                    let data = &tmp[..n as usize];
-                    if idx_map[i] == 1 {
-                        buf1.extend_from_slice(data);
-                    } else {
-                        buf2.extend_from_slice(data);
-                    }
-                }
-            }
+    /// Close all remaining pipe fds.
+    fn close_fds(&mut self) {
+        for fd in [self.stdin_fd.take(), self.stdout_fd.take(), self.stderr_fd.take()].into_iter().flatten() {
+            // SAFETY: fd is a valid pipe fd we own
+            unsafe { libc::close(fd); }
         }
     }
 
-    Ok((buf1, buf2))
+    /// Kill the helper (and by extension, all namespaced descendants),
+    /// wait for it to exit, close fds, and drop the cgroup guard.
+    ///
+    /// Consumes `self`; Drop still runs but sees already-cleaned-up state.
+    pub fn kill_and_cleanup(mut self) -> crate::Result<()> {
+        self.close_fds();
+
+        if !self.waited.get() {
+            self.kill().map_err(crate::SandboxError::Io)?;
+            self.wait().map_err(crate::SandboxError::Io)?;
+        }
+
+        // CgroupGuard::drop handles kill + rmdir when self is dropped.
+        // Taking it here and dropping explicitly makes the ordering clear.
+        drop(self._cgroup_guard.take());
+
+        Ok(())
+    }
 }
 
 impl Drop for LinuxSandboxedChild {
     fn drop(&mut self) {
-        // Close any remaining fds
-        if let Some(fd) = self.stdin_fd.take() {
-            // SAFETY: fd is valid
-            unsafe { libc::close(fd) };
-        }
-        if let Some(fd) = self.stdout_fd.take() {
-            // SAFETY: fd is valid
-            unsafe { libc::close(fd) };
-        }
-        if let Some(fd) = self.stderr_fd.take() {
-            // SAFETY: fd is valid
-            unsafe { libc::close(fd) };
-        }
+        self.close_fds();
 
-        // Reap the helper process to prevent zombie leak.
-        // SAFETY: helper_pid is valid; WNOHANG avoids blocking if already reaped.
-        unsafe {
-            libc::kill(self.helper_pid, libc::SIGKILL);
-            libc::waitpid(self.helper_pid, std::ptr::null_mut(), libc::WNOHANG);
-        };
+        if !self.waited.get() {
+            // Kill and reap the helper to prevent zombie leak.
+            // SAFETY: helper_pid is valid; blocking wait ensures the zombie
+            // is reaped (SIGKILL delivery is near-instant).
+            unsafe {
+                libc::kill(self.helper_pid, libc::SIGKILL);
+                libc::waitpid(self.helper_pid, std::ptr::null_mut(), 0);
+            };
+        }
     }
-}
-
-/// Convert a raw `waitpid` status to `ExitStatus`.
-fn exit_status_from_raw(status: i32) -> std::process::ExitStatus {
-    // SAFETY: from_raw takes a raw wait status on Unix
-    std::os::unix::process::ExitStatusExt::from_raw(status)
 }
 
 #[cfg(test)]

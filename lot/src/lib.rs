@@ -18,6 +18,10 @@
 mod command;
 mod error;
 mod policy;
+mod policy_builder;
+
+#[cfg(unix)]
+mod unix;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -31,6 +35,7 @@ mod windows;
 pub use command::{SandboxCommand, SandboxStdio};
 pub use error::SandboxError;
 pub use policy::{ResourceLimits, SandboxPolicy};
+pub use policy_builder::SandboxPolicyBuilder;
 
 /// Result type for sandbox operations.
 pub type Result<T> = std::result::Result<T, SandboxError>;
@@ -113,7 +118,7 @@ pub fn cleanup_stale() -> Result<()> {
 ///
 /// Created by [`spawn()`]. Dropping the handle performs platform-specific
 /// cleanup (ACL restoration on Windows, cgroup removal on Linux, process
-/// termination on macOS).
+/// group termination on macOS).
 pub struct SandboxedChild {
     #[cfg(target_os = "windows")]
     inner: windows::WindowsSandboxedChild,
@@ -131,16 +136,22 @@ impl std::fmt::Debug for SandboxedChild {
     }
 }
 
+/// Macro to dispatch a method call to `self.inner` on supported platforms,
+/// returning a fallback on unsupported ones.
+macro_rules! platform_dispatch {
+    ($self:expr, $method:ident ( $($arg:expr),* ), $fallback:expr) => {{
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        return $self.inner.$method($($arg),*);
+
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        $fallback
+    }};
+}
+
 impl SandboxedChild {
     /// Returns the OS-assigned process ID.
     pub const fn id(&self) -> u32 {
-        #[cfg(target_os = "windows")]
-        return self.inner.id();
-
-        #[cfg(target_os = "linux")]
-        return self.inner.id();
-
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
         return self.inner.id();
 
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
@@ -149,122 +160,144 @@ impl SandboxedChild {
 
     /// Forcibly terminate the sandboxed process.
     pub fn kill(&self) -> std::io::Result<()> {
-        #[cfg(target_os = "windows")]
-        return self.inner.kill();
-
-        #[cfg(target_os = "linux")]
-        return self.inner.kill();
-
-        #[cfg(target_os = "macos")]
-        return self.inner.kill();
-
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "not implemented",
-        ))
+        platform_dispatch!(self, kill(), Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported, "not implemented")))
     }
 
     /// Block until the sandboxed process exits and return its exit status.
     pub fn wait(&self) -> std::io::Result<std::process::ExitStatus> {
-        #[cfg(target_os = "windows")]
-        return self.inner.wait();
-
-        #[cfg(target_os = "linux")]
-        return self.inner.wait();
-
-        #[cfg(target_os = "macos")]
-        return self.inner.wait();
-
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "not implemented",
-        ))
+        platform_dispatch!(self, wait(), Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported, "not implemented")))
     }
 
     /// Non-blocking check: has the process exited?
     pub fn try_wait(&self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        #[cfg(target_os = "windows")]
-        return self.inner.try_wait();
-
-        #[cfg(target_os = "linux")]
-        return self.inner.try_wait();
-
-        #[cfg(target_os = "macos")]
-        return self.inner.try_wait();
-
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "not implemented",
-        ))
+        platform_dispatch!(self, try_wait(), Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported, "not implemented")))
     }
 
     /// Wait for the process to exit and collect all stdout/stderr output.
     pub fn wait_with_output(self) -> std::io::Result<std::process::Output> {
-        #[cfg(target_os = "windows")]
-        return self.inner.wait_with_output();
-
-        #[cfg(target_os = "linux")]
-        return self.inner.wait_with_output();
-
-        #[cfg(target_os = "macos")]
-        return self.inner.wait_with_output();
-
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "not implemented",
-        ))
+        platform_dispatch!(self, wait_with_output(), Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported, "not implemented")))
     }
 
     /// Take ownership of the child's stdin pipe (if piped).
     #[allow(clippy::missing_const_for_fn)] // not const on all platforms
     pub fn take_stdin(&mut self) -> Option<std::fs::File> {
-        #[cfg(target_os = "windows")]
-        return self.inner.take_stdin();
-
-        #[cfg(target_os = "linux")]
-        return self.inner.take_stdin();
-
-        #[cfg(target_os = "macos")]
-        return self.inner.take_stdin();
-
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        None
+        platform_dispatch!(self, take_stdin(), None)
     }
 
     /// Take ownership of the child's stdout pipe (if piped).
     #[allow(clippy::missing_const_for_fn)] // not const on all platforms
     pub fn take_stdout(&mut self) -> Option<std::fs::File> {
-        #[cfg(target_os = "windows")]
-        return self.inner.take_stdout();
-
-        #[cfg(target_os = "linux")]
-        return self.inner.take_stdout();
-
-        #[cfg(target_os = "macos")]
-        return self.inner.take_stdout();
-
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        None
+        platform_dispatch!(self, take_stdout(), None)
     }
 
     /// Take ownership of the child's stderr pipe (if piped).
     #[allow(clippy::missing_const_for_fn)] // not const on all platforms
     pub fn take_stderr(&mut self) -> Option<std::fs::File> {
-        #[cfg(target_os = "windows")]
-        return self.inner.take_stderr();
+        platform_dispatch!(self, take_stderr(), None)
+    }
 
-        #[cfg(target_os = "linux")]
-        return self.inner.take_stderr();
+    /// Kill the sandboxed process (and all descendants), then run
+    /// platform cleanup synchronously. Returns after cleanup is complete.
+    ///
+    /// Consumes `self` so the `Drop` impl does not run again.
+    pub fn kill_and_cleanup(self) -> Result<()> {
+        platform_dispatch!(self, kill_and_cleanup(),
+            Err(SandboxError::Unsupported("not yet implemented".into())))
+    }
 
+    /// Wait for the child to exit with a timeout. On timeout, kills the
+    /// child (and all descendants), runs platform cleanup, and returns
+    /// a timeout error.
+    ///
+    /// Internally uses `spawn_blocking` so the synchronous `wait_with_output`
+    /// does not block the tokio runtime. On timeout the child is killed by
+    /// raw PID to unblock the waiting thread, then the `JoinHandle` is
+    /// awaited to ensure `Drop` cleanup runs before returning.
+    #[cfg(feature = "tokio")]
+    pub async fn wait_with_output_timeout(
+        self,
+        timeout: std::time::Duration,
+    ) -> Result<std::process::Output> {
+        let pid = self.id();
+
+        let handle = tokio::task::spawn_blocking(move || self.wait_with_output());
+
+        // Pin the handle so we can poll it across select! arms without
+        // consuming it on the timeout path.
+        tokio::pin!(handle);
+
+        tokio::select! {
+            join_result = &mut handle => {
+                let io_result = join_result.unwrap_or_else(|join_err| {
+                    Err(std::io::Error::other(join_err.to_string()))
+                });
+                Ok(io_result?)
+            }
+            () = tokio::time::sleep(timeout) => {
+                // Timeout fired — kill the child by raw PID to unblock
+                // the blocking thread's wait call.
+                kill_by_pid(pid);
+
+                // Await the blocking thread so Drop (platform cleanup)
+                // runs to completion before we return.
+                match handle.await {
+                    Err(join_err) if join_err.is_panic() => {
+                        std::panic::resume_unwind(join_err.into_panic());
+                    }
+                    _ => {}
+                }
+
+                Err(SandboxError::Timeout(timeout))
+            }
+        }
+    }
+}
+
+/// Send a kill signal to a process by raw PID. Best-effort; errors are
+/// ignored because the process may have already exited.
+#[cfg(feature = "tokio")]
+#[allow(unsafe_code)]
+fn kill_by_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let Some(pid_i32) = i32::try_from(pid).ok().filter(|&p| p > 0) else {
+            return;
+        };
+        // macOS children call setsid(), so PGID == PID — negate to kill
+        // the entire process group. Linux uses PID namespaces instead;
+        // killing the helper collapses the namespace.
         #[cfg(target_os = "macos")]
-        return self.inner.take_stderr();
+        let target = -pid_i32;
+        #[cfg(not(target_os = "macos"))]
+        let target = pid_i32;
+        // SAFETY: Sending SIGKILL to a valid pid (or negated PGID on macOS).
+        unsafe {
+            libc::kill(target, libc::SIGKILL);
+        }
+    }
 
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        None
+    #[cfg(windows)]
+    {
+        // SAFETY: Opening a process handle by PID and terminating it.
+        // The handle is closed immediately after. Best-effort; the
+        // process may have already exited. On Windows the Job Object
+        // (KILL_ON_JOB_CLOSE) handles descendant cleanup when the
+        // SandboxedChild is dropped on the blocking thread.
+        unsafe {
+            let h = windows_sys::Win32::System::Threading::OpenProcess(
+                windows_sys::Win32::System::Threading::PROCESS_TERMINATE,
+                0,
+                pid,
+            );
+            if !h.is_null() {
+                windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
+                windows_sys::Win32::Foundation::CloseHandle(h);
+            }
+        }
     }
 }
 
@@ -292,5 +325,149 @@ mod tests {
     fn probe_macos() {
         let caps = probe();
         assert!(caps.seatbelt);
+    }
+
+    #[test]
+    fn timeout_error_display() {
+        let err = SandboxError::Timeout(std::time::Duration::from_secs(5));
+        let msg = err.to_string();
+        assert!(msg.contains("5s"), "expected duration in message, got: {msg}");
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "tokio")]
+mod tokio_tests {
+    use super::*;
+
+    /// Helper: build a minimal policy and command for timeout tests.
+    /// Returns None if the platform sandbox cannot be set up (e.g. missing
+    /// namespace support on Linux).
+    fn spawn_sleep(seconds: u32) -> Option<SandboxedChild> {
+        #[cfg(unix)]
+        {
+            let policy = SandboxPolicy {
+                read_paths: vec![std::path::PathBuf::from("/usr")],
+                write_paths: vec![],
+                exec_paths: vec![],
+                allow_network: false,
+                limits: crate::policy::ResourceLimits::default(),
+            };
+            let mut cmd = SandboxCommand::new("/bin/sleep");
+            cmd.arg(seconds.to_string());
+            cmd.stdout(SandboxStdio::Piped);
+            cmd.stderr(SandboxStdio::Piped);
+            spawn(&policy, &cmd).ok()
+        }
+
+        #[cfg(windows)]
+        {
+            // On Windows, use ping -n <seconds+1> 127.0.0.1 as a sleep substitute.
+            // timeout.exe requires console input and doesn't work in piped mode.
+            let system_root = std::env::var("SYSTEMROOT")
+                .unwrap_or_else(|_| r"C:\Windows".to_string());
+            let system32 = std::path::PathBuf::from(format!("{system_root}\\System32"));
+            let policy = SandboxPolicy {
+                read_paths: vec![system32.clone()],
+                write_paths: vec![],
+                exec_paths: vec![system32],
+                allow_network: true,
+                limits: crate::policy::ResourceLimits::default(),
+            };
+            let mut cmd = SandboxCommand::new("ping");
+            cmd.args(["-n", &(seconds + 1).to_string(), "127.0.0.1"]);
+            cmd.stdout(SandboxStdio::Piped);
+            cmd.stderr(SandboxStdio::Piped);
+            spawn(&policy, &cmd).ok()
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_fires_on_long_running_child() {
+        let child = match spawn_sleep(60) {
+            Some(c) => c,
+            None => return, // sandbox unavailable
+        };
+
+        let result = child
+            .wait_with_output_timeout(std::time::Duration::from_millis(200))
+            .await;
+
+        match result {
+            Err(SandboxError::Timeout(d)) => {
+                assert!(d.as_millis() >= 200, "timeout duration should match requested");
+            }
+            other => panic!("expected Timeout error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_child_completes_before_timeout() {
+        #[cfg(unix)]
+        {
+            let policy = SandboxPolicy {
+                read_paths: vec![std::path::PathBuf::from("/usr")],
+                write_paths: vec![],
+                exec_paths: vec![],
+                allow_network: false,
+                limits: crate::policy::ResourceLimits::default(),
+            };
+            let mut cmd = SandboxCommand::new("/bin/echo");
+            cmd.arg("hello");
+            cmd.stdout(SandboxStdio::Piped);
+            cmd.stderr(SandboxStdio::Piped);
+
+            let child = match spawn(&policy, &cmd) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+
+            let result = child
+                .wait_with_output_timeout(std::time::Duration::from_secs(10))
+                .await;
+
+            match result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    assert_eq!(stdout.trim(), "hello");
+                }
+                Err(e) => panic!("expected success, got: {e:?}"),
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let system_root = std::env::var("SYSTEMROOT")
+                .unwrap_or_else(|_| r"C:\Windows".to_string());
+            let system32 = std::path::PathBuf::from(format!("{system_root}\\System32"));
+            let policy = SandboxPolicy {
+                read_paths: vec![system32.clone()],
+                write_paths: vec![],
+                exec_paths: vec![system32],
+                allow_network: false,
+                limits: crate::policy::ResourceLimits::default(),
+            };
+            let mut cmd = SandboxCommand::new("cmd.exe");
+            cmd.args(["/C", "echo hello"]);
+            cmd.stdout(SandboxStdio::Piped);
+            cmd.stderr(SandboxStdio::Piped);
+
+            let child = match spawn(&policy, &cmd) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+
+            let result = child
+                .wait_with_output_timeout(std::time::Duration::from_secs(10))
+                .await;
+
+            match result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    assert!(stdout.contains("hello"), "expected 'hello' in output, got: {stdout}");
+                }
+                Err(e) => panic!("expected success, got: {e:?}"),
+            }
+        }
     }
 }

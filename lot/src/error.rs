@@ -18,6 +18,11 @@ pub enum SandboxError {
     #[error("cleanup failed: {0}")]
     Cleanup(String),
 
+    /// The child process did not exit within the requested timeout.
+    /// The process (and all descendants) has been killed and cleaned up.
+    #[error("child process timed out after {0:?}")]
+    Timeout(std::time::Duration),
+
     /// An underlying I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),

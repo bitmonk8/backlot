@@ -21,6 +21,13 @@ Add to `Cargo.toml`:
 lot = "0.1"
 ```
 
+For async timeout support (`wait_with_output_timeout`):
+
+```toml
+[dependencies]
+lot = { version = "0.1", features = ["tokio"] }
+```
+
 ### Basic Example
 
 ```rust
@@ -93,6 +100,27 @@ pub struct SandboxPolicy {
 
 Paths must exist. No overlaps allowed within or across path lists. At least one path must be specified.
 
+### `SandboxPolicyBuilder`
+
+Ergonomic builder with auto-canonicalization, overlap deduction, and platform defaults:
+
+```rust
+use lot::SandboxPolicyBuilder;
+
+let policy = SandboxPolicyBuilder::new()
+    .read_path("/project")              // auto-canonicalized; skipped if non-existent
+    .write_path("/project/src")         // deduped against read_paths
+    .include_temp_dirs()                // platform temp dir → write_paths
+    .include_platform_exec_paths()      // /usr/bin, System32, etc.
+    .include_platform_lib_paths()       // /usr/lib, /usr/include, etc.
+    .allow_network(false)
+    .max_memory_bytes(128 * 1024 * 1024)
+    .max_processes(8)
+    .build()?;
+```
+
+Non-existent paths are silently skipped. Narrower paths subsumed by broader entries are deduplicated. Produces a validated `SandboxPolicy`.
+
 ### `ResourceLimits`
 
 ```rust
@@ -110,12 +138,13 @@ Builder for the child process command. Methods chain via `&mut Self`:
 - `new(program)` — program to execute
 - `arg(s)` / `args(iter)` — arguments
 - `env(key, val)` — additional environment variable
+- `forward_common_env()` — forward standard env vars (PATH, HOME, TEMP, SYSTEMROOT, etc.) from parent; missing keys silently skipped
 - `cwd(path)` — working directory
 - `stdin(stdio)` / `stdout(stdio)` / `stderr(stdio)` — I/O configuration
 
 Defaults: stdin `Null`, stdout `Piped`, stderr `Piped`.
 
-Environment is minimal by default (platform essentials only). Pass variables explicitly via `env()`.
+Environment is minimal by default (platform essentials only). Pass variables explicitly via `env()`, or use `forward_common_env()` to forward a standard set.
 
 ### `SandboxStdio`
 
@@ -136,19 +165,22 @@ Handle to a running sandboxed process:
 - `wait() -> io::Result<ExitStatus>` — block until exit
 - `try_wait() -> io::Result<Option<ExitStatus>>` — non-blocking poll
 - `wait_with_output(self) -> io::Result<Output>` — wait and collect stdout/stderr
+- `kill_and_cleanup(self) -> Result<()>` — kill all descendants, run platform cleanup synchronously, consume self
+- `wait_with_output_timeout(self, timeout) -> Result<Output>` — *(requires `tokio` feature)* async wait with timeout; kills and cleans up on timeout
 - `take_stdin()` / `take_stdout()` / `take_stderr()` — take piped I/O handles
 
-Dropping the handle performs platform-specific cleanup (ACL restoration, cgroup removal, etc.).
+Dropping the handle performs platform-specific cleanup (ACL restoration, cgroup removal, etc.). On macOS, drop kills the entire process group (descendants included).
 
 ### `SandboxError`
 
 ```rust
 pub enum SandboxError {
-    Unsupported(String),    // Platform lacks required mechanism
-    Setup(String),          // OS-level sandbox setup failed
-    InvalidPolicy(String),  // Policy validation failed
-    Cleanup(String),        // Post-session cleanup failed
-    Io(std::io::Error),     // Underlying I/O error
+    Unsupported(String),        // Platform lacks required mechanism
+    Setup(String),              // OS-level sandbox setup failed
+    InvalidPolicy(String),      // Policy validation failed
+    Cleanup(String),            // Post-session cleanup failed
+    Timeout(Duration),          // Child exceeded timeout (from wait_with_output_timeout)
+    Io(std::io::Error),         // Underlying I/O error
 }
 ```
 

@@ -27,7 +27,7 @@ pub fn available() -> bool {
 /// restrictions. Filesystem syscalls (open, read, write, mkdir, etc.) are
 /// allowed because seccomp operates on syscall numbers and arguments, not
 /// paths. Path-based isolation is the responsibility of the mount namespace
-/// layer (Phase 5). Seccomp provides defense-in-depth for syscall categories
+/// layer. Seccomp provides defense-in-depth for syscall categories
 /// that are orthogonal to path access — primarily network and dangerous
 /// process-creation flags.
 ///

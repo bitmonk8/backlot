@@ -803,21 +803,32 @@ impl WindowsSandboxedChild {
     pub fn wait_with_output(mut self) -> io::Result<std::process::Output> {
         drop(self.stdin_pipe.take());
 
-        let stdout = if let Some(mut f) = self.stdout_pipe.take() {
-            let mut buf = Vec::new();
-            io::Read::read_to_end(&mut f, &mut buf)?;
-            buf
-        } else {
-            Vec::new()
-        };
+        // Read stdout and stderr concurrently to avoid deadlock when the
+        // child fills one pipe buffer while we block reading the other.
+        let stdout_pipe = self.stdout_pipe.take();
+        let stderr_pipe = self.stderr_pipe.take();
 
-        let stderr = if let Some(mut f) = self.stderr_pipe.take() {
-            let mut buf = Vec::new();
-            io::Read::read_to_end(&mut f, &mut buf)?;
-            buf
-        } else {
-            Vec::new()
-        };
+        let stdout_thread = stdout_pipe.map(|mut f| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                io::Read::read_to_end(&mut f, &mut buf).map(|_| buf)
+            })
+        });
+        let stderr_thread = stderr_pipe.map(|mut f| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                io::Read::read_to_end(&mut f, &mut buf).map(|_| buf)
+            })
+        });
+
+        let stdout = match stdout_thread {
+            Some(t) => t.join().map_err(|_| io::Error::other("stdout reader panicked"))?,
+            None => Ok(Vec::new()),
+        }?;
+        let stderr = match stderr_thread {
+            Some(t) => t.join().map_err(|_| io::Error::other("stderr reader panicked"))?,
+            None => Ok(Vec::new()),
+        }?;
 
         let status = self.wait()?;
 
@@ -838,6 +849,23 @@ impl WindowsSandboxedChild {
 
     pub const fn take_stderr(&mut self) -> Option<std::fs::File> {
         self.stderr_pipe.take()
+    }
+
+    /// Kill the sandboxed process and all descendants (via the Job Object),
+    /// wait for exit, then run platform cleanup (ACL restoration, SID freeing).
+    ///
+    /// Consumes `self`; Drop still runs but `cleanup()` is idempotent.
+    pub fn kill_and_cleanup(mut self) -> crate::Result<()> {
+        // TerminateProcess is redundant when the Job has KILL_ON_JOB_CLOSE,
+        // but we call it explicitly so descendants die before we wait.
+        // kill() may fail with ERROR_ACCESS_DENIED if already exiting — benign.
+        let _ = self.kill();
+        self.wait().map_err(crate::SandboxError::Io)?;
+
+        // ACL restoration + SID freeing. cleanup() is idempotent so Drop
+        // calling it again is harmless.
+        self.cleanup();
+        Ok(())
     }
 
     fn cleanup(&mut self) {

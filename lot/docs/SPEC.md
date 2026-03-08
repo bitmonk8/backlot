@@ -35,7 +35,7 @@ Standalone library crate for launching sandboxed child processes. Restricts file
 | `CLONE_NEWIPC` | IPC namespace. Isolates SysV IPC and POSIX message queues. |
 
 **seccomp-BPF** filters syscalls:
-- Allowlist of permitted syscalls (similar to yule-sandbox's approach).
+- Allowlist of permitted syscalls.
 - Default action: `EPERM` (not `SIGKILL` — debuggable).
 - Conditional rules: network syscalls gated on policy, `ioctl` restricted.
 
@@ -73,7 +73,7 @@ void sandbox_free_error(char *errorbuf);
 - Add `(allow network-outbound) (allow network-inbound)` if network permitted.
 - Always allow: system libraries (`/usr/lib`, `/System/Library`), dynamic linker cache, `/dev/urandom`.
 
-**Process model:** Fork a helper, apply `sandbox_init` in the helper (permanent, no undo), then exec the target command. The parent (caller) is never sandboxed.
+**Process model:** Fork a helper, call `setsid()` so the child becomes its own process group leader (enabling `killpg` to kill all descendants on drop/timeout), apply `sandbox_init` in the helper (permanent, no undo), then exec the target command. The parent (caller) is never sandboxed.
 
 **Resource limits:** `setrlimit(RLIMIT_AS, ...)` for memory. No cgroup equivalent on macOS — rlimit is the available mechanism.
 
@@ -154,7 +154,8 @@ pub struct SandboxCommand {
     /// Additional env vars to set in the child. Default environment is minimal:
     /// only platform essentials (e.g., SystemRoot/TEMP on Windows, PATH
     /// pointing to allowed exec paths on Unix). No wholesale inheritance.
-    /// To forward a parent var, read it from std::env and pass it here.
+    /// To forward a parent var, read it from std::env and pass it here,
+    /// or call `forward_common_env()` to forward a standard set.
     env: Vec<(OsString, OsString)>,
     cwd: Option<PathBuf>,
     stdin: Stdio,
@@ -181,7 +182,47 @@ impl SandboxedChild {
     pub fn take_stdin(&mut self) -> Option<ChildStdin>;
     pub fn take_stdout(&mut self) -> Option<ChildStdout>;
     pub fn take_stderr(&mut self) -> Option<ChildStderr>;
+
+    /// Kill the sandboxed process and all descendants, then run platform
+    /// cleanup synchronously. Consumes self so Drop does not re-run.
+    pub fn kill_and_cleanup(self) -> Result<(), SandboxError>;
+
+    /// (Requires `tokio` feature) Wait for exit with a timeout. On
+    /// timeout, kills all descendants, runs cleanup, returns
+    /// SandboxError::Timeout.
+    #[cfg(feature = "tokio")]
+    pub async fn wait_with_output_timeout(
+        self,
+        timeout: Duration,
+    ) -> Result<Output, SandboxError>;
 }
+```
+
+### SandboxCommand convenience methods
+
+```rust
+impl SandboxCommand {
+    /// Forward a standard set of environment variables from the parent
+    /// process (PATH, HOME, USER, LANG, TMPDIR, SYSTEMROOT, etc.).
+    /// Missing keys are silently skipped.
+    pub fn forward_common_env(&mut self) -> &mut Self;
+}
+```
+
+### Policy builder
+
+```rust
+/// Ergonomic builder with auto-canonicalization, deduplication, and
+/// platform defaults. Produces a validated SandboxPolicy.
+let policy = SandboxPolicyBuilder::new()
+    .read_path("/project")              // auto-canonicalized; skipped if non-existent
+    .write_path("/project/src")         // deduped against read_paths
+    .include_temp_dirs()                // platform temp dir → write_paths
+    .include_platform_exec_paths()      // /usr/bin, System32, etc.
+    .include_platform_lib_paths()       // /usr/lib, /usr/include, etc.
+    .allow_network(true)
+    .max_memory_bytes(512 * 1024 * 1024)
+    .build()?;
 ```
 
 ### Entry point
@@ -198,6 +239,7 @@ pub fn spawn(policy: &SandboxPolicy, command: SandboxCommand) -> Result<Sandboxe
 
 ```rust
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SandboxError {
     #[error("platform not supported: {0}")]
     Unsupported(String),
@@ -210,6 +252,9 @@ pub enum SandboxError {
 
     #[error("cleanup failed: {0}")]
     Cleanup(String),
+
+    #[error("child process timed out after {0:?}")]
+    Timeout(std::time::Duration),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -258,10 +303,11 @@ pub fn cleanup_stale() -> Result<()>;
 ```
 lot/
   src/
-    lib.rs          — Public API: spawn(), probe(), types
-    policy.rs       — SandboxPolicy, ResourceLimits, validation
-    command.rs      — SandboxCommand builder
-    error.rs        — SandboxError
+    lib.rs            — Public API: spawn(), probe(), types
+    policy.rs         — SandboxPolicy, ResourceLimits, validation
+    policy_builder.rs — SandboxPolicyBuilder (auto-canonicalization, platform defaults)
+    command.rs        — SandboxCommand builder
+    error.rs          — SandboxError
     linux/
       mod.rs        — LinuxSandbox: orchestrates namespace + seccomp + cgroup
       namespace.rs  — clone(), pivot_root, bind mounts, uid/gid mapping
@@ -287,6 +333,7 @@ lot/
 | `windows-sys` | Windows | Win32 API bindings (AppContainer, Job Objects, ACL) |
 | `thiserror` | All | Error derive |
 | `tracing` | All | Structured logging (optional feature) |
+| `tokio` | All | Async runtime for `wait_with_output_timeout` (optional `tokio` feature) |
 
 No dependency on `rappct`, `birdcage`, or `yule-sandbox`. All platform code is written from scratch.
 
@@ -322,7 +369,13 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [features]
+tokio = ["dep:tokio"]
 tracing = ["dep:tracing"]
+
+[dependencies.tokio]
+version = "1"
+optional = true
+features = ["rt", "time", "sync", "macros"]
 
 [dependencies.tracing]
 version = "0.1"

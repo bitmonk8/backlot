@@ -94,4 +94,101 @@ impl SandboxCommand {
         self.stderr = stdio;
         self
     }
+
+    /// Forward a standard set of environment variables from the parent
+    /// process. Includes `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `TERM`,
+    /// `SHELL`, `TMPDIR`, `TMP`, `TEMP`, `SYSTEMROOT`, `COMSPEC`, `WINDIR`,
+    /// `PROGRAMFILES`, `APPDATA`, `LOCALAPPDATA`, `USERPROFILE`. Missing
+    /// keys are silently skipped.
+    ///
+    /// The cross-platform key list avoids `#[cfg]` splitting — Unix keys
+    /// are no-ops on Windows and vice versa.
+    pub fn forward_common_env(&mut self) -> &mut Self {
+        const KEYS: &[&str] = &[
+            "PATH",
+            "HOME",
+            "USER",
+            "LANG",
+            "LC_ALL",
+            "TERM",
+            "SHELL",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "SYSTEMROOT",
+            "COMSPEC",
+            "WINDIR",
+            "PROGRAMFILES",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "USERPROFILE",
+        ];
+
+        for key in KEYS {
+            if let Ok(val) = std::env::var(key) {
+                // Skip if the key was already set via .env() to avoid duplicates.
+                // On Windows env var names are case-insensitive, so compare
+                // with case folding there.
+                let already_set = self.env.iter().any(|(k, _)| {
+                    #[cfg(target_os = "windows")]
+                    { k.eq_ignore_ascii_case(OsStr::new(key)) }
+                    #[cfg(not(target_os = "windows"))]
+                    { k == key }
+                });
+                if !already_set {
+                    self.env(key, val);
+                }
+            }
+        }
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forward_common_env_populates_from_parent() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.forward_common_env();
+
+        // At least one of the common keys (e.g. PATH) should be present
+        // in any CI or dev environment.
+        assert!(
+            !cmd.env.is_empty(),
+            "expected at least one common env var to be forwarded"
+        );
+
+        // Every forwarded value must match the parent.
+        for (key, val) in &cmd.env {
+            if let Some(parent_val) = std::env::var_os(key) {
+                assert_eq!(*val, parent_val);
+            } else {
+                panic!("forwarded key {key:?} not found in parent env");
+            }
+        }
+    }
+
+    #[test]
+    fn forward_common_env_does_not_overwrite_existing() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.env("PATH", "custom_path_value");
+        cmd.forward_common_env();
+
+        // The manually-set PATH should be preserved, not overwritten.
+        let path_entries: Vec<_> = cmd.env.iter().filter(|(k, _)| k == "PATH").collect();
+        assert_eq!(path_entries.len(), 1, "PATH should appear exactly once");
+        assert_eq!(path_entries[0].1, "custom_path_value");
+    }
+
+    #[test]
+    fn forward_common_env_is_additive() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.env("CUSTOM", "value");
+        let before = cmd.env.len();
+        cmd.forward_common_env();
+        assert!(cmd.env.len() > before, "should add to existing env");
+        assert_eq!(cmd.env[0].0, "CUSTOM");
+    }
 }

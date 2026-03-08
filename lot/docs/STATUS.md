@@ -6,12 +6,15 @@
 
 ## What Exists
 
-- Full public API: `spawn()`, `probe()`, `cleanup_stale()`, `SandboxedChild`, `SandboxPolicy`, `SandboxCommand`, `SandboxStdio`, `PlatformCapabilities`, `SandboxError`, `ResourceLimits`
+- Full public API: `spawn()`, `probe()`, `cleanup_stale()`, `SandboxedChild`, `SandboxPolicy`, `SandboxPolicyBuilder`, `SandboxCommand`, `SandboxStdio`, `PlatformCapabilities`, `SandboxError`, `ResourceLimits`
 - Policy validation with path canonicalization, overlap detection, resource limit checks
+- `SandboxPolicyBuilder`: auto-canonicalization, overlap deduction, platform default paths (exec, lib, temp)
+- `SandboxCommand::forward_common_env()`: forwards 17 standard env vars from parent
+- `SandboxedChild::kill_and_cleanup()`: explicit kill + synchronous platform cleanup
+- `SandboxedChild::wait_with_output_timeout()`: async timeout with kill+cleanup (behind `tokio` feature)
 - Windows backend: AppContainer (filesystem/network isolation) + Job Objects (resource limits) + sentinel file ACL recovery
 - Linux backend: user/mount/pid/net/ipc namespaces + seccomp-BPF syscall filtering + cgroups v2 resource limits
-- macOS backend: Seatbelt (sandbox_init SBPL profiles) + setrlimit resource limits
-- 36 tests (28 unit + 8 integration), all passing
+- macOS backend: Seatbelt (sandbox_init SBPL profiles) + setrlimit resource limits + process group kill (setsid/killpg)
 - CI pipeline: clippy + test on Linux/macOS/Windows with namespace and cgroup setup
 - Rustdoc on all public API items
 
@@ -32,6 +35,16 @@ See `docs/PLAN.md` for the full phased plan with CI testing strategy.
 | 6 | Linux cgroups v2 | Complete |
 | 7 | macOS Seatbelt | Complete |
 | 8 | Integration + hardening | Complete |
+
+### Post-v1 Features
+
+| Feature | Status |
+|---|---|
+| macOS descendant kill via setsid/killpg | Complete |
+| `kill_and_cleanup()` method | Complete |
+| `SandboxPolicyBuilder` with auto-canonicalization | Complete |
+| `forward_common_env()` on `SandboxCommand` | Complete |
+| `wait_with_output_timeout()` (tokio feature) | Complete |
 
 ## Known Limitations
 
