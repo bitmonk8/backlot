@@ -472,7 +472,7 @@ impl Drop for LinuxSandboxedChild {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::manual_let_else, clippy::single_match)]
 mod tests {
     use super::*;
     use crate::ResourceLimits;
