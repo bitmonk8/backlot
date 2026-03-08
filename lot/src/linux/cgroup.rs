@@ -197,6 +197,7 @@ impl Drop for CgroupGuard {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -215,9 +216,8 @@ mod tests {
             max_processes: Some(10),
             max_cpu_seconds: None,
         };
-        let guard = match CgroupGuard::new(&limits) {
-            Ok(g) => g,
-            Err(_) => return,
+        let Ok(guard) = CgroupGuard::new(&limits) else {
+            return;
         };
         let path = guard.path().to_path_buf();
         assert!(path.exists(), "cgroup directory should exist");
@@ -245,9 +245,8 @@ mod tests {
             return;
         }
         let limits = ResourceLimits::default();
-        let guard = match CgroupGuard::new(&limits) {
-            Ok(g) => g,
-            Err(_) => return,
+        let Ok(guard) = CgroupGuard::new(&limits) else {
+            return;
         };
 
         // Add our own process to the cgroup
@@ -264,9 +263,8 @@ mod tests {
             return;
         }
         let limits = ResourceLimits::default();
-        let guard = match CgroupGuard::new(&limits) {
-            Ok(g) => g,
-            Err(_) => return,
+        let Ok(guard) = CgroupGuard::new(&limits) else {
+            return;
         };
         let path = guard.path().to_path_buf();
         assert!(path.exists());

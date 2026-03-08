@@ -403,6 +403,7 @@ mod tests {
         let output = child.inner.wait_with_output();
         match output {
             Ok(out) => {
+                assert!(out.status.success(), "echo should exit 0");
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 assert_eq!(stdout.trim(), "hello");
             }
@@ -435,6 +436,7 @@ mod tests {
 
         match child.inner.wait_with_output() {
             Ok(out) => {
+                assert!(out.status.success(), "cat should exit 0");
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 assert!(
                     stdout.contains("sandbox_test_content"),

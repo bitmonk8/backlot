@@ -60,6 +60,7 @@ pub struct PlatformCapabilities {
 }
 
 /// Check what sandboxing mechanisms are available on the current platform.
+#[allow(clippy::missing_const_for_fn)]
 pub fn probe() -> PlatformCapabilities {
     #[cfg(target_os = "linux")]
     return linux::probe();

@@ -34,7 +34,17 @@ const METADATA_SYSTEM_PATHS: &[&str] = &[
 ];
 
 /// System paths where exec is allowed (shells, coreutils).
-const EXEC_SYSTEM_PATHS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+/// Includes `/System/Cryptexes/OS` because macOS 13+ moves system binaries there.
+const EXEC_SYSTEM_PATHS: &[&str] = &[
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    "/System/Cryptexes/OS/usr/bin",
+    "/System/Cryptexes/OS/bin",
+    "/System/Cryptexes/OS/usr/sbin",
+    "/System/Cryptexes/OS/sbin",
+];
 
 /// Check whether Seatbelt (sandbox_init) is available.
 pub const fn available() -> bool {
@@ -51,9 +61,11 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     profile.push_str("(version 1)\n");
     profile.push_str("(deny default)\n");
 
-    // System essentials — dylibs, frameworks, and basic devices
+    // System essentials — dylibs, frameworks, and basic devices.
+    // Includes cryptex paths because macOS 13+ moves system libraries there.
     profile.push_str("(allow file-read* (subpath \"/usr/lib\"))\n");
     profile.push_str("(allow file-read* (subpath \"/System/Library\"))\n");
+    profile.push_str("(allow file-read* (subpath \"/System/Cryptexes\"))\n");
     profile.push_str("(allow file-read* (subpath \"/Library/Preferences\"))\n");
     profile.push_str("(allow file-read* (subpath \"/private/var/db/dyld\"))\n");
     profile.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
