@@ -60,6 +60,11 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     profile.push_str("(allow file-read* (literal \"/dev/random\"))\n");
     profile.push_str("(allow file-read* (literal \"/dev/null\"))\n");
 
+    // Allow writing to stdout/stderr pipes and /dev/null.
+    // On newer macOS, (deny default) may block file-write-data on
+    // anonymous pipes, preventing child processes from producing output.
+    profile.push_str("(allow file-write-data)\n");
+
     // Scoped file-read-metadata: system paths needed for stat() resolution
     for sys_path in METADATA_SYSTEM_PATHS {
         profile.push_str("(allow file-read-metadata (literal \"");

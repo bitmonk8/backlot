@@ -13,18 +13,18 @@ pub fn available() -> bool {
         return false;
     }
 
-    match fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone") {
-        Ok(contents) => contents.trim() == "1",
+    fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").map_or_else(
         // Sysctl absent — kernel may still support user namespaces.
         // Fall back to a runtime probe.
-        Err(_) => probe_clone_newuser(),
-    }
+        |_| probe_clone_newuser(),
+        |contents| contents.trim() == "1",
+    )
 }
 
 /// AppArmor can block unprivileged user namespaces even when the kernel supports them.
 fn is_apparmor_restricted() -> bool {
     fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-        .map_or(false, |v| v.trim() == "1")
+        .is_ok_and(|v| v.trim() == "1")
 }
 
 /// Fork a child that attempts `clone(CLONE_NEWUSER)` and immediately exits.

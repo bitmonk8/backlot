@@ -10,7 +10,7 @@ use crate::policy::SandboxPolicy;
 use crate::unix;
 use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
 
-pub fn probe() -> PlatformCapabilities {
+pub const fn probe() -> PlatformCapabilities {
     PlatformCapabilities {
         namespaces: false,
         seccomp: false,
