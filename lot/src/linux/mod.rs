@@ -9,7 +9,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 
-use crate::command::{SandboxCommand, SandboxStdio};
+use crate::command::SandboxCommand;
 use crate::policy::SandboxPolicy;
 use crate::unix;
 use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
@@ -146,10 +146,8 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
         // Unshare namespaces. Skip CLONE_NEWNET when network access is allowed
         // so the child inherits the parent's network namespace.
-        let mut clone_flags = libc::CLONE_NEWUSER
-            | libc::CLONE_NEWNS
-            | libc::CLONE_NEWPID
-            | libc::CLONE_NEWIPC;
+        let mut clone_flags =
+            libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWIPC;
         if !policy.allow_network {
             clone_flags |= libc::CLONE_NEWNET;
         }
@@ -182,14 +180,10 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             let mut buf = [0u8; 20];
             let pid_bytes = itoa_stack(my_pid as u64, &mut buf);
             // SAFETY: open() with a valid CString path
-            let fd = unsafe {
-                libc::open(procs_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC)
-            };
+            let fd = unsafe { libc::open(procs_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
             if fd >= 0 {
                 // SAFETY: fd is valid, pid_bytes points into stack-allocated buf
-                let _ = unsafe {
-                    libc::write(fd, pid_bytes.as_ptr().cast(), pid_bytes.len())
-                };
+                let _ = unsafe { libc::write(fd, pid_bytes.as_ptr().cast(), pid_bytes.len()) };
                 // SAFETY: fd is valid
                 unsafe { libc::close(fd) };
             }
@@ -320,7 +314,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             stdout_fd: parent_stdout,
             stderr_fd: parent_stderr,
             waited: Cell::new(false),
-            _cgroup_guard: cgroup_guard,
+            cgroup_guard: cgroup_guard,
         },
     })
 }
@@ -338,7 +332,7 @@ pub struct LinuxSandboxedChild {
     /// True once the helper has been reaped via waitpid.
     waited: Cell<bool>,
     /// Held until drop to enforce resource limits and clean up the cgroup.
-    _cgroup_guard: Option<CgroupGuard>,
+    cgroup_guard: Option<CgroupGuard>,
 }
 
 impl LinuxSandboxedChild {
@@ -429,9 +423,18 @@ impl LinuxSandboxedChild {
 
     /// Close all remaining pipe fds.
     fn close_fds(&mut self) {
-        for fd in [self.stdin_fd.take(), self.stdout_fd.take(), self.stderr_fd.take()].into_iter().flatten() {
+        for fd in [
+            self.stdin_fd.take(),
+            self.stdout_fd.take(),
+            self.stderr_fd.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             // SAFETY: fd is a valid pipe fd we own
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
         }
     }
 
@@ -449,7 +452,7 @@ impl LinuxSandboxedChild {
 
         // CgroupGuard::drop handles kill + rmdir when self is dropped.
         // Taking it here and dropping explicitly makes the ordering clear.
-        drop(self._cgroup_guard.take());
+        drop(self.cgroup_guard.take());
 
         Ok(())
     }
@@ -474,8 +477,9 @@ impl Drop for LinuxSandboxedChild {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::ResourceLimits;
+    use crate::command::SandboxStdio;
+    use std::path::PathBuf;
 
     fn test_policy(read_paths: Vec<PathBuf>) -> SandboxPolicy {
         SandboxPolicy {
@@ -535,7 +539,10 @@ mod tests {
         for line in stdout.lines() {
             if let Some(rest) = line.strip_prefix("Pid:") {
                 let pid_str = rest.trim();
-                assert_eq!(pid_str, "1", "expected PID 1 inside namespace, got {pid_str}");
+                assert_eq!(
+                    pid_str, "1",
+                    "expected PID 1 inside namespace, got {pid_str}"
+                );
                 return;
             }
         }
@@ -610,6 +617,9 @@ mod tests {
         };
 
         // /home should not be accessible — ls should fail
-        assert!(!output.status.success(), "expected ls /home to fail inside sandbox");
+        assert!(
+            !output.status.success(),
+            "expected ls /home to fail inside sandbox"
+        );
     }
 }

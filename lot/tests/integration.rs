@@ -36,7 +36,11 @@ fn echo_command() -> (PathBuf, Vec<String>) {
 fn cat_command(path: &std::path::Path) -> (PathBuf, Vec<String>) {
     (
         PathBuf::from("cmd"),
-        vec!["/C".into(), "type".into(), path.to_string_lossy().into_owned()],
+        vec![
+            "/C".into(),
+            "type".into(),
+            path.to_string_lossy().into_owned(),
+        ],
     )
 }
 
@@ -102,10 +106,7 @@ fn stdin_echo_command() -> (PathBuf, Vec<String>) {
 /// On Windows, no `exec_paths` are needed — `AppContainer` can run system
 /// executables without explicit grants. On Unix, we add `/bin` (and `/usr/bin`
 /// if distinct) so the sandbox can find standard utilities.
-fn make_policy(
-    read_paths: Vec<PathBuf>,
-    write_paths: Vec<PathBuf>,
-) -> lot::SandboxPolicy {
+fn make_policy(read_paths: Vec<PathBuf>, write_paths: Vec<PathBuf>) -> lot::SandboxPolicy {
     #[allow(unused_mut)]
     let mut exec_paths = Vec::new();
 

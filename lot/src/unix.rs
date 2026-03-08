@@ -59,8 +59,7 @@ pub fn prepare_prefork(command: &SandboxCommand) -> io::Result<PreForkData> {
             let mut entry = k.clone();
             entry.push(b'=');
             entry.extend_from_slice(v);
-            CString::new(entry)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+            CString::new(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
         })
         .collect::<io::Result<_>>()?;
 
@@ -97,8 +96,8 @@ pub fn prepare_prefork(command: &SandboxCommand) -> io::Result<PreForkData> {
 /// Open `/dev/null` with the given flags (e.g., `O_RDONLY` or `O_WRONLY`).
 /// Returns the fd with `O_CLOEXEC` set.
 pub fn open_dev_null(flags: i32) -> io::Result<i32> {
-    let c_path = CString::new("/dev/null")
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let c_path =
+        CString::new("/dev/null").map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     // SAFETY: valid path, caller-provided flags | O_CLOEXEC
     let fd = unsafe { libc::open(c_path.as_ptr(), flags | libc::O_CLOEXEC) };
     if fd < 0 {
@@ -223,27 +222,41 @@ pub fn read_two_fds(fd1: Option<i32>, fd2: Option<i32>) -> io::Result<(Vec<u8>, 
     'outer: while active1.is_some() || active2.is_some() {
         // Stack-allocated: max 2 entries
         let mut pollfds = [
-            libc::pollfd { fd: -1, events: 0, revents: 0 },
-            libc::pollfd { fd: -1, events: 0, revents: 0 },
+            libc::pollfd {
+                fd: -1,
+                events: 0,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: -1,
+                events: 0,
+                revents: 0,
+            },
         ];
         let mut idx_map = [0u8; 2]; // 1 or 2
         let mut nfds = 0usize;
 
         if let Some(fd) = active1 {
-            pollfds[nfds] = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            pollfds[nfds] = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             idx_map[nfds] = 1;
             nfds += 1;
         }
         if let Some(fd) = active2 {
-            pollfds[nfds] = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            pollfds[nfds] = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             idx_map[nfds] = 2;
             nfds += 1;
         }
 
         // SAFETY: pollfds is a valid array, -1 means wait indefinitely
-        let rc = unsafe {
-            libc::poll(pollfds.as_mut_ptr(), nfds as libc::nfds_t, -1)
-        };
+        let rc = unsafe { libc::poll(pollfds.as_mut_ptr(), nfds as libc::nfds_t, -1) };
         if rc < 0 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {

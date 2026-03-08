@@ -7,7 +7,8 @@ use std::path::Path;
 
 use crate::policy::SandboxPolicy;
 
-extern "C" {
+// SAFETY: These are Apple's sandbox API functions, always available on macOS.
+unsafe extern "C" {
     fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
     fn sandbox_free_error(errorbuf: *mut c_char);
 }
@@ -156,8 +157,8 @@ fn append_rule(profile: &mut String, operation: &str, filter: &str, path: &Path)
 /// Must only be called from a forked child process before exec. The profile
 /// string must be a valid SBPL profile.
 pub fn apply_profile(profile: &str) -> io::Result<()> {
-    let c_profile = CString::new(profile)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let c_profile =
+        CString::new(profile).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     let mut errorbuf: *mut c_char = std::ptr::null_mut();
 

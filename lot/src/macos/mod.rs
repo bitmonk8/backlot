@@ -5,7 +5,7 @@ pub(crate) mod seatbelt;
 use std::cell::Cell;
 use std::io;
 
-use crate::command::{SandboxCommand, SandboxStdio};
+use crate::command::SandboxCommand;
 use crate::policy::SandboxPolicy;
 use crate::unix;
 use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
@@ -322,9 +322,18 @@ impl MacSandboxedChild {
 
     /// Close all remaining pipe fds.
     fn close_fds(&mut self) {
-        for fd in [self.stdin_fd.take(), self.stdout_fd.take(), self.stderr_fd.take()].into_iter().flatten() {
+        for fd in [
+            self.stdin_fd.take(),
+            self.stdout_fd.take(),
+            self.stderr_fd.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             // SAFETY: fd is a valid pipe fd we own
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
         }
     }
 
@@ -364,6 +373,7 @@ impl Drop for MacSandboxedChild {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::command::SandboxStdio;
     use crate::policy::ResourceLimits;
     use std::path::PathBuf;
 

@@ -71,11 +71,17 @@ impl CgroupGuard {
     /// Create a new cgroup for a sandbox invocation and write resource limits.
     pub fn new(limits: &ResourceLimits) -> io::Result<Self> {
         let parent = current_cgroup_path().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "cannot determine current cgroup path")
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "cannot determine current cgroup path",
+            )
         })?;
 
         // Use monotonic clock nanoseconds as a unique suffix instead of a static counter.
-        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         // SAFETY: ts is a valid timespec on the stack; CLOCK_MONOTONIC is always available.
         unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
         let nanos = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
@@ -110,6 +116,7 @@ impl CgroupGuard {
     }
 
     /// Move a process into this cgroup by writing its PID to cgroup.procs.
+    #[allow(dead_code)] // used from the fork path via raw fd writes; kept for testing
     pub(crate) fn add_process(&self, pid: i32) -> io::Result<()> {
         fs::write(self.path.join("cgroup.procs"), pid.to_string())
     }
@@ -229,7 +236,10 @@ mod tests {
         assert_eq!(pids_max.ok().as_deref(), Some("10"));
 
         drop(guard);
-        assert!(!path.exists(), "cgroup directory should be removed after drop");
+        assert!(
+            !path.exists(),
+            "cgroup directory should be removed after drop"
+        );
     }
 
     #[test]

@@ -191,14 +191,14 @@ fn platform_lib_paths() -> Vec<PathBuf> {
 
     #[cfg(unix)]
     {
-        let mut paths = vec![
+        let paths = vec![
             PathBuf::from("/usr/lib"),
             PathBuf::from("/usr/include"),
             PathBuf::from("/usr/local/lib"),
             PathBuf::from("/usr/local/include"),
+            #[cfg(target_os = "macos")]
+            PathBuf::from("/Library/Developer"),
         ];
-        #[cfg(target_os = "macos")]
-        paths.push(PathBuf::from("/Library/Developer"));
         paths
     }
 
