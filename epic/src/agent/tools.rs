@@ -2,11 +2,10 @@
 
 use bitflags::bitflags;
 use globset::GlobBuilder;
+use lot::{SandboxCommand, SandboxPolicyBuilder, SandboxStdio};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -292,7 +291,7 @@ pub async fn execute_tool(
     // Bash returns a richer type because non-zero exit is not a dispatch
     // failure but must still set is_error for callers.
     if name == "bash" {
-        return match tool_bash(input, project_root).await {
+        return match tool_bash(input, project_root, grant).await {
             Ok(out) => ToolExecResult {
                 tool_use_id,
                 content: out.content,
@@ -581,52 +580,152 @@ struct BashOutput {
     is_error: bool,
 }
 
-async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<BashOutput, String> {
-    let command = get_str(input, "command")?;
+/// Build a sandbox policy for a bash invocation based on the current tool grant.
+///
+/// - `WRITE` grant present → `project_root` is writable (Execute/Fix phases)
+/// - `WRITE` grant absent  → `project_root` is read-only (Decompose/Verify phases)
+fn build_sandbox_policy(project_root: &Path, grant: ToolGrant) -> lot::Result<lot::SandboxPolicy> {
+    let mut builder = SandboxPolicyBuilder::new()
+        .include_temp_dirs()
+        .include_platform_exec_paths()
+        .include_platform_lib_paths()
+        .allow_network(true);
+
+    if grant.contains(ToolGrant::WRITE) {
+        builder = builder.write_path(project_root);
+    } else {
+        builder = builder.read_path(project_root);
+    }
+
+    builder.build()
+}
+
+async fn tool_bash(
+    input: &JsonValue,
+    project_root: &Path,
+    grant: ToolGrant,
+) -> Result<BashOutput, String> {
+    let command = get_str(input, "command")?.to_owned();
     let timeout_secs = input
         .get("timeout")
         .and_then(JsonValue::as_u64)
         .unwrap_or(DEFAULT_BASH_TIMEOUT_SECS)
         .min(MAX_BASH_TIMEOUT_SECS);
 
+    let policy = match build_sandbox_policy(project_root, grant) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[epic] sandbox policy error ({e}), running unsandboxed");
+            return tool_bash_unsandboxed(&command, project_root, timeout_secs).await;
+        }
+    };
+
+    let project_root = project_root.to_path_buf();
+    match tool_bash_sandboxed(command.clone(), project_root.clone(), policy, timeout_secs).await {
+        Ok(output) => Ok(output),
+        Err(SandboxSpawnError::SetupFailed(msg)) => {
+            eprintln!("[epic] sandbox unavailable ({msg}), running unsandboxed");
+            tool_bash_unsandboxed(&command, &project_root, timeout_secs).await
+        }
+        Err(SandboxSpawnError::Other(msg)) => Err(msg),
+    }
+}
+
+enum SandboxSpawnError {
+    /// Sandbox setup failed (permissions, unsupported platform) — caller
+    /// should fall back to unsandboxed execution.
+    SetupFailed(String),
+    /// Non-recoverable error (timeout, command failure).
+    Other(String),
+}
+
+async fn tool_bash_sandboxed(
+    command: String,
+    project_root: PathBuf,
+    policy: lot::SandboxPolicy,
+    timeout_secs: u64,
+) -> Result<BashOutput, SandboxSpawnError> {
+    let spawn_result = tokio::task::spawn_blocking(move || {
+        let mut cmd = SandboxCommand::new("sh");
+        cmd.args(["-c", &command]);
+        cmd.cwd(&project_root);
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+        cmd.stdin(SandboxStdio::Null);
+        cmd.forward_common_env();
+
+        lot::spawn(&policy, &cmd)
+    })
+    .await
+    .map_err(|e| SandboxSpawnError::Other(format!("spawn task panicked: {e}")))?;
+
+    let child = match spawn_result {
+        Ok(c) => c,
+        Err(e) => return Err(classify_spawn_error(e)),
+    };
+
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    match child.wait_with_output_timeout(timeout).await {
+        Ok(output) => Ok(bash_output_from(&output)),
+        Err(lot::SandboxError::Timeout(_)) => {
+            Err(format!("command timed out after {timeout_secs}s"))
+        }
+        Err(e) => Err(format!("command failed: {e}")),
+    }
+    .map_err(SandboxSpawnError::Other)
+}
+
+/// Classify a `lot::SandboxError` as either a setup failure (fallback to
+/// unsandboxed) or a hard error (propagate).
+fn classify_spawn_error(e: lot::SandboxError) -> SandboxSpawnError {
+    match e {
+        lot::SandboxError::Unsupported(msg)
+        | lot::SandboxError::Setup(msg)
+        | lot::SandboxError::InvalidPolicy(msg) => SandboxSpawnError::SetupFailed(msg),
+        lot::SandboxError::Io(ref io) => match io.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                SandboxSpawnError::SetupFailed(e.to_string())
+            }
+            _ => SandboxSpawnError::Other(e.to_string()),
+        },
+        lot::SandboxError::Cleanup(msg) => SandboxSpawnError::Other(msg),
+        lot::SandboxError::Timeout(_) => SandboxSpawnError::Other(e.to_string()),
+        // #[non_exhaustive]: unknown future variants → treat as setup
+        // failure so we degrade gracefully rather than hard-fail.
+        _ => SandboxSpawnError::SetupFailed(e.to_string()),
+    }
+}
+
+/// Environment variables forwarded in the unsandboxed fallback path.
+/// Mirrors the set used by `SandboxCommand::forward_common_env()`.
+const UNSANDBOXED_ENV_KEYS: &[&str] = &[
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL",
+    "TMPDIR", "TMP", "TEMP",
+    "SYSTEMROOT", "COMSPEC", "WINDIR", "PROGRAMFILES",
+    "APPDATA", "LOCALAPPDATA", "USERPROFILE",
+];
+
+/// Unsandboxed fallback — used when sandbox setup fails.
+async fn tool_bash_unsandboxed(
+    command: &str,
+    project_root: &Path,
+    timeout_secs: u64,
+) -> Result<BashOutput, String> {
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")
         .arg(command)
         .current_dir(project_root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .env_clear();
 
-    for key in &[
-        "PATH",
-        "HOME",
-        "USER",
-        "LANG",
-        "LC_ALL",
-        "TERM",
-        "SHELL",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "SYSTEMROOT",
-        "COMSPEC",
-        "WINDIR",
-        "PROGRAMFILES",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "USERPROFILE",
-    ] {
-        if let Ok(val) = std::env::var(key) {
-            cmd.env(key, val);
-        }
-    }
-
-    // Put child in its own session so we can kill the whole tree via process group.
+    // Put child in its own process group so we can kill the whole tree on timeout.
     #[cfg(unix)]
     {
-        // SAFETY: setsid() is async-signal-safe and has no preconditions
-        // that could cause UB. pre_exec runs between fork and exec.
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: setsid() is async-signal-safe. pre_exec runs between fork and exec.
         #[allow(unsafe_code)]
         unsafe {
             cmd.pre_exec(|| {
@@ -637,13 +736,17 @@ async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<BashOutput,
             });
         }
     }
-    // Prevents Ctrl+C propagation to the child, ensuring the parent can
-    // manage child lifetime independently. taskkill /F /T handles tree kill
-    // via parent-child relationship regardless.
     #[cfg(windows)]
     {
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    // Forward the same env vars lot's forward_common_env() uses.
+    for key in UNSANDBOXED_ENV_KEYS {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
     }
 
     let child = cmd.spawn().map_err(|e| format!("spawn error: {e}"))?;
@@ -652,13 +755,8 @@ async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<BashOutput,
     let timeout_dur = std::time::Duration::from_secs(timeout_secs);
     if let Ok(wait_result) = tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
         let output = wait_result.map_err(|e| format!("command failed: {e}"))?;
-        let is_error = output.status.code() != Some(0);
-        Ok(BashOutput {
-            content: format_bash_output(&output),
-            is_error,
-        })
+        Ok(bash_output_from(&output))
     } else {
-        // Timeout: kill the entire process group, not just the direct child.
         if let Some(pid) = child_pid {
             kill_process_tree(pid);
         }
@@ -666,12 +764,13 @@ async fn tool_bash(input: &JsonValue, project_root: &Path) -> Result<BashOutput,
     }
 }
 
-/// Kill the entire process tree rooted at the given PID.
+/// Kill the entire process group (Unix) or process tree (Windows) rooted
+/// at the given PID. Used only for the unsandboxed fallback path.
 #[cfg(unix)]
 fn kill_process_tree(pid: u32) {
     let Some(pid) = i32::try_from(pid).ok() else { return };
-    // SAFETY: kill with negative pid targets the process group. The pid came
-    // from a child we spawned into its own session via setsid().
+    // SAFETY: negative pid targets the process group. The pid came from
+    // a child we spawned into its own session via setsid().
     #[allow(unsafe_code)]
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
@@ -680,12 +779,18 @@ fn kill_process_tree(pid: u32) {
 
 #[cfg(windows)]
 fn kill_process_tree(pid: u32) {
-    // taskkill /F /T kills the process and all children.
     let _ = std::process::Command::new("taskkill")
         .args(["/F", "/T", "/PID", &pid.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+fn bash_output_from(output: &std::process::Output) -> BashOutput {
+    BashOutput {
+        content: format_bash_output(output),
+        is_error: output.status.code() != Some(0),
+    }
 }
 
 fn format_bash_output(output: &std::process::Output) -> String {
@@ -1118,27 +1223,15 @@ mod tests {
         assert!(result.content.contains("[exit code: 1]"));
     }
 
-    /// Verify that calling kill_process_tree with a stale (already-exited) PID
-    /// does not panic.
-    #[cfg(unix)]
-    #[test]
-    fn test_bash_timeout_kill_stale_pid() {
-        // Use a PID that almost certainly does not exist.
-        let stale_pid: u32 = u32::MAX - 1;
-        kill_process_tree(stale_pid);
-        // Reaching here without panic is the assertion.
-    }
-
-    /// Verify that on timeout, grandchild processes are killed along with the
-    /// direct child (process group kill).
+    /// Verify that on timeout, the sandboxed child and its descendants are killed.
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_bash_timeout_kills_process_group() {
+    async fn test_bash_timeout_kills_sandboxed_child() {
         let tmp = TempDir::new().unwrap();
         let marker = tmp.path().join("bg_alive");
 
-        // Spawn a command that starts a background child which writes a marker
-        // file every 0.2s. On timeout, both sh and the background loop must die.
+        // Spawn a command that starts a background child writing a marker file.
+        // On timeout, both sh and the background loop must die.
         let cmd = format!(
             "(while true; do touch {}; sleep 0.2; done) & sleep 60",
             marker.display()
@@ -1149,20 +1242,145 @@ mod tests {
             "bash",
             &serde_json::json!({"command": cmd, "timeout": 2}),
             tmp.path(),
-            ToolGrant::BASH,
+            ToolGrant::BASH | ToolGrant::WRITE,
         )
         .await;
         assert!(result.is_error);
         assert!(result.content.contains("timed out"));
 
-        // Remove the marker and wait briefly; if the bg process is still alive
+        // Remove the marker and wait briefly; if the bg process survived
         // it will recreate the file.
         let _ = std::fs::remove_file(&marker);
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         assert!(
             !marker.exists(),
-            "background process survived timeout — process group kill failed"
+            "background process survived timeout — process tree kill failed"
         );
+    }
+
+    /// Verify that calling kill_process_tree with a stale PID does not panic.
+    #[cfg(unix)]
+    #[test]
+    fn test_kill_process_tree_stale_pid_unix() {
+        // Use a PID that fits i32 but almost certainly does not exist.
+        kill_process_tree(99_999_999);
+    }
+
+    /// Verify that calling kill_process_tree with a stale PID does not panic.
+    #[cfg(windows)]
+    #[test]
+    fn test_kill_process_tree_stale_pid_windows() {
+        kill_process_tree(u32::MAX - 1);
+    }
+
+    #[test]
+    fn test_build_sandbox_policy_write_grant() {
+        let tmp = TempDir::new().unwrap();
+        let policy = build_sandbox_policy(tmp.path(), ToolGrant::WRITE | ToolGrant::BASH).unwrap();
+        let canon = tmp.path().canonicalize().unwrap();
+
+        // Project root is either directly in write_paths or covered by an
+        // ancestor (e.g. on Windows where TempDir is inside %TEMP%).
+        let covered_by_write = policy.write_paths.iter().any(|w| {
+            canon.starts_with(w) || w.starts_with(&canon)
+        });
+        assert!(
+            covered_by_write,
+            "project root should be writable (directly or via ancestor) when WRITE granted"
+        );
+        assert!(
+            !policy.read_paths.iter().any(|p| *p == canon),
+            "project root should NOT be in read_paths when WRITE granted"
+        );
+    }
+
+    #[test]
+    fn test_build_sandbox_policy_no_write_grant() {
+        let tmp = TempDir::new().unwrap();
+        let policy = build_sandbox_policy(tmp.path(), ToolGrant::BASH).unwrap();
+        let canon = tmp.path().canonicalize().unwrap();
+
+        // Project root is in read_paths unless it overlaps with a write path
+        // (e.g. on Windows where TempDir is inside %TEMP%, already writable).
+        let overlaps_write = policy.write_paths.iter().any(|w| {
+            canon.starts_with(w) || w.starts_with(&canon)
+        });
+        if overlaps_write {
+            assert!(
+                !policy.read_paths.iter().any(|p| *p == canon),
+                "project root should NOT be in read_paths when covered by write_paths"
+            );
+        } else {
+            assert!(
+                policy.read_paths.iter().any(|p| *p == canon),
+                "project root should be in read_paths when WRITE not granted"
+            );
+        }
+        assert!(
+            !policy.write_paths.iter().any(|p| *p == canon),
+            "project root should NOT be in write_paths when WRITE not granted"
+        );
+    }
+
+    #[test]
+    fn test_build_sandbox_policy_allows_network() {
+        let tmp = TempDir::new().unwrap();
+        let policy = build_sandbox_policy(tmp.path(), ToolGrant::BASH).unwrap();
+        assert!(policy.allow_network);
+    }
+
+    #[test]
+    fn test_build_sandbox_policy_has_exec_paths() {
+        let tmp = TempDir::new().unwrap();
+        let policy = build_sandbox_policy(tmp.path(), ToolGrant::BASH).unwrap();
+        assert!(
+            !policy.exec_paths.is_empty(),
+            "exec_paths should contain platform shell directories"
+        );
+    }
+
+    #[test]
+    fn test_classify_spawn_error_unsupported_is_setup_failed() {
+        let e = lot::SandboxError::Unsupported("not supported".into());
+        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::SetupFailed(_)));
+    }
+
+    #[test]
+    fn test_classify_spawn_error_setup_is_setup_failed() {
+        let e = lot::SandboxError::Setup("cannot create sandbox".into());
+        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::SetupFailed(_)));
+    }
+
+    #[test]
+    fn test_classify_spawn_error_invalid_policy_is_setup_failed() {
+        let e = lot::SandboxError::InvalidPolicy("bad policy".into());
+        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::SetupFailed(_)));
+    }
+
+    #[test]
+    fn test_classify_spawn_error_io_permission_denied_is_setup_failed() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let e = lot::SandboxError::Io(io_err);
+        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::SetupFailed(_)));
+    }
+
+    #[test]
+    fn test_classify_spawn_error_io_not_found_is_other() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let e = lot::SandboxError::Io(io_err);
+        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::Other(_)));
+    }
+
+    #[test]
+    fn test_classify_spawn_error_cleanup_is_other() {
+        let e = lot::SandboxError::Cleanup("cleanup failed".into());
+        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::Other(_)));
+    }
+
+    #[test]
+    fn test_classify_spawn_error_timeout_is_other() {
+        let e = lot::SandboxError::Timeout(std::time::Duration::from_secs(5));
+        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::Other(_)));
     }
 
     #[tokio::test]

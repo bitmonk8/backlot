@@ -19,6 +19,7 @@ crossterm = "0.28"
 globset = "0.4"
 walkdir = "2"
 regex = "1"
+lot = { path = "../lot", features = ["tokio"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Audit remediation in progress** — All v1 features implemented (280 tests passing, 0 new clippy warnings). Full codebase audit complete (95 review cells, 541 findings). Remediation ongoing; 1 group remains.
+**v1 complete** — All features implemented, audit remediation done. 95 review cells, 541 findings; all major groups resolved. Lot sandboxing integrated.
 
 ## What Exists
 
@@ -14,6 +14,7 @@
 - CLI via clap — `init`, `run <goal>`, `resume`, `status` subcommands
 - `epic init` — agent-driven interactive configuration scaffolding
 - Container/VM startup detection with suppressible warning
+- Process sandboxing via lot — bash tool spawns children inside OS-native sandbox (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS) with graceful fallback to unsandboxed execution
 - CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain, Flick pinned to rev `f83c56e`
 - Testability infrastructure — `ProviderResolver`/`ToolExecutor` traits (flick), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
 
@@ -32,7 +33,5 @@ Epic uses generalized prompts that work across languages. No language-specific l
 No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
-
-Audit remediation is complete. Operational correctness sandboxing has been delegated to the **[lot](https://github.com/bitmonk8/lot)** project — a standalone cross-platform process sandboxing library. Epic will consume lot as a dependency once it is ready. See [SANDBOXING.md](SANDBOXING.md) for context and [LOT_SPEC.md](LOT_SPEC.md) for the lot design spec.
 
 No remaining epic-internal work candidates at this time.

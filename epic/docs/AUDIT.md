@@ -87,7 +87,7 @@ Cross-cutting: X1 (Cargo.toml), X2 (clippy pedantic), X3 (compiler warnings), X4
 
 | Category | Approx count | Critical | Major |
 |---|---|---|---|
-| Operational correctness sandboxing (Frida, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
+| Operational correctness sandboxing (lot, TOCTOU, per-phase enforcement) | ~33 | 0 | ~16 |
 | Simplification/dedup (retry loops, event variants, prompt boilerplate) | ~61 | 0 | ~3 |
 | Error handling (inconsistent fatal vs best-effort, panics, silent swallowing) | ~40 | 0 | ~3 |
 | Dead code/stubs (unused ToolGrant flags) | ~20 | 0 | ~2 |
@@ -151,13 +151,13 @@ All 7 issues resolved. See Simplification & Dead Code sections above.
 | U10-R6#2 | Config validation incomplete — no boundary tests | **Resolved** — `PartialEq`+`Eq` derives, 14 boundary tests |
 | U10-R6#3 | No dedicated config `load()` abstraction | **Resolved** — `EpicConfig::load(path)` in config module |
 
-### 1. Operational correctness sandboxing (Frida)
+### 1. Operational correctness sandboxing (lot)
 
-TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but full resolution requires Frida's per-phase syscall enforcement.
+TOCTOU findings below have partial code mitigations possible (e.g., `O_NOFOLLOW`, `flock`), but mitigated by lot's per-phase process sandboxing.
 
 | Ref | Summary |
 |-----|---------|
 | U5-R1#1 | TOCTOU symlink race in `safe_path` with `allow_new_file` |
 | U2-R2#2 | TOCTOU in `write_file` path validation |
 | U2-R2#3 | TOCTOU in `edit_file` between read and write |
-| *(full)* | Per-phase access policy enforcement via runtime interception. See [SANDBOXING.md](SANDBOXING.md) Concern 2. |
+| *(full)* | Per-phase access policy enforcement via lot process sandboxing. See [SANDBOXING.md](SANDBOXING.md) Concern 2. |

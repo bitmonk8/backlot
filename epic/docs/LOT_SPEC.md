@@ -35,7 +35,7 @@ Standalone library crate for launching sandboxed child processes. Restricts file
 | `CLONE_NEWIPC` | IPC namespace. Isolates SysV IPC and POSIX message queues. |
 
 **seccomp-BPF** filters syscalls:
-- Allowlist of permitted syscalls (similar to yule-sandbox's approach).
+- Allowlist of permitted syscalls.
 - Default action: `EPERM` (not `SIGKILL` — debuggable).
 - Conditional rules: network syscalls gated on policy, `ioctl` restricted.
 
@@ -288,7 +288,7 @@ lot/
 | `thiserror` | All | Error derive |
 | `tracing` | All | Structured logging (optional feature) |
 
-No dependency on `rappct`, `birdcage`, or `yule-sandbox`. All platform code is written from scratch.
+All platform code is written from scratch.
 
 ---
 
