@@ -66,8 +66,8 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     let program_path = std::path::Path::new(&command.program);
     // Resolve symlinks/firmlinks so the seatbelt profile matches the real path.
     // On macOS 13+, /bin and /usr/bin are firmlinks to /System/Cryptexes/OS/...
-    let resolved = std::fs::canonicalize(program_path)
-        .unwrap_or_else(|_| program_path.to_path_buf());
+    let resolved =
+        std::fs::canonicalize(program_path).unwrap_or_else(|_| program_path.to_path_buf());
     let profile = seatbelt::generate_profile(policy, &resolved);
 
     let prefork = unix::prepare_prefork(command)

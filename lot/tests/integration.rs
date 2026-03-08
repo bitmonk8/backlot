@@ -421,13 +421,11 @@ fn test_wait_returns_exit_status() {
             return;
         };
         let status = child.wait().expect("wait");
-        // On macOS CI, seatbelt may block exec — skip if exit status is non-zero
-        if !status.success() {
-            #[cfg(target_os = "macos")]
+        // On macOS CI, seatbelt may block exec — skip remaining assertions
+        if !status.success() && cfg!(target_os = "macos") {
             return;
-            #[cfg(not(target_os = "macos"))]
-            panic!("exit 0 should be success");
         }
+        assert!(status.success(), "exit 0 should be success");
     }
 
     // Test exit code 42.
@@ -445,12 +443,9 @@ fn test_wait_returns_exit_status() {
         let status = child.wait().expect("wait");
         assert!(!status.success(), "exit 42 should not be success");
 
-        // On macOS CI, seatbelt may block exec with a different code
-        if status.code() != Some(42) {
-            #[cfg(target_os = "macos")]
+        if status.code() != Some(42) && cfg!(target_os = "macos") {
             return;
-            #[cfg(not(target_os = "macos"))]
-            panic!("expected exit code 42, got {:?}", status.code());
         }
+        assert_eq!(status.code(), Some(42));
     }
 }
