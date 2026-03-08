@@ -34,4 +34,4 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-No remaining epic-internal work candidates at this time.
+1. **NuShell migration** — Replace POSIX `sh` with NuShell as the sole shell runtime. Cross-platform consistency, eliminates unix-centric shell dependency. Spec: [NUSHELL_MIGRATION.md](NUSHELL_MIGRATION.md).
