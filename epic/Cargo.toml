@@ -19,7 +19,7 @@ crossterm = "0.28"
 globset = "0.4"
 walkdir = "2"
 regex = "1"
-lot = { path = "../lot", features = ["tokio"] }
+lot = { git = "https://github.com/bitmonk8/lot", rev = "ed985a3", features = ["tokio"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
