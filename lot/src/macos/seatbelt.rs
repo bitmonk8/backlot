@@ -63,6 +63,9 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
 
     // System essentials — dylibs, frameworks, and basic devices.
     // Includes cryptex paths because macOS 13+ moves system libraries there.
+    // Root directory needs file-read* (not just metadata) because dyld/libSystem
+    // does readdir("/") or readlink("/") during process startup.
+    profile.push_str("(allow file-read* (literal \"/\"))\n");
     profile.push_str("(allow file-read* (subpath \"/usr/lib\"))\n");
     profile.push_str("(allow file-read* (subpath \"/System/Library\"))\n");
     profile.push_str("(allow file-read* (subpath \"/System/Cryptexes\"))\n");
@@ -257,6 +260,7 @@ mod tests {
     fn profile_contains_system_essentials() {
         let policy = basic_policy();
         let profile = generate_profile(&policy, &test_program());
+        assert!(profile.contains("(allow file-read* (literal \"/\"))"));
         assert!(profile.contains("(allow file-read* (subpath \"/usr/lib\"))"));
         assert!(profile.contains("(allow file-read* (subpath \"/System/Library\"))"));
         assert!(profile.contains("(allow file-read* (literal \"/dev/null\"))"));

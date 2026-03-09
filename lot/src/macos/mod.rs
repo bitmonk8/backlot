@@ -391,205 +391,26 @@ mod tests {
         }
     }
 
-    /// Run sandbox-exec with a given profile and return its Output.
-    fn run_sandbox_exec(label: &str, profile: &str) -> std::process::Output {
-        eprintln!("[diag] --- {label} ---");
-        eprintln!("[diag] profile:\n{profile}");
-        let out = std::process::Command::new("/usr/bin/sandbox-exec")
-            .args(["-p", profile, "/bin/echo", "hello"])
-            .output()
-            .expect("sandbox-exec");
-        eprintln!("[diag] exit: {:?}", out.status);
-        eprintln!("[diag] stdout: {:?}", String::from_utf8_lossy(&out.stdout));
-        eprintln!("[diag] stderr: {:?}", String::from_utf8_lossy(&out.stderr));
-        out
-    }
-
     #[test]
-    fn sandbox_exec_diagnostics() {
-        // Progressively restrictive profiles to pinpoint what operation
-        // causes SIGABRT in our generated profile.
-        eprintln!("[diag] === sandbox_exec_diagnostics ===");
-
-        // 1. Fully permissive — if this fails, sandbox-exec itself is broken
-        let out1 = run_sandbox_exec("permissive", "(version 1)(allow default)");
-        assert!(
-            out1.status.success(),
-            "permissive sandbox failed: {:?}\nstderr: {}",
-            out1.status,
-            String::from_utf8_lossy(&out1.stderr)
-        );
-
-        // 2. Deny-default with broad allows covering all major operation classes
-        let broad = "\
-(version 1)
-(deny default)
-(allow process*)
-(allow file*)
-(allow mach*)
-(allow sysctl*)
-(allow signal)
-(allow iokit*)
-(allow ipc*)
-(allow network*)
-(allow system*)
-";
-        let out2 = run_sandbox_exec("broad-allows", broad);
-        assert!(
-            out2.status.success(),
-            "broad-allows sandbox failed: {:?}\nstderr: {}",
-            out2.status,
-            String::from_utf8_lossy(&out2.stderr)
-        );
-
-        // 3. Narrow down: deny-default + only process/file/mach/sysctl/signal
-        let narrow = "\
-(version 1)
-(deny default)
-(allow process*)
-(allow file*)
-(allow mach*)
-(allow sysctl*)
-(allow signal)
-";
-        let out3 = run_sandbox_exec("narrow-allows", narrow);
-        eprintln!("[diag] narrow-allows success: {}", out3.status.success());
-
-        // 4. Our actual generated profile
+    fn sandbox_exec_echo_hello() {
+        // Verify our generated SBPL profile works via sandbox-exec
+        // (bypasses our fork/exec code to test the profile itself).
         let policy = test_policy(vec![PathBuf::from("/usr")]);
         let program = std::path::Path::new("/bin/echo");
         let resolved = std::fs::canonicalize(program).unwrap_or_else(|_| program.to_path_buf());
         let profile = seatbelt::generate_profile(&policy, &resolved);
-        let out4 = run_sandbox_exec("generated-profile", &profile);
-        eprintln!(
-            "[diag] generated-profile success: {}",
-            out4.status.success()
-        );
 
-        // If narrow works but generated doesn't, we need to find the missing
-        // If narrow works but generated doesn't, narrow further.
-        if out3.status.success() && !out4.status.success() {
-            // 5a. file* wildcard with scoped process/mach
-            let p5a = "\
-(version 1)
-(deny default)
-(allow file*)
-(allow process-exec (subpath \"/usr/bin\"))
-(allow process-exec (subpath \"/bin\"))
-(allow process-exec (subpath \"/System/Cryptexes/OS\"))
-(allow process-fork)
-(allow process-info* (target self))
-(allow mach-lookup)
-(allow sysctl-read)
-(allow signal (target self))
-";
-            let o5a = run_sandbox_exec("file-wild+scoped-rest", p5a);
-            eprintln!("[diag] file-wild+scoped-rest: {}", o5a.status.success());
-
-            // 5b. process* wildcard with scoped file
-            let p5b = "\
-(version 1)
-(deny default)
-(allow process*)
-(allow file-read* (subpath \"/\"))
-(allow file-map-executable (subpath \"/\"))
-(allow mach-lookup)
-(allow sysctl-read)
-(allow signal (target self))
-";
-            let o5b = run_sandbox_exec("process-wild+file-read-root", p5b);
-            eprintln!(
-                "[diag] process-wild+file-read-root: {}",
-                o5b.status.success()
-            );
-
-            // 5c. Our profile + system* (maybe missing system-mac-syscall)
-            let p5c = format!("{profile}\n(allow system*)\n");
-            let o5c = run_sandbox_exec("generated+system*", &p5c);
-            eprintln!("[diag] generated+system*: {}", o5c.status.success());
-
-            // 5d. Our profile + iokit* broadened
-            let p5d = format!("{profile}\n(allow iokit*)\n");
-            let o5d = run_sandbox_exec("generated+iokit*", &p5d);
-            eprintln!("[diag] generated+iokit*: {}", o5d.status.success());
-
-            // 5e. Our profile + file-read* root (maybe missing a system path)
-            let p5e = format!(
-                "{profile}\n(allow file-read* (subpath \"/\"))\n(allow file-map-executable (subpath \"/\"))\n"
-            );
-            let o5e = run_sandbox_exec("generated+file-read-root", &p5e);
-            eprintln!("[diag] generated+file-read-root: {}", o5e.status.success());
-
-            // 5f. Our profile + process*
-            let p5f = format!("{profile}\n(allow process*)\n");
-            let o5f = run_sandbox_exec("generated+process*", &p5f);
-            eprintln!("[diag] generated+process*: {}", o5f.status.success());
-
-            // Phase 2: Targeted tests.
-            // Test 1: file-read* on root literal only (not subpath)
-            let p_root_literal = format!("{profile}\n(allow file-read* (literal \"/\"))\n");
-            let o_rl = run_sandbox_exec("generated+root-literal", &p_root_literal);
-            eprintln!("[diag] generated+root-literal: {}", o_rl.status.success());
-
-            // Test 2: file-ioctl (for isatty/tcgetattr)
-            let p_ioctl = format!("{profile}\n(allow file-ioctl)\n");
-            let o_io = run_sandbox_exec("generated+file-ioctl", &p_ioctl);
-            eprintln!("[diag] generated+file-ioctl: {}", o_io.status.success());
-
-            // Test 3: file-write* globally (maybe process writes somewhere)
-            let p_fw = format!("{profile}\n(allow file-write*)\n");
-            let o_fw = run_sandbox_exec("generated+file-write*", &p_fw);
-            eprintln!("[diag] generated+file-write*: {}", o_fw.status.success());
-
-            // Test 4: Combine root-literal + file-ioctl
-            let p_combo =
-                format!("{profile}\n(allow file-read* (literal \"/\"))\n(allow file-ioctl)\n");
-            let o_combo = run_sandbox_exec("generated+root+ioctl", &p_combo);
-            eprintln!("[diag] generated+root+ioctl: {}", o_combo.status.success());
-
-            // Test 5: file-read* for top-level dirs not in our profile
-            let p_toplevel = format!(
-                "{profile}\n\
-                 (allow file-read* (subpath \"/private\"))\n\
-                 (allow file-read* (subpath \"/Library\"))\n\
-                 (allow file-read* (subpath \"/opt\"))\n\
-                 (allow file-read* (subpath \"/Applications\"))\n\
-                 (allow file-read* (literal \"/\"))\n"
-            );
-            let o_tl = run_sandbox_exec("generated+toplevel-combo", &p_toplevel);
-            eprintln!("[diag] generated+toplevel-combo: {}", o_tl.status.success());
-
-            // Test 6: Just /private + /Library
-            let p_pl = format!(
-                "{profile}\n\
-                 (allow file-read* (subpath \"/private\"))\n\
-                 (allow file-read* (subpath \"/Library\"))\n"
-            );
-            let o_pl = run_sandbox_exec("generated+private+library", &p_pl);
-            eprintln!(
-                "[diag] generated+private+library: {}",
-                o_pl.status.success()
-            );
-
-            // Test 7: Just /private
-            let p_priv = format!("{profile}\n(allow file-read* (subpath \"/private\"))\n");
-            let o_priv = run_sandbox_exec("generated+/private", &p_priv);
-            eprintln!("[diag] generated+/private: {}", o_priv.status.success());
-
-            // Test 8: Just /Library (all of it)
-            let p_lib = format!("{profile}\n(allow file-read* (subpath \"/Library\"))\n");
-            let o_lib = run_sandbox_exec("generated+/Library", &p_lib);
-            eprintln!("[diag] generated+/Library: {}", o_lib.status.success());
-        }
-
-        // Final assertion: our generated profile must work
+        let out = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/echo", "hello"])
+            .output()
+            .expect("sandbox-exec");
         assert!(
-            out4.status.success(),
-            "generated profile failed: {:?}\nstderr: {}",
-            out4.status,
-            String::from_utf8_lossy(&out4.stderr)
+            out.status.success(),
+            "sandbox-exec echo failed: {:?}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
         );
-        let stdout = String::from_utf8_lossy(&out4.stdout);
+        let stdout = String::from_utf8_lossy(&out.stdout);
         assert_eq!(stdout.trim(), "hello");
     }
 
