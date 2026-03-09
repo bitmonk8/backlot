@@ -1,16 +1,14 @@
 #![allow(dead_code, clippy::expect_used, clippy::unwrap_used)]
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use flick::config::Config;
 use flick::context::Message;
 use flick::error::ProviderError;
 use flick::model::ReasoningLevel;
-use flick::provider::{
-    DynProvider, ModelResponse, RequestParams, ToolDefinition, UsageResponse,
-};
+use flick::provider::{DynProvider, ModelResponse, RequestParams, ToolDefinition, UsageResponse};
 
 /// Owned mirror of `RequestParams` for test assertions.
 #[derive(Debug)]
@@ -67,9 +65,8 @@ impl DynProvider for MockProvider {
     fn call_boxed<'a>(
         &'a self,
         params: RequestParams<'a>,
-    ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>,
-    > {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
+    {
         self.captured
             .lock()
             .expect("captured mutex poisoned")

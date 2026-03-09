@@ -60,9 +60,14 @@ impl Context {
         Ok(ctx)
     }
 
-    pub fn push_user_text(&mut self, text: impl Into<String>) -> Result<(), crate::error::FlickError> {
+    pub fn push_user_text(
+        &mut self,
+        text: impl Into<String>,
+    ) -> Result<(), crate::error::FlickError> {
         if self.messages.len() >= MAX_CONTEXT_MESSAGES {
-            return Err(crate::error::FlickError::ContextOverflow(MAX_CONTEXT_MESSAGES));
+            return Err(crate::error::FlickError::ContextOverflow(
+                MAX_CONTEXT_MESSAGES,
+            ));
         }
         self.messages.push(Message {
             role: Role::User,
@@ -71,9 +76,14 @@ impl Context {
         Ok(())
     }
 
-    pub fn push_assistant(&mut self, content: Vec<ContentBlock>) -> Result<(), crate::error::FlickError> {
+    pub fn push_assistant(
+        &mut self,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), crate::error::FlickError> {
         if self.messages.len() >= MAX_CONTEXT_MESSAGES {
-            return Err(crate::error::FlickError::ContextOverflow(MAX_CONTEXT_MESSAGES));
+            return Err(crate::error::FlickError::ContextOverflow(
+                MAX_CONTEXT_MESSAGES,
+            ));
         }
         self.messages.push(Message {
             role: Role::Assistant,
@@ -82,16 +92,24 @@ impl Context {
         Ok(())
     }
 
-    pub fn push_tool_results(&mut self, results: Vec<ContentBlock>) -> Result<(), crate::error::FlickError> {
+    pub fn push_tool_results(
+        &mut self,
+        results: Vec<ContentBlock>,
+    ) -> Result<(), crate::error::FlickError> {
         if self.messages.len() >= MAX_CONTEXT_MESSAGES {
-            return Err(crate::error::FlickError::ContextOverflow(MAX_CONTEXT_MESSAGES));
+            return Err(crate::error::FlickError::ContextOverflow(
+                MAX_CONTEXT_MESSAGES,
+            ));
         }
         if results.is_empty() {
             return Err(crate::error::FlickError::InvalidToolResults(
                 "push_tool_results called with empty results".into(),
             ));
         }
-        if !results.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })) {
+        if !results
+            .iter()
+            .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        {
             return Err(crate::error::FlickError::InvalidToolResults(
                 "push_tool_results called with non-ToolResult blocks".into(),
             ));
@@ -178,7 +196,8 @@ mod tests {
         let mut ctx = Context::default();
         ctx.push_assistant(vec![ContentBlock::Text {
             text: "reply".into(),
-        }]).unwrap();
+        }])
+        .unwrap();
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.messages[0].role, Role::Assistant);
     }
@@ -190,7 +209,8 @@ mod tests {
             tool_use_id: "id1".into(),
             content: "output".into(),
             is_error: false,
-        }]).unwrap();
+        }])
+        .unwrap();
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.messages[0].role, Role::User);
     }
@@ -201,7 +221,8 @@ mod tests {
         ctx.push_user_text("test").unwrap();
         ctx.push_assistant(vec![ContentBlock::Text {
             text: "response".into(),
-        }]).unwrap();
+        }])
+        .unwrap();
         let json = serde_json::to_string(&ctx).expect("serialize");
         let restored: Context = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.messages.len(), 2);
@@ -232,23 +253,31 @@ mod tests {
     fn serde_round_trip_with_tool_use() {
         let mut ctx = Context::default();
         ctx.push_assistant(vec![
-            ContentBlock::Text { text: "calling tool".into() },
+            ContentBlock::Text {
+                text: "calling tool".into(),
+            },
             ContentBlock::ToolUse {
                 id: "call_1".into(),
                 name: "read_file".into(),
                 input: serde_json::json!({"path": "/tmp/test"}),
             },
-        ]).unwrap();
+        ])
+        .unwrap();
         ctx.push_tool_results(vec![ContentBlock::ToolResult {
             tool_use_id: "call_1".into(),
             content: "file contents".into(),
             is_error: false,
-        }]).unwrap();
+        }])
+        .unwrap();
         let json = serde_json::to_string(&ctx).expect("serialize");
         let restored: Context = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.messages.len(), 2);
-        assert!(matches!(&restored.messages[0].content[1], ContentBlock::ToolUse { name, .. } if name == "read_file"));
-        assert!(matches!(&restored.messages[1].content[0], ContentBlock::ToolResult { content, is_error, .. } if content == "file contents" && !is_error));
+        assert!(
+            matches!(&restored.messages[0].content[1], ContentBlock::ToolUse { name, .. } if name == "read_file")
+        );
+        assert!(
+            matches!(&restored.messages[1].content[0], ContentBlock::ToolResult { content, is_error, .. } if content == "file contents" && !is_error)
+        );
     }
 
     #[test]
@@ -257,7 +286,8 @@ mod tests {
         ctx.push_assistant(vec![ContentBlock::Thinking {
             text: "reasoning".into(),
             signature: String::new(),
-        }]).unwrap();
+        }])
+        .unwrap();
         let json = serde_json::to_string(&ctx).expect("serialize");
         let restored: Context = serde_json::from_str(&json).expect("deserialize");
         match &restored.messages[0].content[0] {
@@ -271,7 +301,8 @@ mod tests {
 
     #[tokio::test]
     async fn load_from_file_nonexistent_path() {
-        let result = Context::load_from_file(std::path::Path::new("/nonexistent/context.json")).await;
+        let result =
+            Context::load_from_file(std::path::Path::new("/nonexistent/context.json")).await;
         assert!(matches!(result, Err(crate::error::FlickError::Io(_))));
     }
 
@@ -282,7 +313,10 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().expect("create temp file");
         f.write_all(b"not json").expect("write");
         let result = Context::load_from_file(f.path()).await;
-        assert!(matches!(result, Err(crate::error::FlickError::ContextParse(_))));
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::ContextParse(_))
+        ));
     }
 
     #[test]
@@ -320,7 +354,10 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().expect("create temp file");
         f.write_all(br#"{"not_messages": []}"#).expect("write");
         let result = Context::load_from_file(f.path()).await;
-        assert!(matches!(result, Err(crate::error::FlickError::ContextParse(_))));
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::ContextParse(_))
+        ));
     }
 
     #[test]
@@ -357,10 +394,7 @@ mod tests {
             result,
             Err(crate::error::FlickError::InvalidToolResults(_))
         ));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("empty"));
+        assert!(result.unwrap_err().to_string().contains("empty"));
     }
 
     #[test]
@@ -373,10 +407,7 @@ mod tests {
             result,
             Err(crate::error::FlickError::InvalidToolResults(_))
         ));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("non-ToolResult"));
+        assert!(result.unwrap_err().to_string().contains("non-ToolResult"));
     }
 
     // --- load_tool_results tests ---
@@ -399,7 +430,11 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         match &results[0] {
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 assert_eq!(tool_use_id, "tc_1");
                 assert_eq!(content, "file contents");
                 assert!(!is_error);
@@ -408,7 +443,11 @@ mod tests {
         }
 
         match &results[1] {
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 assert_eq!(tool_use_id, "tc_2");
                 assert_eq!(content, "command failed");
                 assert!(*is_error);
@@ -464,7 +503,9 @@ mod tests {
 
     #[tokio::test]
     async fn load_tool_results_nonexistent_file() {
-        let err = load_tool_results(Path::new("/nonexistent/results.json")).await.unwrap_err();
+        let err = load_tool_results(Path::new("/nonexistent/results.json"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, crate::error::FlickError::Io(_)));
     }
 

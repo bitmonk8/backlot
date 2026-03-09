@@ -36,7 +36,8 @@ impl MessagesProvider {
     fn build_body(&self, params: &RequestParams<'_>) -> serde_json::Value {
         // Messages API always requires max_tokens.
         // Resolve: explicit → registry → 8192.
-        let resolved_max = params.max_tokens
+        let resolved_max = params
+            .max_tokens
             .or_else(|| crate::model::default_max_output_tokens(params.model))
             .unwrap_or(8192);
         let mut body = serde_json::json!({
@@ -52,11 +53,8 @@ impl MessagesProvider {
             body["system"] = serde_json::json!(system);
         }
 
-        let messages: Vec<serde_json::Value> = params
-            .messages
-            .iter()
-            .map(convert_message)
-            .collect();
+        let messages: Vec<serde_json::Value> =
+            params.messages.iter().map(convert_message).collect();
         body["messages"] = serde_json::Value::Array(messages);
 
         if !params.tools.is_empty() {
@@ -125,10 +123,7 @@ impl DynProvider for MessagesProvider {
         })
     }
 
-    fn build_request(
-        &self,
-        params: RequestParams<'_>,
-    ) -> Result<serde_json::Value, ProviderError> {
+    fn build_request(&self, params: RequestParams<'_>) -> Result<serde_json::Value, ProviderError> {
         Ok(self.build_body(&params))
     }
 }
@@ -209,30 +204,26 @@ fn convert_message(msg: &Message) -> serde_json::Value {
         .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => {
-                Some(serde_json::json!({"type": "text", "text": text}))
-            }
+            ContentBlock::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
             // Omit thinking blocks with empty signature — unsigned thinking is
             // invalid for round-tripping and would cause an API validation error.
             ContentBlock::Thinking { signature, .. } if signature.is_empty() => None,
-            ContentBlock::Thinking { text, signature } => {
-                Some(serde_json::json!({"type": "thinking", "thinking": text, "signature": signature}))
-            }
-            ContentBlock::ToolUse { id, name, input } => {
-                Some(serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input}))
-            }
+            ContentBlock::Thinking { text, signature } => Some(
+                serde_json::json!({"type": "thinking", "thinking": text, "signature": signature}),
+            ),
+            ContentBlock::ToolUse { id, name, input } => Some(
+                serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input}),
+            ),
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            } => {
-                Some(serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": content,
-                    "is_error": is_error,
-                }))
-            }
+            } => Some(serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "is_error": is_error,
+            })),
         })
         .collect();
     serde_json::json!({"role": role, "content": content})
@@ -410,7 +401,9 @@ mod tests {
         let tools = vec![crate::provider::ToolDefinition {
             name: "read_file".into(),
             description: "Read a file".into(),
-            input_schema: Some(serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}})),
+            input_schema: Some(
+                serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            ),
         }];
         let params = crate::provider::RequestParams {
             model: "claude-sonnet-4-20250514",

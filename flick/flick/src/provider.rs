@@ -1,6 +1,6 @@
-pub mod messages;
 pub mod chat_completions;
 pub mod http;
+pub mod messages;
 
 use std::pin::Pin;
 
@@ -78,10 +78,7 @@ impl DynProvider for ProviderInstance {
         }
     }
 
-    fn build_request(
-        &self,
-        params: RequestParams<'_>,
-    ) -> Result<serde_json::Value, ProviderError> {
+    fn build_request(&self, params: RequestParams<'_>) -> Result<serde_json::Value, ProviderError> {
         match self {
             Self::Messages(p) => DynProvider::build_request(p, params),
             Self::ChatCompletions(p) => DynProvider::build_request(p, params),
@@ -116,10 +113,7 @@ pub trait DynProvider: Send + Sync {
         params: RequestParams<'a>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>;
 
-    fn build_request(
-        &self,
-        params: RequestParams<'_>,
-    ) -> Result<serde_json::Value, ProviderError>;
+    fn build_request(&self, params: RequestParams<'_>) -> Result<serde_json::Value, ProviderError>;
 }
 
 #[cfg(test)]
@@ -152,7 +146,12 @@ mod tests {
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&config, "test-key".into(), "https://custom.anthropic.com", reqwest::Client::new());
+        let provider = create_provider(
+            &config,
+            "test-key".into(),
+            "https://custom.anthropic.com",
+            reqwest::Client::new(),
+        );
         match &provider {
             ProviderInstance::Messages(p) => {
                 assert_eq!(p.base_url(), "https://custom.anthropic.com");
@@ -170,7 +169,12 @@ mod tests {
                 explicit_tool_choice_auto: true,
             }),
         };
-        let provider = create_provider(&config, "test-key".into(), "https://custom.openai.com", reqwest::Client::new());
+        let provider = create_provider(
+            &config,
+            "test-key".into(),
+            "https://custom.openai.com",
+            reqwest::Client::new(),
+        );
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert_eq!(p.base_url(), "https://custom.openai.com");
@@ -187,7 +191,12 @@ mod tests {
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&messages_config, "key".into(), "https://api.anthropic.com", reqwest::Client::new());
+        let provider = create_provider(
+            &messages_config,
+            "key".into(),
+            "https://api.anthropic.com",
+            reqwest::Client::new(),
+        );
         match &provider {
             ProviderInstance::Messages(p) => {
                 assert_eq!(p.base_url(), "https://api.anthropic.com");
@@ -200,7 +209,12 @@ mod tests {
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&openai_config, "key".into(), "https://api.openai.com", reqwest::Client::new());
+        let provider = create_provider(
+            &openai_config,
+            "key".into(),
+            "https://api.openai.com",
+            reqwest::Client::new(),
+        );
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert_eq!(p.base_url(), "https://api.openai.com");
@@ -216,7 +230,12 @@ mod tests {
             credential: None,
             compat: None,
         };
-        let provider = create_provider(&config, "key".into(), "https://api.openai.com", reqwest::Client::new());
+        let provider = create_provider(
+            &config,
+            "key".into(),
+            "https://api.openai.com",
+            reqwest::Client::new(),
+        );
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert!(!p.compat().explicit_tool_choice_auto);

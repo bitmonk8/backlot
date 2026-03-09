@@ -66,8 +66,8 @@ pub async fn record(
         context_hash: context_hash.to_string(),
     };
 
-    let mut line = serde_json::to_string(&entry)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut line =
+        serde_json::to_string(&entry).map_err(|e| std::io::Error::other(e.to_string()))?;
     line.push('\n');
 
     // Append to history file
@@ -174,8 +174,7 @@ mod tests {
             .expect("read history");
         let lines: Vec<&str> = history.trim().lines().collect();
         assert_eq!(lines.len(), 1);
-        let entry: serde_json::Value =
-            serde_json::from_str(lines[0]).expect("parse history line");
+        let entry: serde_json::Value = serde_json::from_str(lines[0]).expect("parse history line");
         assert!(entry["timestamp"].is_string());
         assert_eq!(entry["context_hash"].as_str().expect("hash"), hash);
     }

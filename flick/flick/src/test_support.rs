@@ -58,9 +58,8 @@ impl DynProvider for SingleShotProvider {
     fn call_boxed<'a>(
         &'a self,
         _params: RequestParams<'a>,
-    ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>,
-    > {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
+    {
         #[allow(clippy::expect_used)]
         let response = self
             .response
@@ -98,9 +97,8 @@ impl DynProvider for MultiShotProvider {
     fn call_boxed<'a>(
         &'a self,
         _params: RequestParams<'a>,
-    ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>,
-    > {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
+    {
         #[allow(clippy::expect_used)]
         let result = self
             .responses
@@ -127,9 +125,8 @@ impl DynProvider for StubBuildProvider {
     fn call_boxed<'a>(
         &'a self,
         _params: RequestParams<'a>,
-    ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>,
-    > {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
+    {
         Box::pin(async { unreachable!("StubBuildProvider::call_boxed must not be called") })
     }
 

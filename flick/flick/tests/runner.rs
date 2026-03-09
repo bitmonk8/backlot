@@ -6,12 +6,12 @@ use common::*;
 
 use std::pin::Pin;
 
-use flick::runner;
 use flick::config::Config;
 use flick::context::{ContentBlock, Context};
 use flick::error::{FlickError, ProviderError};
 use flick::provider::{DynProvider, ModelResponse, RequestParams, UsageResponse};
 use flick::result::ResultStatus;
+use flick::runner;
 
 fn test_config() -> Config {
     Config::parse_yaml(
@@ -77,7 +77,10 @@ async fn run_single_call_complete() {
     assert_eq!(result.content.len(), 1);
     assert!(matches!(&result.content[0], ContentBlock::Text { text } if text == "done"));
 
-    assert!(result.context_hash.is_none(), "context_hash should be None (computed by main.rs, not runner::run)");
+    assert!(
+        result.context_hash.is_none(),
+        "context_hash should be None (computed by main.rs, not runner::run)"
+    );
 
     let usage = result.usage.unwrap();
     assert_eq!(usage.input_tokens, 100);
@@ -120,9 +123,7 @@ async fn run_provider_error_propagates() {
             &'a self,
             _params: RequestParams<'a>,
         ) -> Pin<
-            Box<
-                dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a,
-            >,
+            Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>,
         > {
             Box::pin(async {
                 Err(ProviderError::Api {
@@ -277,14 +278,18 @@ async fn run_mixed_text_and_tool_calls() {
     // Assistant message added to context
     assert_eq!(context.messages.len(), 2);
     let assistant = &context.messages[1];
-    assert!(assistant
-        .content
-        .iter()
-        .any(|b| matches!(b, ContentBlock::Text { .. })));
-    assert!(assistant
-        .content
-        .iter()
-        .any(|b| matches!(b, ContentBlock::ToolUse { .. })));
+    assert!(
+        assistant
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { .. }))
+    );
+    assert!(
+        assistant
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+    );
 }
 
 /// Provider params are forwarded correctly from config.
@@ -325,9 +330,7 @@ pricing:
     let mut context = Context::default();
     context.push_user_text("test query").unwrap();
 
-    runner::run(&config, &provider, &mut context)
-        .await
-        .unwrap();
+    runner::run(&config, &provider, &mut context).await.unwrap();
 
     let captured = provider.captured_params();
     assert_eq!(captured.len(), 1);
@@ -380,9 +383,14 @@ async fn run_malformed_tool_arguments_error() {
     let mut context = Context::default();
     context.push_user_text("test").unwrap();
 
-    let err = runner::run(&config, &provider, &mut context).await.unwrap_err();
+    let err = runner::run(&config, &provider, &mut context)
+        .await
+        .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("malformed tool call arguments"), "unexpected error: {msg}");
+    assert!(
+        msg.contains("malformed tool call arguments"),
+        "unexpected error: {msg}"
+    );
     assert!(msg.contains("read_file"), "should mention tool name: {msg}");
 }
 
@@ -417,19 +425,17 @@ async fn run_context_overflow_propagates() {
         if i % 2 == 0 {
             context.push_user_text(format!("msg {i}")).unwrap();
         } else {
-            context.push_assistant(vec![ContentBlock::Text {
-                text: format!("msg {i}"),
-            }])
-            .unwrap();
+            context
+                .push_assistant(vec![ContentBlock::Text {
+                    text: format!("msg {i}"),
+                }])
+                .unwrap();
         }
     }
     assert_eq!(context.messages.len(), 1024);
 
     let result = runner::run(&config, &provider, &mut context).await;
-    assert!(matches!(
-        result,
-        Err(FlickError::ContextOverflow(1024))
-    ));
+    assert!(matches!(result, Err(FlickError::ContextOverflow(1024))));
 }
 
 /// `build_content` preserves ordering: thinking, then text, then `tool_use`.
@@ -609,9 +615,7 @@ pricing:
     )
     .expect("test config should parse");
 
-    let provider = MockProvider::new(vec![
-        text_response(r#"{"answer":"42"}"#, 100, 50),
-    ]);
+    let provider = MockProvider::new(vec![text_response(r#"{"answer":"42"}"#, 100, 50)]);
     let mut context = Context::default();
     context.push_user_text("test").unwrap();
 
@@ -654,9 +658,7 @@ pricing:
     )
     .expect("test config should parse");
 
-    let provider = MockProvider::new(vec![
-        text_response(r#"{"answer":"42"}"#, 100, 50),
-    ]);
+    let provider = MockProvider::new(vec![text_response(r#"{"answer":"42"}"#, 100, 50)]);
     let mut context = Context::default();
     context.push_user_text("test").unwrap();
 

@@ -71,11 +71,7 @@ impl ChatCompletionsProvider {
         body["messages"] = serde_json::Value::Array(messages);
 
         if !params.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = params
-                .tools
-                .iter()
-                .map(convert_tool)
-                .collect();
+            let tools: Vec<serde_json::Value> = params.tools.iter().map(convert_tool).collect();
             body["tools"] = serde_json::Value::Array(tools);
 
             if self.compat.explicit_tool_choice_auto {
@@ -110,7 +106,9 @@ impl DynProvider for ChatCompletionsProvider {
     {
         Box::pin(async move {
             if params.messages.is_empty() {
-                return Err(ProviderError::ResponseParse("messages array is empty".into()));
+                return Err(ProviderError::ResponseParse(
+                    "messages array is empty".into(),
+                ));
             }
             let body = self.build_body(&params);
             let url = format!("{}/v1/chat/completions", self.base_url);
@@ -127,12 +125,11 @@ impl DynProvider for ChatCompletionsProvider {
         })
     }
 
-    fn build_request(
-        &self,
-        params: RequestParams<'_>,
-    ) -> Result<serde_json::Value, ProviderError> {
+    fn build_request(&self, params: RequestParams<'_>) -> Result<serde_json::Value, ProviderError> {
         if params.messages.is_empty() {
-            return Err(ProviderError::ResponseParse("messages array is empty".into()));
+            return Err(ProviderError::ResponseParse(
+                "messages array is empty".into(),
+            ));
         }
         Ok(self.build_body(&params))
     }
@@ -276,7 +273,7 @@ fn convert_tool(tool: &ToolDefinition) -> serde_json::Value {
 }
 
 /// Recursively walk a JSON schema value and ensure every object-typed schema
-/// has `"additionalProperties": false`, as required by OpenAI strict mode.
+/// has `"additionalProperties": false`, as required by `OpenAI` strict mode.
 fn enforce_no_additional_properties(schema: &mut serde_json::Value) {
     let Some(obj) = schema.as_object_mut() else {
         return;
@@ -345,9 +342,9 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
             if text.is_none() && tool_calls.is_empty() {
                 if let Some(refusal) = message["refusal"].as_str() {
                     if !refusal.is_empty() {
-                        return Err(ProviderError::ResponseParse(
-                            format!("model refused: {refusal}"),
-                        ));
+                        return Err(ProviderError::ResponseParse(format!(
+                            "model refused: {refusal}"
+                        )));
                     }
                 }
             }
@@ -356,12 +353,8 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
 
     // Usage
     let usage_obj = &json["usage"];
-    let (input_tokens, output_tokens) = extract_token_pair(
-        usage_obj,
-        "prompt_tokens",
-        "completion_tokens",
-    )
-    .unwrap_or((0, 0));
+    let (input_tokens, output_tokens) =
+        extract_token_pair(usage_obj, "prompt_tokens", "completion_tokens").unwrap_or((0, 0));
     let cached = usage_obj
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
@@ -607,7 +600,8 @@ mod tests {
     fn build_body_with_output_schema() {
         let provider = make_provider();
         let (msgs, tools) = minimal_params();
-        let schema = serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}});
+        let schema =
+            serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}});
         let params = RequestParams {
             model: "gpt-4o",
             max_tokens: Some(1024),
@@ -680,7 +674,10 @@ mod tests {
             }],
         };
         let messages = convert_message(&msg);
-        assert!(messages.is_empty(), "thinking-only assistant message should produce empty vec");
+        assert!(
+            messages.is_empty(),
+            "thinking-only assistant message should produce empty vec"
+        );
     }
 
     #[test]
@@ -853,7 +850,8 @@ mod tests {
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5}
         });
-        let resp = parse_response(&json).expect("refusal should be ignored when tool_calls present");
+        let resp =
+            parse_response(&json).expect("refusal should be ignored when tool_calls present");
         assert!(resp.text.is_none());
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].tool_name, "read_file");
@@ -964,8 +962,14 @@ mod tests {
         let result = convert_tool(&tool);
         assert_eq!(result["function"]["strict"], true);
         assert_eq!(result["function"]["parameters"]["type"], "object");
-        assert_eq!(result["function"]["parameters"]["properties"], serde_json::json!({}));
-        assert_eq!(result["function"]["parameters"]["additionalProperties"], false);
+        assert_eq!(
+            result["function"]["parameters"]["properties"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            result["function"]["parameters"]["additionalProperties"],
+            false
+        );
     }
 
     #[tokio::test]
@@ -1018,7 +1022,7 @@ mod tests {
         }
     }
 
-    /// In debug builds, a User message with ToolUse blocks triggers the debug_assert.
+    /// In debug builds, a User message with `ToolUse` blocks triggers the `debug_assert`.
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "user message contains ToolUse blocks")]
@@ -1068,5 +1072,4 @@ mod tests {
             "user messages must not have tool_calls"
         );
     }
-
 }

@@ -1,4 +1,3 @@
-pub mod runner;
 pub mod config;
 pub mod context;
 pub mod credential;
@@ -8,6 +7,7 @@ pub mod model;
 pub mod model_list;
 pub mod provider;
 pub mod result;
+pub mod runner;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
@@ -81,11 +81,7 @@ impl FlickClient {
 
     /// Single-shot query. Pushes the query as a user message, makes one model
     /// call, and returns the result. The caller owns and passes the `Context`.
-    pub async fn run(
-        &self,
-        query: &str,
-        context: &mut Context,
-    ) -> Result<FlickResult, FlickError> {
+    pub async fn run(&self, query: &str, context: &mut Context) -> Result<FlickResult, FlickError> {
         context.push_user_text(query)?;
         runner::run(&self.config, self.provider.as_ref(), context).await
     }
@@ -102,10 +98,7 @@ impl FlickClient {
     }
 
     /// Build the API request body without sending it (dry-run).
-    pub fn build_request(
-        &self,
-        query: &str,
-    ) -> Result<serde_json::Value, FlickError> {
+    pub fn build_request(&self, query: &str) -> Result<serde_json::Value, FlickError> {
         let mut context = Context::default();
         context.push_user_text(query)?;
         let tool_defs: Vec<provider::ToolDefinition> = self
@@ -203,13 +196,18 @@ tools:
 
     #[tokio::test]
     async fn run_returns_text_response() {
-        let client = FlickClient::new(minimal_config(), SingleShotProvider::with_text("Hello back"));
+        let client = FlickClient::new(
+            minimal_config(),
+            SingleShotProvider::with_text("Hello back"),
+        );
         let mut ctx = Context::default();
         let result = client.run("Hello", &mut ctx).await.unwrap();
-        assert!(result
-            .content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Text { text } if text == "Hello back")));
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == "Hello back"))
+        );
     }
 
     #[tokio::test]
@@ -244,10 +242,12 @@ tools:
             is_error: false,
         }];
         let result = client.resume(&mut ctx, tool_results).await.unwrap();
-        assert!(result
-            .content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Text { text } if text == "Done reading")));
+        assert!(
+            result
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == "Done reading"))
+        );
     }
 
     #[tokio::test]

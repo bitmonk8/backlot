@@ -78,7 +78,6 @@ pub enum ConfigError {
 
     #[error("invalid model config: {0}")]
     InvalidModelConfig(String),
-
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -117,7 +116,6 @@ pub enum CredentialError {
     InvalidFormat(String),
 }
 
-
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -125,19 +123,29 @@ mod tests {
 
     #[test]
     fn display_provider_error_variants() {
-        let api = ProviderError::Api { status: 500, message: "internal".into() };
+        let api = ProviderError::Api {
+            status: 500,
+            message: "internal".into(),
+        };
         assert_eq!(api.to_string(), "API error (500): internal");
 
         let rp = ProviderError::ResponseParse("bad data".into());
         assert_eq!(rp.to_string(), "response parse error: bad data");
 
-        let rl_with = ProviderError::RateLimited { retry_after_ms: Some(3000) };
+        let rl_with = ProviderError::RateLimited {
+            retry_after_ms: Some(3000),
+        };
         assert!(rl_with.to_string().contains("3000ms"));
 
-        let rl_without = ProviderError::RateLimited { retry_after_ms: None };
+        let rl_without = ProviderError::RateLimited {
+            retry_after_ms: None,
+        };
         assert_eq!(rl_without.to_string(), "rate limited");
 
-        assert_eq!(ProviderError::AuthFailed.to_string(), "authentication failed");
+        assert_eq!(
+            ProviderError::AuthFailed.to_string(),
+            "authentication failed"
+        );
     }
 
     #[test]
@@ -164,17 +172,41 @@ mod tests {
 
     #[test]
     fn display_credential_error_variants() {
-        assert!(CredentialError::NotFound("openai".into()).to_string().contains("openai"));
-        assert!(CredentialError::DecryptionFailed("test".into()).to_string().contains("test"));
-        assert!(CredentialError::NoSecretKey(PathBuf::from("/key")).to_string().contains("/key"));
-        assert!(CredentialError::InvalidFormat("bad".into()).to_string().contains("bad"));
+        assert!(
+            CredentialError::NotFound("openai".into())
+                .to_string()
+                .contains("openai")
+        );
+        assert!(
+            CredentialError::DecryptionFailed("test".into())
+                .to_string()
+                .contains("test")
+        );
+        assert!(
+            CredentialError::NoSecretKey(PathBuf::from("/key"))
+                .to_string()
+                .contains("/key")
+        );
+        assert!(
+            CredentialError::InvalidFormat("bad".into())
+                .to_string()
+                .contains("bad")
+        );
     }
 
     #[test]
     fn display_flick_error_variants() {
         assert!(FlickError::NoQuery.to_string().contains("no query"));
-        assert!(FlickError::InvalidArguments("bad".into()).to_string().contains("bad"));
-        assert!(FlickError::InvalidToolResults("empty".into()).to_string().contains("empty"));
+        assert!(
+            FlickError::InvalidArguments("bad".into())
+                .to_string()
+                .contains("bad")
+        );
+        assert!(
+            FlickError::InvalidToolResults("empty".into())
+                .to_string()
+                .contains("empty")
+        );
     }
 
     #[test]
@@ -244,7 +276,9 @@ mod tests {
 
     #[tokio::test]
     async fn code_provider_http() {
-        let err = reqwest::get("http://[::1]:1").await.expect_err("connection should fail");
+        let err = reqwest::get("http://[::1]:1")
+            .await
+            .expect_err("connection should fail");
         let e = FlickError::Provider(ProviderError::Http(err));
         assert_eq!(e.code(), "provider_http_error");
     }

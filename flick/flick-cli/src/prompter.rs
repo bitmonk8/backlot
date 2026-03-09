@@ -6,13 +6,11 @@ pub trait Prompter {
     fn password(&self, prompt: &str) -> Result<String, FlickError>;
 
     /// Display a selection list. Returns the index of the selected item.
-    fn select(&self, prompt: &str, items: &[String], default: usize)
-        -> Result<usize, FlickError>;
+    fn select(&self, prompt: &str, items: &[String], default: usize) -> Result<usize, FlickError>;
 
     /// Display a text input with an optional default.
     /// Returns the entered string (or default if empty).
-    fn input(&self, prompt: &str, default: Option<&str>)
-        -> Result<String, FlickError>;
+    fn input(&self, prompt: &str, default: Option<&str>) -> Result<String, FlickError>;
 
     /// Print a message to the user (stderr).
     fn message(&self, msg: &str) -> Result<(), FlickError>;
@@ -43,7 +41,9 @@ impl Prompter for TerminalPrompter {
 
         let map_io = |e| FlickError::Io(std::io::Error::other(e));
 
-        self.term.write_str(&format!("{prompt}: ")).map_err(map_io)?;
+        self.term
+            .write_str(&format!("{prompt}: "))
+            .map_err(map_io)?;
         self.term.flush().map_err(map_io)?;
 
         let mut input = String::new();
@@ -75,12 +75,7 @@ impl Prompter for TerminalPrompter {
         Ok(input)
     }
 
-    fn select(
-        &self,
-        prompt: &str,
-        items: &[String],
-        default: usize,
-    ) -> Result<usize, FlickError> {
+    fn select(&self, prompt: &str, items: &[String], default: usize) -> Result<usize, FlickError> {
         dialoguer::Select::new()
             .with_prompt(prompt)
             .items(items)
@@ -135,22 +130,28 @@ impl MockPrompter {
 
     #[must_use]
     pub fn with_passwords(self, passwords: Vec<String>) -> Self {
-        *self.passwords.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-            passwords.into_iter().collect();
+        *self
+            .passwords
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = passwords.into_iter().collect();
         self
     }
 
     #[must_use]
     pub fn with_selects(self, selects: Vec<usize>) -> Self {
-        *self.selects.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-            selects.into_iter().collect();
+        *self
+            .selects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = selects.into_iter().collect();
         self
     }
 
     #[must_use]
     pub fn with_inputs(self, inputs: Vec<String>) -> Self {
-        *self.inputs.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-            inputs.into_iter().collect();
+        *self
+            .inputs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = inputs.into_iter().collect();
         self
     }
 

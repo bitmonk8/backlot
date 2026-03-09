@@ -6,11 +6,11 @@ use std::pin::Pin;
 
 use common::*;
 
-use flick::runner;
 use flick::context::{ContentBlock, Context};
 use flick::error::{FlickError, ProviderError};
 use flick::provider::{DynProvider, ModelResponse, RequestParams, ThinkingContent, UsageResponse};
 use flick::result::{FlickResult, ResultError, ResultStatus, UsageSummary};
+use flick::runner;
 use xxhash_rust::xxh3::xxh3_128;
 
 // -- Integration tests --------------------------------------------------------
@@ -45,10 +45,12 @@ pricing:
         .expect("should succeed");
 
     assert_eq!(result.status, ResultStatus::Complete);
-    assert!(result
-        .content
-        .iter()
-        .any(|b| matches!(b, ContentBlock::Text { text } if text == "Hello world")));
+    assert!(
+        result
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text == "Hello world"))
+    );
 
     let usage = result.usage.expect("usage should be present");
     assert_eq!(usage.input_tokens, 50);
@@ -359,9 +361,8 @@ impl DynProvider for ErrorProvider {
     fn call_boxed<'a>(
         &'a self,
         _params: RequestParams<'a>,
-    ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>,
-    > {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
+    {
         Box::pin(async { Err(ProviderError::AuthFailed) })
     }
 
@@ -486,10 +487,12 @@ fn error_result_json_output_format() {
 
     assert_eq!(parsed["status"], "error");
     assert_eq!(parsed["error"]["code"], "no_query");
-    assert!(parsed["error"]["message"]
-        .as_str()
-        .expect("message str")
-        .contains("no query"));
+    assert!(
+        parsed["error"]["message"]
+            .as_str()
+            .expect("message str")
+            .contains("no query")
+    );
     // Empty content and None fields should be omitted
     assert!(parsed.get("content").is_none());
     assert!(parsed.get("usage").is_none());
@@ -563,7 +566,9 @@ pricing:
     // Must be exactly 32 lowercase hex characters
     assert_eq!(hash_hex.len(), 32);
     assert!(
-        hash_hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        hash_hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "hash should be 32 lowercase hex chars, got: {hash_hex}"
     );
 

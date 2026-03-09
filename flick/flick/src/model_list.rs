@@ -44,9 +44,7 @@ fn parse_model_response(body: &serde_json::Value) -> Result<Vec<FetchedModel>, F
         .get("data")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
-            FlickError::Io(std::io::Error::other(
-                "model response missing 'data' array",
-            ))
+            FlickError::Io(std::io::Error::other("model response missing 'data' array"))
         })?;
 
     let mut models = Vec::new();
@@ -74,7 +72,8 @@ impl ModelFetcher for HttpModelFetcher {
         base_url: &'a str,
         api_key: &'a str,
         api: ApiKind,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<FetchedModel>, FlickError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<FetchedModel>, FlickError>> + Send + 'a>>
+    {
         Box::pin(async move {
             let root = base_url.trim_end_matches('/');
             let url = format!("{root}/v1/models");
@@ -117,12 +116,9 @@ impl ModelFetcher for HttpModelFetcher {
                         FlickError::Io(std::io::Error::other(format!("model fetch: {e}")))
                     })?;
                     if fallback_resp.status().is_success() {
-                        let body: serde_json::Value =
-                            fallback_resp.json().await.map_err(|e| {
-                                FlickError::Io(std::io::Error::other(format!(
-                                    "model fetch parse: {e}"
-                                )))
-                            })?;
+                        let body: serde_json::Value = fallback_resp.json().await.map_err(|e| {
+                            FlickError::Io(std::io::Error::other(format!("model fetch parse: {e}")))
+                        })?;
                         return parse_model_response(&body);
                     }
                 }
@@ -136,10 +132,9 @@ impl ModelFetcher for HttpModelFetcher {
                 ))));
             }
 
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| FlickError::Io(std::io::Error::other(format!("model fetch parse: {e}"))))?;
+            let body: serde_json::Value = response.json().await.map_err(|e| {
+                FlickError::Io(std::io::Error::other(format!("model fetch parse: {e}")))
+            })?;
 
             parse_model_response(&body)
         })
@@ -341,9 +336,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/models"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
             .expect(1)
             .mount(&server)
             .await;
@@ -377,5 +370,4 @@ mod tests {
             .await;
         assert!(result.is_err());
     }
-
 }

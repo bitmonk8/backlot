@@ -67,8 +67,7 @@ mod tests {
             context_hash: Some("abc123".into()),
             error: None,
         };
-        let json: serde_json::Value =
-            serde_json::to_value(&result).expect("serialize");
+        let json: serde_json::Value = serde_json::to_value(&result).expect("serialize");
         assert_eq!(json["status"], "complete");
         assert_eq!(json["content"][0]["text"], "Done.");
         assert_eq!(json["usage"]["input_tokens"], 2400);
@@ -101,8 +100,7 @@ mod tests {
             context_hash: Some("00a1b2c3".into()),
             error: None,
         };
-        let json: serde_json::Value =
-            serde_json::to_value(&result).expect("serialize");
+        let json: serde_json::Value = serde_json::to_value(&result).expect("serialize");
         assert_eq!(json["status"], "tool_calls_pending");
         assert_eq!(json["content"].as_array().expect("content array").len(), 2);
         assert_eq!(json["usage"]["cache_creation_input_tokens"], 800);
@@ -121,8 +119,7 @@ mod tests {
                 code: "rate_limit".into(),
             }),
         };
-        let json: serde_json::Value =
-            serde_json::to_value(&result).expect("serialize");
+        let json: serde_json::Value = serde_json::to_value(&result).expect("serialize");
         assert_eq!(json["status"], "error");
         assert_eq!(json["error"]["message"], "Rate limit exceeded");
         assert_eq!(json["error"]["code"], "rate_limit");
@@ -141,8 +138,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cost_usd: 0.001,
         };
-        let json: serde_json::Value =
-            serde_json::to_value(&usage).expect("serialize");
+        let json: serde_json::Value = serde_json::to_value(&usage).expect("serialize");
         assert!(json.get("cache_creation_input_tokens").is_none());
         assert!(json.get("cache_read_input_tokens").is_none());
         assert_eq!(json["input_tokens"], 100);
@@ -158,8 +154,7 @@ mod tests {
             cache_read_input_tokens: 300,
             cost_usd: 0.005,
         };
-        let json: serde_json::Value =
-            serde_json::to_value(&usage).expect("serialize");
+        let json: serde_json::Value = serde_json::to_value(&usage).expect("serialize");
         assert_eq!(json["cache_creation_input_tokens"], 200);
         assert_eq!(json["cache_read_input_tokens"], 300);
     }

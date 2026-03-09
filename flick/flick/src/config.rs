@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::ApiKind;
 use crate::error::ConfigError;
-use crate::model::{anthropic_budget_tokens, ReasoningLevel};
+use crate::model::{ReasoningLevel, anthropic_budget_tokens};
 use crate::provider::ToolDefinition;
 
 /// Config string format for `Config::from_str`.
@@ -152,9 +152,7 @@ impl Config {
         match ext {
             Some("yaml" | "yml" | "json") => {}
             _ => {
-                return Err(ConfigError::UnsupportedFormat(
-                    path.display().to_string(),
-                ));
+                return Err(ConfigError::UnsupportedFormat(path.display().to_string()));
             }
         }
         let text = tokio::fs::read_to_string(path).await.map_err(|e| {
@@ -224,10 +222,7 @@ impl Config {
 
     /// Override reasoning from CLI `--reasoning` flag. Re-validates
     /// `budget_tokens` constraint; reverts on failure.
-    pub fn override_reasoning(
-        &mut self,
-        reasoning: ReasoningConfig,
-    ) -> Result<(), ConfigError> {
+    pub fn override_reasoning(&mut self, reasoning: ReasoningConfig) -> Result<(), ConfigError> {
         let old = self.model.reasoning.replace(reasoning);
         if let Err(e) = self.validate() {
             self.model.reasoning = old;
@@ -321,9 +316,13 @@ impl Config {
         }
 
         // Reasoning + output_schema is unsupported by the Anthropic API
-        if self.model.reasoning.is_some() && self.output_schema.is_some() && provider.api == ApiKind::Messages {
+        if self.model.reasoning.is_some()
+            && self.output_schema.is_some()
+            && provider.api == ApiKind::Messages
+        {
             return Err(ConfigError::InvalidModelConfig(
-                "reasoning and output_schema cannot be used together (Anthropic API limitation)".into(),
+                "reasoning and output_schema cannot be used together (Anthropic API limitation)"
+                    .into(),
             ));
         }
 
@@ -331,7 +330,9 @@ impl Config {
         if let Some(reasoning) = &self.model.reasoning {
             if provider.api == ApiKind::Messages {
                 let budget = anthropic_budget_tokens(reasoning.level);
-                let effective_max = self.model.max_tokens
+                let effective_max = self
+                    .model
+                    .max_tokens
                     .or_else(|| crate::model::default_max_output_tokens(&self.model.name))
                     .unwrap_or(8192);
                 if budget >= effective_max {
@@ -578,7 +579,10 @@ provider:
         let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         let reasoning = config.model.reasoning.expect("reasoning should be Some");
-        assert!(matches!(reasoning.level, crate::model::ReasoningLevel::High));
+        assert!(matches!(
+            reasoning.level,
+            crate::model::ReasoningLevel::High
+        ));
     }
 
     #[tokio::test]
@@ -627,7 +631,8 @@ provider:
 
     #[tokio::test]
     async fn validate_empty_provider_name() {
-        let yaml = "model:\n  provider: \"\"\n  name: test-model\nprovider:\n  test:\n    api: messages\n";
+        let yaml =
+            "model:\n  provider: \"\"\n  name: test-model\nprovider:\n  test:\n    api: messages\n";
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         assert!(matches!(result, Err(ConfigError::UnknownProvider(_))));
@@ -638,12 +643,15 @@ provider:
         let yaml = "model:\n  provider: test\n  name: test-model\n  max_tokens: 0\nprovider:\n  test:\n    api: messages\n";
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("max_tokens")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("max_tokens"))
+        );
     }
 
     #[tokio::test]
     async fn max_tokens_none_when_omitted() {
-        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\n";
+        let yaml =
+            "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\n";
         let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         assert!(config.model().max_tokens().is_none());
@@ -662,7 +670,9 @@ provider:
         let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: 2.5\nprovider:\n  test:\n    api: chat_completions\n";
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("temperature")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("temperature"))
+        );
     }
 
     #[tokio::test]
@@ -694,7 +704,9 @@ provider:
         let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: 1.5\nprovider:\n  test:\n    api: messages\n";
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("temperature")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("temperature"))
+        );
     }
 
     #[tokio::test]
@@ -710,7 +722,9 @@ provider:
         let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\npricing:\n  input_per_million: -1.0\n  output_per_million: 5.0\n";
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("input_per_million")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("input_per_million"))
+        );
     }
 
     #[tokio::test]
@@ -718,7 +732,9 @@ provider:
         let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\npricing:\n  input_per_million: 3.0\n  output_per_million: -2.0\n";
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("output_per_million")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("output_per_million"))
+        );
     }
 
     #[tokio::test]
@@ -745,7 +761,9 @@ provider:
         let yaml = "model:\n  provider: test\n  name: test-model\n  temperature: -0.5\nprovider:\n  test:\n    api: messages\n";
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("non-negative")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("non-negative"))
+        );
     }
 
     #[tokio::test]
@@ -754,7 +772,9 @@ provider:
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
         // High = 32000, max_tokens = 1024 -> rejected
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("budget_tokens")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("budget_tokens"))
+        );
     }
 
     #[tokio::test]
@@ -779,7 +799,9 @@ provider:
         let f = write_temp_config(yaml);
         let mut config = Config::load(f.path()).await.expect("should parse");
         assert_eq!(config.model().name(), "original-model");
-        config.override_model_name("new-model".into()).expect("override should succeed");
+        config
+            .override_model_name("new-model".into())
+            .expect("override should succeed");
         assert_eq!(config.model().name(), "new-model");
     }
 
@@ -790,7 +812,11 @@ provider:
         let mut config = Config::load(f.path()).await.expect("should parse");
         let result = config.override_model_name(String::new());
         assert!(result.is_err());
-        assert_eq!(config.model().name(), "original-model", "should revert to original");
+        assert_eq!(
+            config.model().name(),
+            "original-model",
+            "should revert to original"
+        );
     }
 
     #[tokio::test]
@@ -799,7 +825,11 @@ provider:
         let f = write_temp_config(yaml);
         let mut config = Config::load(f.path()).await.expect("should parse");
         assert!(config.model().reasoning().is_none());
-        config.override_reasoning(super::ReasoningConfig { level: crate::model::ReasoningLevel::Medium }).expect("override should succeed");
+        config
+            .override_reasoning(super::ReasoningConfig {
+                level: crate::model::ReasoningLevel::Medium,
+            })
+            .expect("override should succeed");
         assert!(config.model().reasoning().is_some());
     }
 
@@ -809,9 +839,14 @@ provider:
         let f = write_temp_config(yaml);
         let mut config = Config::load(f.path()).await.expect("should parse");
         assert!(config.model().reasoning().is_none());
-        let result = config.override_reasoning(super::ReasoningConfig { level: crate::model::ReasoningLevel::High });
+        let result = config.override_reasoning(super::ReasoningConfig {
+            level: crate::model::ReasoningLevel::High,
+        });
         assert!(result.is_err());
-        assert!(config.model().reasoning().is_none(), "should revert to None");
+        assert!(
+            config.model().reasoning().is_none(),
+            "should revert to None"
+        );
     }
 
     #[tokio::test]
@@ -860,7 +895,8 @@ tools:
 
     #[tokio::test]
     async fn tools_empty_array() {
-        let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\n";
+        let yaml =
+            "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\n";
         let f = write_temp_config(yaml);
         let config = Config::load(f.path()).await.expect("should parse");
         assert!(config.tools().is_empty());
@@ -871,7 +907,9 @@ tools:
         let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: \"\"\n    description: empty name\n";
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
-        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("empty")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("empty"))
+        );
     }
 
     #[tokio::test]
@@ -879,7 +917,9 @@ tools:
         let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: first\n  - name: my_tool\n    description: duplicate\n";
         let f = write_temp_config(yaml);
         let result = Config::load(f.path()).await;
-        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("duplicate")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("duplicate"))
+        );
     }
 
     #[test]
@@ -945,8 +985,9 @@ pricing:
             "pricing": { "input_per_million": 3.0, "output_per_million": 15.0 }
         }"#;
         let from_yaml = Config::parse_yaml(yaml).expect("yaml");
-        let from_json: Config =
-            serde_json::from_str(json).map_err(|e| ConfigError::Parse(e.to_string())).expect("json");
+        let from_json: Config = serde_json::from_str(json)
+            .map_err(|e| ConfigError::Parse(e.to_string()))
+            .expect("json");
         from_json.validate().expect("json validate");
 
         assert_eq!(from_yaml.model.name, from_json.model.name);
@@ -1016,7 +1057,9 @@ pricing:
     fn reasoning_plus_output_schema_rejected_messages() {
         let yaml = "model:\n  provider: test\n  name: test-model\n  max_tokens: 64000\n  reasoning:\n    level: medium\nprovider:\n  test:\n    api: messages\noutput_schema:\n  schema:\n    type: object\n";
         let result = Config::parse_yaml(yaml);
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("reasoning") && msg.contains("output_schema")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("reasoning") && msg.contains("output_schema"))
+        );
     }
 
     #[test]
@@ -1034,7 +1077,9 @@ pricing:
     fn tools_empty_description_rejected() {
         let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: \"\"\n";
         let result = Config::parse_yaml(yaml);
-        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("description")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("description"))
+        );
     }
 
     // -- T44: tool parameters must be JSON object --
@@ -1043,14 +1088,18 @@ pricing:
     fn tools_parameters_string_rejected() {
         let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: a tool\n    parameters: \"not an object\"\n";
         let result = Config::parse_yaml(yaml);
-        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object"))
+        );
     }
 
     #[test]
     fn tools_parameters_array_rejected() {
         let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: a tool\n    parameters:\n      - item1\n";
         let result = Config::parse_yaml(yaml);
-        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object"))
+        );
     }
 
     #[test]
@@ -1063,7 +1112,9 @@ pricing:
         let result = config.override_reasoning(ReasoningConfig {
             level: crate::model::ReasoningLevel::Medium,
         });
-        let err_msg = result.expect_err("should reject reasoning + output_schema").to_string();
+        let err_msg = result
+            .expect_err("should reject reasoning + output_schema")
+            .to_string();
         assert!(err_msg.contains("reasoning") && err_msg.contains("output_schema"));
 
         // Verify rollback: reasoning should still be None.
@@ -1085,7 +1136,10 @@ pricing:
         let result = config.override_reasoning(ReasoningConfig {
             level: crate::model::ReasoningLevel::High,
         });
-        assert!(result.is_err(), "high reasoning should be rejected with max_tokens=10001");
+        assert!(
+            result.is_err(),
+            "high reasoning should be rejected with max_tokens=10001"
+        );
 
         // Verify rollback: reasoning should still be Medium.
         assert!(matches!(
@@ -1105,7 +1159,8 @@ pricing:
     fn tools_parameters_number_rejected() {
         let yaml = "model:\n  provider: test\n  name: test-model\nprovider:\n  test:\n    api: messages\ntools:\n  - name: my_tool\n    description: a tool\n    parameters: 42\n";
         let result = Config::parse_yaml(yaml);
-        assert!(matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object"))
+        );
     }
-
 }

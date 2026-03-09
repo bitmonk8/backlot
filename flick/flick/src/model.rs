@@ -26,15 +26,12 @@ pub struct ModelInfo {
 /// (longest registry ID wins). This handles gateway-prefixed model IDs
 /// like `anthropic.claude-opus-4-6-v1-engine-eng` matching `claude-opus-4-6`.
 pub fn resolve_model(id: &str) -> Option<&'static ModelInfo> {
-    BUILTIN_MODELS
-        .iter()
-        .find(|m| m.id == id)
-        .or_else(|| {
-            BUILTIN_MODELS
-                .iter()
-                .filter(|m| id.contains(m.id))
-                .max_by_key(|m| m.id.len())
-        })
+    BUILTIN_MODELS.iter().find(|m| m.id == id).or_else(|| {
+        BUILTIN_MODELS
+            .iter()
+            .filter(|m| id.contains(m.id))
+            .max_by_key(|m| m.id.len())
+    })
 }
 
 /// Map reasoning level to Anthropic `budget_tokens`.
@@ -242,16 +239,35 @@ mod tests {
     fn resolve_model_fuzzy_dated_suffix() {
         // Dated variants should match the short-form registry entry
         let cases = [
-            ("provider.claude-opus-4-5-20251101-extra", "claude-opus-4-5", Some(64_000)),
-            ("provider.claude-sonnet-4-5-20250929-extra", "claude-sonnet-4-5", Some(64_000)),
-            ("provider.claude-opus-4-1-20250805-extra", "claude-opus-4-1", Some(32_000)),
-            ("provider.claude-haiku-4-5-20251001-extra", "claude-haiku-4-5", Some(64_000)),
+            (
+                "provider.claude-opus-4-5-20251101-extra",
+                "claude-opus-4-5",
+                Some(64_000),
+            ),
+            (
+                "provider.claude-sonnet-4-5-20250929-extra",
+                "claude-sonnet-4-5",
+                Some(64_000),
+            ),
+            (
+                "provider.claude-opus-4-1-20250805-extra",
+                "claude-opus-4-1",
+                Some(32_000),
+            ),
+            (
+                "provider.claude-haiku-4-5-20251001-extra",
+                "claude-haiku-4-5",
+                Some(64_000),
+            ),
         ];
         for (gateway_id, expected_match, expected_tokens) in cases {
-            let info = resolve_model(gateway_id)
-                .unwrap_or_else(|| panic!("no match for {gateway_id}"));
+            let info =
+                resolve_model(gateway_id).unwrap_or_else(|| panic!("no match for {gateway_id}"));
             assert_eq!(info.id, expected_match, "wrong match for {gateway_id}");
-            assert_eq!(info.max_output_tokens, expected_tokens, "wrong tokens for {gateway_id}");
+            assert_eq!(
+                info.max_output_tokens, expected_tokens,
+                "wrong tokens for {gateway_id}"
+            );
         }
     }
 
@@ -259,23 +275,37 @@ mod tests {
     fn resolve_model_fuzzy_various_prefixes() {
         // Different gateway prefix styles should all resolve
         let cases = [
-            ("gateway/claude-sonnet-4-6/v1", "claude-sonnet-4-6", Some(64_000)),
-            ("acme.claude-opus-4-20250514-prod", "claude-opus-4-20250514", Some(32_000)),
-            ("proxy.claude-3-5-haiku-20241022-v2", "claude-3-5-haiku-20241022", Some(8_192)),
+            (
+                "gateway/claude-sonnet-4-6/v1",
+                "claude-sonnet-4-6",
+                Some(64_000),
+            ),
+            (
+                "acme.claude-opus-4-20250514-prod",
+                "claude-opus-4-20250514",
+                Some(32_000),
+            ),
+            (
+                "proxy.claude-3-5-haiku-20241022-v2",
+                "claude-3-5-haiku-20241022",
+                Some(8_192),
+            ),
         ];
         for (gateway_id, expected_match, expected_tokens) in cases {
-            let info = resolve_model(gateway_id)
-                .unwrap_or_else(|| panic!("no match for {gateway_id}"));
+            let info =
+                resolve_model(gateway_id).unwrap_or_else(|| panic!("no match for {gateway_id}"));
             assert_eq!(info.id, expected_match, "wrong match for {gateway_id}");
-            assert_eq!(info.max_output_tokens, expected_tokens, "wrong tokens for {gateway_id}");
+            assert_eq!(
+                info.max_output_tokens, expected_tokens,
+                "wrong tokens for {gateway_id}"
+            );
         }
     }
 
     #[test]
     fn resolve_model_fuzzy_picks_longest_match() {
         // "gpt-4o-mini" should match over "gpt-4o"
-        let info = resolve_model("proxy/gpt-4o-mini/v2")
-            .expect("should fuzzy-match gpt-4o-mini");
+        let info = resolve_model("proxy/gpt-4o-mini/v2").expect("should fuzzy-match gpt-4o-mini");
         assert_eq!(info.id, "gpt-4o-mini");
     }
 

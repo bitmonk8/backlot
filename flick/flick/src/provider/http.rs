@@ -13,11 +13,7 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 }
 
 /// Map HTTP error status codes to `ProviderError`.
-pub fn handle_http_error(
-    status: u16,
-    body: String,
-    retry_after_ms: Option<u64>,
-) -> ProviderError {
+pub fn handle_http_error(status: u16, body: String, retry_after_ms: Option<u64>) -> ProviderError {
     match status {
         401 | 403 => ProviderError::AuthFailed,
         429 => ProviderError::RateLimited { retry_after_ms },
@@ -58,9 +54,9 @@ pub(crate) const fn classify_for_retry(err: &ProviderError) -> RetryVerdict {
         ProviderError::Api { status, .. } if *status >= 500 || *status == 408 => {
             RetryVerdict::Retry { delay_ms: None }
         }
-        ProviderError::AuthFailed
-        | ProviderError::ResponseParse(_)
-        | ProviderError::Api { .. } => RetryVerdict::Fail,
+        ProviderError::AuthFailed | ProviderError::ResponseParse(_) | ProviderError::Api { .. } => {
+            RetryVerdict::Fail
+        }
     }
 }
 
@@ -126,8 +122,7 @@ pub async fn request_json(
 ) -> Result<serde_json::Value, ProviderError> {
     let response = send_with_retry(&RetryPolicy::default(), build_request).await?;
     let body = response.text().await.map_err(ProviderError::Http)?;
-    serde_json::from_str(&body)
-        .map_err(|e| ProviderError::ResponseParse(format!("{e}: {body}")))
+    serde_json::from_str(&body).map_err(|e| ProviderError::ResponseParse(format!("{e}: {body}")))
 }
 
 #[cfg(test)]
@@ -152,7 +147,9 @@ mod tests {
         let err = handle_http_error(429, String::new(), None);
         assert!(matches!(
             err,
-            ProviderError::RateLimited { retry_after_ms: None }
+            ProviderError::RateLimited {
+                retry_after_ms: None
+            }
         ));
     }
 

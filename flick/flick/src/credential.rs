@@ -215,8 +215,8 @@ impl CredentialStore {
         &self,
         creds: &BTreeMap<String, StoredProvider>,
     ) -> Result<(), CredentialError> {
-        let text = toml::to_string(creds)
-            .map_err(|e| CredentialError::InvalidFormat(e.to_string()))?;
+        let text =
+            toml::to_string(creds).map_err(|e| CredentialError::InvalidFormat(e.to_string()))?;
         let path = self.credentials_path();
 
         // Write to temp file, set permissions, then rename atomically to prevent
@@ -241,9 +241,8 @@ impl CredentialStore {
 }
 
 pub fn flick_dir() -> Result<PathBuf, CredentialError> {
-    let home = home_dir().ok_or_else(|| {
-        CredentialError::InvalidFormat("HOME/USERPROFILE not set".into())
-    })?;
+    let home = home_dir()
+        .ok_or_else(|| CredentialError::InvalidFormat("HOME/USERPROFILE not set".into()))?;
     Ok(home.join(".flick"))
 }
 
@@ -270,16 +269,16 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 fn restrict_windows_permissions(path: &std::path::Path) -> Result<(), CredentialError> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::{
-        CloseHandle, LocalFree, HANDLE, HLOCAL, ERROR_SUCCESS, WIN32_ERROR,
+        CloseHandle, ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree, WIN32_ERROR,
     };
     use windows::Win32::Security::Authorization::{
-        SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SE_FILE_OBJECT,
-        SET_ACCESS, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+        EXPLICIT_ACCESS_W, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows::Win32::Security::{
-        GetTokenInformation, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE,
-        OBJECT_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID,
-        TOKEN_QUERY, TOKEN_USER, TokenUser,
+        ACL, DACL_SECURITY_INFORMATION, GetTokenInformation, NO_INHERITANCE,
+        OBJECT_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows::core::PCWSTR;
@@ -331,9 +330,8 @@ fn restrict_windows_permissions(path: &std::path::Path) -> Result<(), Credential
     // u64-aligned buffer satisfies TOKEN_USER alignment requirements
     let align_len = (needed as usize).div_ceil(std::mem::size_of::<u64>());
     let mut aligned: Vec<u64> = vec![0u64; align_len];
-    let buffer: &mut [u8] = unsafe {
-        std::slice::from_raw_parts_mut(aligned.as_mut_ptr().cast(), needed as usize)
-    };
+    let buffer: &mut [u8] =
+        unsafe { std::slice::from_raw_parts_mut(aligned.as_mut_ptr().cast(), needed as usize) };
     unsafe {
         GetTokenInformation(
             token,
@@ -403,7 +401,13 @@ fn encrypt(key: &[u8; 32], plaintext: &str, provider: &str) -> Result<String, Cr
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, Payload { msg: plaintext.as_bytes(), aad: provider.as_bytes() })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext.as_bytes(),
+                aad: provider.as_bytes(),
+            },
+        )
         .map_err(|_| CredentialError::InvalidFormat("encryption failed".into()))?;
 
     let mut combined = Vec::with_capacity(NONCE_LEN + ciphertext.len());
@@ -425,7 +429,13 @@ fn decrypt(key: &[u8; 32], value: &str, provider: &str) -> Result<String, Creden
     let nonce = Nonce::from_slice(nonce_bytes);
     let cipher = ChaCha20Poly1305::new(key.into());
     let plaintext = cipher
-        .decrypt(nonce, Payload { msg: ciphertext, aad: provider.as_bytes() })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad: provider.as_bytes(),
+            },
+        )
         .map_err(|_| CredentialError::DecryptionFailed(provider.to_string()))?;
     String::from_utf8(plaintext)
         .map_err(|_| CredentialError::DecryptionFailed(provider.to_string()))
@@ -482,8 +492,24 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
-        store.set("openai", "key1", ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set openai");
-        store.set("anthropic", "key2", ApiKind::Messages, "https://api.anthropic.com").await.expect("set anthropic");
+        store
+            .set(
+                "openai",
+                "key1",
+                ApiKind::ChatCompletions,
+                "https://api.openai.com",
+            )
+            .await
+            .expect("set openai");
+        store
+            .set(
+                "anthropic",
+                "key2",
+                ApiKind::Messages,
+                "https://api.anthropic.com",
+            )
+            .await
+            .expect("set anthropic");
 
         let providers = store.list().await.expect("list");
         assert_eq!(providers.len(), 2);
@@ -507,9 +533,33 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
-        store.set("zebra", "k", ApiKind::ChatCompletions, "https://example.com").await.expect("set");
-        store.set("alpha", "k", ApiKind::ChatCompletions, "https://example.com").await.expect("set");
-        store.set("middle", "k", ApiKind::ChatCompletions, "https://example.com").await.expect("set");
+        store
+            .set(
+                "zebra",
+                "k",
+                ApiKind::ChatCompletions,
+                "https://example.com",
+            )
+            .await
+            .expect("set");
+        store
+            .set(
+                "alpha",
+                "k",
+                ApiKind::ChatCompletions,
+                "https://example.com",
+            )
+            .await
+            .expect("set");
+        store
+            .set(
+                "middle",
+                "k",
+                ApiKind::ChatCompletions,
+                "https://example.com",
+            )
+            .await
+            .expect("set");
 
         let providers = store.list().await.expect("list");
         let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
@@ -522,7 +572,12 @@ mod tests {
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
         store
-            .set("anthropic", "sk-ant-test-key-123", ApiKind::Messages, "https://api.anthropic.com")
+            .set(
+                "anthropic",
+                "sk-ant-test-key-123",
+                ApiKind::Messages,
+                "https://api.anthropic.com",
+            )
             .await
             .expect("set should succeed");
         let entry = store.get("anthropic").await.expect("get should succeed");
@@ -536,8 +591,19 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
-        store.set("provider_a", "key_a", ApiKind::Messages, "https://a.com").await.expect("set a");
-        store.set("provider_b", "key_b", ApiKind::ChatCompletions, "https://b.com").await.expect("set b");
+        store
+            .set("provider_a", "key_a", ApiKind::Messages, "https://a.com")
+            .await
+            .expect("set a");
+        store
+            .set(
+                "provider_b",
+                "key_b",
+                ApiKind::ChatCompletions,
+                "https://b.com",
+            )
+            .await
+            .expect("set b");
 
         assert_eq!(store.get("provider_a").await.expect("get a").key, "key_a");
         assert_eq!(store.get("provider_b").await.expect("get b").key, "key_b");
@@ -548,8 +614,24 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
-        store.set("openai", "old-key", ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set old");
-        store.set("openai", "new-key", ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set new");
+        store
+            .set(
+                "openai",
+                "old-key",
+                ApiKind::ChatCompletions,
+                "https://api.openai.com",
+            )
+            .await
+            .expect("set old");
+        store
+            .set(
+                "openai",
+                "new-key",
+                ApiKind::ChatCompletions,
+                "https://api.openai.com",
+            )
+            .await
+            .expect("set new");
 
         assert_eq!(store.get("openai").await.expect("get").key, "new-key");
     }
@@ -560,7 +642,10 @@ mod tests {
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
         // Set something to create the secret key file
-        store.set("existing", "key", ApiKind::Messages, "https://example.com").await.expect("set");
+        store
+            .set("existing", "key", ApiKind::Messages, "https://example.com")
+            .await
+            .expect("set");
         let result = store.get("nonexistent").await;
         assert!(matches!(result, Err(CredentialError::NotFound(_))));
     }
@@ -591,7 +676,14 @@ mod tests {
         let key_path = dir.path().join(".secret_key");
         std::fs::write(&key_path, "not-hex").expect("write key");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let result = store.set("test", "key-value", ApiKind::Messages, "https://example.com").await;
+        let result = store
+            .set(
+                "test",
+                "key-value",
+                ApiKind::Messages,
+                "https://example.com",
+            )
+            .await;
         assert!(result.is_err());
     }
 
@@ -600,11 +692,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         // Create a valid key first
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        store.set("seed", "value", ApiKind::Messages, "https://example.com").await.expect("initial set");
+        store
+            .set("seed", "value", ApiKind::Messages, "https://example.com")
+            .await
+            .expect("initial set");
         // Corrupt the credentials file
         let creds_path = dir.path().join("credentials");
         std::fs::write(&creds_path, "[[[invalid toml").expect("corrupt file");
-        let result = store.set("test", "new-key", ApiKind::Messages, "https://example.com").await;
+        let result = store
+            .set("test", "new-key", ApiKind::Messages, "https://example.com")
+            .await;
         assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
     }
 
@@ -631,7 +728,15 @@ mod tests {
         let path = dir.path().to_path_buf();
 
         let store1 = CredentialStore::with_dir(path.clone());
-        store1.set("test", "persistent-key", ApiKind::Messages, "https://example.com").await.expect("set");
+        store1
+            .set(
+                "test",
+                "persistent-key",
+                ApiKind::Messages,
+                "https://example.com",
+            )
+            .await
+            .expect("set");
 
         let store2 = CredentialStore::with_dir(path);
         assert_eq!(store2.get("test").await.expect("get").key, "persistent-key");
@@ -642,7 +747,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
         // Create a valid secret key first
-        store.set("seed", "value", ApiKind::Messages, "https://example.com").await.expect("initial set");
+        store
+            .set("seed", "value", ApiKind::Messages, "https://example.com")
+            .await
+            .expect("initial set");
         // Write credentials with integer value instead of string
         let creds_path = dir.path().join("credentials");
         std::fs::write(&creds_path, "provider = 42\n").expect("write");
@@ -657,7 +765,15 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        store.set("test_provider", "secret-key", ApiKind::Messages, "https://example.com").await.expect("set credential");
+        store
+            .set(
+                "test_provider",
+                "secret-key",
+                ApiKind::Messages,
+                "https://example.com",
+            )
+            .await
+            .expect("set credential");
 
         let key_path = dir.path().join(".secret_key");
         let key_perms = std::fs::metadata(&key_path)
@@ -665,7 +781,10 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(key_perms, 0o600, "secret key should be mode 0600, got {key_perms:o}");
+        assert_eq!(
+            key_perms, 0o600,
+            "secret key should be mode 0600, got {key_perms:o}"
+        );
 
         let creds_path = dir.path().join("credentials");
         let creds_perms = std::fs::metadata(&creds_path)
@@ -673,7 +792,10 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(creds_perms, 0o600, "credentials should be mode 0600, got {creds_perms:o}");
+        assert_eq!(
+            creds_perms, 0o600,
+            "credentials should be mode 0600, got {creds_perms:o}"
+        );
     }
 
     #[test]
@@ -710,7 +832,12 @@ mod tests {
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
 
         store
-            .set("provider_a", "original-key", ApiKind::Messages, "https://example.com")
+            .set(
+                "provider_a",
+                "original-key",
+                ApiKind::Messages,
+                "https://example.com",
+            )
             .await
             .expect("initial set");
 
@@ -718,11 +845,24 @@ mod tests {
         let tmp_path = dir.path().join("credentials.tmp");
         std::fs::create_dir_all(&tmp_path).expect("create blocking dir");
 
-        let result = store.set("provider_a", "new-key", ApiKind::Messages, "https://example.com").await;
-        assert!(result.is_err(), "set should fail when temp path is a directory");
+        let result = store
+            .set(
+                "provider_a",
+                "new-key",
+                ApiKind::Messages,
+                "https://example.com",
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "set should fail when temp path is a directory"
+        );
 
         // Original credential must survive
-        let entry = store.get("provider_a").await.expect("get after failed write");
+        let entry = store
+            .get("provider_a")
+            .await
+            .expect("get after failed write");
         assert_eq!(entry.key, "original-key");
 
         // Clean up blocking directory so tempdir drop succeeds
@@ -734,13 +874,11 @@ mod tests {
     #[allow(unsafe_code, clippy::expect_used)]
     fn restrict_windows_permissions_sets_single_ace() {
         use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Foundation::{ERROR_SUCCESS, LocalFree, HLOCAL};
-        use windows::Win32::Security::Authorization::{
-            GetNamedSecurityInfoW, SE_FILE_OBJECT,
-        };
+        use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
         use windows::Win32::Security::{
-            ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION,
-            GetAclInformation, PSECURITY_DESCRIPTOR,
+            ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, GetAclInformation,
+            PSECURITY_DESCRIPTOR,
         };
         use windows::core::PCWSTR;
 

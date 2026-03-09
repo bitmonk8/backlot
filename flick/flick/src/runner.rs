@@ -48,7 +48,9 @@ pub async fn run(
         context.push_assistant(blocks.clone())?;
     }
 
-    let has_tool_use = blocks.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+    let has_tool_use = blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
     let status = if has_tool_use {
         ResultStatus::ToolCallsPending
     } else {
@@ -80,8 +82,8 @@ pub async fn run(
         let total_output = response.usage.output_tokens + response2.usage.output_tokens;
         let total_cache_creation = response.usage.cache_creation_input_tokens
             + response2.usage.cache_creation_input_tokens;
-        let total_cache_read = response.usage.cache_read_input_tokens
-            + response2.usage.cache_read_input_tokens;
+        let total_cache_read =
+            response.usage.cache_read_input_tokens + response2.usage.cache_read_input_tokens;
         let cost_usd = config.compute_cost(total_input, total_output);
 
         return Ok(FlickResult {
@@ -99,10 +101,7 @@ pub async fn run(
         });
     }
 
-    let cost_usd = config.compute_cost(
-        response.usage.input_tokens,
-        response.usage.output_tokens,
-    );
+    let cost_usd = config.compute_cost(response.usage.input_tokens, response.usage.output_tokens);
 
     Ok(FlickResult {
         status,
@@ -135,11 +134,12 @@ fn build_content(response: &ModelResponse) -> Result<Vec<ContentBlock>, FlickErr
     }
 
     for tc in &response.tool_calls {
-        let input: serde_json::Value = serde_json::from_str(&tc.arguments)
-            .map_err(|e| FlickError::Provider(crate::error::ProviderError::ResponseParse(format!(
+        let input: serde_json::Value = serde_json::from_str(&tc.arguments).map_err(|e| {
+            FlickError::Provider(crate::error::ProviderError::ResponseParse(format!(
                 "malformed tool call arguments for '{}': {e}",
                 tc.tool_name
-            ))))?;
+            )))
+        })?;
         content.push(ContentBlock::ToolUse {
             id: tc.call_id.clone(),
             name: tc.tool_name.clone(),

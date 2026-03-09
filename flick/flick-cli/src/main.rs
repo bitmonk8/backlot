@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use xxhash_rust::xxh3::xxh3_128;
 
+use flick::FlickClient;
 use flick::config::Config;
 use flick::context::Context;
 use flick::credential::CredentialStore;
@@ -12,10 +13,9 @@ use flick::error::FlickError;
 use flick::history;
 use flick::model::ReasoningLevel;
 use flick::model_list::{self, ModelFetcher};
-use flick::FlickClient;
 mod prompter;
-use prompter::{Prompter, TerminalPrompter};
 use flick::result::{FlickResult, ResultError, ResultStatus, UsageSummary};
+use prompter::{Prompter, TerminalPrompter};
 
 #[derive(Parser)]
 #[command(name = "flick", version, about = "Ultra-small LLM runner CLI")]
@@ -85,7 +85,17 @@ async fn main() {
             model,
             reasoning,
         } => {
-            if let Err(e) = cmd_run(config, query, resume, tool_results, dry_run, model, reasoning).await {
+            if let Err(e) = cmd_run(
+                config,
+                query,
+                resume,
+                tool_results,
+                dry_run,
+                model,
+                reasoning,
+            )
+            .await
+            {
                 let error_result = FlickResult {
                     status: ResultStatus::Error,
                     content: vec![],
@@ -136,7 +146,11 @@ async fn cmd_run(
 ) -> Result<(), FlickError> {
     // Validate CLI argument combinations (before empty-query check so
     // mutually-exclusive flags produce the more specific error).
-    validate_run_args(query.as_deref(), resume.as_deref(), tool_results_path.as_deref())?;
+    validate_run_args(
+        query.as_deref(),
+        resume.as_deref(),
+        tool_results_path.as_deref(),
+    )?;
 
     // Reject explicitly empty --query before any I/O
     if let Some(ref q) = query {
@@ -187,14 +201,20 @@ async fn cmd_run(
 
     let mut stdout = std::io::stdout().lock();
     let flick_result = cmd_run_core(
-        &client, &mut context, &query_text, tool_results, dry_run, &mut stdout,
-    ).await?;
+        &client,
+        &mut context,
+        &query_text,
+        tool_results,
+        dry_run,
+        &mut stdout,
+    )
+    .await?;
 
     // For non-dry-run runs, compute context hash, write context file, output result
     if let Some(mut result) = flick_result {
         let flick_dir = flick::credential::flick_dir()?;
-        let context_bytes = serde_json::to_vec(&context)
-            .map_err(|e| FlickError::Io(std::io::Error::other(e)))?;
+        let context_bytes =
+            serde_json::to_vec(&context).map_err(|e| FlickError::Io(std::io::Error::other(e)))?;
         let hash = xxh3_128(&context_bytes);
         let hash_hex = format!("{hash:032x}");
 
@@ -208,8 +228,8 @@ async fn cmd_run(
 
         result.context_hash = Some(hash_hex.clone());
 
-        let json = serde_json::to_string(&result)
-            .map_err(|e| FlickError::Io(std::io::Error::other(e)))?;
+        let json =
+            serde_json::to_string(&result).map_err(|e| FlickError::Io(std::io::Error::other(e)))?;
         writeln!(stdout, "{json}").map_err(FlickError::Io)?;
 
         // Record history
@@ -357,7 +377,9 @@ async fn cmd_setup_core(
     let key = prompter.password(&format!("API key for '{provider_name}'"))?;
     if key.trim().is_empty() {
         prompter.message("No key provided, aborting.")?;
-        return Err(FlickError::Io(std::io::Error::other("setup aborted: no key provided")));
+        return Err(FlickError::Io(std::io::Error::other(
+            "setup aborted: no key provided",
+        )));
     }
 
     // API type: infer for known providers, otherwise prompt
@@ -478,9 +500,7 @@ async fn cmd_init_core(
             }
             Ok(_empty) => (prompt_model_name(prompter)?, None),
             Err(e) => {
-                prompter.message(&format!(
-                    "Could not fetch models from provider: {e}"
-                ))?;
+                prompter.message(&format!("Could not fetch models from provider: {e}"))?;
                 (prompt_model_name(prompter)?, None)
             }
         };
@@ -497,10 +517,7 @@ async fn cmd_init_core(
             } else {
                 "Max output tokens (enter 'none' to omit)"
             };
-            let input = prompter.input(
-                prompt_label,
-                Some(&default_max.to_string()),
-            )?;
+            let input = prompter.input(prompt_label, Some(&default_max.to_string()))?;
             if input.trim().eq_ignore_ascii_case("none") {
                 None
             } else {
@@ -508,19 +525,14 @@ async fn cmd_init_core(
             }
         }
         flick::ApiKind::Messages => {
-            let input = prompter.input(
-                "Max output tokens",
-                Some(&default_max.to_string()),
-            )?;
+            let input = prompter.input("Max output tokens", Some(&default_max.to_string()))?;
             Some(parse_max_tokens(&input)?)
         }
     };
 
     // Step 4 — System prompt
-    let system_input = prompter.input(
-        "System prompt",
-        Some("You are Flick, a fast LLM runner."),
-    )?;
+    let system_input =
+        prompter.input("System prompt", Some("You are Flick, a fast LLM runner."))?;
     let system_prompt = {
         let trimmed = system_input.trim();
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
@@ -543,7 +555,9 @@ async fn cmd_init_core(
     if output_path != "-" {
         prompter.message(&format!("Writing config to {output_path}"))?;
     }
-    writer.write_all(yaml_output.as_bytes()).map_err(FlickError::Io)?;
+    writer
+        .write_all(yaml_output.as_bytes())
+        .map_err(FlickError::Io)?;
 
     Ok(())
 }
@@ -614,7 +628,9 @@ fn generate_config_yaml(p: &ConfigGenParams<'_>) -> String {
     let _ = writeln!(out, "  provider: \"{}\"", yaml_escape(p.provider_name));
     let _ = writeln!(out, "  name: \"{}\"", yaml_escape(p.model_name));
     match p.max_tokens {
-        Some(v) => { let _ = writeln!(out, "  max_tokens: {v}"); }
+        Some(v) => {
+            let _ = writeln!(out, "  max_tokens: {v}");
+        }
         None => out.push_str("  # max_tokens: 8192\n"),
     }
     out.push_str("  # temperature: 0.0\n");
@@ -629,7 +645,11 @@ fn generate_config_yaml(p: &ConfigGenParams<'_>) -> String {
     out.push_str("provider:\n");
     let _ = writeln!(out, "  \"{}\":", yaml_escape(p.provider_name));
     let _ = writeln!(out, "    api: \"{}\"", yaml_escape(&p.api.to_string()));
-    let _ = writeln!(out, "    # credential: \"{}\"", yaml_escape(p.provider_name));
+    let _ = writeln!(
+        out,
+        "    # credential: \"{}\"",
+        yaml_escape(p.provider_name)
+    );
     out.push_str("    # compat:\n");
     out.push_str("    #   explicit_tool_choice_auto: false\n");
     out.push('\n');
@@ -702,11 +722,7 @@ mod tests {
 
     #[test]
     fn validate_resume_without_tool_results_rejected() {
-        let result = validate_run_args(
-            None,
-            Some("a1b2c3d4e5f60718a1b2c3d4e5f60718"),
-            None,
-        );
+        let result = validate_run_args(None, Some("a1b2c3d4e5f60718a1b2c3d4e5f60718"), None);
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
         assert!(err.to_string().contains("--resume requires --tool-results"));
@@ -714,11 +730,7 @@ mod tests {
 
     #[test]
     fn validate_tool_results_without_resume_rejected() {
-        let result = validate_run_args(
-            None,
-            None,
-            Some(std::path::Path::new("results.json")),
-        );
+        let result = validate_run_args(None, None, Some(std::path::Path::new("results.json")));
         let err = result.unwrap_err();
         assert!(matches!(err, FlickError::InvalidArguments(_)));
         assert!(err.to_string().contains("--tool-results requires --resume"));
@@ -747,7 +759,8 @@ mod tests {
             None,
             Some("a1b2c3d4e5f60718a1b2c3d4e5f60718"),
             Some(std::path::Path::new("results.json")),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -836,7 +849,9 @@ mod tests {
             .with_passwords(vec!["sk-test-key-123".into()])
             .with_inputs(vec!["https://api.anthropic.com".into()]);
 
-        cmd_setup_core("anthropic", &prompter, &store).await.expect("setup_core");
+        cmd_setup_core("anthropic", &prompter, &store)
+            .await
+            .expect("setup_core");
 
         let messages = prompter.collected_messages();
         assert!(messages.iter().any(|m| m.contains("Credential stored")));
@@ -858,7 +873,9 @@ mod tests {
             .with_selects(vec![0]) // chat_completions
             .with_inputs(vec!["https://api.openai.com".into()]);
 
-        cmd_setup_core("openai", &prompter, &store).await.expect("setup_core");
+        cmd_setup_core("openai", &prompter, &store)
+            .await
+            .expect("setup_core");
 
         let entry = store.get("openai").await.expect("get");
         assert_eq!(entry.key, "sk-openai-key");
@@ -875,7 +892,9 @@ mod tests {
             .with_selects(vec![1]) // messages
             .with_inputs(vec!["http://proxy:4000".into()]);
 
-        cmd_setup_core("litellm", &prompter, &store).await.expect("setup_core");
+        cmd_setup_core("litellm", &prompter, &store)
+            .await
+            .expect("setup_core");
 
         let entry = store.get("litellm").await.expect("get");
         assert_eq!(entry.api, flick::ApiKind::Messages);
@@ -886,31 +905,34 @@ mod tests {
     async fn setup_core_rejects_forward_slash() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let prompter = MockPrompter::new()
-            .with_passwords(vec!["sk-key".into()]);
+        let prompter = MockPrompter::new().with_passwords(vec!["sk-key".into()]);
 
         let result = cmd_setup_core("my/provider", &prompter, &store).await;
-        assert!(result.is_err(), "forward slash in provider name should be rejected");
+        assert!(
+            result.is_err(),
+            "forward slash in provider name should be rejected"
+        );
     }
 
     #[tokio::test]
     async fn setup_core_rejects_platform_separator() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let prompter = MockPrompter::new()
-            .with_passwords(vec!["sk-key".into()]);
+        let prompter = MockPrompter::new().with_passwords(vec!["sk-key".into()]);
 
         let name = format!("my{}provider", std::path::MAIN_SEPARATOR);
         let result = cmd_setup_core(&name, &prompter, &store).await;
-        assert!(result.is_err(), "path separator in provider name should be rejected");
+        assert!(
+            result.is_err(),
+            "path separator in provider name should be rejected"
+        );
     }
 
     #[tokio::test]
     async fn setup_core_rejects_empty_name() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let prompter = MockPrompter::new()
-            .with_passwords(vec!["sk-key".into()]);
+        let prompter = MockPrompter::new().with_passwords(vec!["sk-key".into()]);
 
         let result = cmd_setup_core("", &prompter, &store).await;
         assert!(result.is_err(), "empty provider name should be rejected");
@@ -920,33 +942,39 @@ mod tests {
     async fn setup_core_rejects_whitespace_only_name() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let prompter = MockPrompter::new()
-            .with_passwords(vec!["sk-key".into()]);
+        let prompter = MockPrompter::new().with_passwords(vec!["sk-key".into()]);
 
         let result = cmd_setup_core("  ", &prompter, &store).await;
-        assert!(result.is_err(), "whitespace-only provider name should be rejected");
+        assert!(
+            result.is_err(),
+            "whitespace-only provider name should be rejected"
+        );
     }
 
     #[tokio::test]
     async fn setup_core_rejects_control_characters() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let prompter = MockPrompter::new()
-            .with_passwords(vec!["sk-key".into()]);
+        let prompter = MockPrompter::new().with_passwords(vec!["sk-key".into()]);
 
         let result = cmd_setup_core("my\0provider", &prompter, &store).await;
-        assert!(result.is_err(), "null byte in provider name should be rejected");
+        assert!(
+            result.is_err(),
+            "null byte in provider name should be rejected"
+        );
 
         let result = cmd_setup_core("my\nprovider", &prompter, &store).await;
-        assert!(result.is_err(), "newline in provider name should be rejected");
+        assert!(
+            result.is_err(),
+            "newline in provider name should be rejected"
+        );
     }
 
     #[tokio::test]
     async fn setup_core_rejects_dot_traversal() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let prompter = MockPrompter::new()
-            .with_passwords(vec!["sk-key".into()]);
+        let prompter = MockPrompter::new().with_passwords(vec!["sk-key".into()]);
 
         let result = cmd_setup_core(".", &prompter, &store).await;
         assert!(result.is_err(), "'.' as provider name should be rejected");
@@ -959,8 +987,7 @@ mod tests {
     async fn setup_core_empty_key_aborts() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let prompter = MockPrompter::new()
-            .with_passwords(vec![String::new()]);
+        let prompter = MockPrompter::new().with_passwords(vec![String::new()]);
 
         let result = cmd_setup_core("test", &prompter, &store).await;
         assert!(result.is_err(), "empty key should return error");
@@ -975,8 +1002,24 @@ mod tests {
     async fn list_core_outputs_tab_separated_columns() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        store.set("anthropic", "k1", flick::ApiKind::Messages, "https://api.anthropic.com").await.expect("set");
-        store.set("openai", "k2", flick::ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set");
+        store
+            .set(
+                "anthropic",
+                "k1",
+                flick::ApiKind::Messages,
+                "https://api.anthropic.com",
+            )
+            .await
+            .expect("set");
+        store
+            .set(
+                "openai",
+                "k2",
+                flick::ApiKind::ChatCompletions,
+                "https://api.openai.com",
+            )
+            .await
+            .expect("set");
 
         let mut output = Vec::new();
         cmd_list_core(&store, &mut output).await.expect("list_core");
@@ -1001,14 +1044,15 @@ mod tests {
 
     // -- cmd_run_core tests --
 
+    use flick::DynProvider;
     use flick::context::ContentBlock;
     use flick::provider::ToolCallResponse;
     use flick::result::ResultStatus;
     use flick::test_support::{SingleShotProvider, StubBuildProvider};
-    use flick::DynProvider;
 
     fn stub_config() -> Config {
-        Config::parse_yaml(r"
+        Config::parse_yaml(
+            r"
 model:
   provider: test
   name: test-model
@@ -1017,7 +1061,9 @@ model:
 provider:
   test:
     api: messages
-").expect("stub config should parse")
+",
+        )
+        .expect("stub config should parse")
     }
 
     fn stub_client(provider: Box<dyn DynProvider>) -> FlickClient {
@@ -1029,7 +1075,15 @@ provider:
         let client = stub_client(Box::new(StubBuildProvider));
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&client, &mut Context::default(), "", None, false, &mut output).await;
+        let result = cmd_run_core(
+            &client,
+            &mut Context::default(),
+            "",
+            None,
+            false,
+            &mut output,
+        )
+        .await;
         assert!(matches!(result, Err(FlickError::NoQuery)));
     }
 
@@ -1038,7 +1092,15 @@ provider:
         let client = stub_client(Box::new(StubBuildProvider));
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&client, &mut Context::default(), "   ", None, false, &mut output).await;
+        let result = cmd_run_core(
+            &client,
+            &mut Context::default(),
+            "   ",
+            None,
+            false,
+            &mut output,
+        )
+        .await;
         assert!(matches!(result, Err(FlickError::NoQuery)));
     }
 
@@ -1047,7 +1109,15 @@ provider:
         let client = stub_client(Box::new(StubBuildProvider));
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&client, &mut Context::default(), "", None, true, &mut output).await;
+        let result = cmd_run_core(
+            &client,
+            &mut Context::default(),
+            "",
+            None,
+            true,
+            &mut output,
+        )
+        .await;
         assert!(matches!(result, Err(FlickError::NoQuery)));
     }
 
@@ -1056,12 +1126,21 @@ provider:
         let client = stub_client(Box::new(StubBuildProvider));
         let mut output = Vec::new();
 
-        let result = cmd_run_core(&client, &mut Context::default(), "hello", None, true, &mut output).await;
+        let result = cmd_run_core(
+            &client,
+            &mut Context::default(),
+            "hello",
+            None,
+            true,
+            &mut output,
+        )
+        .await;
         let flick_result = result.expect("should succeed");
         assert!(flick_result.is_none(), "dry-run should return None");
 
         let output_str = String::from_utf8(output).expect("utf8");
-        let parsed: serde_json::Value = serde_json::from_str(output_str.trim()).expect("valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(output_str.trim()).expect("valid JSON");
         assert_eq!(parsed["model"], "test");
     }
 
@@ -1071,17 +1150,18 @@ provider:
         let mut context = Context::default();
         let mut output = Vec::new();
 
-        let result = cmd_run_core(
-            &client, &mut context, "say hello", None, false, &mut output,
-        )
-        .await
-        .expect("should succeed");
+        let result = cmd_run_core(&client, &mut context, "say hello", None, false, &mut output)
+            .await
+            .expect("should succeed");
 
         let flick_result = result.expect("non-dry-run should return Some");
         assert_eq!(flick_result.status, ResultStatus::Complete);
-        assert!(flick_result.content.iter().any(
-            |b| matches!(b, ContentBlock::Text { text } if text == "Hello from model")
-        ));
+        assert!(
+            flick_result
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == "Hello from model"))
+        );
     }
 
     #[tokio::test]
@@ -1120,7 +1200,12 @@ tools:
         let mut output = Vec::new();
 
         let result = cmd_run_core(
-            &client, &mut context, "read the file", None, false, &mut output,
+            &client,
+            &mut context,
+            "read the file",
+            None,
+            false,
+            &mut output,
         )
         .await
         .expect("should succeed");
@@ -1184,7 +1269,12 @@ tools:
         let mut output = Vec::new();
 
         let result = cmd_run_core(
-            &client, &mut context, "", Some(tool_results), false, &mut output,
+            &client,
+            &mut context,
+            "",
+            Some(tool_results),
+            false,
+            &mut output,
         )
         .await
         .expect("should succeed");
@@ -1203,7 +1293,12 @@ tools:
     async fn init_store_with_anthropic(dir: &std::path::Path) -> CredentialStore {
         let store = CredentialStore::with_dir(dir.to_path_buf());
         store
-            .set("anthropic", "sk-ant-key", flick::ApiKind::Messages, "https://api.anthropic.com")
+            .set(
+                "anthropic",
+                "sk-ant-key",
+                flick::ApiKind::Messages,
+                "https://api.anthropic.com",
+            )
             .await
             .expect("set anthropic");
         store
@@ -1237,7 +1332,10 @@ tools:
         // input system_prompt (default)
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "64000".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1258,8 +1356,24 @@ tools:
     async fn init_core_multi_provider_select() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        store.set("anthropic", "k1", flick::ApiKind::Messages, "https://api.anthropic.com").await.expect("set");
-        store.set("openai", "k2", flick::ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set");
+        store
+            .set(
+                "anthropic",
+                "k1",
+                flick::ApiKind::Messages,
+                "https://api.anthropic.com",
+            )
+            .await
+            .expect("set");
+        store
+            .set(
+                "openai",
+                "k2",
+                flick::ApiKind::ChatCompletions,
+                "https://api.openai.com",
+            )
+            .await
+            .expect("set");
 
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "gpt-4o".into(),
@@ -1270,7 +1384,10 @@ tools:
         // input max_tokens, input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![1, 0])
-            .with_inputs(vec!["16384".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "16384".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1286,14 +1403,15 @@ tools:
     async fn init_core_model_fetch_fails_fallback() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = init_store_with_anthropic(dir.path()).await;
-        let fetcher = MockModelFetcher::with_error(
-            FlickError::Io(std::io::Error::other("network error")),
-        );
+        let fetcher =
+            MockModelFetcher::with_error(FlickError::Io(std::io::Error::other("network error")));
 
         // select provider (0), input model name, input max_tokens, input system prompt
-        let prompter = MockPrompter::new()
-            .with_selects(vec![0])
-            .with_inputs(vec!["custom-model".into(), "8192".into(), "You are Flick, a fast LLM runner.".into()]);
+        let prompter = MockPrompter::new().with_selects(vec![0]).with_inputs(vec![
+            "custom-model".into(),
+            "8192".into(),
+            "You are Flick, a fast LLM runner.".into(),
+        ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1303,7 +1421,11 @@ tools:
         let text = String::from_utf8(output).expect("utf8");
         assert!(text.contains("name: \"custom-model\""));
         let messages = prompter.collected_messages();
-        assert!(messages.iter().any(|m| m.contains("Could not fetch models")));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("Could not fetch models"))
+        );
     }
 
     #[tokio::test]
@@ -1319,7 +1441,11 @@ tools:
         // input max_tokens, input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 1])
-            .with_inputs(vec!["my-model".into(), "8192".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "my-model".into(),
+                "8192".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1364,7 +1490,10 @@ tools:
         // input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["32000".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "32000".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1390,7 +1519,10 @@ tools:
         // input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "64000".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1416,7 +1548,10 @@ tools:
         // input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["8192".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "8192".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1431,7 +1566,15 @@ tools:
     async fn init_core_max_tokens_none_chat_completions() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        store.set("openai", "sk-key", flick::ApiKind::ChatCompletions, "https://api.openai.com").await.expect("set");
+        store
+            .set(
+                "openai",
+                "sk-key",
+                flick::ApiKind::ChatCompletions,
+                "https://api.openai.com",
+            )
+            .await
+            .expect("set");
 
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "gpt-4o".into(),
@@ -1442,7 +1585,10 @@ tools:
         // input system prompt
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["none".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "none".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1542,7 +1688,10 @@ tools:
 
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "64000".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1563,7 +1712,15 @@ tools:
     async fn init_core_nondefault_base_url_absent_from_yaml() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        store.set("litellm", "sk-key", flick::ApiKind::Messages, "http://custom:4000").await.expect("set");
+        store
+            .set(
+                "litellm",
+                "sk-key",
+                flick::ApiKind::Messages,
+                "http://custom:4000",
+            )
+            .await
+            .expect("set");
 
         let fetcher = MockModelFetcher::with_models(vec![FetchedModel {
             id: "claude-sonnet-4-20250514".into(),
@@ -1572,7 +1729,10 @@ tools:
 
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "64000".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1580,7 +1740,10 @@ tools:
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(!text.contains("base_url"), "base_url should not appear in generated config");
+        assert!(
+            !text.contains("base_url"),
+            "base_url should not appear in generated config"
+        );
     }
 
     #[test]
@@ -1593,7 +1756,10 @@ tools:
             api: flick::ApiKind::Messages,
         };
         let yaml_str = generate_config_yaml(&params);
-        assert!(!yaml_str.contains("base_url"), "base_url should not appear in generated config");
+        assert!(
+            !yaml_str.contains("base_url"),
+            "base_url should not appear in generated config"
+        );
         assert!(yaml_str.contains("provider: \"anthropic\""));
         assert!(yaml_str.contains("name: \"claude-sonnet-4-20250514\""));
         assert!(yaml_str.contains("max_tokens: 64000"));
@@ -1615,7 +1781,10 @@ tools:
 
         let prompter = MockPrompter::new()
             .with_selects(vec![0, 0])
-            .with_inputs(vec!["64000".into(), "You are Flick, a fast LLM runner.".into()]);
+            .with_inputs(vec![
+                "64000".into(),
+                "You are Flick, a fast LLM runner.".into(),
+            ]);
 
         let mut output = Vec::new();
         cmd_init_core("-", &prompter, &store, &fetcher, &mut output)
@@ -1623,7 +1792,10 @@ tools:
             .expect("init_core");
 
         let text = String::from_utf8(output).expect("utf8");
-        assert!(!text.contains("base_url"), "base_url should not appear in generated config");
+        assert!(
+            !text.contains("base_url"),
+            "base_url should not appear in generated config"
+        );
     }
 
     // -- Test gap #11: system prompt with newlines --
@@ -1697,8 +1869,7 @@ tools:
     async fn setup_core_rejects_dot_in_provider_name() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let store = CredentialStore::with_dir(dir.path().to_path_buf());
-        let prompter = MockPrompter::new()
-            .with_passwords(vec!["sk-key".into()]);
+        let prompter = MockPrompter::new().with_passwords(vec!["sk-key".into()]);
 
         let result = cmd_setup_core("my.provider", &prompter, &store).await;
         assert!(result.is_err(), "dot in provider name should be rejected");
@@ -1717,12 +1888,18 @@ tools:
         };
         let yaml_str = generate_config_yaml(&params);
         // Verify the commented-out max_tokens line is present
-        assert!(yaml_str.contains("# max_tokens:"), "expected commented-out max_tokens line");
+        assert!(
+            yaml_str.contains("# max_tokens:"),
+            "expected commented-out max_tokens line"
+        );
         // Verify no active max_tokens line
-        assert!(!yaml_str.lines().any(|l| {
-            let trimmed = l.trim();
-            trimmed.starts_with("max_tokens:") && !trimmed.starts_with('#')
-        }), "max_tokens should only appear as a comment");
+        assert!(
+            !yaml_str.lines().any(|l| {
+                let trimmed = l.trim();
+                trimmed.starts_with("max_tokens:") && !trimmed.starts_with('#')
+            }),
+            "max_tokens should only appear as a comment"
+        );
         assert!(yaml_str.contains("provider: \"openai\""));
         assert!(yaml_str.contains("name: \"gpt-4o\""));
         // Round-trip: generated YAML should parse
