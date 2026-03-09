@@ -525,54 +525,61 @@ mod tests {
             let o5f = run_sandbox_exec("generated+process*", &p5f);
             eprintln!("[diag] generated+process*: {}", o5f.status.success());
 
-            // Phase 2: Narrow which file path is missing.
-            // Test file-read* only vs file-map-executable only
-            let p6a = format!("{profile}\n(allow file-read* (subpath \"/\"))\n");
-            let o6a = run_sandbox_exec("generated+file-read-root-only", &p6a);
+            // Phase 2: Targeted tests.
+            // Test 1: file-read* on root literal only (not subpath)
+            let p_root_literal = format!("{profile}\n(allow file-read* (literal \"/\"))\n");
+            let o_rl = run_sandbox_exec("generated+root-literal", &p_root_literal);
+            eprintln!("[diag] generated+root-literal: {}", o_rl.status.success());
+
+            // Test 2: file-ioctl (for isatty/tcgetattr)
+            let p_ioctl = format!("{profile}\n(allow file-ioctl)\n");
+            let o_io = run_sandbox_exec("generated+file-ioctl", &p_ioctl);
+            eprintln!("[diag] generated+file-ioctl: {}", o_io.status.success());
+
+            // Test 3: file-write* globally (maybe process writes somewhere)
+            let p_fw = format!("{profile}\n(allow file-write*)\n");
+            let o_fw = run_sandbox_exec("generated+file-write*", &p_fw);
+            eprintln!("[diag] generated+file-write*: {}", o_fw.status.success());
+
+            // Test 4: Combine root-literal + file-ioctl
+            let p_combo =
+                format!("{profile}\n(allow file-read* (literal \"/\"))\n(allow file-ioctl)\n");
+            let o_combo = run_sandbox_exec("generated+root+ioctl", &p_combo);
+            eprintln!("[diag] generated+root+ioctl: {}", o_combo.status.success());
+
+            // Test 5: file-read* for top-level dirs not in our profile
+            let p_toplevel = format!(
+                "{profile}\n\
+                 (allow file-read* (subpath \"/private\"))\n\
+                 (allow file-read* (subpath \"/Library\"))\n\
+                 (allow file-read* (subpath \"/opt\"))\n\
+                 (allow file-read* (subpath \"/Applications\"))\n\
+                 (allow file-read* (literal \"/\"))\n"
+            );
+            let o_tl = run_sandbox_exec("generated+toplevel-combo", &p_toplevel);
+            eprintln!("[diag] generated+toplevel-combo: {}", o_tl.status.success());
+
+            // Test 6: Just /private + /Library
+            let p_pl = format!(
+                "{profile}\n\
+                 (allow file-read* (subpath \"/private\"))\n\
+                 (allow file-read* (subpath \"/Library\"))\n"
+            );
+            let o_pl = run_sandbox_exec("generated+private+library", &p_pl);
             eprintln!(
-                "[diag] generated+file-read-root-only: {}",
-                o6a.status.success()
+                "[diag] generated+private+library: {}",
+                o_pl.status.success()
             );
 
-            let p6b = format!("{profile}\n(allow file-map-executable (subpath \"/\"))\n");
-            let o6b = run_sandbox_exec("generated+file-map-exec-root-only", &p6b);
-            eprintln!(
-                "[diag] generated+file-map-exec-root-only: {}",
-                o6b.status.success()
-            );
+            // Test 7: Just /private
+            let p_priv = format!("{profile}\n(allow file-read* (subpath \"/private\"))\n");
+            let o_priv = run_sandbox_exec("generated+/private", &p_priv);
+            eprintln!("[diag] generated+/private: {}", o_priv.status.success());
 
-            // Test specific paths we might be missing
-            let paths_to_test = [
-                "/private/etc",
-                "/usr/share",
-                "/private/var",
-                "/private/tmp",
-                "/var/folders",
-                "/usr/local",
-                "/etc",
-                "/tmp",
-                "/Users",
-            ];
-            for test_path in &paths_to_test {
-                let p = format!(
-                    "{profile}\n(allow file-read* (subpath \"{test_path}\"))\n(allow file-map-executable (subpath \"{test_path}\"))\n"
-                );
-                let o = run_sandbox_exec(&format!("generated+{test_path}"), &p);
-                eprintln!("[diag] generated+{test_path}: {}", o.status.success());
-            }
-
-            // Test file-map-executable for dyld shared cache
-            let p7 = format!(
-                "{profile}\n(allow file-map-executable (subpath \"/private/var/db/dyld\"))\n"
-            );
-            let o7 = run_sandbox_exec("generated+fme-dyld", &p7);
-            eprintln!("[diag] generated+fme-dyld: {}", o7.status.success());
-
-            // Test file-map-executable for /System/Cryptexes
-            let p8 =
-                format!("{profile}\n(allow file-map-executable (subpath \"/System/Cryptexes\"))\n");
-            let o8 = run_sandbox_exec("generated+fme-cryptex", &p8);
-            eprintln!("[diag] generated+fme-cryptex: {}", o8.status.success());
+            // Test 8: Just /Library (all of it)
+            let p_lib = format!("{profile}\n(allow file-read* (subpath \"/Library\"))\n");
+            let o_lib = run_sandbox_exec("generated+/Library", &p_lib);
+            eprintln!("[diag] generated+/Library: {}", o_lib.status.success());
         }
 
         // Final assertion: our generated profile must work
