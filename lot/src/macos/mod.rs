@@ -433,10 +433,6 @@ mod tests {
 (allow ipc*)
 (allow network*)
 (allow system*)
-(allow lsopen*)
-(allow nvram*)
-(allow user-preference*)
-(allow appleevent-send)
 ";
         let out2 = run_sandbox_exec("broad-allows", broad);
         assert!(
@@ -471,10 +467,10 @@ mod tests {
         );
 
         // If narrow works but generated doesn't, we need to find the missing
-        // operation by adding back wildcards one at a time. Log which passed.
+        // If narrow works but generated doesn't, narrow further.
         if out3.status.success() && !out4.status.success() {
-            // Test with file* wildcard but scoped process/mach/etc
-            let test_file_wild = "\
+            // 5a. file* wildcard with scoped process/mach
+            let p5a = "\
 (version 1)
 (deny default)
 (allow file*)
@@ -487,11 +483,47 @@ mod tests {
 (allow sysctl-read)
 (allow signal (target self))
 ";
-            let out5 = run_sandbox_exec("file-wild-process-scoped", test_file_wild);
+            let o5a = run_sandbox_exec("file-wild+scoped-rest", p5a);
+            eprintln!("[diag] file-wild+scoped-rest: {}", o5a.status.success());
+
+            // 5b. process* wildcard with scoped file
+            let p5b = "\
+(version 1)
+(deny default)
+(allow process*)
+(allow file-read* (subpath \"/\"))
+(allow file-map-executable (subpath \"/\"))
+(allow mach-lookup)
+(allow sysctl-read)
+(allow signal (target self))
+";
+            let o5b = run_sandbox_exec("process-wild+file-read-root", p5b);
             eprintln!(
-                "[diag] file-wild-process-scoped success: {}",
-                out5.status.success()
+                "[diag] process-wild+file-read-root: {}",
+                o5b.status.success()
             );
+
+            // 5c. Our profile + system* (maybe missing system-mac-syscall)
+            let p5c = format!("{profile}\n(allow system*)\n");
+            let o5c = run_sandbox_exec("generated+system*", &p5c);
+            eprintln!("[diag] generated+system*: {}", o5c.status.success());
+
+            // 5d. Our profile + iokit* broadened
+            let p5d = format!("{profile}\n(allow iokit*)\n");
+            let o5d = run_sandbox_exec("generated+iokit*", &p5d);
+            eprintln!("[diag] generated+iokit*: {}", o5d.status.success());
+
+            // 5e. Our profile + file-read* root (maybe missing a system path)
+            let p5e = format!(
+                "{profile}\n(allow file-read* (subpath \"/\"))\n(allow file-map-executable (subpath \"/\"))\n"
+            );
+            let o5e = run_sandbox_exec("generated+file-read-root", &p5e);
+            eprintln!("[diag] generated+file-read-root: {}", o5e.status.success());
+
+            // 5f. Our profile + process*
+            let p5f = format!("{profile}\n(allow process*)\n");
+            let o5f = run_sandbox_exec("generated+process*", &p5f);
+            eprintln!("[diag] generated+process*: {}", o5f.status.success());
         }
 
         // Final assertion: our generated profile must work
