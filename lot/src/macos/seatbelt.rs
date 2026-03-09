@@ -177,10 +177,18 @@ fn escape_sbpl_path(path: &Path) -> std::result::Result<String, &'static str> {
     Ok(s.replace('"', "\\\"").replace(')', "\\)"))
 }
 
+/// Resolve a path through canonicalize, falling back to the original if the
+/// path doesn't exist yet. SBPL checks against resolved (real) paths, so
+/// symlinks like /tmp → /private/tmp must be resolved.
+fn resolve_path(path: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Append an SBPL `(allow <op> (<filter> "<path>"))` rule.
+/// Resolves symlinks via canonicalize because SBPL matches real paths.
 fn append_rule(profile: &mut String, operation: &str, filter: &str, path: &Path) {
-    // escape_sbpl_path only fails on null bytes; display() never produces them
-    let Ok(escaped) = escape_sbpl_path(path) else {
+    let resolved = resolve_path(path);
+    let Ok(escaped) = escape_sbpl_path(&resolved) else {
         return;
     };
     profile.push_str("(allow ");
