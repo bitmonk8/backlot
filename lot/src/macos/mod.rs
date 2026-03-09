@@ -392,6 +392,41 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_exec_echo_hello() {
+        // Test via sandbox-exec (bypasses our fork/exec code) to verify the
+        // SBPL profile itself works.
+        let policy = test_policy(vec![PathBuf::from("/usr")]);
+        let program = std::path::Path::new("/bin/echo");
+        let resolved = std::fs::canonicalize(program).unwrap_or_else(|_| program.to_path_buf());
+        let profile = seatbelt::generate_profile(&policy, &resolved);
+        eprintln!("[diag] === sandbox_exec_echo_hello ===");
+        eprintln!("[diag] resolved program: {resolved:?}");
+        eprintln!("[diag] SBPL profile:\n{profile}");
+
+        let out = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/echo", "hello"])
+            .output()
+            .expect("sandbox-exec");
+        eprintln!("[diag] sandbox-exec exit: {:?}", out.status);
+        eprintln!(
+            "[diag] sandbox-exec stdout: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        eprintln!(
+            "[diag] sandbox-exec stderr: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.status.success(),
+            "sandbox-exec echo should succeed: {:?}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout.trim(), "hello");
+    }
+
+    #[test]
     fn spawn_echo_hello() {
         let policy = test_policy(vec![PathBuf::from("/usr")]);
         let mut cmd = SandboxCommand::new("/bin/echo");
