@@ -21,7 +21,7 @@ This folder contains detailed design documents. The README is the primary entry 
 | [Lot Spec](LOT_SPEC.md) | Design spec for the lot sandboxing library (separate repo) |
 | [Open Questions](OPEN_QUESTIONS.md) | Design decisions record (all resolved) |
 | [NuShell Migration](NUSHELL_MIGRATION.md) | Spec: replace POSIX sh with NuShell as sole shell runtime (persistent MCP session) |
-| [Remove Unsandboxed](DE_UNSANDBOXED.md) | Spec: remove unsandboxed execution fallback |
+| [Remove Unsandboxed](DE_UNSANDBOXED.md) | Completed: removed unsandboxed execution fallback |
 | [Status](STATUS.md) | Current phase, milestones, next work candidates, decisions log |
 
 ## Reference Material

@@ -21,9 +21,6 @@ walkdir = "2"
 regex = "1"
 lot = { git = "https://github.com/bitmonk8/lot", rev = "ed985a3", features = ["tokio"] }
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [lints.rust]
 unsafe_code = "deny"
 

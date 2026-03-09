@@ -110,15 +110,13 @@ Agent sessions are oneshot — once a session returns, it is never reused. A new
 The shell tool is implemented in `src/agent/tools.rs`:
 
 - Tool name: `"bash"`
-- Shell binary: `"sh"` invoked with `-c <command>` (lines 649, 714)
-- Two execution paths: sandboxed (lot `SandboxCommand`) and unsandboxed fallback (`tokio::process::Command`)
+- Shell binary: `"sh"` invoked with `-c <command>` (in `tool_bash`)
+- Single execution path: sandboxed via lot `SandboxCommand` (no unsandboxed fallback)
 - Grant flag: `ToolGrant::BASH` (bitflag `0b0000_0100`)
 - Available in Execute and Decompose phases; not in Analyze
 - Constants: `MAX_BASH_OUTPUT` (64 KiB), `DEFAULT_BASH_TIMEOUT_SECS` (120), `MAX_BASH_TIMEOUT_SECS` (600)
-- Internal types: `BashOutput` struct, functions `tool_bash`, `tool_bash_sandboxed`, `tool_bash_unsandboxed`, `format_bash_output`, `bash_output_from`
-- Process group management: `setsid()` on Unix, `CREATE_NEW_PROCESS_GROUP` on Windows — shell-agnostic
-- Environment: `env_clear()` + whitelist (`UNSANDBOXED_ENV_KEYS`)
-- Tests: ~15 bash-specific tests (lines 1192–1419)
+- Internal types: `BashOutput` struct, functions `tool_bash`, `format_bash_output`, `bash_output_from`
+- Tests: bash-specific tests in `mod tests`
 
 ## Required Changes
 
@@ -143,7 +141,7 @@ Module in epic (e.g. `src/agent/nu_session.rs`) that manages the `epic-nu --mcp`
 | Implementation | Spawn `sh -c` per call | Send MCP `evaluate` to persistent nu session |
 | Constants | `MAX_BASH_OUTPUT`, `DEFAULT_BASH_TIMEOUT_SECS`, `MAX_BASH_TIMEOUT_SECS` | `MAX_NU_OUTPUT`, `DEFAULT_NU_TIMEOUT_SECS`, `MAX_NU_TIMEOUT_SECS` |
 | Struct | `BashOutput` | `NuOutput` |
-| Functions | `tool_bash`, `tool_bash_sandboxed`, `tool_bash_unsandboxed`, `format_bash_output`, `bash_output_from` | `tool_nu`, `format_nu_output` (sandboxed/unsandboxed distinction moves to session layer) |
+| Functions | `tool_bash`, `format_bash_output`, `bash_output_from` | `tool_nu`, `format_nu_output` |
 | Grant flag | `ToolGrant::BASH` | `ToolGrant::NU` |
 
 Tests: rename, update command syntax (e.g. `sleep 10` → `sleep 10sec`), add MCP session lifecycle tests.
@@ -152,7 +150,6 @@ Tests: rename, update command syntax (e.g. `sleep 10` → `sleep 10sec`), add MC
 
 - **Sandbox policy**: lot `SandboxPolicy` is shell-agnostic. `build_sandbox_policy()` unchanged.
 - **Output handling**: exit code convention (0 = success) preserved. MCP structured responses provide richer data but `NuOutput` maps to same interface.
-- **Process group management**: Applied to the persistent nu process instead of per-call processes.
 
 ### Other source files
 
@@ -177,7 +174,7 @@ Tests: rename, update command syntax (e.g. `sleep 10` → `sleep 10sec`), add MC
 ## NuShell Compatibility Notes
 
 1. **Exit codes**: Standard (0 = success). MCP responses include exit status.
-2. **Environment variables**: NuShell reads them. The `env_clear()` + whitelist approach works at process spawn.
+2. **Environment variables**: NuShell reads them. Lot's `forward_common_env()` handles environment filtering at process spawn.
 3. **Process signals**: NuShell responds to SIGKILL / TerminateProcess normally.
 4. **Syntax**: LLM agents generate NuShell syntax instead of POSIX sh. The tool name and description handle this implicitly.
 

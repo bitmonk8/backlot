@@ -1,6 +1,6 @@
 # Sandboxing
 
-> **Operational correctness sandboxing is implemented via [lot](https://github.com/bitmonk8/lot)** — a standalone cross-platform process sandboxing library (Seatbelt on macOS, AppContainer on Windows, namespaces + seccomp + cgroups v2 on Linux). The bash tool spawns commands inside a lot sandbox with per-phase policies (write access only during Execute/Fix phases). Graceful fallback to unsandboxed execution if the sandbox cannot be established. See [LOT_SPEC.md](LOT_SPEC.md) for the lot design spec.
+> **Operational correctness sandboxing is implemented via [lot](https://github.com/bitmonk8/lot)** — a standalone cross-platform process sandboxing library (Seatbelt on macOS, AppContainer on Windows, namespaces + seccomp + cgroups v2 on Linux). The bash tool spawns commands inside a lot sandbox with per-phase policies (write access only during Execute/Fix phases). Sandbox is mandatory — if lot cannot establish a sandbox, the tool call fails with an error. See [LOT_SPEC.md](LOT_SPEC.md) for the lot design spec.
 
 Epic sandboxing addresses two distinct concerns with fundamentally different solutions.
 
@@ -64,7 +64,7 @@ Platform mechanisms:
 - **macOS:** Seatbelt (`sandbox_init`) + rlimit
 - **Windows:** AppContainer + Job objects
 
-Graceful fallback: if sandbox setup fails (permissions, unsupported kernel), epic logs a warning and runs the command unsandboxed.
+Sandbox is mandatory: if sandbox setup fails (permissions, unsupported kernel), the tool call returns an error with lot's diagnostic message. There is no unsandboxed fallback.
 
 ### Existing Enforcement (Retained)
 

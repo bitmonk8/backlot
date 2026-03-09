@@ -362,7 +362,6 @@ dependencies = [
  "crossterm",
  "flick",
  "globset",
- "libc",
  "lot",
  "ratatui",
  "regex",

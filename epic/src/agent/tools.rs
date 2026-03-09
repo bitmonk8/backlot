@@ -612,39 +612,10 @@ async fn tool_bash(
         .unwrap_or(DEFAULT_BASH_TIMEOUT_SECS)
         .min(MAX_BASH_TIMEOUT_SECS);
 
-    let policy = match build_sandbox_policy(project_root, grant) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[epic] sandbox policy error ({e}), running unsandboxed");
-            return tool_bash_unsandboxed(&command, project_root, timeout_secs).await;
-        }
-    };
+    let policy = build_sandbox_policy(project_root, grant)
+        .map_err(|e| format!("sandbox setup failed: {e}"))?;
 
     let project_root = project_root.to_path_buf();
-    match tool_bash_sandboxed(command.clone(), project_root.clone(), policy, timeout_secs).await {
-        Ok(output) => Ok(output),
-        Err(SandboxSpawnError::SetupFailed(msg)) => {
-            eprintln!("[epic] sandbox unavailable ({msg}), running unsandboxed");
-            tool_bash_unsandboxed(&command, &project_root, timeout_secs).await
-        }
-        Err(SandboxSpawnError::Other(msg)) => Err(msg),
-    }
-}
-
-enum SandboxSpawnError {
-    /// Sandbox setup failed (permissions, unsupported platform) — caller
-    /// should fall back to unsandboxed execution.
-    SetupFailed(String),
-    /// Non-recoverable error (timeout, command failure).
-    Other(String),
-}
-
-async fn tool_bash_sandboxed(
-    command: String,
-    project_root: PathBuf,
-    policy: lot::SandboxPolicy,
-    timeout_secs: u64,
-) -> Result<BashOutput, SandboxSpawnError> {
     let spawn_result = tokio::task::spawn_blocking(move || {
         let mut cmd = SandboxCommand::new("sh");
         cmd.args(["-c", &command]);
@@ -657,12 +628,9 @@ async fn tool_bash_sandboxed(
         lot::spawn(&policy, &cmd)
     })
     .await
-    .map_err(|e| SandboxSpawnError::Other(format!("spawn task panicked: {e}")))?;
+    .map_err(|e| format!("spawn task panicked: {e}"))?;
 
-    let child = match spawn_result {
-        Ok(c) => c,
-        Err(e) => return Err(classify_spawn_error(e)),
-    };
+    let child = spawn_result.map_err(|e| e.to_string())?;
 
     let timeout = std::time::Duration::from_secs(timeout_secs);
     match child.wait_with_output_timeout(timeout).await {
@@ -672,132 +640,6 @@ async fn tool_bash_sandboxed(
         }
         Err(e) => Err(format!("command failed: {e}")),
     }
-    .map_err(SandboxSpawnError::Other)
-}
-
-/// Classify a `lot::SandboxError` as either a setup failure (fallback to
-/// unsandboxed) or a hard error (propagate).
-fn classify_spawn_error(e: lot::SandboxError) -> SandboxSpawnError {
-    match e {
-        lot::SandboxError::Unsupported(msg)
-        | lot::SandboxError::Setup(msg)
-        | lot::SandboxError::InvalidPolicy(msg) => SandboxSpawnError::SetupFailed(msg),
-        lot::SandboxError::Io(ref io) => match io.kind() {
-            std::io::ErrorKind::PermissionDenied => SandboxSpawnError::SetupFailed(e.to_string()),
-            _ => SandboxSpawnError::Other(e.to_string()),
-        },
-        lot::SandboxError::Cleanup(msg) => SandboxSpawnError::Other(msg),
-        lot::SandboxError::Timeout(_) => SandboxSpawnError::Other(e.to_string()),
-        // #[non_exhaustive]: unknown future variants → treat as setup
-        // failure so we degrade gracefully rather than hard-fail.
-        _ => SandboxSpawnError::SetupFailed(e.to_string()),
-    }
-}
-
-/// Environment variables forwarded in the unsandboxed fallback path.
-/// Mirrors the set used by `SandboxCommand::forward_common_env()`.
-const UNSANDBOXED_ENV_KEYS: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USER",
-    "LANG",
-    "LC_ALL",
-    "TERM",
-    "SHELL",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "SYSTEMROOT",
-    "COMSPEC",
-    "WINDIR",
-    "PROGRAMFILES",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "USERPROFILE",
-];
-
-/// Unsandboxed fallback — used when sandbox setup fails.
-async fn tool_bash_unsandboxed(
-    command: &str,
-    project_root: &Path,
-    timeout_secs: u64,
-) -> Result<BashOutput, String> {
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(project_root)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .env_clear();
-
-    // Put child in its own process group so we can kill the whole tree on timeout.
-    #[cfg(unix)]
-    {
-        #[allow(unused_imports)]
-        use std::os::unix::process::CommandExt as _;
-        // SAFETY: setsid() is async-signal-safe. pre_exec runs between fork and exec.
-        #[allow(unsafe_code)]
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(windows)]
-    {
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    }
-
-    // Forward the same env vars lot's forward_common_env() uses.
-    for key in UNSANDBOXED_ENV_KEYS {
-        if let Ok(val) = std::env::var(key) {
-            cmd.env(key, val);
-        }
-    }
-
-    let child = cmd.spawn().map_err(|e| format!("spawn error: {e}"))?;
-    let child_pid = child.id();
-
-    let timeout_dur = std::time::Duration::from_secs(timeout_secs);
-    if let Ok(wait_result) = tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
-        let output = wait_result.map_err(|e| format!("command failed: {e}"))?;
-        Ok(bash_output_from(&output))
-    } else {
-        if let Some(pid) = child_pid {
-            kill_process_tree(pid);
-        }
-        Err(format!("command timed out after {timeout_secs}s"))
-    }
-}
-
-/// Kill the entire process group (Unix) or process tree (Windows) rooted
-/// at the given PID. Used only for the unsandboxed fallback path.
-#[cfg(unix)]
-fn kill_process_tree(pid: u32) {
-    let Some(pid) = i32::try_from(pid).ok() else {
-        return;
-    };
-    // SAFETY: negative pid targets the process group. The pid came from
-    // a child we spawned into its own session via setsid().
-    #[allow(unsafe_code)]
-    unsafe {
-        libc::kill(-pid, libc::SIGKILL);
-    }
-}
-
-#[cfg(windows)]
-fn kill_process_tree(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/T", "/PID", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
 }
 
 fn bash_output_from(output: &std::process::Output) -> BashOutput {
@@ -867,6 +709,34 @@ mod tests {
     async fn exec(name: &str, input: serde_json::Value, grant: ToolGrant) -> ToolExecResult {
         let tmp = TempDir::new().unwrap();
         execute_tool("tu_1".into(), name, &input, tmp.path(), grant).await
+    }
+
+    /// Panics if the sandbox cannot spawn `sh -c true`.
+    /// OnceLock caches the probe result so the spawn+wait cost is paid once.
+    fn assert_sandbox_available() {
+        use std::sync::OnceLock;
+        static AVAILABLE: OnceLock<Result<(), String>> = OnceLock::new();
+        AVAILABLE
+            .get_or_init(|| {
+                let tmp = TempDir::new().map_err(|e| format!("TempDir: {e}"))?;
+                let policy = build_sandbox_policy(tmp.path(), ToolGrant::BASH)
+                    .map_err(|e| format!("policy: {e}"))?;
+                let mut cmd = SandboxCommand::new("sh");
+                cmd.args(["-c", "true"]);
+                cmd.cwd(tmp.path());
+                cmd.stdout(SandboxStdio::Null);
+                cmd.stderr(SandboxStdio::Null);
+                cmd.stdin(SandboxStdio::Null);
+                let child =
+                    lot::spawn(&policy, &cmd).map_err(|e| format!("spawn: {e}"))?;
+                match child.wait() {
+                    Ok(status) if status.success() => Ok(()),
+                    Ok(status) => Err(format!("probe exited: {status}")),
+                    Err(e) => Err(format!("probe wait: {e}")),
+                }
+            })
+            .as_ref()
+            .expect("sandbox must be available");
     }
 
     #[test]
@@ -1212,6 +1082,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_echo() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "echo hello"}),
@@ -1224,6 +1095,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_timeout() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "sleep 10", "timeout": 2}),
@@ -1236,6 +1108,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_zero_exit_not_error() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "true"}),
@@ -1247,6 +1120,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_nonzero_exit_is_error() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "exit 1"}),
@@ -1261,6 +1135,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_bash_timeout_kills_sandboxed_child() {
+        assert_sandbox_available();
         let tmp = TempDir::new().unwrap();
         let marker = tmp.path().join("bg_alive");
 
@@ -1290,21 +1165,6 @@ mod tests {
             !marker.exists(),
             "background process survived timeout — process tree kill failed"
         );
-    }
-
-    /// Verify that calling `kill_process_tree` with a stale PID does not panic.
-    #[cfg(unix)]
-    #[test]
-    fn test_kill_process_tree_stale_pid_unix() {
-        // Use a PID that fits i32 but almost certainly does not exist.
-        kill_process_tree(99_999_999);
-    }
-
-    /// Verify that calling `kill_process_tree` with a stale PID does not panic.
-    #[cfg(windows)]
-    #[test]
-    fn test_kill_process_tree_stale_pid_windows() {
-        kill_process_tree(u32::MAX - 1);
     }
 
     #[test]
@@ -1375,73 +1235,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_classify_spawn_error_unsupported_is_setup_failed() {
-        let e = lot::SandboxError::Unsupported("not supported".into());
-        assert!(matches!(
-            classify_spawn_error(e),
-            SandboxSpawnError::SetupFailed(_)
-        ));
-    }
-
-    #[test]
-    fn test_classify_spawn_error_setup_is_setup_failed() {
-        let e = lot::SandboxError::Setup("cannot create sandbox".into());
-        assert!(matches!(
-            classify_spawn_error(e),
-            SandboxSpawnError::SetupFailed(_)
-        ));
-    }
-
-    #[test]
-    fn test_classify_spawn_error_invalid_policy_is_setup_failed() {
-        let e = lot::SandboxError::InvalidPolicy("bad policy".into());
-        assert!(matches!(
-            classify_spawn_error(e),
-            SandboxSpawnError::SetupFailed(_)
-        ));
-    }
-
-    #[test]
-    fn test_classify_spawn_error_io_permission_denied_is_setup_failed() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        let e = lot::SandboxError::Io(io_err);
-        assert!(matches!(
-            classify_spawn_error(e),
-            SandboxSpawnError::SetupFailed(_)
-        ));
-    }
-
-    #[test]
-    fn test_classify_spawn_error_io_not_found_is_other() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
-        let e = lot::SandboxError::Io(io_err);
-        assert!(matches!(
-            classify_spawn_error(e),
-            SandboxSpawnError::Other(_)
-        ));
-    }
-
-    #[test]
-    fn test_classify_spawn_error_cleanup_is_other() {
-        let e = lot::SandboxError::Cleanup("cleanup failed".into());
-        assert!(matches!(
-            classify_spawn_error(e),
-            SandboxSpawnError::Other(_)
-        ));
-    }
-
-    #[test]
-    fn test_classify_spawn_error_timeout_is_other() {
-        let e = lot::SandboxError::Timeout(std::time::Duration::from_secs(5));
-        assert!(matches!(
-            classify_spawn_error(e),
-            SandboxSpawnError::Other(_)
-        ));
+    /// Nonexistent project root — fails at policy build or spawn, either way
+    /// the tool must return is_error with a meaningful message.
+    #[tokio::test]
+    async fn test_bash_bad_root_fails() {
+        let gone = TempDir::new().unwrap().into_path();
+        std::fs::remove_dir(&gone).unwrap();
+        let input = serde_json::json!({"command": "true"});
+        let result = execute_tool(
+            "tu_1".into(),
+            "bash",
+            &input,
+            &gone,
+            ToolGrant::BASH,
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "expected error for nonexistent root, got: {}",
+            result.content,
+        );
     }
 
     #[tokio::test]
     async fn test_bash_env_filtered() {
+        assert_sandbox_available();
         let tmp = TempDir::new().unwrap();
         // SAFETY: no other threads read EPIC_TEST_SECRET.
         #[allow(unsafe_code)]
@@ -1669,6 +1487,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_stderr_output() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "echo errout >&2"}),
@@ -1682,6 +1501,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_empty_output() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "true"}),
@@ -1694,6 +1514,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_mixed_stdout_stderr() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "echo out; echo err >&2"}),
@@ -1708,6 +1529,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_nonzero_with_stderr() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "echo fail >&2; exit 42"}),
@@ -1722,6 +1544,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_custom_timeout() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "echo fast", "timeout": 10}),
@@ -1734,6 +1557,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_timeout_clamped_to_max() {
+        assert_sandbox_available();
         let result = exec(
             "bash",
             serde_json::json!({"command": "echo ok", "timeout": 99999}),
