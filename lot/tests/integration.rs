@@ -17,8 +17,15 @@ use tempfile::TempDir;
 /// Returns true if the current platform has any sandbox mechanism available.
 fn has_sandbox_support() -> bool {
     let caps = lot::probe();
-    eprintln!("[diag] probe() = appcontainer={}, namespaces={}, seccomp={}, cgroups_v2={}, seatbelt={}, job_objects={}",
-        caps.appcontainer, caps.namespaces, caps.seccomp, caps.cgroups_v2, caps.seatbelt, caps.job_objects);
+    eprintln!(
+        "[diag] probe() = appcontainer={}, namespaces={}, seccomp={}, cgroups_v2={}, seatbelt={}, job_objects={}",
+        caps.appcontainer,
+        caps.namespaces,
+        caps.seccomp,
+        caps.cgroups_v2,
+        caps.seatbelt,
+        caps.job_objects
+    );
     caps.appcontainer || caps.namespaces || caps.seatbelt
 }
 
@@ -170,8 +177,15 @@ fn make_policy(read_paths: Vec<PathBuf>, write_paths: Vec<PathBuf>) -> lot::Sand
 fn test_probe_returns_platform_capabilities() {
     eprintln!("[diag] === test_probe_returns_platform_capabilities ===");
     let caps = lot::probe();
-    eprintln!("[diag] probe() = appcontainer={}, namespaces={}, seccomp={}, cgroups_v2={}, seatbelt={}, job_objects={}",
-        caps.appcontainer, caps.namespaces, caps.seccomp, caps.cgroups_v2, caps.seatbelt, caps.job_objects);
+    eprintln!(
+        "[diag] probe() = appcontainer={}, namespaces={}, seccomp={}, cgroups_v2={}, seatbelt={}, job_objects={}",
+        caps.appcontainer,
+        caps.namespaces,
+        caps.seccomp,
+        caps.cgroups_v2,
+        caps.seatbelt,
+        caps.job_objects
+    );
 
     #[cfg(target_os = "windows")]
     {
@@ -221,8 +235,14 @@ fn test_spawn_echo() {
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!("[diag] stdout: {:?}", String::from_utf8_lossy(&output.stdout));
-    eprintln!("[diag] stderr: {:?}", String::from_utf8_lossy(&output.stderr));
+    eprintln!(
+        "[diag] stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // On some macOS versions, seatbelt may block exec — skip rather than fail
     if !output.status.success() {
@@ -264,8 +284,14 @@ fn test_spawn_read_allowed_path() {
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!("[diag] stdout: {:?}", String::from_utf8_lossy(&output.stdout));
-    eprintln!("[diag] stderr: {:?}", String::from_utf8_lossy(&output.stderr));
+    eprintln!(
+        "[diag] stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     if !output.status.success() {
         eprintln!("[diag] SKIPPED: process exited with failure status");
@@ -308,8 +334,14 @@ fn test_spawn_disallowed_path_blocked() {
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!("[diag] stdout: {:?}", String::from_utf8_lossy(&output.stdout));
-    eprintln!("[diag] stderr: {:?}", String::from_utf8_lossy(&output.stderr));
+    eprintln!(
+        "[diag] stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // The command should fail (non-zero exit) because the file is outside the policy.
     assert!(
@@ -320,8 +352,14 @@ fn test_spawn_disallowed_path_blocked() {
     // Check that stdout does NOT contain the secret data — confirms the sandbox blocked it,
     // not just that exec failed for an unrelated reason.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    eprintln!("[diag] stdout contains secret_data: {}", stdout.contains("secret_data"));
-    eprintln!("[diag] PASSED: process failed as expected (exit={:?})", output.status.code());
+    eprintln!(
+        "[diag] stdout contains secret_data: {}",
+        stdout.contains("secret_data")
+    );
+    eprintln!(
+        "[diag] PASSED: process failed as expected (exit={:?})",
+        output.status.code()
+    );
 }
 
 #[test]
@@ -351,8 +389,14 @@ fn test_spawn_write_to_readonly_blocked() {
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!("[diag] stdout: {:?}", String::from_utf8_lossy(&output.stdout));
-    eprintln!("[diag] stderr: {:?}", String::from_utf8_lossy(&output.stderr));
+    eprintln!(
+        "[diag] stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     eprintln!("[diag] file exists after attempt: {}", target.exists());
 
     // Writing to a read-only path should fail.
@@ -361,7 +405,10 @@ fn test_spawn_write_to_readonly_blocked() {
         "writing to read-only path should fail, but exited with: {:?}",
         output.status
     );
-    eprintln!("[diag] PASSED: write to read-only path failed (exit={:?})", output.status.code());
+    eprintln!(
+        "[diag] PASSED: write to read-only path failed (exit={:?})",
+        output.status.code()
+    );
 }
 
 #[test]
@@ -410,14 +457,13 @@ fn test_cleanup_after_drop() {
 
     #[cfg(target_os = "macos")]
     {
-        // Verify process is actually gone using kill(pid, 0)
-        // SAFETY: kill with signal 0 does not send a signal, only checks existence.
-        let exists = unsafe { libc::kill(pid as i32, 0) };
-        let gone = exists != 0;
-        eprintln!("[diag] kill(0) returned {exists}, errno={}", std::io::Error::last_os_error());
+        // Check if the process is still alive after drop.
+        // signal 0 doesn't send a signal, just checks if pid exists.
+        let result = std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .output();
+        let gone = result.map_or(true, |o| !o.status.success());
         eprintln!("[diag] process gone after drop: {gone}");
-        // Don't assert — the echo may have already exited before drop.
-        // The point is to log whether drop actually did anything.
         eprintln!("[diag] PASSED: cleanup ran (process gone={gone})");
     }
 }
@@ -454,8 +500,14 @@ fn test_spawn_with_piped_stdin() {
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!("[diag] stdout: {:?}", String::from_utf8_lossy(&output.stdout));
-    eprintln!("[diag] stderr: {:?}", String::from_utf8_lossy(&output.stderr));
+    eprintln!(
+        "[diag] stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     if !output.status.success() {
         eprintln!("[diag] SKIPPED: process exited with failure status");
@@ -494,7 +546,11 @@ fn test_wait_returns_exit_status() {
             return;
         };
         let status = child.wait().expect("wait");
-        eprintln!("[diag] exit status: {:?}, code: {:?}", status, status.code());
+        eprintln!(
+            "[diag] exit status: {:?}, code: {:?}",
+            status,
+            status.code()
+        );
         // On macOS CI, seatbelt may block exec — skip remaining assertions
         if !status.success() && cfg!(target_os = "macos") {
             eprintln!("[diag] SKIPPED: macOS exit 0 test failed (seatbelt blocked exec?)");
@@ -519,11 +575,18 @@ fn test_wait_returns_exit_status() {
             return;
         };
         let status = child.wait().expect("wait");
-        eprintln!("[diag] exit status: {:?}, code: {:?}", status, status.code());
+        eprintln!(
+            "[diag] exit status: {:?}, code: {:?}",
+            status,
+            status.code()
+        );
         assert!(!status.success(), "exit 42 should not be success");
 
         if status.code() != Some(42) && cfg!(target_os = "macos") {
-            eprintln!("[diag] SKIPPED: macOS exit code was {:?}, not 42", status.code());
+            eprintln!(
+                "[diag] SKIPPED: macOS exit code was {:?}, not 42",
+                status.code()
+            );
             return;
         }
         assert_eq!(status.code(), Some(42));
