@@ -1,16 +1,16 @@
-# NuShell Migration Spec
+# NuShell Migration Spec — DONE
 
-Replace POSIX `sh` with [NuShell](https://www.nushell.sh/) as epic's sole shell runtime, using a persistent MCP session.
+Replace POSIX `sh` with [NuShell](https://www.nushell.sh/) as epic's sole shell runtime, using a persistent MCP session. Implementation complete.
 
 ## Motivation
 
 POSIX `sh` is unix-centric. On Windows it requires Git Bash or similar, and behavior diverges across platforms. NuShell is cross-platform with consistent behavior on Windows, Linux, and macOS.
 
-Beyond cross-platform consistency, a persistent MCP session gives epic stateful shell access — environment variables, working directory, and shell state carry across tool calls. The current approach spawns a fresh `sh` per tool call, losing all state each time.
+Beyond cross-platform consistency, a persistent MCP session gives epic stateful shell access — environment variables, working directory, and shell state carry across tool calls. The previous approach spawned a fresh `sh` per tool call, losing all state each time.
 
 ## Approach
 
-Epic builds a custom `nu` binary from NuShell's Rust crates with MCP support enabled. At runtime, epic spawns `nu --mcp` once, keeps it running, and communicates via MCP protocol over stdio. Lot sandboxes the spawned `nu` process — same OS-level isolation as today.
+Epic's `build.rs` downloads a prebuilt NuShell 0.111.0 binary from GitHub releases, verifies its SHA-256 checksum, and caches it in `target/nu-cache/`. At runtime, epic resolves the `nu` binary by checking: (1) same directory as the epic executable, (2) build-time cache, (3) `PATH`. Epic then spawns `nu --mcp` once, keeps it running, and communicates via MCP protocol over stdio. Lot sandboxes the spawned `nu` process — same OS-level isolation as today.
 
 ## NuShell MCP Server
 
@@ -43,45 +43,17 @@ Error formatting is LLM-friendly (ANSI coloring disabled, rich error diagnostics
 
 Variables, environment variables, and working directory persist across MCP tool calls. A `$history` variable provides access to command history.
 
-## Custom NuShell Build
+## NuShell Binary
 
-Epic ships its own `nu` binary — no separate install required.
+Epic ships a prebuilt `nu` binary — no separate install required. No NuShell crates are compiled from source.
 
-### Required Crates
+Epic downloads a prebuilt NuShell 0.111.0 binary at build time (via `build.rs`). The binary is verified against a hardcoded SHA-256 checksum and cached in `target/nu-cache/`. Version updates are deliberate: update the version and checksums in `build.rs`, run CI, release.
 
-| Crate | Purpose |
-|---|---|
-| `nu-cli` | Entry points including MCP server startup |
-| `nu-cmd-lang` | `create_default_context()`, language builtins (`def`, `let`, `if`, `for`) |
-| `nu-command` | ~350 built-in commands (filesystem, string, math, networking) |
-| `nu-engine` | AST evaluator, command dispatch |
-| `nu-parser` | Source → AST |
-| `nu-protocol` | Core types (`EngineState`, `Stack`, `Value`, `PipelineData`) |
-| `nu-std` | Standard library scripts |
-| `nu-mcp` | MCP server implementation |
-
-All crates are pinned to an exact NuShell release (currently 0.111.1, MSRV 1.92.0) via `=` version constraints in `epic-nu/Cargo.toml`. Epic ships its own `epic-nu` binary — no separate NuShell install required. NuShell version updates are deliberate: bump the pinned version, run CI, release.
-
-### Feature Flags
-
-Disable `plugin`, `dataframe`, `sqlite`, `trash-support` to minimize binary size. Keep `mcp` and `network` enabled.
-
-### Binary Size
-
-| Configuration | Size |
-|---|---|
-| Full (stripped) | ~37-38 MB |
-| Minimal features (stripped) | ~14-18 MB (estimated) |
-
-### Build Approach
-
-Add a workspace member binary crate (`epic-nu/`) that depends on the NuShell crates and produces an `epic-nu` binary. Epic's build produces two binaries: `epic` and `epic-nu`. At runtime, epic spawns `epic-nu --mcp`.
-
-Clean separation, standard Cargo workflow, easy to version-lock nushell crates.
+At runtime, epic resolves the `nu` binary by checking: (1) same directory as the epic executable, (2) build-time cache, (3) `PATH`. Epic then spawns `nu --mcp`.
 
 ## MCP Client in Epic
 
-Epic needs an MCP client to communicate with the `nu --mcp` process. This replaces the current spawn-per-call pattern.
+Epic uses an MCP client to communicate with the `nu --mcp` process, replacing the former spawn-per-call bash pattern.
 
 **Protocol**: JSON-RPC 2.0 over stdio. Epic writes JSON-RPC requests to nu's stdin, reads JSON-RPC responses from nu's stdout.
 
@@ -105,71 +77,15 @@ Agent sessions are oneshot — once a session returns, it is never reused. A new
 - Multiple tool calls within a session share the nu process and its state (env vars, cwd, variables).
 - Sandbox correctness is guaranteed by construction — each nu process runs under the exact policy its phase requires.
 
-## Current State
+## Implementation Summary
 
-The shell tool is implemented in `src/agent/tools.rs`:
-
-- Tool name: `"bash"`
-- Shell binary: `"sh"` invoked with `-c <command>` (in `tool_bash`)
-- Single execution path: sandboxed via lot `SandboxCommand` (no unsandboxed fallback)
-- Grant flag: `ToolGrant::BASH` (bitflag `0b0000_0100`)
-- Available in Execute and Decompose phases; not in Analyze
-- Constants: `MAX_BASH_OUTPUT` (64 KiB), `DEFAULT_BASH_TIMEOUT_SECS` (120), `MAX_BASH_TIMEOUT_SECS` (600)
-- Internal types: `BashOutput` struct, functions `tool_bash`, `format_bash_output`, `bash_output_from`
-- Tests: bash-specific tests in `mod tests`
-
-## Required Changes
-
-### New: `epic-nu/` workspace member
-
-Binary crate producing `epic-nu`. Depends on NuShell crates listed above. Single `main.rs` that boots the NuShell engine and starts the MCP server.
-
-### New: MCP client module
-
-Module in epic (e.g. `src/agent/nu_session.rs`) that manages the `epic-nu --mcp` process for an agent session:
-
-- Spawn (lazily on first tool call) and kill (when session ends) lifecycle
-- JSON-RPC request/response serialization
-- Timeout handling per MCP call
-
-### `src/agent/tools.rs`
-
-| Item | Current | New |
+| Component | Location | What Changed |
 |---|---|---|
-| Tool name | `"bash"` | `"nu"` |
-| Tool description | `"Execute a bash command..."` | `"Execute a NuShell command..."` |
-| Implementation | Spawn `sh -c` per call | Send MCP `evaluate` to persistent nu session |
-| Constants | `MAX_BASH_OUTPUT`, `DEFAULT_BASH_TIMEOUT_SECS`, `MAX_BASH_TIMEOUT_SECS` | `MAX_NU_OUTPUT`, `DEFAULT_NU_TIMEOUT_SECS`, `MAX_NU_TIMEOUT_SECS` |
-| Struct | `BashOutput` | `NuOutput` |
-| Functions | `tool_bash`, `format_bash_output`, `bash_output_from` | `tool_nu`, `format_nu_output` |
-| Grant flag | `ToolGrant::BASH` | `ToolGrant::NU` |
-
-Tests: rename, update command syntax (e.g. `sleep 10` → `sleep 10sec`), add MCP session lifecycle tests.
-
-### Unchanged subsystems
-
-- **Sandbox policy**: lot `SandboxPolicy` is shell-agnostic. `build_sandbox_policy()` unchanged.
-- **Output handling**: exit code convention (0 = success) preserved. MCP structured responses provide richer data but `NuOutput` maps to same interface.
-
-### Other source files
-
-- `src/agent/config_gen.rs` — No changes. Tool list generated dynamically.
-- `src/agent/prompts.rs` — No changes. Tool name and description tell the model which shell to use.
-- `src/config/project.rs`, `src/init.rs` — No changes. `VerificationStep.command` is `Vec<String>`.
-
-### Documentation
-
-| File | Change |
-|---|---|
-| `docs/STATUS.md` | `bash` → `nu`, add MCP session description |
-| `docs/SANDBOXING.md` | "bash tool" → "nu tool", note persistent process model |
-| `docs/CONFIGURATION.md` | Update any bash references |
-| `docs/LOT_SPEC.md` | Update if `sh` appears as example program |
-| `docs/audit/X6.md` | `DEFAULT_BASH_TIMEOUT_SECS` → `DEFAULT_NU_TIMEOUT_SECS` |
-| `docs/audit/U5-R2.md` | "bash tool" → "nu tool" |
-| `docs/audit/U1-R2.md` | "bash tool" → "nu tool" |
-| `README.md` | Tool table: `bash` → `nu` |
-| `Cargo.toml` | Add `epic-nu` to workspace members |
+| NuShell binary | `build.rs` + `target/nu-cache/` | Prebuilt NuShell 0.111.0 binary downloaded from GitHub releases, SHA-256 verified, cached at build time |
+| MCP client | `src/agent/nu_session.rs` | `NuSession`: lazy spawn, JSON-RPC 2.0 over stdio, per-phase sandbox via lot |
+| Tool layer | `src/agent/tools.rs` | `tool_nu` delegates to `NuSession::evaluate`; `ToolGrant::NU` replaces `BASH` |
+| Sandbox policy | `src/agent/nu_session.rs` | `build_nu_sandbox_policy` — same lot policy, now anchored to the persistent process |
+| Flick integration | `src/agent/flick.rs` | `ToolExecutor::execute` takes `&NuSession`; one session per `run_with_tools` call |
 
 ## NuShell Compatibility Notes
 
@@ -184,7 +100,7 @@ On timeout, epic kills the nu MCP process entirely and returns an error to the a
 
 ## References
 
-- [NuShell GitHub](https://github.com/nushell/nushell) — Source, 37-crate workspace, version 0.111.1
+- [NuShell GitHub](https://github.com/nushell/nushell) — Source, 37-crate workspace, version 0.111.0
 - [NuShell 0.108.0 release](https://www.nushell.sh/blog/2025-10-15-nushell_v0_108_0.html) — Initial MCP
 - [NuShell 0.110.0 release](https://www.nushell.sh/blog/2026-01-17-nushell_v0_110_0.html) — MCP default, state persistence
 - [NuShell 0.111.0 release](https://www.nushell.sh/blog/2026-02-28-nushell_v0_111_0.html) — HTTP transport, request cancellation

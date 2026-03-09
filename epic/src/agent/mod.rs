@@ -2,6 +2,7 @@
 
 pub mod config_gen;
 pub mod flick;
+pub mod nu_session;
 mod prompts;
 pub mod tools;
 

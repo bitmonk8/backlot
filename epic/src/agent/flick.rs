@@ -4,6 +4,7 @@ use crate::agent::config_gen::{
     self, AssessmentWire, CheckpointWire, DecompositionWire, RecoveryPlanWire, RecoveryWire,
     TaskOutcomeWire, VerificationWire,
 };
+use crate::agent::nu_session::NuSession;
 use crate::agent::prompts;
 use crate::agent::tools::{self, AgentMethod, ToolExecResult, ToolGrant};
 use crate::agent::{AgentService, TaskContext};
@@ -42,6 +43,7 @@ pub trait ToolExecutor: Send + Sync {
         input: &'a JsonValue,
         project_root: &'a Path,
         grant: ToolGrant,
+        nu_session: &'a NuSession,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>>;
 }
 
@@ -67,10 +69,11 @@ impl ToolExecutor for DefaultToolExecutor {
         input: &'a JsonValue,
         project_root: &'a Path,
         grant: ToolGrant,
+        nu_session: &'a NuSession,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>> {
-        Box::pin(
-            async move { tools::execute_tool(tool_use_id, name, input, project_root, grant).await },
-        )
+        Box::pin(async move {
+            tools::execute_tool(tool_use_id, name, input, project_root, grant, nu_session).await
+        })
     }
 }
 
@@ -189,6 +192,9 @@ impl FlickAgent {
         let client = self.build_client(config).await?;
         let mut context = flick::Context::default();
 
+        // One NuSession per agent call — spawned lazily, killed when this method returns.
+        let nu_session = NuSession::new();
+
         // Initial call (not counted toward MAX_TOOL_ROUNDS; the limit applies to resume rounds).
         let mut result = tokio::time::timeout(self.call_timeout, client.run(query, &mut context))
             .await
@@ -205,7 +211,14 @@ impl FlickAgent {
             for (id, name, input) in &tool_calls {
                 let r = self
                     .tool_executor
-                    .execute(id.clone(), name, input, &self.project_root, grant)
+                    .execute(
+                        id.clone(),
+                        name,
+                        input,
+                        &self.project_root,
+                        grant,
+                        &nu_session,
+                    )
                     .await;
                 tool_results.push(flick::ContentBlock::ToolResult {
                     tool_use_id: r.tool_use_id,
@@ -224,8 +237,12 @@ impl FlickAgent {
         }
 
         if matches!(result.status, ResultStatus::ToolCallsPending) {
+            nu_session.kill().await;
             bail!("flick tool loop exceeded {MAX_TOOL_ROUNDS} rounds");
         }
+
+        // Clean up the nu session before returning.
+        nu_session.kill().await;
 
         check_error(&result)?;
         log_usage(&result);
@@ -688,6 +705,7 @@ mod tests {
             _input: &'a JsonValue,
             _project_root: &'a Path,
             _grant: ToolGrant,
+            _nu_session: &'a NuSession,
         ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>> {
             self.call_count.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move {

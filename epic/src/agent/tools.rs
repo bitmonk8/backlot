@@ -1,8 +1,8 @@
-// Tool access flags: READ, WRITE, BASH, TASK, WEB presets.
+// Tool access flags: READ, WRITE, NU, TASK, WEB presets.
 
+use crate::agent::nu_session::{NuOutput, NuSession};
 use bitflags::bitflags;
 use globset::GlobBuilder;
-use lot::{SandboxCommand, SandboxPolicyBuilder, SandboxStdio};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -15,9 +15,9 @@ const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_GLOB_RESULTS: usize = 1000;
 const MAX_GREP_OUTPUT: usize = 64 * 1024;
 const MAX_GREP_FILE_BYTES: u64 = 10 * 1024 * 1024;
-const MAX_BASH_OUTPUT: usize = 64 * 1024;
-const DEFAULT_BASH_TIMEOUT_SECS: u64 = 120;
-const MAX_BASH_TIMEOUT_SECS: u64 = 600;
+const MAX_NU_OUTPUT: usize = 64 * 1024;
+const DEFAULT_NU_TIMEOUT_SECS: u64 = 120;
+const MAX_NU_TIMEOUT_SECS: u64 = 600;
 
 bitflags! {
     /// Permission flags controlling which tools an agent call may use.
@@ -25,7 +25,7 @@ bitflags! {
     pub struct ToolGrant: u8 {
         const READ  = 0b0000_0001;
         const WRITE = 0b0000_0010;
-        const BASH  = 0b0000_0100;
+        const NU    = 0b0000_0100;
         const TASK  = 0b0000_1000;
         const WEB   = 0b0001_0000;
     }
@@ -36,18 +36,18 @@ bitflags! {
 pub enum AgentMethod {
     /// Assessment / verification / checkpoint / recovery — read-only analysis.
     Analyze,
-    /// Leaf execution — needs read, write, bash.
+    /// Leaf execution — needs read, write, nu.
     Execute,
-    /// Design and decompose — needs read for exploration.
+    /// Design and decompose — needs read and nu for exploration.
     Decompose,
 }
 
 /// Returns the tool grant set appropriate for a given agent method.
 pub fn phase_tools(method: AgentMethod) -> ToolGrant {
     match method {
-        AgentMethod::Execute => ToolGrant::READ | ToolGrant::WRITE | ToolGrant::BASH,
+        AgentMethod::Execute => ToolGrant::READ | ToolGrant::WRITE | ToolGrant::NU,
         AgentMethod::Analyze => ToolGrant::READ,
-        AgentMethod::Decompose => ToolGrant::READ | ToolGrant::BASH,
+        AgentMethod::Decompose => ToolGrant::READ | ToolGrant::NU,
     }
 }
 
@@ -130,14 +130,14 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
         });
     }
 
-    if grant.contains(ToolGrant::BASH) {
+    if grant.contains(ToolGrant::NU) {
         tools.push(FlickToolDef {
-            name: "bash".into(),
-            description: "Execute a bash command and return its output.".into(),
+            name: "nu".into(),
+            description: "Execute a NuShell command and return its output. Uses NuShell syntax (not POSIX sh). Session state (variables, env, cwd) persists across calls.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The command to execute" },
+                    "command": { "type": "string", "description": "The NuShell command to execute" },
                     "timeout": { "type": "integer", "description": "Timeout in seconds (default 120)" }
                 },
                 "required": ["command"]
@@ -245,7 +245,7 @@ fn required_grant(name: &str) -> Option<ToolGrant> {
     match name {
         "read_file" | "glob" | "grep" => Some(ToolGrant::READ),
         "write_file" | "edit_file" => Some(ToolGrant::WRITE),
-        "bash" => Some(ToolGrant::BASH),
+        "nu" => Some(ToolGrant::NU),
         _ => None,
     }
 }
@@ -268,6 +268,7 @@ pub async fn execute_tool(
     input: &JsonValue,
     project_root: &Path,
     grant: ToolGrant,
+    nu_session: &NuSession,
 ) -> ToolExecResult {
     // Check grant
     match required_grant(name) {
@@ -288,10 +289,10 @@ pub async fn execute_tool(
         Some(_) => {}
     }
 
-    // Bash returns a richer type because non-zero exit is not a dispatch
+    // Nu tool returns a richer type because non-zero exit is not a dispatch
     // failure but must still set is_error for callers.
-    if name == "bash" {
-        return match tool_bash(input, project_root, grant).await {
+    if name == "nu" {
+        return match tool_nu(input, project_root, grant, nu_session).await {
             Ok(out) => ToolExecResult {
                 tool_use_id,
                 content: out.content,
@@ -573,130 +574,45 @@ async fn tool_edit_file(input: &JsonValue, project_root: &Path) -> Result<String
     Ok(format!("edited {}", path.display()))
 }
 
-/// Carries both content and error flag from bash execution, since a non-zero
-/// exit is not a dispatch failure but should still surface via `is_error`.
-struct BashOutput {
-    content: String,
-    is_error: bool,
-}
-
-/// Build a sandbox policy for a bash invocation based on the current tool grant.
-///
-/// - `WRITE` grant present → `project_root` is writable (Execute/Fix phases)
-/// - `WRITE` grant absent  → `project_root` is read-only (Decompose/Verify phases)
-fn build_sandbox_policy(project_root: &Path, grant: ToolGrant) -> lot::Result<lot::SandboxPolicy> {
-    let mut builder = SandboxPolicyBuilder::new()
-        .include_temp_dirs()
-        .include_platform_exec_paths()
-        .include_platform_lib_paths()
-        .allow_network(true);
-
-    if grant.contains(ToolGrant::WRITE) {
-        builder = builder.write_path(project_root);
-    } else {
-        builder = builder.read_path(project_root);
-    }
-
-    builder.build()
-}
-
-async fn tool_bash(
+async fn tool_nu(
     input: &JsonValue,
     project_root: &Path,
     grant: ToolGrant,
-) -> Result<BashOutput, String> {
-    let command = get_str(input, "command")?.to_owned();
+    nu_session: &NuSession,
+) -> Result<NuOutput, String> {
+    let command = get_str(input, "command")?;
     let timeout_secs = input
         .get("timeout")
         .and_then(JsonValue::as_u64)
-        .unwrap_or(DEFAULT_BASH_TIMEOUT_SECS)
-        .min(MAX_BASH_TIMEOUT_SECS);
+        .unwrap_or(DEFAULT_NU_TIMEOUT_SECS)
+        .min(MAX_NU_TIMEOUT_SECS);
 
-    let policy = build_sandbox_policy(project_root, grant)
-        .map_err(|e| format!("sandbox setup failed: {e}"))?;
+    let mut result = nu_session
+        .evaluate(command, timeout_secs, project_root, grant)
+        .await?;
 
-    let project_root = project_root.to_path_buf();
-    let spawn_result = tokio::task::spawn_blocking(move || {
-        let mut cmd = SandboxCommand::new("sh");
-        cmd.args(["-c", &command]);
-        cmd.cwd(&project_root);
-        cmd.stdout(SandboxStdio::Piped);
-        cmd.stderr(SandboxStdio::Piped);
-        cmd.stdin(SandboxStdio::Null);
-        cmd.forward_common_env();
+    result.content = format_nu_output(result.content);
 
-        lot::spawn(&policy, &cmd)
-    })
-    .await
-    .map_err(|e| format!("spawn task panicked: {e}"))?;
-
-    let child = spawn_result.map_err(|e| e.to_string())?;
-
-    let timeout = std::time::Duration::from_secs(timeout_secs);
-    match child.wait_with_output_timeout(timeout).await {
-        Ok(output) => Ok(bash_output_from(&output)),
-        Err(lot::SandboxError::Timeout(_)) => {
-            Err(format!("command timed out after {timeout_secs}s"))
-        }
-        Err(e) => Err(format!("command failed: {e}")),
-    }
+    Ok(result)
 }
 
-fn bash_output_from(output: &std::process::Output) -> BashOutput {
-    BashOutput {
-        content: format_bash_output(output),
-        is_error: output.status.code() != Some(0),
+fn format_nu_output(raw: String) -> String {
+    if raw.is_empty() {
+        return "[no output]".into();
     }
-}
 
-fn format_bash_output(output: &std::process::Output) -> String {
-    let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-    // Truncate large outputs on char boundaries to avoid panic
-    if stdout.len() > MAX_BASH_OUTPUT {
-        let mut end = MAX_BASH_OUTPUT;
-        while !stdout.is_char_boundary(end) {
+    if raw.len() > MAX_NU_OUTPUT {
+        let mut output = raw;
+        let mut end = MAX_NU_OUTPUT;
+        while !output.is_char_boundary(end) {
             end -= 1;
         }
-        stdout.truncate(end);
-        stdout.push_str("\n[stdout truncated]");
+        output.truncate(end);
+        output.push_str("\n[output truncated]");
+        output
+    } else {
+        raw
     }
-    if stderr.len() > MAX_BASH_OUTPUT {
-        let mut end = MAX_BASH_OUTPUT;
-        while !stderr.is_char_boundary(end) {
-            end -= 1;
-        }
-        stderr.truncate(end);
-        stderr.push_str("\n[stderr truncated]");
-    }
-
-    let exit_code = output.status.code().unwrap_or(-1);
-    let mut result = String::new();
-
-    if !stdout.is_empty() {
-        result.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str("[stderr]\n");
-        result.push_str(&stderr);
-    }
-
-    if exit_code != 0 {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        let _ = write!(result, "[exit code: {exit_code}]");
-    }
-
-    if result.is_empty() {
-        result.push_str("[no output]");
-    }
-
-    result
 }
 
 #[cfg(test)]
@@ -708,35 +624,19 @@ mod tests {
     /// pre-populated files).
     async fn exec(name: &str, input: serde_json::Value, grant: ToolGrant) -> ToolExecResult {
         let tmp = TempDir::new().unwrap();
-        execute_tool("tu_1".into(), name, &input, tmp.path(), grant).await
+        let session = NuSession::new();
+        execute_tool("tu_1".into(), name, &input, tmp.path(), grant, &session).await
     }
 
-    /// Panics if the sandbox cannot spawn `sh -c true`.
-    /// OnceLock caches the probe result so the spawn+wait cost is paid once.
-    fn assert_sandbox_available() {
-        use std::sync::OnceLock;
-        static AVAILABLE: OnceLock<Result<(), String>> = OnceLock::new();
-        AVAILABLE
-            .get_or_init(|| {
-                let tmp = TempDir::new().map_err(|e| format!("TempDir: {e}"))?;
-                let policy = build_sandbox_policy(tmp.path(), ToolGrant::BASH)
-                    .map_err(|e| format!("policy: {e}"))?;
-                let mut cmd = SandboxCommand::new("sh");
-                cmd.args(["-c", "true"]);
-                cmd.cwd(tmp.path());
-                cmd.stdout(SandboxStdio::Null);
-                cmd.stderr(SandboxStdio::Null);
-                cmd.stdin(SandboxStdio::Null);
-                let child =
-                    lot::spawn(&policy, &cmd).map_err(|e| format!("spawn: {e}"))?;
-                match child.wait() {
-                    Ok(status) if status.success() => Ok(()),
-                    Ok(status) => Err(format!("probe exited: {status}")),
-                    Err(e) => Err(format!("probe wait: {e}")),
-                }
-            })
-            .as_ref()
-            .expect("sandbox must be available");
+    /// Helper: execute a tool in a specific directory.
+    async fn exec_in(
+        name: &str,
+        input: serde_json::Value,
+        path: &std::path::Path,
+        grant: ToolGrant,
+    ) -> ToolExecResult {
+        let session = NuSession::new();
+        execute_tool("tu_1".into(), name, &input, path, grant, &session).await
     }
 
     #[test]
@@ -744,23 +644,23 @@ mod tests {
         let grant = phase_tools(AgentMethod::Analyze);
         assert!(grant.contains(ToolGrant::READ));
         assert!(!grant.contains(ToolGrant::WRITE));
-        assert!(!grant.contains(ToolGrant::BASH));
+        assert!(!grant.contains(ToolGrant::NU));
     }
 
     #[test]
-    fn decompose_gets_read_bash() {
+    fn decompose_gets_read_nu() {
         let grant = phase_tools(AgentMethod::Decompose);
         assert!(grant.contains(ToolGrant::READ));
         assert!(!grant.contains(ToolGrant::WRITE));
-        assert!(grant.contains(ToolGrant::BASH));
+        assert!(grant.contains(ToolGrant::NU));
     }
 
     #[test]
-    fn execute_gets_read_write_bash() {
+    fn execute_gets_read_write_nu() {
         let grant = phase_tools(AgentMethod::Execute);
         assert!(grant.contains(ToolGrant::READ));
         assert!(grant.contains(ToolGrant::WRITE));
-        assert!(grant.contains(ToolGrant::BASH));
+        assert!(grant.contains(ToolGrant::NU));
     }
 
     #[test]
@@ -771,18 +671,18 @@ mod tests {
         assert!(names.contains(&"glob"));
         assert!(names.contains(&"grep"));
         assert!(!names.contains(&"write_file"));
-        assert!(!names.contains(&"bash"));
+        assert!(!names.contains(&"nu"));
     }
 
     #[test]
     fn full_tools() {
-        let grant = ToolGrant::READ | ToolGrant::WRITE | ToolGrant::BASH;
+        let grant = ToolGrant::READ | ToolGrant::WRITE | ToolGrant::NU;
         let tools = tool_definitions(grant);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
         assert!(names.contains(&"edit_file"));
-        assert!(names.contains(&"bash"));
+        assert!(names.contains(&"nu"));
     }
 
     #[test]
@@ -842,7 +742,7 @@ mod tests {
         let result = exec(
             "nonexistent_tool",
             serde_json::json!({}),
-            ToolGrant::READ | ToolGrant::WRITE | ToolGrant::BASH,
+            ToolGrant::READ | ToolGrant::WRITE | ToolGrant::NU,
         )
         .await;
         assert!(result.is_error);
@@ -855,10 +755,9 @@ mod tests {
     async fn test_read_file_basic() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), "hello world").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "read_file",
-            &serde_json::json!({"path": "test.txt"}),
+            serde_json::json!({"path": "test.txt"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -873,10 +772,9 @@ mod tests {
         // Write a file larger than MAX_READ_BYTES
         let big = "x".repeat(usize::try_from(MAX_READ_BYTES).unwrap() + 100);
         std::fs::write(tmp.path().join("big.txt"), &big).unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "read_file",
-            &serde_json::json!({"path": "big.txt"}),
+            serde_json::json!({"path": "big.txt"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -905,10 +803,9 @@ mod tests {
         std::fs::write(tmp.path().join("src/main.rs"), "").unwrap();
         std::fs::write(tmp.path().join("src/lib.rs"), "").unwrap();
         std::fs::write(tmp.path().join("readme.md"), "").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "glob",
-            &serde_json::json!({"pattern": "**/*.rs"}),
+            serde_json::json!({"pattern": "**/*.rs"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -930,10 +827,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(tmp.path().join("data.txt"), "no match here\n").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "grep",
-            &serde_json::json!({"pattern": "fn main"}),
+            serde_json::json!({"pattern": "fn main"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -949,10 +845,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "aaa\n").unwrap();
         let huge = format!("({}){{{}}}", "a|b|c|d|e|f|g|h|i|j".repeat(50), 9999);
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "grep",
-            &serde_json::json!({"pattern": huge}),
+            serde_json::json!({"pattern": huge}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -965,10 +860,9 @@ mod tests {
     async fn test_grep_normal_regex_works() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("code.rs"), "fn hello_world() {}\n").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "grep",
-            &serde_json::json!({"pattern": r"fn\s+\w+"}),
+            serde_json::json!({"pattern": r"fn\s+\w+"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -984,10 +878,9 @@ mod tests {
         std::fs::write(tmp.path().join("src/main.rs"), "fn hello()\n").unwrap();
         std::fs::write(tmp.path().join("src/lib.rs"), "fn hello()\n").unwrap();
         std::fs::write(tmp.path().join("src/data.txt"), "fn hello()\n").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "grep",
-            &serde_json::json!({"pattern": "fn hello", "glob": "*.rs"}),
+            serde_json::json!({"pattern": "fn hello", "glob": "*.rs"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -1003,10 +896,9 @@ mod tests {
     #[tokio::test]
     async fn test_write_file_creates() {
         let tmp = TempDir::new().unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "write_file",
-            &serde_json::json!({"path": "sub/new.txt", "content": "created"}),
+            serde_json::json!({"path": "sub/new.txt", "content": "created"}),
             tmp.path(),
             ToolGrant::WRITE,
         )
@@ -1049,10 +941,9 @@ mod tests {
     async fn test_edit_file_replaces() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "hello world").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "edit_file",
-            &serde_json::json!({"path": "f.txt", "old_string": "world", "new_string": "rust"}),
+            serde_json::json!({"path": "f.txt", "old_string": "world", "new_string": "rust"}),
             tmp.path(),
             ToolGrant::WRITE,
         )
@@ -1066,10 +957,9 @@ mod tests {
     async fn test_edit_file_ambiguous() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "aaa aaa").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "edit_file",
-            &serde_json::json!({"path": "f.txt", "old_string": "aaa", "new_string": "bbb"}),
+            serde_json::json!({"path": "f.txt", "old_string": "aaa", "new_string": "bbb"}),
             tmp.path(),
             ToolGrant::WRITE,
         )
@@ -1078,176 +968,57 @@ mod tests {
         assert!(result.content.contains("2 times"));
     }
 
-    // -- bash tests --
+    // -- nu tool tests --
+    //
+    // Integration tests for the nu tool require a `nu` binary (downloaded by
+    // build.rs) and lot sandbox — not yet written (TODO).
+    // Unit tests for format_nu_output are always enabled.
 
-    #[tokio::test]
-    async fn test_bash_echo() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "echo hello"}),
-            ToolGrant::BASH,
-        )
-        .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("hello"));
+    #[test]
+    fn test_format_nu_output_empty() {
+        assert_eq!(format_nu_output(String::new()), "[no output]");
+    }
+
+    #[test]
+    fn test_format_nu_output_normal() {
+        assert_eq!(format_nu_output("hello world".to_owned()), "hello world");
+    }
+
+    #[test]
+    fn test_format_nu_output_truncation() {
+        let big = "x".repeat(MAX_NU_OUTPUT + 100);
+        let formatted = format_nu_output(big);
+        assert!(formatted.len() <= MAX_NU_OUTPUT + 20); // truncation marker
+        assert!(formatted.ends_with("[output truncated]"));
+    }
+
+    #[test]
+    fn test_format_nu_output_truncation_multibyte() {
+        // U+1F600 (😀) is 4 bytes in UTF-8. Fill past the limit.
+        let emoji = "😀".repeat(MAX_NU_OUTPUT / 4 + 50);
+        let formatted = format_nu_output(emoji);
+        assert!(formatted.ends_with("[output truncated]"));
+        // Verify valid UTF-8 (would panic on invalid).
+        let _ = formatted.as_bytes();
     }
 
     #[tokio::test]
-    async fn test_bash_timeout() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "sleep 10", "timeout": 2}),
-            ToolGrant::BASH,
-        )
-        .await;
+    async fn test_nu_missing_command_param() {
+        let result = exec("nu", serde_json::json!({}), ToolGrant::NU).await;
         assert!(result.is_error);
-        assert!(result.content.contains("timed out"));
+        assert!(result.content.contains("missing"));
     }
 
+    /// Nonexistent project root — the nu session fails to spawn.
     #[tokio::test]
-    async fn test_bash_zero_exit_not_error() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "true"}),
-            ToolGrant::BASH,
-        )
-        .await;
-        assert!(!result.is_error);
-    }
-
-    #[tokio::test]
-    async fn test_bash_nonzero_exit_is_error() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "exit 1"}),
-            ToolGrant::BASH,
-        )
-        .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("[exit code: 1]"));
-    }
-
-    /// Verify that on timeout, the sandboxed child and its descendants are killed.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_bash_timeout_kills_sandboxed_child() {
-        assert_sandbox_available();
-        let tmp = TempDir::new().unwrap();
-        let marker = tmp.path().join("bg_alive");
-
-        // Spawn a command that starts a background child writing a marker file.
-        // On timeout, both sh and the background loop must die.
-        let cmd = format!(
-            "(while true; do touch {}; sleep 0.2; done) & sleep 60",
-            marker.display()
-        );
-
-        let result = execute_tool(
-            "tu_1".into(),
-            "bash",
-            &serde_json::json!({"command": cmd, "timeout": 2}),
-            tmp.path(),
-            ToolGrant::BASH | ToolGrant::WRITE,
-        )
-        .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("timed out"));
-
-        // Remove the marker and wait briefly; if the bg process survived
-        // it will recreate the file.
-        let _ = std::fs::remove_file(&marker);
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        assert!(
-            !marker.exists(),
-            "background process survived timeout — process tree kill failed"
-        );
-    }
-
-    #[test]
-    fn test_build_sandbox_policy_write_grant() {
-        let tmp = TempDir::new().unwrap();
-        let policy = build_sandbox_policy(tmp.path(), ToolGrant::WRITE | ToolGrant::BASH).unwrap();
-        let canon = tmp.path().canonicalize().unwrap();
-
-        // Project root is either directly in write_paths or covered by an
-        // ancestor (e.g. on Windows where TempDir is inside %TEMP%).
-        let covered_by_write = policy
-            .write_paths
-            .iter()
-            .any(|w| canon.starts_with(w) || w.starts_with(&canon));
-        assert!(
-            covered_by_write,
-            "project root should be writable (directly or via ancestor) when WRITE granted"
-        );
-        assert!(
-            !policy.read_paths.contains(&canon),
-            "project root should NOT be in read_paths when WRITE granted"
-        );
-    }
-
-    #[test]
-    fn test_build_sandbox_policy_no_write_grant() {
-        let tmp = TempDir::new().unwrap();
-        let policy = build_sandbox_policy(tmp.path(), ToolGrant::BASH).unwrap();
-        let canon = tmp.path().canonicalize().unwrap();
-
-        // Project root is in read_paths unless it overlaps with a write path
-        // (e.g. on Windows where TempDir is inside %TEMP%, already writable).
-        let overlaps_write = policy
-            .write_paths
-            .iter()
-            .any(|w| canon.starts_with(w) || w.starts_with(&canon));
-        if overlaps_write {
-            assert!(
-                !policy.read_paths.contains(&canon),
-                "project root should NOT be in read_paths when covered by write_paths"
-            );
-        } else {
-            assert!(
-                policy.read_paths.contains(&canon),
-                "project root should be in read_paths when WRITE not granted"
-            );
-        }
-        assert!(
-            !policy.write_paths.contains(&canon),
-            "project root should NOT be in write_paths when WRITE not granted"
-        );
-    }
-
-    #[test]
-    fn test_build_sandbox_policy_allows_network() {
-        let tmp = TempDir::new().unwrap();
-        let policy = build_sandbox_policy(tmp.path(), ToolGrant::BASH).unwrap();
-        assert!(policy.allow_network);
-    }
-
-    #[test]
-    fn test_build_sandbox_policy_has_exec_paths() {
-        let tmp = TempDir::new().unwrap();
-        let policy = build_sandbox_policy(tmp.path(), ToolGrant::BASH).unwrap();
-        assert!(
-            !policy.exec_paths.is_empty(),
-            "exec_paths should contain platform shell directories"
-        );
-    }
-
-    /// Nonexistent project root — fails at policy build or spawn, either way
-    /// the tool must return is_error with a meaningful message.
-    #[tokio::test]
-    async fn test_bash_bad_root_fails() {
+    async fn test_nu_bad_root_fails() {
         let gone = TempDir::new().unwrap().into_path();
         std::fs::remove_dir(&gone).unwrap();
-        let input = serde_json::json!({"command": "true"});
-        let result = execute_tool(
-            "tu_1".into(),
-            "bash",
-            &input,
+        let result = exec_in(
+            "nu",
+            serde_json::json!({"command": "echo hello"}),
             &gone,
-            ToolGrant::BASH,
+            ToolGrant::NU,
         )
         .await;
         assert!(
@@ -1255,42 +1026,6 @@ mod tests {
             "expected error for nonexistent root, got: {}",
             result.content,
         );
-    }
-
-    #[tokio::test]
-    async fn test_bash_env_filtered() {
-        assert_sandbox_available();
-        let tmp = TempDir::new().unwrap();
-        // SAFETY: no other threads read EPIC_TEST_SECRET.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("EPIC_TEST_SECRET", "leaked");
-        }
-
-        let result = execute_tool(
-            "tu_1".into(),
-            "bash",
-            &serde_json::json!({"command": "env"}),
-            tmp.path(),
-            ToolGrant::BASH,
-        )
-        .await;
-
-        assert!(!result.is_error);
-        assert!(
-            !result.content.contains("EPIC_TEST_SECRET"),
-            "secret env var leaked into child process"
-        );
-        assert!(
-            result.content.contains("PATH="),
-            "PATH should be present in child environment"
-        );
-
-        // SAFETY: no other threads read EPIC_TEST_SECRET.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::remove_var("EPIC_TEST_SECRET");
-        }
     }
 
     // -- read_file edge cases --
@@ -1306,10 +1041,9 @@ mod tests {
     async fn test_read_file_directory_rejected() {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("subdir")).unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "read_file",
-            &serde_json::json!({"path": "subdir"}),
+            serde_json::json!({"path": "subdir"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -1324,10 +1058,9 @@ mod tests {
     async fn test_glob_no_matches() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("file.txt"), "").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "glob",
-            &serde_json::json!({"pattern": "*.rs"}),
+            serde_json::json!({"pattern": "*.rs"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -1361,10 +1094,9 @@ mod tests {
     async fn test_grep_no_matches() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "hello world\n").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "grep",
-            &serde_json::json!({"pattern": "zzz_no_match"}),
+            serde_json::json!({"pattern": "zzz_no_match"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -1387,10 +1119,9 @@ mod tests {
         binary_content.extend_from_slice(&[0u8; 100]);
         std::fs::write(tmp.path().join("bin.dat"), &binary_content).unwrap();
         std::fs::write(tmp.path().join("text.rs"), "fn match_me\n").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "grep",
-            &serde_json::json!({"pattern": "match_me"}),
+            serde_json::json!({"pattern": "match_me"}),
             tmp.path(),
             ToolGrant::READ,
         )
@@ -1406,10 +1137,9 @@ mod tests {
     async fn test_edit_file_not_found() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "hello world").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "edit_file",
-            &serde_json::json!({"path": "f.txt", "old_string": "zzz", "new_string": "aaa"}),
+            serde_json::json!({"path": "f.txt", "old_string": "zzz", "new_string": "aaa"}),
             tmp.path(),
             ToolGrant::WRITE,
         )
@@ -1422,10 +1152,9 @@ mod tests {
     async fn test_edit_file_missing_params() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "hello").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "edit_file",
-            &serde_json::json!({"path": "f.txt"}),
+            serde_json::json!({"path": "f.txt"}),
             tmp.path(),
             ToolGrant::WRITE,
         )
@@ -1459,14 +1188,21 @@ mod tests {
         assert!(result.content.contains("missing"));
     }
 
+    #[test]
+    fn test_format_nu_output_exact_limit() {
+        let exact = "x".repeat(MAX_NU_OUTPUT);
+        let formatted = format_nu_output(exact.clone());
+        assert_eq!(formatted, exact);
+        assert!(!formatted.contains("[output truncated]"));
+    }
+
     #[tokio::test]
     async fn test_write_file_overwrites() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "old content").unwrap();
-        let result = execute_tool(
-            "tu_1".into(),
+        let result = exec_in(
             "write_file",
-            &serde_json::json!({"path": "f.txt", "content": "new content"}),
+            serde_json::json!({"path": "f.txt", "content": "new content"}),
             tmp.path(),
             ToolGrant::WRITE,
         )
@@ -1474,97 +1210,5 @@ mod tests {
         assert!(!result.is_error);
         let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
         assert_eq!(content, "new content");
-    }
-
-    // -- bash edge cases --
-
-    #[tokio::test]
-    async fn test_bash_missing_command_param() {
-        let result = exec("bash", serde_json::json!({}), ToolGrant::BASH).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("missing"));
-    }
-
-    #[tokio::test]
-    async fn test_bash_stderr_output() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "echo errout >&2"}),
-            ToolGrant::BASH,
-        )
-        .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("[stderr]"));
-        assert!(result.content.contains("errout"));
-    }
-
-    #[tokio::test]
-    async fn test_bash_empty_output() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "true"}),
-            ToolGrant::BASH,
-        )
-        .await;
-        assert!(!result.is_error);
-        assert_eq!(result.content, "[no output]");
-    }
-
-    #[tokio::test]
-    async fn test_bash_mixed_stdout_stderr() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "echo out; echo err >&2"}),
-            ToolGrant::BASH,
-        )
-        .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("out"));
-        assert!(result.content.contains("[stderr]"));
-        assert!(result.content.contains("err"));
-    }
-
-    #[tokio::test]
-    async fn test_bash_nonzero_with_stderr() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "echo fail >&2; exit 42"}),
-            ToolGrant::BASH,
-        )
-        .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("[stderr]"));
-        assert!(result.content.contains("fail"));
-        assert!(result.content.contains("[exit code: 42]"));
-    }
-
-    #[tokio::test]
-    async fn test_bash_custom_timeout() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "echo fast", "timeout": 10}),
-            ToolGrant::BASH,
-        )
-        .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("fast"));
-    }
-
-    #[tokio::test]
-    async fn test_bash_timeout_clamped_to_max() {
-        assert_sandbox_available();
-        let result = exec(
-            "bash",
-            serde_json::json!({"command": "echo ok", "timeout": 99999}),
-            ToolGrant::BASH,
-        )
-        .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("ok"));
     }
 }

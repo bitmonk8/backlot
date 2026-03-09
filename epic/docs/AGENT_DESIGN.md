@@ -9,9 +9,9 @@ This document covers per-phase tool grants, prompt assembly, and structured outp
 | Task Path | Phase | Tools | Purpose |
 |---|---|---|---|
 | Any | Assess | NONE | Pure classification call via `run_structured` (no tools) |
-| Leaf | Implement | READ \| WRITE \| EXECUTE | Code changes |
+| Leaf | Implement | READ \| WRITE \| NU | Code changes |
 | Leaf | Verify | READ | Read-only analysis |
-| Branch | Design + Decompose | READ \| BASH | Research + exploration, no writes |
+| Branch | Design + Decompose | READ \| NU | Research + exploration, no writes |
 | Branch | Verify | TASK | May spawn sub-agents for large diffs |
 
 ## Prompt Assembly

@@ -58,12 +58,12 @@ Six tools with phase-based access control via `ToolGrant` bitflags:
 | `grep` | READ | Search file contents by regex (max 64 KiB output) |
 | `write_file` | WRITE | Create or overwrite a file |
 | `edit_file` | WRITE | Replace exact substring in a file |
-| `bash` | BASH | Execute shell command (timeout: 120s default, 600s max) |
+| `nu` | NU | Execute NuShell command via persistent MCP session (timeout: 120s default, 600s max) |
 
 **Phase → tool grants:**
 - Analyze: READ
-- Execute: READ + WRITE + BASH
-- Decompose: READ
+- Execute: READ + WRITE + NU
+- Decompose: READ + NU
 
 All file operations are sandboxed to the project root via path canonicalization and containment checks.
 
@@ -229,6 +229,7 @@ src/
 │   ├── mod.rs               # AgentService trait (9 async methods)
 │   ├── flick.rs             # FlickAgent: Flick library integration
 │   ├── config_gen.rs        # Wire format types, structured output schemas
+│   ├── nu_session.rs        # NuShell MCP client — resolves and manages prebuilt nu binary
 │   ├── prompts.rs           # Prompt assembly for all agent calls
 │   └── tools.rs             # ToolGrant flags, tool definitions, execute_tool
 ├── task/
@@ -264,6 +265,11 @@ src/
 | `anyhow` + `thiserror` | Error handling |
 | `globset` + `walkdir` + `regex` | File search |
 | `bitflags` | Tool permission flags |
+| `lot` | Process sandboxing (lot library, git dependency) |
+
+### NuShell Binary
+
+Epic's `build.rs` downloads a prebuilt NuShell 0.111.0 binary from GitHub releases, verifies its SHA-256 checksum, and caches it in `target/nu-cache/`. At runtime, epic resolves the `nu` binary by checking: (1) same directory as the epic executable, (2) build-time cache, (3) `PATH`.
 
 ## Lineage
 

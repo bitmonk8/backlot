@@ -8,10 +8,8 @@ The unsandboxed fallback added code complexity (platform-specific process manage
 
 ## What Changed
 
-- Removed from `src/agent/tools.rs` (~160 lines): `tool_bash_unsandboxed`, `SandboxSpawnError`, `classify_spawn_error`, `kill_process_tree`, `UNSANDBOXED_ENV_KEYS`, platform-specific `cfg` blocks, fallback branches in `tool_bash`, and 7 associated tests.
-- Removed `libc` dependency from `Cargo.toml` (used only for `setsid()`/`kill()` in the unsandboxed path).
-- `tool_bash` is now a straight pipeline: build policy → spawn sandboxed → return result or error.
-- `tool_bash` returns `Result<BashOutput, String>` directly (no `SandboxSpawnError` enum).
+- Removed the unsandboxed execution fallback (~160 lines) and its `libc` dependency. If sandbox setup fails, the tool call now returns an error.
+- Shell execution uses `tool_nu` (NuShell MCP session) — see [NUSHELL_MIGRATION.md](NUSHELL_MIGRATION.md).
 
 ## Platform Impact
 

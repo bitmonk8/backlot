@@ -1,6 +1,6 @@
 # Sandboxing
 
-> **Operational correctness sandboxing is implemented via [lot](https://github.com/bitmonk8/lot)** — a standalone cross-platform process sandboxing library (Seatbelt on macOS, AppContainer on Windows, namespaces + seccomp + cgroups v2 on Linux). The bash tool spawns commands inside a lot sandbox with per-phase policies (write access only during Execute/Fix phases). Sandbox is mandatory — if lot cannot establish a sandbox, the tool call fails with an error. See [LOT_SPEC.md](LOT_SPEC.md) for the lot design spec.
+> **Operational correctness sandboxing is implemented via [lot](https://github.com/bitmonk8/lot)** — a standalone cross-platform process sandboxing library (Seatbelt on macOS, AppContainer on Windows, namespaces + seccomp + cgroups v2 on Linux). The nu tool spawns a persistent `nu --mcp` process inside a lot sandbox with per-phase policies (write access only during Execute/Fix phases). One nu MCP session per agent call. Sandbox is mandatory — if lot cannot establish a sandbox, the tool call fails with an error. See [LOT_SPEC.md](LOT_SPEC.md) for the lot design spec.
 
 Epic sandboxing addresses two distinct concerns with fundamentally different solutions.
 
@@ -48,11 +48,11 @@ None of these are foolproof. Detection is best-effort — a false positive means
 
 ### Problem
 
-Each epic operation (assessment, decomposition, leaf execution, verification, etc.) has a defined contract for what it should access. `ToolGrant` bitflags and `safe_path()` validation provide prompt-level and path-level enforcement, but bash commands bypass both — an agent with BASH grant has effectively unrestricted access.
+Each epic operation (assessment, decomposition, leaf execution, verification, etc.) has a defined contract for what it should access. `ToolGrant` bitflags and `safe_path()` validation provide prompt-level and path-level enforcement, but shell commands bypass both — an agent with NU grant has effectively unrestricted access within the sandbox.
 
 ### Solution: lot Process Sandboxing
 
-The bash tool spawns commands inside a [lot](https://github.com/bitmonk8/lot) sandbox (`build_sandbox_policy` in `src/agent/tools.rs`). Per-phase policies control access:
+The nu tool spawns a persistent `nu --mcp` process inside a [lot](https://github.com/bitmonk8/lot) sandbox (`build_nu_sandbox_policy` in `src/agent/nu_session.rs`). Per-phase policies control access:
 
 | Phase | Project Root | Temp Dirs | Network |
 |---|---|---|---|
