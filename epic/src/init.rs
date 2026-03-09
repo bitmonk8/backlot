@@ -26,6 +26,7 @@ pub async fn run_init(agent: &FlickAgent, project_root: &Path) -> anyhow::Result
     let (steps, declined) = present_and_confirm(findings, &mut lines)?;
     let models = prompt_models(&mut lines)?;
     let limits = prompt_limits(&mut lines)?;
+    drop(lines);
 
     let config = EpicConfig {
         verification_steps: steps,
@@ -304,7 +305,11 @@ fn read_line_raw(
     match lines.next() {
         Some(Ok(line)) => {
             let trimmed = line.trim();
-            Ok(if lowercase { trimmed.to_lowercase() } else { trimmed.to_owned() })
+            Ok(if lowercase {
+                trimmed.to_lowercase()
+            } else {
+                trimmed.to_owned()
+            })
         }
         Some(Err(e)) => bail!("stdin read error: {e}"),
         None if bail_on_eof => bail!("unexpected end of input"),
@@ -456,17 +461,9 @@ mod tests {
 
     #[test]
     fn present_and_confirm_edit_response() {
-        let findings = sample_findings(vec![
-            sample_step("build", &["cargo", "build"]),
-        ]);
+        let findings = sample_findings(vec![sample_step("build", &["cargo", "build"])]);
         // "edit" for the step, then provide name/command/timeout, then "n" to not add another
-        let mut lines = mock_lines(vec![
-            "edit",
-            "compile",
-            "cargo build --release",
-            "600",
-            "n",
-        ]);
+        let mut lines = mock_lines(vec!["edit", "compile", "cargo build --release", "600", "n"]);
         let (accepted, declined) = present_and_confirm(findings, &mut lines).unwrap();
         assert_eq!(accepted.len(), 1);
         assert!(declined.is_empty());
@@ -477,13 +474,10 @@ mod tests {
 
     #[test]
     fn present_and_confirm_edit_keeps_defaults() {
-        let findings = sample_findings(vec![
-            sample_step("build", &["cargo", "build"]),
-        ]);
+        let findings = sample_findings(vec![sample_step("build", &["cargo", "build"])]);
         // "e" shorthand triggers edit, then accept all defaults with empty lines
         let mut lines = mock_lines(vec![
-            "e",
-            "",  // keep default name
+            "e", "",  // keep default name
             "",  // keep default command
             "",  // keep default timeout
             "n", // don't add another step
@@ -498,9 +492,7 @@ mod tests {
 
     #[test]
     fn present_and_confirm_add_custom_step() {
-        let findings = sample_findings(vec![
-            sample_step("build", &["cargo", "build"]),
-        ]);
+        let findings = sample_findings(vec![sample_step("build", &["cargo", "build"])]);
         // Accept the detected step, then add a custom step, then stop
         let mut lines = mock_lines(vec![
             "y",    // accept build
@@ -508,11 +500,11 @@ mod tests {
             "lint", // custom step name
             "cargo clippy",
             "120",
-            "y",    // add another step?
-            "fmt",  // second custom step name
+            "y",   // add another step?
+            "fmt", // second custom step name
             "cargo fmt --check",
-            "",     // default timeout (300)
-            "n",    // done adding steps
+            "",  // default timeout (300)
+            "n", // done adding steps
         ]);
         let (accepted, declined) = present_and_confirm(findings, &mut lines).unwrap();
         assert_eq!(accepted.len(), 3);
@@ -528,12 +520,7 @@ mod tests {
 
     #[test]
     fn prompt_models_custom_values() {
-        let mut lines = mock_lines(vec![
-            "n",
-            "gpt-4o-mini",
-            "gpt-4o",
-            "gpt-4-turbo",
-        ]);
+        let mut lines = mock_lines(vec!["n", "gpt-4o-mini", "gpt-4o", "gpt-4-turbo"]);
         let models = prompt_models(&mut lines).unwrap();
         assert_eq!(models.fast, "gpt-4o-mini");
         assert_eq!(models.balanced, "gpt-4o");
@@ -547,8 +534,8 @@ mod tests {
         let mut lines = mock_lines(vec![
             "no",
             "custom-fast",
-            "",  // accept default balanced
-            "",  // accept default strong
+            "", // accept default balanced
+            "", // accept default strong
         ]);
         let models = prompt_models(&mut lines).unwrap();
         assert_eq!(models.fast, "custom-fast");
@@ -558,13 +545,7 @@ mod tests {
 
     #[test]
     fn prompt_limits_custom_values() {
-        let mut lines = mock_lines(vec![
-            "n",
-            "10",
-            "5",
-            "8",
-            "50",
-        ]);
+        let mut lines = mock_lines(vec!["n", "10", "5", "8", "50"]);
         let limits = prompt_limits(&mut lines).unwrap();
         assert_eq!(limits.max_depth, 10);
         assert_eq!(limits.max_recovery_rounds, 5);
@@ -575,13 +556,7 @@ mod tests {
     #[test]
     fn prompt_limits_invalid_numeric_falls_back_to_defaults() {
         let defaults = LimitsConfig::default();
-        let mut lines = mock_lines(vec![
-            "n",
-            "not_a_number",
-            "abc",
-            "xyz",
-            "!!!",
-        ]);
+        let mut lines = mock_lines(vec!["n", "not_a_number", "abc", "xyz", "!!!"]);
         let limits = prompt_limits(&mut lines).unwrap();
         assert_eq!(limits.max_depth, defaults.max_depth);
         assert_eq!(limits.max_recovery_rounds, defaults.max_recovery_rounds);
@@ -593,11 +568,10 @@ mod tests {
     fn prompt_limits_mixed_valid_and_invalid() {
         let defaults = LimitsConfig::default();
         let mut lines = mock_lines(vec![
-            "n",
-            "15",       // valid
-            "invalid",  // falls back to default
-            "7",        // valid
-            "invalid",  // falls back to default
+            "n", "15",      // valid
+            "invalid", // falls back to default
+            "7",       // valid
+            "invalid", // falls back to default
         ]);
         let limits = prompt_limits(&mut lines).unwrap();
         assert_eq!(limits.max_depth, 15);

@@ -683,9 +683,7 @@ fn classify_spawn_error(e: lot::SandboxError) -> SandboxSpawnError {
         | lot::SandboxError::Setup(msg)
         | lot::SandboxError::InvalidPolicy(msg) => SandboxSpawnError::SetupFailed(msg),
         lot::SandboxError::Io(ref io) => match io.kind() {
-            std::io::ErrorKind::PermissionDenied => {
-                SandboxSpawnError::SetupFailed(e.to_string())
-            }
+            std::io::ErrorKind::PermissionDenied => SandboxSpawnError::SetupFailed(e.to_string()),
             _ => SandboxSpawnError::Other(e.to_string()),
         },
         lot::SandboxError::Cleanup(msg) => SandboxSpawnError::Other(msg),
@@ -699,10 +697,23 @@ fn classify_spawn_error(e: lot::SandboxError) -> SandboxSpawnError {
 /// Environment variables forwarded in the unsandboxed fallback path.
 /// Mirrors the set used by `SandboxCommand::forward_common_env()`.
 const UNSANDBOXED_ENV_KEYS: &[&str] = &[
-    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL",
-    "TMPDIR", "TMP", "TEMP",
-    "SYSTEMROOT", "COMSPEC", "WINDIR", "PROGRAMFILES",
-    "APPDATA", "LOCALAPPDATA", "USERPROFILE",
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "SHELL",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "WINDIR",
+    "PROGRAMFILES",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERPROFILE",
 ];
 
 /// Unsandboxed fallback — used when sandbox setup fails.
@@ -724,6 +735,7 @@ async fn tool_bash_unsandboxed(
     // Put child in its own process group so we can kill the whole tree on timeout.
     #[cfg(unix)]
     {
+        #[allow(unused_imports)]
         use std::os::unix::process::CommandExt as _;
         // SAFETY: setsid() is async-signal-safe. pre_exec runs between fork and exec.
         #[allow(unsafe_code)]
@@ -768,7 +780,9 @@ async fn tool_bash_unsandboxed(
 /// at the given PID. Used only for the unsandboxed fallback path.
 #[cfg(unix)]
 fn kill_process_tree(pid: u32) {
-    let Some(pid) = i32::try_from(pid).ok() else { return };
+    let Some(pid) = i32::try_from(pid).ok() else {
+        return;
+    };
     // SAFETY: negative pid targets the process group. The pid came from
     // a child we spawned into its own session via setsid().
     #[allow(unsafe_code)]
@@ -1003,7 +1017,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_nonexistent() {
-        let result = exec("read_file", serde_json::json!({"path": "nope.txt"}), ToolGrant::READ).await;
+        let result = exec(
+            "read_file",
+            serde_json::json!({"path": "nope.txt"}),
+            ToolGrant::READ,
+        )
+        .await;
         assert!(result.is_error);
     }
 
@@ -1193,7 +1212,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_echo() {
-        let result = exec("bash", serde_json::json!({"command": "echo hello"}), ToolGrant::BASH).await;
+        let result = exec(
+            "bash",
+            serde_json::json!({"command": "echo hello"}),
+            ToolGrant::BASH,
+        )
+        .await;
         assert!(!result.is_error);
         assert!(result.content.contains("hello"));
     }
@@ -1212,13 +1236,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_zero_exit_not_error() {
-        let result = exec("bash", serde_json::json!({"command": "true"}), ToolGrant::BASH).await;
+        let result = exec(
+            "bash",
+            serde_json::json!({"command": "true"}),
+            ToolGrant::BASH,
+        )
+        .await;
         assert!(!result.is_error);
     }
 
     #[tokio::test]
     async fn test_bash_nonzero_exit_is_error() {
-        let result = exec("bash", serde_json::json!({"command": "exit 1"}), ToolGrant::BASH).await;
+        let result = exec(
+            "bash",
+            serde_json::json!({"command": "exit 1"}),
+            ToolGrant::BASH,
+        )
+        .await;
         assert!(result.is_error);
         assert!(result.content.contains("[exit code: 1]"));
     }
@@ -1258,7 +1292,7 @@ mod tests {
         );
     }
 
-    /// Verify that calling kill_process_tree with a stale PID does not panic.
+    /// Verify that calling `kill_process_tree` with a stale PID does not panic.
     #[cfg(unix)]
     #[test]
     fn test_kill_process_tree_stale_pid_unix() {
@@ -1266,7 +1300,7 @@ mod tests {
         kill_process_tree(99_999_999);
     }
 
-    /// Verify that calling kill_process_tree with a stale PID does not panic.
+    /// Verify that calling `kill_process_tree` with a stale PID does not panic.
     #[cfg(windows)]
     #[test]
     fn test_kill_process_tree_stale_pid_windows() {
@@ -1281,15 +1315,16 @@ mod tests {
 
         // Project root is either directly in write_paths or covered by an
         // ancestor (e.g. on Windows where TempDir is inside %TEMP%).
-        let covered_by_write = policy.write_paths.iter().any(|w| {
-            canon.starts_with(w) || w.starts_with(&canon)
-        });
+        let covered_by_write = policy
+            .write_paths
+            .iter()
+            .any(|w| canon.starts_with(w) || w.starts_with(&canon));
         assert!(
             covered_by_write,
             "project root should be writable (directly or via ancestor) when WRITE granted"
         );
         assert!(
-            !policy.read_paths.iter().any(|p| *p == canon),
+            !policy.read_paths.contains(&canon),
             "project root should NOT be in read_paths when WRITE granted"
         );
     }
@@ -1302,22 +1337,23 @@ mod tests {
 
         // Project root is in read_paths unless it overlaps with a write path
         // (e.g. on Windows where TempDir is inside %TEMP%, already writable).
-        let overlaps_write = policy.write_paths.iter().any(|w| {
-            canon.starts_with(w) || w.starts_with(&canon)
-        });
+        let overlaps_write = policy
+            .write_paths
+            .iter()
+            .any(|w| canon.starts_with(w) || w.starts_with(&canon));
         if overlaps_write {
             assert!(
-                !policy.read_paths.iter().any(|p| *p == canon),
+                !policy.read_paths.contains(&canon),
                 "project root should NOT be in read_paths when covered by write_paths"
             );
         } else {
             assert!(
-                policy.read_paths.iter().any(|p| *p == canon),
+                policy.read_paths.contains(&canon),
                 "project root should be in read_paths when WRITE not granted"
             );
         }
         assert!(
-            !policy.write_paths.iter().any(|p| *p == canon),
+            !policy.write_paths.contains(&canon),
             "project root should NOT be in write_paths when WRITE not granted"
         );
     }
@@ -1342,45 +1378,66 @@ mod tests {
     #[test]
     fn test_classify_spawn_error_unsupported_is_setup_failed() {
         let e = lot::SandboxError::Unsupported("not supported".into());
-        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::SetupFailed(_)));
+        assert!(matches!(
+            classify_spawn_error(e),
+            SandboxSpawnError::SetupFailed(_)
+        ));
     }
 
     #[test]
     fn test_classify_spawn_error_setup_is_setup_failed() {
         let e = lot::SandboxError::Setup("cannot create sandbox".into());
-        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::SetupFailed(_)));
+        assert!(matches!(
+            classify_spawn_error(e),
+            SandboxSpawnError::SetupFailed(_)
+        ));
     }
 
     #[test]
     fn test_classify_spawn_error_invalid_policy_is_setup_failed() {
         let e = lot::SandboxError::InvalidPolicy("bad policy".into());
-        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::SetupFailed(_)));
+        assert!(matches!(
+            classify_spawn_error(e),
+            SandboxSpawnError::SetupFailed(_)
+        ));
     }
 
     #[test]
     fn test_classify_spawn_error_io_permission_denied_is_setup_failed() {
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         let e = lot::SandboxError::Io(io_err);
-        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::SetupFailed(_)));
+        assert!(matches!(
+            classify_spawn_error(e),
+            SandboxSpawnError::SetupFailed(_)
+        ));
     }
 
     #[test]
     fn test_classify_spawn_error_io_not_found_is_other() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         let e = lot::SandboxError::Io(io_err);
-        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::Other(_)));
+        assert!(matches!(
+            classify_spawn_error(e),
+            SandboxSpawnError::Other(_)
+        ));
     }
 
     #[test]
     fn test_classify_spawn_error_cleanup_is_other() {
         let e = lot::SandboxError::Cleanup("cleanup failed".into());
-        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::Other(_)));
+        assert!(matches!(
+            classify_spawn_error(e),
+            SandboxSpawnError::Other(_)
+        ));
     }
 
     #[test]
     fn test_classify_spawn_error_timeout_is_other() {
         let e = lot::SandboxError::Timeout(std::time::Duration::from_secs(5));
-        assert!(matches!(classify_spawn_error(e), SandboxSpawnError::Other(_)));
+        assert!(matches!(
+            classify_spawn_error(e),
+            SandboxSpawnError::Other(_)
+        ));
     }
 
     #[tokio::test]
@@ -1470,7 +1527,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_glob_invalid_pattern() {
-        let result = exec("glob", serde_json::json!({"pattern": "[invalid"}), ToolGrant::READ).await;
+        let result = exec(
+            "glob",
+            serde_json::json!({"pattern": "[invalid"}),
+            ToolGrant::READ,
+        )
+        .await;
         assert!(result.is_error);
         assert!(result.content.contains("invalid glob"));
     }
@@ -1607,7 +1669,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_stderr_output() {
-        let result = exec("bash", serde_json::json!({"command": "echo errout >&2"}), ToolGrant::BASH).await;
+        let result = exec(
+            "bash",
+            serde_json::json!({"command": "echo errout >&2"}),
+            ToolGrant::BASH,
+        )
+        .await;
         assert!(!result.is_error);
         assert!(result.content.contains("[stderr]"));
         assert!(result.content.contains("errout"));
@@ -1615,7 +1682,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_empty_output() {
-        let result = exec("bash", serde_json::json!({"command": "true"}), ToolGrant::BASH).await;
+        let result = exec(
+            "bash",
+            serde_json::json!({"command": "true"}),
+            ToolGrant::BASH,
+        )
+        .await;
         assert!(!result.is_error);
         assert_eq!(result.content, "[no output]");
     }

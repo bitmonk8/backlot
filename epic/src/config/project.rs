@@ -161,10 +161,8 @@ impl EpicConfig {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => {
-                return Err(
-                    anyhow::Error::new(e)
-                        .context(format!("reading config from {}", path.display())),
-                );
+                return Err(anyhow::Error::new(e)
+                    .context(format!("reading config from {}", path.display())));
             }
         };
         let config: Self = toml::from_str(&contents)
@@ -224,7 +222,8 @@ impl EpicConfig {
             if step.timeout < 1 {
                 anyhow::bail!(
                     "verification[{}].timeout must be >= 1, got {}",
-                    i, step.timeout
+                    i,
+                    step.timeout
                 );
             }
         }
@@ -316,7 +315,10 @@ max_total_tasks = 42
         let mut config = EpicConfig::default();
         config.limits.max_depth = 0;
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("max_depth"), "error should name the field: {err}");
+        assert!(
+            err.contains("max_depth"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]
@@ -324,7 +326,10 @@ max_total_tasks = 42
         let mut config = EpicConfig::default();
         config.limits.max_depth = 33;
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("max_depth"), "error should name the field: {err}");
+        assert!(
+            err.contains("max_depth"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]
@@ -339,7 +344,10 @@ max_total_tasks = 42
         let mut config = EpicConfig::default();
         config.limits.max_recovery_rounds = 0;
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("max_recovery_rounds"), "error should name the field: {err}");
+        assert!(
+            err.contains("max_recovery_rounds"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]
@@ -347,7 +355,10 @@ max_total_tasks = 42
         let mut config = EpicConfig::default();
         config.limits.retry_budget = 0;
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("retry_budget"), "error should name the field: {err}");
+        assert!(
+            err.contains("retry_budget"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]
@@ -355,7 +366,10 @@ max_total_tasks = 42
         let mut config = EpicConfig::default();
         config.limits.branch_fix_rounds = 0;
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("branch_fix_rounds"), "error should name the field: {err}");
+        assert!(
+            err.contains("branch_fix_rounds"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]
@@ -363,7 +377,10 @@ max_total_tasks = 42
         let mut config = EpicConfig::default();
         config.limits.root_fix_rounds = 0;
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("root_fix_rounds"), "error should name the field: {err}");
+        assert!(
+            err.contains("root_fix_rounds"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]
@@ -371,7 +388,10 @@ max_total_tasks = 42
         let mut config = EpicConfig::default();
         config.limits.max_total_tasks = 0;
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("max_total_tasks"), "error should name the field: {err}");
+        assert!(
+            err.contains("max_total_tasks"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]
@@ -379,7 +399,10 @@ max_total_tasks = 42
         let mut config = EpicConfig::default();
         config.limits.max_total_tasks = 10_001;
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("max_total_tasks"), "error should name the field: {err}");
+        assert!(
+            err.contains("max_total_tasks"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]
@@ -398,7 +421,10 @@ max_total_tasks = 42
             timeout: 0,
         });
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("timeout"), "error should name the field: {err}");
+        assert!(
+            err.contains("timeout"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]
@@ -407,11 +433,11 @@ max_total_tasks = 42
         let path = dir.path().join("epic.toml");
         std::fs::write(
             &path,
-            r#"
+            r"
 [limits]
 max_depth = 4
 max_total_tasks = 50
-"#,
+",
         )
         .unwrap();
         let config = EpicConfig::load(&path).unwrap();
@@ -451,7 +477,10 @@ max_total_tasks = 50
             timeout: 0,
         });
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("verification[1]"), "should report index 1: {err}");
+        assert!(
+            err.contains("verification[1]"),
+            "should report index 1: {err}"
+        );
     }
 
     #[test]
@@ -470,6 +499,9 @@ max_total_tasks = 50
             timeout: 60,
         });
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("command"), "error should mention command: {err}");
+        assert!(
+            err.contains("command"),
+            "error should mention command: {err}"
+        );
     }
 }
