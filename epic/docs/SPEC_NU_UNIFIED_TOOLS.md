@@ -1,10 +1,10 @@
 # Spec: Unified Tool Layer via Nu Custom Commands
 
-**Status**: Draft — not yet decided.
+**Status**: Draft — decisions recorded, approaching implementation-ready.
 
 ## Summary
 
-Move epic's file tools (`read_file`, `write_file`, `edit_file`, `glob`, `grep`) out of epic's Rust process and into the nu MCP session as nu custom commands. All agent tool calls would route through the sandboxed nu process, eliminating the dual-enforcement model (safe_path + lot) in favor of lot-only sandboxing.
+Move epic's file tools (`read_file`, `write_file`, `edit_file`, `glob`, `grep`) out of epic's Rust process and into the nu MCP session as nu custom commands. All agent tool calls route through the sandboxed nu process, eliminating the dual-enforcement model (safe_path + lot) in favor of lot-only sandboxing.
 
 ## Motivation
 
@@ -15,7 +15,39 @@ Epic currently enforces filesystem boundaries two ways:
 
 This creates three TOCTOU race conditions (see git history, formerly AUDIT.md) that are not practically exploitable but exist because epic's process is unsandboxed. Moving all file operations into the sandboxed nu process eliminates the race class by construction — lot enforces boundaries at the syscall level, before any file handle is opened.
 
-## Current Tool Grant Model
+## Decisions
+
+### D1: Lazy spawn (decided)
+
+Nu processes spawn lazily on first tool call. Three agent call types never receive tools (assessment, checkpoint, assess-recovery) and never spawn nu. All other agent types (verify, execute, decompose, fix, recovery-design) receive tools and their prompts explicitly instruct tool use — meaning they will call tools in virtually every session. Lazy spawn adds at most one tool-call of latency for those sessions.
+
+### D2: Custom commands via evaluate, not MCP tool registration (decided)
+
+Nu 0.111.0 does not support registering custom MCP tools. Nu's built-in MCP server exposes only `evaluate`, `find_command`, and `list_command`. Custom commands are defined via `def` in nu script and invoked through the `evaluate` tool. This is simpler than MCP registration and gives full access to nu's scripting capabilities.
+
+### D3: Lot sandbox is the sole access control mechanism (decided)
+
+`safe_path()`, `verify_ancestors_within_root()`, and `ToolGrant::READ`/`WRITE` flags are removed. Lot's per-phase sandbox policy is the sole gatekeeper. `ToolGrant` collapses or is removed entirely (all tool calls route through nu `evaluate`).
+
+### D4: Platform sandbox verification (confirmed)
+
+Lot provides OS-level read/write/execute path controls on all three platforms:
+
+| Capability | Linux | macOS | Windows |
+|---|---|---|---|
+| Read-only enforcement | Mount NS (`MS_RDONLY` remount) | Seatbelt SBPL (`file-read*` only) | AppContainer ACLs (`FILE_GENERIC_READ`) |
+| Read-write enforcement | Mount NS (no `MS_RDONLY`) | Seatbelt (`file-read*` + `file-write*`) | ACLs (`FILE_GENERIC_READ \| WRITE`) |
+| Executable control | Mount flags (`MS_NOEXEC`) | Seatbelt (`process-exec`, `file-map-executable`) | ACLs (`FILE_GENERIC_EXECUTE`) |
+| Path hiding | Full (only mounted paths exist) | Default-deny (access denied) | ACL-based (access denied) |
+| Always available? | Requires unprivileged user NS | Always | Always |
+
+**Path hiding difference**: On Linux, unmounted paths literally don't exist in the mount namespace. On macOS/Windows, paths exist but access is denied. For epic's use case (agents work within project root) this is equivalent — agents cannot read or write outside the sandbox boundary.
+
+**Linux caveat**: Unprivileged user namespaces may be disabled by kernel config or AppArmor. This is an existing constraint (epic already depends on lot for nu), not a new one.
+
+---
+
+## Current Tool Grant Model (before)
 
 | Phase | Grant Flags | Tools Available |
 |-------|-------------|-----------------|
@@ -23,91 +55,195 @@ This creates three TOCTOU race conditions (see git history, formerly AUDIT.md) t
 | Execute | `READ \| WRITE \| NU` | read_file, glob, grep, write_file, edit_file, nu |
 | Decompose | `READ \| NU` | read_file, glob, grep, nu |
 
-Analyze-phase sessions have no nu access today.
+Assessment, checkpoint, and assess-recovery receive zero tools and use `run_structured()` (no tool loop).
 
-## Proposed Change
-
-All file tools become nu custom commands. Every agent session gets a nu MCP session. Lot's per-phase sandbox policy replaces ToolGrant as the access control mechanism.
+## Proposed Model (after)
 
 ### Phase → Lot Policy Mapping
 
-| Phase | Lot Policy | Effect |
-|-------|-----------|--------|
-| Analyze | read_path(project_root) | File tools work read-only. Nu commands cannot write. |
-| Execute | write_path(project_root) | Full access. |
-| Decompose | read_path(project_root) | Read + nu commands, no writes. |
+| Phase | Lot Policy | Tools Available | Effect |
+|-------|-----------|-----------------|--------|
+| Analyze (verify, file-review) | `read_path(project_root)` | All commands via `evaluate` | Read-only. OS prevents writes. |
+| Execute (leaf, fix-leaf) | `write_path(project_root)` | All commands via `evaluate` | Full read-write access. |
+| Decompose (design, recovery-design) | `read_path(project_root)` | All commands via `evaluate` | Read + nu commands, OS prevents writes. |
+| Assess / Checkpoint | N/A | None | No nu process spawned. No tools. |
 
 ### What Changes
 
-- `tool_read_file`, `tool_write_file`, `tool_edit_file`, `tool_glob`, `tool_grep` removed from tools.rs.
-- Equivalent nu custom commands registered at session startup.
-- `safe_path()` and `verify_ancestors_within_root()` removed (lot enforces boundaries).
-- `ToolGrant::READ` and `ToolGrant::WRITE` flags become unused — lot policy is the sole gatekeeper.
-- `ToolGrant` may collapse to just `NU` + `TASK` + `WEB`, or be removed entirely if all tools route through nu.
-- `execute_tool()` dispatch simplifies: all tool calls go to `nu_session.evaluate()` (or a tool-call variant).
+- `tool_read_file`, `tool_write_file`, `tool_edit_file`, `tool_glob`, `tool_grep` removed from `tools.rs`.
+- `safe_path()` and `verify_ancestors_within_root()` removed.
+- `ToolGrant::READ` and `ToolGrant::WRITE` flags removed. `ToolGrant` type removed or reduced to a marker for "has nu access".
+- `execute_tool()` dispatch simplified: all tool calls go to `nu_session.evaluate()`.
+- `AgentMethod` enum simplified: `HasTools` (spawns nu) vs `NoTools` (structured output, no tool loop).
+- Nu custom commands defined at session startup via `--commands` flag or initial `evaluate` call.
 
-### Nu Custom Commands
+---
 
-The custom commands would preserve the current tool semantics (size limits, output caps, etc.) but implemented in nu:
+## Nu Custom Command Definitions
 
-| Command | Equivalent | Notes |
-|---------|-----------|-------|
-| `epic read <path>` | `tool_read_file` | 256 KiB cap, returns content |
-| `epic write <path> <content>` | `tool_write_file` | 1 MiB cap |
-| `epic edit <path> <old> <new>` | `tool_edit_file` | Exact substring replacement |
-| `epic glob <pattern>` | `tool_glob` | 1000 result cap |
-| `epic grep <pattern> <path?>` | `tool_grep` | 64 KiB output cap, 10 MiB file cap |
+### Loading mechanism
 
-Exact command names and signatures TBD. Could also be registered as MCP tools rather than nu custom commands.
+At session startup, before any agent tool calls, epic sends an `evaluate` call containing all custom command definitions as nu script. This is a single MCP `tools/call` request with the `def` blocks concatenated. The definitions persist in the nu session for subsequent `evaluate` calls.
 
-## Advantages
+Alternative: pass definitions via `nu --commands "..." --mcp`. Needs testing — `--commands` may conflict with `--mcp` mode. If it works, it avoids the extra evaluate round-trip.
 
-1. **Eliminates TOCTOU races by construction.** Lot enforces path boundaries at the OS level before any file handle opens. No validation-then-use gap.
-2. **Single sandboxing mechanism.** Removes the `safe_path` + `ToolGrant` + lot layering. One mechanism to reason about.
-3. **Less Rust code to maintain.** ~450 lines of file tool implementations in tools.rs replaced by simpler nu commands.
-4. **Consistent security model.** Every agent action — file reads, writes, shell commands — goes through the same sandbox.
+### Command definitions
 
-## Disadvantages and Open Questions
+Each command preserves the semantics of the current Rust implementation. Error reporting uses nu's structured error mechanism (`error make`).
 
-### All sessions now require a nu process
+```nu
+# read_file — read file contents, 256 KiB cap
+def "epic read" [path: string] {
+    let full = ($path | path expand)
+    let size = (ls $full | get size | first)
+    if $size > 262144 {
+        error make {
+            msg: $"File too large: ($size) bytes, max 262144"
+            label: { text: "size limit", span: (metadata $path).span }
+        }
+    }
+    open $full --raw | decode utf-8
+}
 
-Analyze-phase sessions (assessment, verification, checkpoints) currently use no nu session. This change would spawn a nu MCP process for every agent call, increasing resource usage. Assessment calls are frequent and cheap (single Haiku call, no tools used most of the time).
+# write_file — write content to file, 1 MiB cap
+def "epic write" [path: string, content: string] {
+    let size = ($content | str length)
+    if $size > 1048576 {
+        error make {
+            msg: $"Content too large: ($size) bytes, max 1048576"
+        }
+    }
+    let full = ($path | path expand)
+    # Ensure parent directory exists
+    let parent = ($full | path dirname)
+    mkdir $parent
+    $content | save --force $full
+}
 
-**Mitigation options:**
-- Lazy spawn: only start nu when the first tool call arrives (current behavior for nu-granting phases).
-- Accept the cost: nu startup is fast, and sessions are short-lived.
-- Keep `read_file`/`glob`/`grep` in-process for Analyze phase only — but this reintroduces the dual model.
+# edit_file — exact substring replacement
+def "epic edit" [path: string, old: string, new: string] {
+    let full = ($path | path expand)
+    let content = (open $full --raw | decode utf-8)
+    let count = ($content | str index-of $old | length)  # TBD: nu API for count
+    if $count == 0 {
+        error make { msg: "Substring not found" }
+    }
+    if $count > 1 {
+        error make { msg: $"Substring found ($count) times, must be unique" }
+    }
+    let result = ($content | str replace $old $new)
+    $result | save --force $full
+}
 
-### Write access exposure
+# glob — find files by pattern, 1000 result cap
+def "epic glob" [pattern: string] {
+    glob $pattern | first 1000 | to text
+}
 
-Today, Analyze-phase sessions cannot call `write_file` because `ToolGrant::WRITE` is not granted. With unified nu, the question becomes: does lot's read-only policy on the project root actually prevent writes?
+# grep — search file contents, 64 KiB output cap, 10 MiB file size cap
+def "epic grep" [
+    pattern: string
+    path?: string
+] {
+    # TBD: implementation using nu's built-in grep/find capabilities
+    # Must respect: 64 KiB output cap, 10 MiB per-file cap, regex support
+}
+```
 
-**Answer: yes.** Lot's `read_path()` uses OS-level enforcement (namespaces + seccomp on Linux, Seatbelt on macOS, AppContainer on Windows) to make the path read-only to the process. The nu process literally cannot open files for writing. This is stronger than ToolGrant, which is advisory (enforced in epic's Rust code, bypassable if there's a bug).
+**These are illustrative, not final.** The exact nu API calls, error handling patterns, and output formatting need validation against nu 0.111.0. Key areas requiring prototype testing:
 
-However, this needs verification per platform. The lot sandbox must be tested to confirm:
-- `read_path` truly prevents writes, renames, symlink creation, and hardlink creation.
-- `write_path` does not grant access outside the specified path.
-- Temp dir access does not provide a pivot to project root.
+1. **`epic edit` substring counting** — nu's string API for counting non-overlapping occurrences.
+2. **`epic grep` implementation** — nu has no built-in grep equivalent with regex. Options: `rg` via shell-out (requires rg in sandbox), manual `open` + `lines` + `where` pipeline, or `str contains`/`str index-of` per line.
+3. **`epic glob` path relativity** — confirm glob patterns resolve relative to cwd (project root) within the sandbox.
+4. **Binary file handling** — `open --raw` returns bytes; `decode utf-8` may fail on binary files. Need error handling.
+5. **Output format** — current Rust tools return structured JSON. Nu `evaluate` returns the output as a string. Agents currently receive tool results as text, so this should be compatible, but needs verification.
 
-### Performance
+### Tool descriptions for agent prompts
 
-File tool calls currently use direct `tokio::fs` operations. With nu, each call adds:
-- JSON-RPC serialization/deserialization
-- IPC round-trip over stdin/stdout
-- Nu command parsing and execution
+Agents see tool descriptions in their system prompt. With unified nu, agents see a single tool:
 
-Likely negligible for individual calls. Could matter for grep over large trees or rapid glob calls. Needs measurement.
+```
+evaluate: Execute a NuShell command or pipeline.
 
-### Error fidelity
+Available commands:
+  epic read <path>       — Read file contents (max 256 KiB)
+  epic write <path> <content> — Write file (max 1 MiB)  [execute phase only]
+  epic edit <path> <old> <new> — Replace exact substring  [execute phase only]
+  epic glob <pattern>    — Find files by glob pattern (max 1000 results)
+  epic grep <pattern> [path] — Search file contents by regex (max 64 KiB output)
 
-Current Rust implementations return structured errors (path not found, permission denied, size limit exceeded). Nu custom commands would need to match this error reporting for agents to recover correctly.
+  You can also run arbitrary NuShell commands and pipelines.
+```
 
-### MCP tool registration
+Write commands (`epic write`, `epic edit`) are listed in all prompts but enforced by the sandbox — if an analyze-phase agent tries to write, the OS blocks it and nu returns a permission error. The agent prompt can optionally omit write commands for read-only phases to reduce confusion, but security does not depend on it.
 
-An alternative to nu custom commands: register the file tools as additional MCP tools on the nu server. This would preserve the current tool-call interface exactly (same JSON schema, same dispatch) but route execution through the sandboxed process. Requires understanding nu's MCP tool registration API.
+**Decision (D5)**: Omit write commands from read-only phase prompts. Two prompt variants: read-only (analyze/decompose) lists `epic read`, `epic glob`, `epic grep` only; read-write (execute) lists all five commands. Security does not depend on this (sandbox enforces regardless), but it avoids confusing agents with tools that will fail.
+
+---
+
+## Implementation Plan
+
+### Phase 1: Nu custom command prototyping
+
+1. Write and test nu custom command definitions against nu 0.111.0.
+2. Validate: `--commands` + `--mcp` compatibility.
+3. Validate: error reporting via `error make` surfaces correctly through MCP `evaluate` responses.
+4. Validate: output format compatibility (string output vs structured).
+5. Validate: `epic glob` and `epic grep` behavior within sandbox boundaries.
+
+### Phase 2: Session startup injection
+
+1. Modify `NuSession::initialize()` to send custom command definitions after MCP handshake.
+2. Test: commands persist across subsequent `evaluate` calls in the same session.
+3. Test: command definitions don't interfere with raw `evaluate` calls (agents can still run arbitrary nu).
+
+### Phase 3: Tool layer migration
+
+1. Remove `tool_read_file`, `tool_write_file`, `tool_edit_file`, `tool_glob`, `tool_grep` from `tools.rs`.
+2. Remove `safe_path()`, `verify_ancestors_within_root()`.
+3. Remove `ToolGrant::READ`, `ToolGrant::WRITE`. Simplify or remove `ToolGrant`.
+4. Simplify `execute_tool()` — all calls route to `nu_session.evaluate()`.
+5. Update `AgentMethod` to `HasTools` / `NoTools`.
+6. Update tool descriptions in prompt assembly (`prompts.rs`).
+
+### Phase 4: Sandbox policy consolidation
+
+1. Verify lot `read_path` prevents writes on all platforms (automated tests).
+2. Verify temp dir access cannot pivot to project root.
+3. Remove any remaining `safe_path` references.
+4. Update DESIGN.md and README.md to reflect unified model.
+
+---
+
+## Risks
+
+### grep implementation complexity
+
+Current Rust `tool_grep` uses the `regex` and `walkdir` crates for recursive regex search with file-size filtering. Nu has no direct equivalent. Options:
+
+| Approach | Pros | Cons |
+|---|---|---|
+| Shell out to `rg` (ripgrep) | Feature-complete, fast | Requires rg binary in sandbox; extra dependency |
+| Nu `open` + `lines` + `find` pipeline | No extra dependency | Slow on large trees, limited regex |
+| Bundle a grep script in nu | Self-contained | Complex, maintenance burden |
+
+**Recommendation**: Ship `rg` alongside `nu` in the build (same download-and-cache pattern in `build.rs`). `rg` is a single static binary, widely available, and already the industry standard for code search. The `epic grep` command becomes a thin wrapper around `rg --json` with output capping.
+
+### Performance on large repositories
+
+File tool calls gain IPC overhead (~1ms per call). For typical agent sessions (10-50 tool calls), this adds <50ms total. For pathological grep-over-large-tree cases, the bottleneck is I/O, not IPC.
+
+### Error message fidelity
+
+Agents rely on error messages to recover (e.g., "file not found" vs "permission denied" vs "size limit exceeded"). Nu's `error make` produces structured errors that surface through MCP `evaluate` responses. The error text must be clear enough for the agent to act on. Test this explicitly during Phase 1.
+
+### Sandbox policy for temp dirs
+
+Lot grants writable temp dir access on all platforms. This is necessary (nu needs temp space for internal operations). Temp dirs are outside the project root, so an agent writing to temp cannot affect project files. However, an agent could use temp as scratch space to work around read-only project root restrictions (read file → copy to temp → modify in temp). This is not a security concern (the agent can't write the result back to the project root), but it's worth noting.
 
 ## Non-Goals
 
 - Changing the tool semantics (size limits, output formats).
-- Adding new tools.
-- Changing the agent prompt format.
+- Adding new tools beyond the existing six.
+- Changing the agent prompt format (beyond tool descriptions).
+- Parallel nu sessions within a single agent call.
