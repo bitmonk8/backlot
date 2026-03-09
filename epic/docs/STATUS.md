@@ -34,4 +34,5 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Nu integration tests** — No integration tests for the nu MCP session (spawn, timeout, kill, env filtering, exit codes). Protocol parsing functions (`try_parse_response`, `read_response`) and generation-based session invalidation also lack unit tests.
+1. **Unified nu tool layer** — Move file tools (`read_file`, `write_file`, `edit_file`, `glob`, `grep`) into the sandboxed nu MCP session as custom commands. Eliminates TOCTOU races, removes `safe_path()` and `ToolGrant::READ/WRITE`, makes lot the sole access control mechanism. Spec: `docs/SPEC_NU_UNIFIED_TOOLS.md` (decisions D1-D5 recorded, implementation plan defined). Next step: Phase 1 prototyping (validate nu custom commands against nu 0.111.0).
+2. **Nu integration tests** — No integration tests for the nu MCP session (spawn, timeout, kill, env filtering, exit codes). Protocol parsing functions (`try_parse_response`, `read_response`) and generation-based session invalidation also lack unit tests. Could be combined with unified tool layer work.
