@@ -524,6 +524,55 @@ mod tests {
             let p5f = format!("{profile}\n(allow process*)\n");
             let o5f = run_sandbox_exec("generated+process*", &p5f);
             eprintln!("[diag] generated+process*: {}", o5f.status.success());
+
+            // Phase 2: Narrow which file path is missing.
+            // Test file-read* only vs file-map-executable only
+            let p6a = format!("{profile}\n(allow file-read* (subpath \"/\"))\n");
+            let o6a = run_sandbox_exec("generated+file-read-root-only", &p6a);
+            eprintln!(
+                "[diag] generated+file-read-root-only: {}",
+                o6a.status.success()
+            );
+
+            let p6b = format!("{profile}\n(allow file-map-executable (subpath \"/\"))\n");
+            let o6b = run_sandbox_exec("generated+file-map-exec-root-only", &p6b);
+            eprintln!(
+                "[diag] generated+file-map-exec-root-only: {}",
+                o6b.status.success()
+            );
+
+            // Test specific paths we might be missing
+            let paths_to_test = [
+                "/private/etc",
+                "/usr/share",
+                "/private/var",
+                "/private/tmp",
+                "/var/folders",
+                "/usr/local",
+                "/etc",
+                "/tmp",
+                "/Users",
+            ];
+            for test_path in &paths_to_test {
+                let p = format!(
+                    "{profile}\n(allow file-read* (subpath \"{test_path}\"))\n(allow file-map-executable (subpath \"{test_path}\"))\n"
+                );
+                let o = run_sandbox_exec(&format!("generated+{test_path}"), &p);
+                eprintln!("[diag] generated+{test_path}: {}", o.status.success());
+            }
+
+            // Test file-map-executable for dyld shared cache
+            let p7 = format!(
+                "{profile}\n(allow file-map-executable (subpath \"/private/var/db/dyld\"))\n"
+            );
+            let o7 = run_sandbox_exec("generated+fme-dyld", &p7);
+            eprintln!("[diag] generated+fme-dyld: {}", o7.status.success());
+
+            // Test file-map-executable for /System/Cryptexes
+            let p8 =
+                format!("{profile}\n(allow file-map-executable (subpath \"/System/Cryptexes\"))\n");
+            let o8 = run_sandbox_exec("generated+fme-cryptex", &p8);
+            eprintln!("[diag] generated+fme-cryptex: {}", o8.status.success());
         }
 
         // Final assertion: our generated profile must work
