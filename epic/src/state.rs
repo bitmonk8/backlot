@@ -1,7 +1,7 @@
 // EpicState: task tree persistence and session resume.
 
 use crate::task::{Task, TaskId};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

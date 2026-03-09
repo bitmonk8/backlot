@@ -212,7 +212,9 @@ fn print_status(state_path: &std::path::Path) -> anyhow::Result<()> {
         return Ok(());
     }
     let (state, root_id, _) = load_and_validate_state(state_path)?;
-    let root = state.get(root_id).expect("validated by load_and_validate_state");
+    let root = state
+        .get(root_id)
+        .expect("validated by load_and_validate_state");
 
     println!("Goal: {}", root.goal);
     println!("Root status: {:?}", root.phase);

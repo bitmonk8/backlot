@@ -72,11 +72,7 @@ impl AgentService for MockAgentService {
             .ok_or_else(|| anyhow::anyhow!("no assess response queued"))
     }
 
-    async fn execute_leaf(
-        &self,
-        _ctx: &TaskContext,
-        _model: Model,
-    ) -> anyhow::Result<LeafResult> {
+    async fn execute_leaf(&self, _ctx: &TaskContext, _model: Model) -> anyhow::Result<LeafResult> {
         self.leaf_responses
             .lock()
             .unwrap()
@@ -134,11 +130,7 @@ impl AgentService for MockAgentService {
             .ok_or_else(|| anyhow::anyhow!("no fix_subtask response queued"))
     }
 
-    async fn verify(
-        &self,
-        ctx: &TaskContext,
-        model: Model,
-    ) -> anyhow::Result<VerificationResult> {
+    async fn verify(&self, ctx: &TaskContext, model: Model) -> anyhow::Result<VerificationResult> {
         let injected = self
             .verify_errors
             .lock()

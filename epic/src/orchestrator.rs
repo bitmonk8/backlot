@@ -232,10 +232,7 @@ impl<A: AgentService> Orchestrator<A> {
         Ok(TaskOutcome::Success)
     }
 
-    async fn try_verify(
-        &mut self,
-        id: TaskId,
-    ) -> Result<VerifyOutcome, OrchestratorError> {
+    async fn try_verify(&mut self, id: TaskId) -> Result<VerifyOutcome, OrchestratorError> {
         let verify_model = self.verification_model(id)?;
         let ctx = self.build_context(id)?;
         match self.agent.verify(&ctx, verify_model).await {
@@ -357,54 +354,52 @@ impl<A: AgentService> Orchestrator<A> {
             }
         }
 
-        let (completed_siblings, pending_sibling_goals) = parent
-            .map_or_else(
-                || (Vec::new(), Vec::new()),
-                |parent| {
-                    let mut completed = Vec::new();
-                    let mut pending = Vec::new();
-                    for &sib_id in &parent.subtask_ids {
-                        if sib_id == id {
-                            continue;
+        let (completed_siblings, pending_sibling_goals) = parent.map_or_else(
+            || (Vec::new(), Vec::new()),
+            |parent| {
+                let mut completed = Vec::new();
+                let mut pending = Vec::new();
+                for &sib_id in &parent.subtask_ids {
+                    if sib_id == id {
+                        continue;
+                    }
+                    let Some(sib) = self.state.get(sib_id) else {
+                        continue;
+                    };
+                    match sib.phase {
+                        TaskPhase::Completed => {
+                            completed.push(SiblingSummary {
+                                id: sib_id,
+                                goal: sib.goal.clone(),
+                                outcome: TaskOutcome::Success,
+                                discoveries: sib.discoveries.clone(),
+                            });
                         }
-                        let Some(sib) = self.state.get(sib_id) else {
-                            continue;
-                        };
-                        match sib.phase {
-                            TaskPhase::Completed => {
-                                completed.push(SiblingSummary {
-                                    id: sib_id,
-                                    goal: sib.goal.clone(),
-                                    outcome: TaskOutcome::Success,
-                                    discoveries: sib.discoveries.clone(),
-                                });
-                            }
-                            TaskPhase::Failed => {
-                                let reason = sib
-                                    .attempts
-                                    .iter()
-                                    .rev()
-                                    .find_map(|a| a.error.clone())
-                                    .unwrap_or_else(|| "unknown".into());
-                                completed.push(SiblingSummary {
-                                    id: sib_id,
-                                    goal: sib.goal.clone(),
-                                    outcome: TaskOutcome::Failed { reason },
-                                    discoveries: sib.discoveries.clone(),
-                                });
-                            }
-                            _ => {
-                                pending.push(sib.goal.clone());
-                            }
+                        TaskPhase::Failed => {
+                            let reason = sib
+                                .attempts
+                                .iter()
+                                .rev()
+                                .find_map(|a| a.error.clone())
+                                .unwrap_or_else(|| "unknown".into());
+                            completed.push(SiblingSummary {
+                                id: sib_id,
+                                goal: sib.goal.clone(),
+                                outcome: TaskOutcome::Failed { reason },
+                                discoveries: sib.discoveries.clone(),
+                            });
+                        }
+                        _ => {
+                            pending.push(sib.goal.clone());
                         }
                     }
-                    (completed, pending)
-                },
-            );
+                }
+                (completed, pending)
+            },
+        );
 
         // Checkpoint guidance: look at the parent task's stored guidance.
-        let checkpoint_guidance = parent
-            .and_then(|p| p.checkpoint_guidance.clone());
+        let checkpoint_guidance = parent.and_then(|p| p.checkpoint_guidance.clone());
 
         // Build child summaries for branch tasks.
         let children = task
@@ -435,10 +430,8 @@ impl<A: AgentService> Orchestrator<A> {
             .collect();
 
         // Parent discoveries and decomposition rationale for recovery context.
-        let parent_discoveries = parent
-            .map_or_else(Vec::new, |p| p.discoveries.clone());
-        let parent_decomposition_rationale = parent
-            .and_then(|p| p.decomposition_rationale.clone());
+        let parent_discoveries = parent.map_or_else(Vec::new, |p| p.discoveries.clone());
+        let parent_decomposition_rationale = parent.and_then(|p| p.decomposition_rationale.clone());
 
         Ok(TaskContext {
             task,
@@ -1131,9 +1124,9 @@ impl<A: AgentService> Orchestrator<A> {
             .subtask_ids
             .clone();
         let any_non_fix_succeeded = child_ids.iter().any(|&cid| {
-            self.state.get(cid).is_some_and(|c| {
-                !c.is_fix_task && c.phase == TaskPhase::Completed
-            })
+            self.state
+                .get(cid)
+                .is_some_and(|c| !c.is_fix_task && c.phase == TaskPhase::Completed)
         });
         if !any_non_fix_succeeded {
             return Ok(TaskOutcome::Failed {
@@ -6123,10 +6116,13 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(leaf_success());
-        mock.push_verify_errors(TaskId(1), vec![
-            None, // initial verify uses verify_responses
-            Some("transient API error".into()),
-        ]);
+        mock.push_verify_errors(
+            TaskId(1),
+            vec![
+                None, // initial verify uses verify_responses
+                Some("transient API error".into()),
+            ],
+        );
 
         // Fix attempt 2 succeeds, verify() passes.
         mock.fix_leaf_responses
@@ -6224,10 +6220,13 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(pass_verification()); // fix subtask verification
-        mock.push_verify_errors(TaskId(0), vec![
-            None, // initial root verify uses verify_responses
-            Some("transient verify error".into()),
-        ]);
+        mock.push_verify_errors(
+            TaskId(0),
+            vec![
+                None, // initial root verify uses verify_responses
+                Some("transient verify error".into()),
+            ],
+        );
 
         // Round 2: design succeeds, fix subtask succeeds, verify() passes.
         mock.fix_subtask_responses
@@ -6287,10 +6286,13 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(pass_verification()); // fix subtask verification
-        mock.push_verify_errors(TaskId(0), vec![
-            None, // initial root verify uses verify_responses
-            Some("transient verify error".into()),
-        ]);
+        mock.push_verify_errors(
+            TaskId(0),
+            vec![
+                None, // initial root verify uses verify_responses
+                Some("transient verify error".into()),
+            ],
+        );
 
         // Round 3: design succeeds, fix subtask succeeds, verify() passes.
         mock.fix_subtask_responses
@@ -6330,10 +6332,13 @@ mod tests {
         setup_branch_with_failing_root_verify(&mock, "root check failed");
 
         // Both rounds: design_fix_subtasks returns Err.
-        mock.push_fix_subtask_errors(TaskId(0), vec![
-            Some("LLM timeout round 1".into()),
-            Some("LLM timeout round 2".into()),
-        ]);
+        mock.push_fix_subtask_errors(
+            TaskId(0),
+            vec![
+                Some("LLM timeout round 1".into()),
+                Some("LLM timeout round 2".into()),
+            ],
+        );
 
         // Recovery assessment for branch failure.
         mock.recovery_responses.lock().unwrap().push_back(None);
@@ -6619,13 +6624,7 @@ mod tests {
         let assessing_id = state.next_task_id(); // T5
         let verifying_id = state.next_task_id(); // T6
 
-        let mut parent = Task::new(
-            parent_id,
-            None,
-            "parent".into(),
-            vec!["passes".into()],
-            0,
-        );
+        let mut parent = Task::new(parent_id, None, "parent".into(), vec!["passes".into()], 0);
         parent.subtask_ids = vec![
             completed_id,
             failed_id,
@@ -6745,13 +6744,7 @@ mod tests {
         let real_child_id = state.next_task_id(); // T1
         let dangling_id = state.next_task_id(); // T2 — never inserted
 
-        let mut parent = Task::new(
-            parent_id,
-            None,
-            "parent".into(),
-            vec!["passes".into()],
-            0,
-        );
+        let mut parent = Task::new(parent_id, None, "parent".into(), vec!["passes".into()], 0);
         parent.subtask_ids = vec![real_child_id, dangling_id];
 
         let real_child = Task::new(

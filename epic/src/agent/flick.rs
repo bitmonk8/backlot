@@ -26,8 +26,9 @@ const MAX_TOOL_ROUNDS: u32 = 50;
 // Injection seams for testability
 // ---------------------------------------------------------------------------
 
-type ResolverFuture<'a> =
-    Pin<Box<dyn std::future::Future<Output = anyhow::Result<Box<dyn flick::DynProvider>>> + Send + 'a>>;
+type ResolverFuture<'a> = Pin<
+    Box<dyn std::future::Future<Output = anyhow::Result<Box<dyn flick::DynProvider>>> + Send + 'a>,
+>;
 
 pub trait ProviderResolver: Send + Sync {
     fn resolve<'a>(&'a self, config: &'a flick::Config) -> ResolverFuture<'a>;
@@ -67,9 +68,9 @@ impl ToolExecutor for DefaultToolExecutor {
         project_root: &'a Path,
         grant: ToolGrant,
     ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>> {
-        Box::pin(async move {
-            tools::execute_tool(tool_use_id, name, input, project_root, grant).await
-        })
+        Box::pin(
+            async move { tools::execute_tool(tool_use_id, name, input, project_root, grant).await },
+        )
     }
 }
 
@@ -644,8 +645,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use flick::test_support::{MultiShotProvider, SingleShotProvider};
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Generic resolver: wraps any `Fn() -> Box<dyn DynProvider>` factory.
     struct FnResolver<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync>(F);
@@ -912,10 +913,7 @@ provider:
 
     #[tokio::test]
     async fn build_client_propagates_resolver_error() {
-        let agent = test_agent(
-            Box::new(FailingResolver),
-            Box::new(DefaultToolExecutor),
-        );
+        let agent = test_agent(Box::new(FailingResolver), Box::new(DefaultToolExecutor));
         match agent.build_client(test_config()).await {
             Ok(_) => panic!("expected resolver error, got Ok"),
             Err(err) => assert!(

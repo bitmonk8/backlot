@@ -445,7 +445,7 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{TaskPath, TaskOutcome};
+    use crate::task::{TaskOutcome, TaskPath};
 
     fn app() -> TuiApp {
         TuiApp::new("test goal".into())
@@ -519,7 +519,9 @@ mod tests {
         register(&mut app, 0, None, "root", 0);
         app.handle_event(Event::TaskCompleted {
             task_id: TaskId(0),
-            outcome: TaskOutcome::Failed { reason: "oops".into() },
+            outcome: TaskOutcome::Failed {
+                reason: "oops".into(),
+            },
         });
         assert_eq!(app.tasks[&TaskId(0)].phase, TaskPhase::Failed);
     }

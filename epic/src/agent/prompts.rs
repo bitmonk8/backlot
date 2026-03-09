@@ -257,11 +257,15 @@ pub fn build_verify(ctx: &TaskContext, verification_steps: &[VerificationStep]) 
     };
 
     let path_guidance = match ctx.task.path {
-        Some(TaskPath::Leaf) => "\n\nThis is a leaf task. Verify that the code changes are correct and complete. \
-Check that the implementation matches the verification criteria. Run verification commands if available.",
-        Some(TaskPath::Branch) => "\n\nThis is a branch task. Verify that all subtasks' results collectively \
+        Some(TaskPath::Leaf) => {
+            "\n\nThis is a leaf task. Verify that the code changes are correct and complete. \
+Check that the implementation matches the verification criteria. Run verification commands if available."
+        }
+        Some(TaskPath::Branch) => {
+            "\n\nThis is a branch task. Verify that all subtasks' results collectively \
 satisfy the branch goal. Check integration between subtask outputs. Verify no gaps or conflicts between \
-subtask implementations.",
+subtask implementations."
+        }
         None => "",
     };
 
@@ -573,14 +577,12 @@ mod tests {
     #[test]
     fn recovery_prompt_includes_rationale_and_parent_discoveries() {
         let mut ctx = test_context();
-        ctx.task.decomposition_rationale =
-            Some("Split by module boundary for isolation".into());
-        ctx.parent_discoveries =
-            vec!["API uses v2 format".into(), "Config path changed".into()];
-        let pair =
-            build_design_recovery_subtasks(&ctx, "compile error", "incremental", 2);
+        ctx.task.decomposition_rationale = Some("Split by module boundary for isolation".into());
+        ctx.parent_discoveries = vec!["API uses v2 format".into(), "Config path changed".into()];
+        let pair = build_design_recovery_subtasks(&ctx, "compile error", "incremental", 2);
         assert!(
-            pair.query.contains("Split by module boundary for isolation"),
+            pair.query
+                .contains("Split by module boundary for isolation"),
             "query should contain decomposition rationale"
         );
         assert!(
@@ -661,7 +663,8 @@ mod tests {
             "query should show COMPLETED status"
         );
         assert!(
-            pair.query.contains("[FAILED: syntax error] write migration"),
+            pair.query
+                .contains("[FAILED: syntax error] write migration"),
             "query should show FAILED status with reason"
         );
         assert!(
@@ -677,8 +680,7 @@ mod tests {
     #[test]
     fn format_context_includes_parent_decomposition_rationale() {
         let mut ctx = test_context();
-        ctx.parent_decomposition_rationale =
-            Some("Split by module boundary for isolation".into());
+        ctx.parent_decomposition_rationale = Some("Split by module boundary for isolation".into());
         let text = format_context(&ctx);
         assert!(
             text.contains("## Parent Decomposition Rationale"),
@@ -695,8 +697,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.task.decomposition_rationale = None;
         ctx.parent_discoveries = Vec::new();
-        let pair =
-            build_design_recovery_subtasks(&ctx, "child crashed", "retry", 1);
+        let pair = build_design_recovery_subtasks(&ctx, "child crashed", "retry", 1);
         assert!(
             !pair.query.contains("Decomposition rationale"),
             "should not contain rationale when None"
@@ -729,7 +730,9 @@ mod tests {
 
         let execute_pair = build_execute_leaf(&ctx);
         assert!(
-            execute_pair.system_prompt.contains("scope of this single task"),
+            execute_pair
+                .system_prompt
+                .contains("scope of this single task"),
             "execute_leaf system prompt should contain 'scope of this single task', got: {}",
             execute_pair.system_prompt,
         );

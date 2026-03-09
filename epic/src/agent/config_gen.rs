@@ -399,7 +399,14 @@ fn build_config(
     output_schema: Option<&JsonValue>,
     model_config: &ModelConfig,
 ) -> anyhow::Result<flick::Config> {
-    let json = build_config_json(system_prompt, model, credential_name, tools, output_schema, model_config);
+    let json = build_config_json(
+        system_prompt,
+        model,
+        credential_name,
+        tools,
+        output_schema,
+        model_config,
+    );
     let json_str = serde_json::to_string(&json).context("failed to serialize config JSON")?;
     flick::Config::from_str(&json_str, flick::ConfigFormat::Json).map_err(|e| {
         let msg = e.to_string().replace(credential_name, "[REDACTED]");

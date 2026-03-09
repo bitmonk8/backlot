@@ -210,7 +210,10 @@ mod tests {
             TaskPhase::Failed,
         ];
         for phase in all {
-            assert_eq!(phase.try_transition(TaskPhase::Failed), Ok(TaskPhase::Failed));
+            assert_eq!(
+                phase.try_transition(TaskPhase::Failed),
+                Ok(TaskPhase::Failed)
+            );
         }
     }
 
@@ -224,7 +227,10 @@ mod tests {
             (TaskPhase::Completed, TaskPhase::Pending),
         ];
         for (from, to) in cases {
-            assert!(from.try_transition(to).is_err(), "{from:?} -> {to:?} should fail");
+            assert!(
+                from.try_transition(to).is_err(),
+                "{from:?} -> {to:?} should fail"
+            );
         }
     }
 
@@ -276,7 +282,9 @@ mod tests {
             discoveries: vec!["found X".into()],
         };
         let c = LeafResult {
-            outcome: TaskOutcome::Failed { reason: "oops".into() },
+            outcome: TaskOutcome::Failed {
+                reason: "oops".into(),
+            },
             discoveries: Vec::new(),
         };
         assert_eq!(a, b);
