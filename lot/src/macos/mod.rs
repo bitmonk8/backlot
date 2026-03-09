@@ -391,38 +391,117 @@ mod tests {
         }
     }
 
+    /// Run sandbox-exec with a given profile and return its Output.
+    fn run_sandbox_exec(label: &str, profile: &str) -> std::process::Output {
+        eprintln!("[diag] --- {label} ---");
+        eprintln!("[diag] profile:\n{profile}");
+        let out = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", profile, "/bin/echo", "hello"])
+            .output()
+            .expect("sandbox-exec");
+        eprintln!("[diag] exit: {:?}", out.status);
+        eprintln!("[diag] stdout: {:?}", String::from_utf8_lossy(&out.stdout));
+        eprintln!("[diag] stderr: {:?}", String::from_utf8_lossy(&out.stderr));
+        out
+    }
+
     #[test]
-    fn sandbox_exec_echo_hello() {
-        // Test via sandbox-exec (bypasses our fork/exec code) to verify the
-        // SBPL profile itself works.
+    fn sandbox_exec_diagnostics() {
+        // Progressively restrictive profiles to pinpoint what operation
+        // causes SIGABRT in our generated profile.
+        eprintln!("[diag] === sandbox_exec_diagnostics ===");
+
+        // 1. Fully permissive — if this fails, sandbox-exec itself is broken
+        let out1 = run_sandbox_exec("permissive", "(version 1)(allow default)");
+        assert!(
+            out1.status.success(),
+            "permissive sandbox failed: {:?}\nstderr: {}",
+            out1.status,
+            String::from_utf8_lossy(&out1.stderr)
+        );
+
+        // 2. Deny-default with broad allows covering all major operation classes
+        let broad = "\
+(version 1)
+(deny default)
+(allow process*)
+(allow file*)
+(allow mach*)
+(allow sysctl*)
+(allow signal)
+(allow iokit*)
+(allow ipc*)
+(allow network*)
+(allow system*)
+(allow lsopen*)
+(allow nvram*)
+(allow user-preference*)
+(allow appleevent-send)
+";
+        let out2 = run_sandbox_exec("broad-allows", broad);
+        assert!(
+            out2.status.success(),
+            "broad-allows sandbox failed: {:?}\nstderr: {}",
+            out2.status,
+            String::from_utf8_lossy(&out2.stderr)
+        );
+
+        // 3. Narrow down: deny-default + only process/file/mach/sysctl/signal
+        let narrow = "\
+(version 1)
+(deny default)
+(allow process*)
+(allow file*)
+(allow mach*)
+(allow sysctl*)
+(allow signal)
+";
+        let out3 = run_sandbox_exec("narrow-allows", narrow);
+        eprintln!("[diag] narrow-allows success: {}", out3.status.success());
+
+        // 4. Our actual generated profile
         let policy = test_policy(vec![PathBuf::from("/usr")]);
         let program = std::path::Path::new("/bin/echo");
         let resolved = std::fs::canonicalize(program).unwrap_or_else(|_| program.to_path_buf());
         let profile = seatbelt::generate_profile(&policy, &resolved);
-        eprintln!("[diag] === sandbox_exec_echo_hello ===");
-        eprintln!("[diag] resolved program: {resolved:?}");
-        eprintln!("[diag] SBPL profile:\n{profile}");
+        let out4 = run_sandbox_exec("generated-profile", &profile);
+        eprintln!(
+            "[diag] generated-profile success: {}",
+            out4.status.success()
+        );
 
-        let out = std::process::Command::new("/usr/bin/sandbox-exec")
-            .args(["-p", &profile, "/bin/echo", "hello"])
-            .output()
-            .expect("sandbox-exec");
-        eprintln!("[diag] sandbox-exec exit: {:?}", out.status);
-        eprintln!(
-            "[diag] sandbox-exec stdout: {:?}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-        eprintln!(
-            "[diag] sandbox-exec stderr: {:?}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        // If narrow works but generated doesn't, we need to find the missing
+        // operation by adding back wildcards one at a time. Log which passed.
+        if out3.status.success() && !out4.status.success() {
+            // Test with file* wildcard but scoped process/mach/etc
+            let test_file_wild = "\
+(version 1)
+(deny default)
+(allow file*)
+(allow process-exec (subpath \"/usr/bin\"))
+(allow process-exec (subpath \"/bin\"))
+(allow process-exec (subpath \"/System/Cryptexes/OS\"))
+(allow process-fork)
+(allow process-info* (target self))
+(allow mach-lookup)
+(allow sysctl-read)
+(allow signal (target self))
+";
+            let out5 = run_sandbox_exec("file-wild-process-scoped", test_file_wild);
+            eprintln!(
+                "[diag] file-wild-process-scoped success: {}",
+                out5.status.success()
+            );
+        }
+
+        // Final assertion: our generated profile must work
         assert!(
-            out.status.success(),
-            "sandbox-exec echo should succeed: {:?}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
+            out4.status.success(),
+            "generated profile failed: {:?}\nstderr: {}",
+            out4.status,
+            String::from_utf8_lossy(&out4.stderr)
         );
-        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stdout = String::from_utf8_lossy(&out4.stdout);
         assert_eq!(stdout.trim(), "hello");
     }
 
