@@ -105,7 +105,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - run: cargo test -- --test-threads=1
+      - run: cargo test -- --test-threads=1 --nocapture
 
   test-windows:
     name: Test (Windows)
