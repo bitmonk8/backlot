@@ -403,14 +403,14 @@ mod tests {
             return;
         };
 
-        if let Ok(out) = child.inner.wait_with_output() {
-            // On some macOS versions, seatbelt may block exec despite our rules
-            if !out.status.success() {
-                return;
-            }
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            assert_eq!(stdout.trim(), "hello");
-        }
+        let out = child.inner.wait_with_output().expect("wait_with_output");
+        assert!(
+            out.status.success(),
+            "echo should succeed: {:?}",
+            out.status
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout.trim(), "hello");
     }
 
     #[test]
@@ -435,16 +435,13 @@ mod tests {
             return;
         };
 
-        if let Ok(out) = child.inner.wait_with_output() {
-            if !out.status.success() {
-                return;
-            }
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            assert!(
-                stdout.contains("sandbox_test_content"),
-                "expected to read allowed file, got: {stdout}"
-            );
-        }
+        let out = child.inner.wait_with_output().expect("wait_with_output");
+        assert!(out.status.success(), "cat should succeed: {:?}", out.status);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("sandbox_test_content"),
+            "expected to read allowed file, got: {stdout}"
+        );
     }
 
     #[test]
@@ -460,13 +457,18 @@ mod tests {
             return;
         };
 
-        if let Ok(out) = child.inner.wait_with_output() {
-            // cat should fail because /etc is not in read_paths
-            assert!(
-                !out.status.success(),
-                "expected cat /etc/hosts to fail inside sandbox"
-            );
-        }
+        let out = child.inner.wait_with_output().expect("wait_with_output");
+        // cat should fail because /etc is not in read_paths
+        assert!(
+            !out.status.success(),
+            "expected cat /etc/hosts to fail inside sandbox"
+        );
+        // Must exit normally (not by signal) to confirm policy enforcement
+        assert!(
+            out.status.code().is_some(),
+            "process should exit normally, not by signal: {:?}",
+            out.status
+        );
     }
 
     #[test]

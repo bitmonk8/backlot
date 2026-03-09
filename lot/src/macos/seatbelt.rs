@@ -67,15 +67,27 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     profile.push_str("(allow file-read* (subpath \"/System/Library\"))\n");
     profile.push_str("(allow file-read* (subpath \"/System/Cryptexes\"))\n");
     profile.push_str("(allow file-read* (subpath \"/Library/Preferences\"))\n");
+    profile.push_str("(allow file-read* (subpath \"/Library/Apple\"))\n");
     profile.push_str("(allow file-read* (subpath \"/private/var/db/dyld\"))\n");
     profile.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
     profile.push_str("(allow file-read* (literal \"/dev/random\"))\n");
     profile.push_str("(allow file-read* (literal \"/dev/null\"))\n");
 
+    // dyld maps shared libraries with executable permissions. file-read* does
+    // NOT cover this — file-map-executable is a separate sandbox operation.
+    // Without it, dyld aborts the process with SIGABRT on macOS 13+.
+    profile.push_str("(allow file-map-executable\n");
+    profile.push_str("  (subpath \"/usr/lib\")\n");
+    profile.push_str("  (subpath \"/System/Library/Frameworks\")\n");
+    profile.push_str("  (subpath \"/System/Library/PrivateFrameworks\")\n");
+    profile.push_str("  (subpath \"/System/Library/Extensions\")\n");
+    profile.push_str("  (subpath \"/Library/Apple/System/Library/Frameworks\")\n");
+    profile.push_str("  (subpath \"/Library/Apple/System/Library/PrivateFrameworks\")\n");
+    profile.push_str("  (subpath \"/Library/Apple/usr/lib\"))\n");
+
     // Allow writing to stdout/stderr pipes and /dev/null.
-    // On newer macOS, (deny default) may block file-write-data on
-    // anonymous pipes, preventing child processes from producing output.
-    profile.push_str("(allow file-write-data)\n");
+    profile.push_str("(allow file-write-data (literal \"/dev/null\"))\n");
+    profile.push_str("(allow file-write-data (subpath \"/dev/fd\"))\n");
 
     // Scoped file-read-metadata: system paths needed for stat() resolution
     for sys_path in METADATA_SYSTEM_PATHS {
@@ -95,20 +107,26 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     }
 
     // Scoped process-exec: target binary + exec_paths + system bin dirs.
-    // Each also needs file-read* so dyld can map the Mach-O binary.
+    // Each also needs file-read* and file-map-executable so dyld can load the binary.
     append_rule(&mut profile, "process-exec", "literal", program_path);
     append_rule(&mut profile, "file-read*", "literal", program_path);
+    append_rule(&mut profile, "file-map-executable", "literal", program_path);
     for path in &policy.exec_paths {
         append_rule(&mut profile, "process-exec", "subpath", path);
+        append_rule(&mut profile, "file-map-executable", "subpath", path);
     }
     for sys_path in EXEC_SYSTEM_PATHS {
         let sys = std::path::Path::new(sys_path);
         append_rule(&mut profile, "process-exec", "subpath", sys);
         append_rule(&mut profile, "file-read*", "subpath", sys);
+        append_rule(&mut profile, "file-map-executable", "subpath", sys);
     }
 
     profile.push_str("(allow process-fork)\n");
     profile.push_str("(allow sysctl-read)\n");
+
+    // Process needs to inspect its own info during startup (dyld, libSystem).
+    profile.push_str("(allow process-info* (target self))\n");
 
     // Unrestricted mach-lookup is an intentional trade-off: narrowing to specific
     // Mach service names would break most programs because the required services
@@ -118,6 +136,9 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
 
     // Only allow sending signals to self
     profile.push_str("(allow signal (target self))\n");
+
+    // IOKit access needed by some system libraries during startup.
+    profile.push_str("(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n");
 
     // Policy-specified read paths
     for path in &policy.read_paths {
@@ -239,7 +260,9 @@ mod tests {
         assert!(profile.contains("(allow file-read* (subpath \"/usr/lib\"))"));
         assert!(profile.contains("(allow file-read* (subpath \"/System/Library\"))"));
         assert!(profile.contains("(allow file-read* (literal \"/dev/null\"))"));
+        assert!(profile.contains("(allow file-map-executable"));
         assert!(profile.contains("(allow process-fork)"));
+        assert!(profile.contains("(allow process-info* (target self))"));
         assert!(profile.contains("(allow mach-lookup)"));
     }
 
@@ -264,6 +287,9 @@ mod tests {
         assert!(profile.contains("(allow process-exec (subpath \"/opt/mybin\"))"));
         assert!(profile.contains("(allow process-exec (subpath \"/usr/bin\"))"));
         assert!(profile.contains("(allow process-exec (subpath \"/bin\"))"));
+        // Exec paths also get file-map-executable for dyld
+        assert!(profile.contains("(allow file-map-executable (literal \"/usr/bin/true\"))"));
+        assert!(profile.contains("(allow file-map-executable (subpath \"/opt/mybin\"))"));
     }
 
     #[test]

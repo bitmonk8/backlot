@@ -229,7 +229,6 @@ fn test_spawn_echo() {
     cmd.stderr(lot::SandboxStdio::Piped);
 
     let Some(child) = try_spawn(&policy, &cmd) else {
-        eprintln!("[diag] SKIPPED: spawn returned None");
         return;
     };
     let output = child.wait_with_output().expect("wait_with_output");
@@ -244,17 +243,17 @@ fn test_spawn_echo() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // On some macOS versions, seatbelt may block exec — skip rather than fail
-    if !output.status.success() {
-        eprintln!("[diag] SKIPPED: process exited with failure status");
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "echo should succeed inside sandbox, got: {:?}",
+        output.status
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("hello"),
         "stdout should contain 'hello', got: {stdout:?}"
     );
-    eprintln!("[diag] PASSED: assertion verified");
+    eprintln!("[diag] PASSED");
 }
 
 #[test]
@@ -278,7 +277,6 @@ fn test_spawn_read_allowed_path() {
     cmd.stderr(lot::SandboxStdio::Piped);
 
     let Some(child) = try_spawn(&policy, &cmd) else {
-        eprintln!("[diag] SKIPPED: spawn returned None");
         return;
     };
     let output = child.wait_with_output().expect("wait_with_output");
@@ -293,16 +291,17 @@ fn test_spawn_read_allowed_path() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    if !output.status.success() {
-        eprintln!("[diag] SKIPPED: process exited with failure status");
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "cat should succeed for allowed path, got: {:?}",
+        output.status
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("sandbox_test_data"),
         "should read allowed file, got: {stdout:?}"
     );
-    eprintln!("[diag] PASSED: assertion verified");
+    eprintln!("[diag] PASSED");
 }
 
 #[test]
@@ -328,7 +327,6 @@ fn test_spawn_disallowed_path_blocked() {
     cmd.stderr(lot::SandboxStdio::Piped);
 
     let Some(child) = try_spawn(&policy, &cmd) else {
-        eprintln!("[diag] SKIPPED: spawn returned None");
         return;
     };
     let output = child.wait_with_output().expect("wait_with_output");
@@ -343,21 +341,29 @@ fn test_spawn_disallowed_path_blocked() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // The command should fail (non-zero exit) because the file is outside the policy.
+    // The command must fail because the file is outside the policy.
     assert!(
         !output.status.success(),
         "reading disallowed path should fail, but exited with: {:?}",
         output.status
     );
-    // Check that stdout does NOT contain the secret data — confirms the sandbox blocked it,
-    // not just that exec failed for an unrelated reason.
+    // The process must have exited normally (not killed by signal).
+    // A signal death means the sandbox killed the process for an unrelated
+    // reason (e.g. exec failed), which is a false positive — not a real
+    // policy enforcement test.
+    assert!(
+        output.status.code().is_some(),
+        "process should exit normally (not by signal), got: {:?}",
+        output.status
+    );
+    // stdout must NOT contain the secret data.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    eprintln!(
-        "[diag] stdout contains secret_data: {}",
-        stdout.contains("secret_data")
+    assert!(
+        !stdout.contains("secret_data"),
+        "sandbox should have blocked reading the secret, but stdout contained it"
     );
     eprintln!(
-        "[diag] PASSED: process failed as expected (exit={:?})",
+        "[diag] PASSED: disallowed path blocked (exit code={:?})",
         output.status.code()
     );
 }
@@ -383,7 +389,6 @@ fn test_spawn_write_to_readonly_blocked() {
     cmd.stderr(lot::SandboxStdio::Piped);
 
     let Some(child) = try_spawn(&policy, &cmd) else {
-        eprintln!("[diag] SKIPPED: spawn returned None");
         return;
     };
     let output = child.wait_with_output().expect("wait_with_output");
@@ -405,8 +410,19 @@ fn test_spawn_write_to_readonly_blocked() {
         "writing to read-only path should fail, but exited with: {:?}",
         output.status
     );
+    // Must be a normal exit, not a signal kill (which would be a false positive).
+    assert!(
+        output.status.code().is_some(),
+        "process should exit normally (not by signal), got: {:?}",
+        output.status
+    );
+    // The file must not have been created.
+    assert!(
+        !target.exists(),
+        "file should not exist after blocked write"
+    );
     eprintln!(
-        "[diag] PASSED: write to read-only path failed (exit={:?})",
+        "[diag] PASSED: write to read-only path blocked (exit code={:?})",
         output.status.code()
     );
 }
@@ -429,7 +445,6 @@ fn test_cleanup_after_drop() {
     cmd.stderr(lot::SandboxStdio::Piped);
 
     let Some(child) = try_spawn(&policy, &cmd) else {
-        eprintln!("[diag] SKIPPED: spawn returned None");
         return;
     };
     let pid = child.id();
@@ -487,7 +502,6 @@ fn test_spawn_with_piped_stdin() {
     cmd.stderr(lot::SandboxStdio::Piped);
 
     let Some(mut child) = try_spawn(&policy, &cmd) else {
-        eprintln!("[diag] SKIPPED: spawn returned None");
         return;
     };
 
@@ -509,16 +523,17 @@ fn test_spawn_with_piped_stdin() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    if !output.status.success() {
-        eprintln!("[diag] SKIPPED: process exited with failure status");
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "stdin echo should succeed inside sandbox, got: {:?}",
+        output.status
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("piped_input"),
         "stdout should contain piped input, got: {stdout:?}"
     );
-    eprintln!("[diag] PASSED: assertion verified");
+    eprintln!("[diag] PASSED");
 }
 
 #[test]
@@ -542,7 +557,6 @@ fn test_wait_returns_exit_status() {
         cmd.stderr(lot::SandboxStdio::Piped);
 
         let Some(child) = try_spawn(&policy, &cmd) else {
-            eprintln!("[diag] SKIPPED: spawn returned None");
             return;
         };
         let status = child.wait().expect("wait");
@@ -551,12 +565,10 @@ fn test_wait_returns_exit_status() {
             status,
             status.code()
         );
-        // On macOS CI, seatbelt may block exec — skip remaining assertions
-        if !status.success() && cfg!(target_os = "macos") {
-            eprintln!("[diag] SKIPPED: macOS exit 0 test failed (seatbelt blocked exec?)");
-            return;
-        }
-        assert!(status.success(), "exit 0 should be success");
+        assert!(
+            status.success(),
+            "exit 0 should be success, got: {status:?}"
+        );
         eprintln!("[diag] PASSED: exit 0 verified");
     }
 
@@ -571,7 +583,6 @@ fn test_wait_returns_exit_status() {
         cmd.stderr(lot::SandboxStdio::Piped);
 
         let Some(child) = try_spawn(&policy, &cmd) else {
-            eprintln!("[diag] SKIPPED: spawn returned None");
             return;
         };
         let status = child.wait().expect("wait");
@@ -581,15 +592,12 @@ fn test_wait_returns_exit_status() {
             status.code()
         );
         assert!(!status.success(), "exit 42 should not be success");
-
-        if status.code() != Some(42) && cfg!(target_os = "macos") {
-            eprintln!(
-                "[diag] SKIPPED: macOS exit code was {:?}, not 42",
-                status.code()
-            );
-            return;
-        }
-        assert_eq!(status.code(), Some(42));
+        assert_eq!(
+            status.code(),
+            Some(42),
+            "exit code should be 42, got: {:?}",
+            status.code()
+        );
         eprintln!("[diag] PASSED: exit 42 verified");
     }
 }
