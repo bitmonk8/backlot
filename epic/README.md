@@ -271,20 +271,6 @@ src/
 
 Epic's `build.rs` downloads a prebuilt NuShell 0.111.0 binary from GitHub releases, verifies its SHA-256 checksum, and caches it in `target/nu-cache/`. At runtime, epic resolves the `nu` binary by checking: (1) same directory as the epic executable, (2) build-time cache, (3) `PATH`.
 
-## Lineage
-
-Epic is a ground-up Rust reimplementation informed by the Python-based `fds2_epic` tool. Key divergences:
-
-| Concern | fds2_epic | epic |
-|---------|-----------|------|
-| Language | Python | Rust |
-| Task model | Six task types (GROUP, RESEARCH, DESIGN, PLAN, IMPLEMENTATION, VERIFY) | Recursive problem-solver (assess → leaf/branch → verify) |
-| Agent runtime | Claude Agent SDK | Flick (library crate) |
-| Sandboxing | Custom command filtering | Best-effort VM/container detection + path containment |
-| Project scope | Hardcoded for fds2 | Configurable verification for any project |
-| TUI | Textual | ratatui + crossterm |
-| Planning | PLAN tasks modify task tree | Recovery agents create subtasks on failure |
-
 ## Troubleshooting
 
 **"Goal mismatch"**: State file exists with a different goal. Delete `.epic/state.json` or use `epic resume` to continue the existing run.

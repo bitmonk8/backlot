@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**v1 complete, NuShell migration done** — All features implemented, audit remediation done. 95 review cells, 541 findings; all major groups resolved. Lot sandboxing integrated. Shell runtime migrated from POSIX sh to NuShell MCP session.
+**v1 complete** — All features implemented.
 
 ## What Exists
 
@@ -34,5 +34,4 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Nu integration tests** — The bash integration tests (~15 tests covering spawn, timeout, kill, env filtering, exit codes) were removed during the NuShell migration. Nu equivalents are not yet written. Protocol parsing functions (`try_parse_response`, `read_response`) and generation-based session invalidation also lack unit tests.
-2. **Stale audit doc references** — Several audit files (`U5-R1` through `U5-R6`, `U6-R7`) still reference `tool_bash` / `ToolGrant::BASH`. Line numbers in `U5-R2` are stale.
+1. **Nu integration tests** — No integration tests for the nu MCP session (spawn, timeout, kill, env filtering, exit codes). Protocol parsing functions (`try_parse_response`, `read_response`) and generation-based session invalidation also lack unit tests.
