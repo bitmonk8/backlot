@@ -111,6 +111,57 @@ When `file_tool_forwarders = true` (default):
 
 This enables A/B comparison of tool-use accuracy with and without forwarders.
 
+### D8: Config-file injection replaces evaluate injection (decided)
+
+Nu in `--mcp` mode loads user config files by default (`env.nu`, `config.nu`, vendor/user autoload dirs). This creates two problems:
+- **Reproducibility**: User config could define aliases that shadow builtins, modify PATH, or change `$env.config` settings, causing different behavior across machines.
+- **Sandbox leakage**: User config executes arbitrary nu code at startup. While lot constrains filesystem access, user config could override commands, load plugins, or shadow epic's custom commands.
+
+**Solution**: Epic spawns nu with explicit config paths pointing to epic-controlled files:
+
+```
+nu --mcp --config <epic_config.nu> --env-config <epic_env.nu>
+```
+
+This overrides the default config resolution, preventing user config from loading. The config files are managed by epic (embedded in binary or written to `target/nu-cache/` at build time).
+
+- `epic_env.nu`: Minimal env setup (e.g., `$env.NU_MCP_OUTPUT_LIMIT`, PATH adjustments for rg).
+- `epic_config.nu`: All custom command definitions (`epic_read`, `epic_write`, `epic_edit`, `epic_glob`, `epic_grep`).
+
+**Validated**: `--config` + `--env-config` + `--mcp` works on nu 0.111.0. Custom commands defined in the config file are visible in the MCP `evaluate` scope. `$nu.config-path` and `$nu.env-path` point to the overridden paths, confirming no user config leakage.
+
+**Consequence**: Phase 3 ("session startup injection via evaluate") is eliminated. The config file *is* the injection mechanism. No extra MCP round-trip needed after handshake.
+
+### D9: Nu-native types and structured return values (decided)
+
+Nu has a `filesize` type distinct from `int`. `ls` returns file sizes as `filesize`, and filesize literals like `256KiB` are also `filesize`. However, `bytes length` returns `int`. The `>` operator does not allow cross-type comparison.
+
+**Conversion rule**: Use `into filesize` to convert `int` → `filesize` where needed, keeping all size comparisons in `filesize` space. Example: `($content | encode utf-8 | bytes length | into filesize) > 1MiB`. This is idiomatic nu.
+
+**Structured return values**: Nu custom commands return records and lists using nu-native types — not pre-formatted strings. The Rust translation layer parses the NUON output from the MCP response and formats it into the text format Claude expects. This keeps the nu commands idiomatic and puts format conversion at the Rust boundary where it belongs.
+
+### D10: Conversion boundary — nu-native in, Claude-formatted out (decided)
+
+Two conversion points, both in Rust:
+
+**Inbound (Claude JSON → nu command)**: `translate_tool_call()` converts Claude's JSON tool parameters into a quoted nu command string. Parameter types map directly (string → quoted string, int → int). No type coercion needed — nu parameters accept the JSON-native types.
+
+**Outbound (nu NUON → Claude text)**: Nu commands return structured records. Rust parses the NUON from the MCP response `output` field and formats it into the text style Claude expects:
+
+| Tool | Nu returns | Rust formats as |
+|------|-----------|-----------------|
+| Read | `{path, size, total_lines, content}` | Line-numbered content (cat -n style), with total lines and size as context |
+| Write | `{path, bytes_written}` | Confirmation message |
+| Edit | `{path, replacements}` | Confirmation message with count |
+| Glob | `list<string>` | Newline-separated file paths |
+| Grep | raw rg text (via `^rg`) | Pass-through (rg output is already Claude-compatible) |
+| NuShell | varies | Pass-through (raw MCP output text) |
+
+This separation means:
+- Nu commands are idiomatic nu — usable standalone, testable in isolation, no Claude-specific formatting.
+- Claude sees the same output format it's trained on — Rust handles the translation.
+- Format changes (e.g., switching from cat -n to a different style) don't require touching nu code.
+
 ---
 
 ## Current Tool Grant Model (before)
@@ -193,7 +244,9 @@ Read file contents with optional line-based pagination.
 
 **Differences from Claude Code**: `file_path` accepts project-relative paths (Claude Code requires absolute). Default `limit` is governed by the 256 KiB output cap rather than a fixed line count.
 
-**Translation**: `epic_read $file_path --offset $offset --limit $limit`
+**Inbound**: `epic_read $file_path --offset $offset --limit $limit`
+
+**Outbound**: Nu returns `{path, size, total_lines, offset, lines_returned, lines: [{line, text}, ...]}`. Rust formats `lines` into cat -n style text (`     1\tline text`), appends total line count as context.
 
 ### Write
 
@@ -222,7 +275,9 @@ Create or overwrite a file.
 
 **Differences from Claude Code**: None meaningful. Size cap (1 MiB) enforced by the nu command.
 
-**Translation**: `epic_write $file_path $content`
+**Inbound**: `epic_write $file_path $content`
+
+**Outbound**: Nu returns `{path, bytes_written}`. Rust formats as confirmation message.
 
 ### Edit
 
@@ -259,7 +314,9 @@ Replace exact string in a file.
 
 **Differences from Claude Code**: None. Schema matches exactly.
 
-**Translation**: `epic_edit $file_path $old_string $new_string --replace-all=$replace_all`
+**Inbound**: `epic_edit $file_path $old_string $new_string --replace-all=$replace_all`
+
+**Outbound**: Nu returns `{path, replacements}`. Rust formats as confirmation message with count.
 
 ### Glob
 
@@ -288,7 +345,9 @@ Find files by glob pattern.
 
 **Differences from Claude Code**: None. Schema matches exactly.
 
-**Translation**: `epic_glob $pattern --path $path`
+**Inbound**: `epic_glob $pattern --path $path`
+
+**Outbound**: Nu returns `list<string>`. Rust joins with newlines.
 
 ### Grep
 
@@ -360,7 +419,9 @@ Search file contents by regex. Powered by ripgrep.
 
 Claude Code's `type` parameter is renamed to `include_type` to avoid collision with JSON Schema's `type` keyword.
 
-**Translation**: `epic_grep $pattern --path $path --output-mode $output_mode --glob $glob --type $include_type --case-insensitive=$case_insensitive --line-numbers=$line_numbers --context-after=$context_after --context-before=$context_before --context=$context --multiline=$multiline --head-limit=$head_limit`
+**Inbound**: `epic_grep $pattern --path $path --output-mode $output_mode --glob $glob --type $include_type --case-insensitive=$case_insensitive --line-numbers=$line_numbers --context-after=$context_after --context-before=$context_before --context=$context --multiline=$multiline --head-limit=$head_limit`
+
+**Outbound**: Nu returns `{exit_code, output}`. Rust passes through the `output` string (rg text is already Claude-compatible). Exit code 1 (no matches) is not an error.
 
 ### NuShell
 
@@ -397,11 +458,16 @@ Execute a NuShell command. Replaces the former `nu` tool. Parameter schema mirro
 
 ---
 
-## Tool Executor: JSON → Nu Translation
+## Tool Executor: Bidirectional Translation
 
-When `file_tool_forwarders = true`, epic's `execute_tool()` receives a JSON tool call from Flick, translates parameters into a nu command string, and dispatches through `nu_session.evaluate()`. When forwarders are disabled, only the NuShell tool is offered — agents invoke nu custom commands directly.
+When `file_tool_forwarders = true`, epic's `execute_tool()` handles two conversions per tool call (see D10):
 
-### Translation layer (Rust)
+1. **Inbound**: Claude's JSON tool params → nu command string → `nu_session.evaluate()`
+2. **Outbound**: nu NUON response → Claude-formatted text → tool result
+
+When forwarders are disabled, only the NuShell tool is offered — agents invoke nu custom commands directly, and the outbound step is skipped (raw MCP output returned).
+
+### Inbound: translate_tool_call (Rust)
 
 ```rust
 fn translate_tool_call(name: &str, params: &serde_json::Value) -> Result<String> {
@@ -418,7 +484,7 @@ fn translate_tool_call(name: &str, params: &serde_json::Value) -> Result<String>
             Ok(cmd)
         }
         "NuShell" => {
-            // Direct pass-through
+            // Direct pass-through — no outbound formatting either
             Ok(params["command"].as_str().required()?.to_string())
         }
         // ... other tools
@@ -428,9 +494,43 @@ fn translate_tool_call(name: &str, params: &serde_json::Value) -> Result<String>
 
 String parameters containing special characters must be escaped for nu syntax. The `quote_nu()` helper wraps values in single quotes with appropriate escaping.
 
+### Outbound: format_tool_result (Rust)
+
+```rust
+fn format_tool_result(name: &str, nuon_output: &str) -> Result<String> {
+    match name {
+        "Read" => {
+            // Parse NUON record: {path, size, total_lines, offset, lines_returned, lines}
+            // Format lines table as "     1\tline text\n     2\tline text\n..."
+            // Append context: "(showing lines N-M of T total, SIZE)"
+        }
+        "Write" => {
+            // Parse NUON record: {path, bytes_written}
+            // Format: "Wrote BYTES to PATH"
+        }
+        "Edit" => {
+            // Parse NUON record: {path, replacements}
+            // Format: "Replaced N occurrence(s) in PATH"
+        }
+        "Glob" => {
+            // Parse NUON list: [path1, path2, ...]
+            // Join with newlines
+        }
+        "Grep" => {
+            // Parse NUON record: {exit_code, output}
+            // Pass through output string (rg format is Claude-compatible)
+        }
+        "NuShell" => {
+            // No formatting — return raw MCP output
+            Ok(nuon_output.to_string())
+        }
+    }
+}
+```
+
 ### Error mapping
 
-Nu `error make` messages and sandbox permission errors are returned to the agent as tool result text. The translation layer does not interpret or reformat errors — it passes them through so the agent sees the same error context as if it had invoked the command directly.
+Nu `error make` messages surface as JSON-RPC errors (code `-32603`). The Rust layer extracts the `msg` field from the error and returns it as tool result text. The session remains alive after errors. Sandbox permission errors (lot denying access) produce OS-level errors that nu surfaces similarly.
 
 ---
 
@@ -438,55 +538,68 @@ Nu `error make` messages and sandbox permission errors are returned to the agent
 
 ### Loading mechanism
 
-At session startup, before any agent tool calls, epic sends an `evaluate` call containing all custom command definitions as nu script. This is a single MCP `tools/call` request with the `def` blocks concatenated. The definitions persist in the nu session for subsequent `evaluate` calls.
+Custom command definitions are loaded via nu's config file mechanism. Epic spawns nu with `--config <path>` pointing to an epic-controlled config file containing all `def` blocks. Commands are available immediately in the MCP `evaluate` scope — no extra round-trip needed.
 
-Alternative: pass definitions via `nu --commands "..." --mcp`. Needs testing — `--commands` may conflict with `--mcp` mode. If it works, it avoids the extra evaluate round-trip.
+The config file is either embedded as a Rust `const &str` and written to `target/nu-cache/epic_config.nu` at build time, or generated at runtime from the validated command definitions. The env config (`epic_env.nu`) is minimal — primarily sets `$env.NU_MCP_OUTPUT_LIMIT` and any PATH adjustments for bundled binaries (rg).
+
+Previous approaches tested and rejected:
+- `--commands` + `--mcp`: commands not visible in MCP evaluate scope.
+- Evaluate injection after handshake: works, but unnecessary now that `--config` is validated.
 
 ### Command definitions
 
-Each command preserves the semantics of the current Rust implementation with Claude Code-aligned enhancements. Error reporting uses nu's structured error mechanism (`error make`).
+Commands use nu-native types internally and return structured records/lists. Error reporting uses nu's `error make`. The Rust translation layer (D10) formats the structured output for Claude.
 
-**These are illustrative, not final.** Exact nu API calls, error handling, and output formatting need validation against nu 0.111.0.
+**Validated against nu 0.111.0** (2026-03-10). `epic_read`, `epic_write`, `epic_edit`, `epic_glob` tested via `--config` + `--mcp`. `epic_grep` awaits rg binary.
 
 ```nu
-# epic_read — read file contents, 256 KiB cap, optional line pagination
+# epic_read — read file contents, return structured record
 def epic_read [
     path: string
     --offset: int    # 1-based line number to start from
     --limit: int     # max lines to return
 ] {
     let full = ($path | path expand)
-    let size = (ls $full | get size | first)
-    if $size > 262144 {
-        error make {
-            msg: $"File too large: ($size) bytes, max 262144"
-        }
+    let meta = (ls $full | first)
+    if $meta.size > 256KiB {
+        error make { msg: $"File too large: ($meta.size), max 256 KiB" }
     }
-    let lines = (open $full --raw | decode utf-8 | lines)
+    let all_lines = (open $full --raw | lines)
+    let total = ($all_lines | length)
     let start = if ($offset | is-empty) { 0 } else { $offset - 1 }
-    let lines = ($lines | skip $start)
-    let lines = if ($limit | is-empty) { $lines } else { $lines | first $limit }
-    # Output with line numbers (cat -n style)
-    $lines | enumerate | each { |row|
-        $"($row.index + $start + 1 | fill -a right -w 6) ($row.item)"
-    } | str join "\n"
+    let selected = ($all_lines | skip $start)
+    let selected = if ($limit | is-empty) { $selected } else { $selected | first $limit }
+    let numbered = ($selected | enumerate | each { |row|
+        {line: ($row.index + $start + 1), text: $row.item}
+    })
+    {
+        path: $full,
+        size: $meta.size,
+        total_lines: $total,
+        offset: ($start + 1),
+        lines_returned: ($numbered | length),
+        lines: $numbered,
+    }
 }
 
-# epic_write — write content to file, 1 MiB cap
+# epic_write — write content to file, return structured record
 def epic_write [path: string, content: string] {
-    let size = ($content | str length)
-    if $size > 1048576 {
-        error make {
-            msg: $"Content too large: ($size) bytes, max 1048576"
-        }
+    let byte_size = ($content | encode utf-8 | bytes length | into filesize)
+    if $byte_size > 1MiB {
+        error make { msg: $"Content too large: ($byte_size), max 1 MiB" }
     }
     let full = ($path | path expand)
     let parent = ($full | path dirname)
     mkdir $parent
     $content | save --force $full
+    {
+        path: $full,
+        bytes_written: $byte_size,
+    }
 }
 
-# epic_edit — exact substring replacement, optional replace-all
+# epic_edit — exact substring replacement, return structured record
+# split row and str replace are LITERAL by default in nu 0.111.0 (not regex).
 def epic_edit [
     path: string
     old_string: string
@@ -494,42 +607,33 @@ def epic_edit [
     --replace-all    # replace all occurrences instead of requiring uniqueness
 ] {
     let full = ($path | path expand)
-    let content = (open $full --raw | decode utf-8)
-
+    let content = (open $full --raw)
+    let parts = ($content | split row $old_string)
+    let count = (($parts | length) - 1)
+    if $count == 0 { error make { msg: "old_string not found in file" } }
     if not $replace_all {
-        # Count occurrences — TBD: validate nu API for this
-        let parts = ($content | split row $old_string)
-        let count = (($parts | length) - 1)
-        if $count == 0 {
-            error make { msg: "old_string not found in file" }
-        }
         if $count > 1 {
-            error make {
-                msg: $"old_string found ($count) times, must be unique. Use --replace-all to replace all occurrences."
-            }
+            error make { msg: $"old_string found ($count) times, must be unique" }
         }
-        let result = ($content | str replace $old_string $new_string)
-        $result | save --force $full
+        ($content | str replace $old_string $new_string) | save --force $full
+        { path: $full, replacements: 1 }
     } else {
-        let result = ($content | str replace --all $old_string $new_string)
-        if $result == $content {
-            error make { msg: "old_string not found in file" }
-        }
-        $result | save --force $full
+        ($content | str replace --all $old_string $new_string) | save --force $full
+        { path: $full, replacements: $count }
     }
 }
 
-# epic_glob — find files by pattern, 1000 result cap
+# epic_glob — find files by pattern, return list<string>, 1000 result cap
 def epic_glob [
     pattern: string
     --path: string   # directory to search in
 ] {
     let dir = if ($path | is-empty) { "." } else { $path }
     cd $dir
-    glob $pattern | first 1000 | to text
+    glob $pattern | first 1000
 }
 
-# epic_grep — search file contents via rg, 64 KiB output cap
+# epic_grep — search file contents via rg, return structured record
 # Requires rg (ripgrep) binary in the sandbox.
 def epic_grep [
     pattern: string
@@ -577,40 +681,63 @@ def epic_grep [
 
     $args = ($args | append $search_path)
 
-    let output = (^rg ...$args | complete)
+    # --color never: prevent ANSI codes in output
+    $args = ($args | append "--color=never")
 
-    # Apply head_limit
-    let lines = ($output.stdout | lines)
-    let lines = if not ($head_limit | is-empty) { $lines | first $head_limit } else { $lines }
+    let result = (^rg ...$args | complete)
 
-    # Apply 64 KiB output cap
-    # TBD: truncation strategy
-    $lines | str join "\n"
+    let output_lines = ($result.stdout | lines)
+    let output_lines = if not ($head_limit | is-empty) { $output_lines | first $head_limit } else { $output_lines }
+
+    {
+        exit_code: $result.exit_code,
+        output: ($output_lines | str join "\n"),
+    }
 }
 ```
 
-### Prototype validation items
+### Prototype validation results (2026-03-10)
 
-1. **`epic_read` line pagination** — validate `lines | skip | first` pipeline with edge cases (offset beyond EOF, empty files).
-2. **`epic_edit` substring counting** — validate `split row` approach for counting. May need literal string matching (not regex).
-3. **`epic_grep` rg integration** — validate `^rg` external command invocation within lot sandbox. Requires rg binary accessible in the sandbox path.
-4. **`epic_glob` cwd behavior** — confirm `cd $dir; glob $pattern` resolves correctly within sandbox.
-5. **Binary file handling** — `decode utf-8` may fail on binary files. Need error handling or `--raw` fallback.
-6. **Output format** — nu `evaluate` returns output as string. Verify agents can parse the formatted output correctly.
-7. **`--commands` + `--mcp` compatibility** — test whether `nu --commands "def epic_read ..." --mcp` works to avoid the extra evaluate round-trip.
+| # | Item | Result |
+|---|------|--------|
+| 1 | `epic_read` line pagination | Not yet tested (deferred to implementation). |
+| 2 | `epic_edit` substring counting | **Validated.** `split row` is literal by default (not regex). `(split row $old_string \| length) - 1` correctly counts occurrences. `str replace` is also literal by default; regex requires `--regex` flag. Full `epic_edit` command tested end-to-end: uniqueness check, replace-all, not-found detection all work. |
+| 3 | `epic_grep` rg integration | **Blocked.** rg binary not yet in build cache. Needs `build.rs` addition (same download-and-cache pattern as nu). `^rg` invocation pattern is sound but untested inside lot sandbox. |
+| 4 | `epic_glob` cwd behavior | Not yet tested (deferred to implementation). |
+| 5 | Binary file handling | Not yet tested (deferred to implementation). |
+| 6 | Output format | **Validated.** MCP `evaluate` returns structured NUON: `{cwd, history_index, timestamp, output}`. The `output` field contains the command result as a string. Nu records, tables, and lists all serialize correctly through MCP. |
+| 7 | `--commands` + `--mcp` | **Does NOT work.** Custom commands defined via `--commands` are not visible to subsequent `evaluate` calls. The MCP session runs in a separate scope. |
+| 8 | `--config` + `--mcp` | **Works.** Custom commands defined in the config file are visible in the MCP `evaluate` scope. `$nu.config-path` confirms the override. **This is the chosen approach** (see D8). |
+| 9 | Type system | **`filesize` vs `int` mismatch.** `ls` size is `filesize`; `bytes length` is `int`. Cannot compare across types. **Resolved**: use `into filesize` to convert int → filesize where needed (D9). `ls` sizes compare directly to filesize literals (`> 256KiB`). `bytes length` converts via `\| into filesize` before comparing to `1MiB`. |
+| 10 | Structured return values | **Validated.** Nu records (`{path, size, total_lines, ...}`) and lists serialize as NUON through MCP `output` field. Rust parses and reformats for Claude (D10). |
+
+#### Additional findings
+
+- **MCP evaluate parameter name**: `input` (not `code`). The MCP tool schema uses `input` as the parameter for the `evaluate` tool.
+- **Error handling**: `error make` errors surface as JSON-RPC error responses (code `-32603`), NOT as `isError: true` tool results. The session remains alive after errors — subsequent calls work normally. Epic's MCP response parser must handle JSON-RPC errors from `error make` and map them to agent-visible tool error messages.
+- **User config leakage**: `nu --mcp` loads user config files by default. Epic uses `--config` + `--env-config` to override with epic-controlled files, preventing user config from affecting agent behavior (D8).
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Prototype nu custom commands
+### Phase 1: Prototype nu custom commands (mostly complete)
 
-1. Write and test nu custom command definitions against nu 0.111.0.
-2. Validate: `--commands` + `--mcp` compatibility.
-3. Validate: error reporting via `error make` surfaces correctly through MCP `evaluate` responses.
-4. Validate: `epic_grep` with bundled `rg` binary inside lot sandbox.
-5. Validate: output format compatibility (numbered lines, grep results, glob lists).
-6. Validate: `epic_edit` substring counting and `replace_all` behavior.
+**Done:**
+- `--commands` + `--mcp` tested — does not work.
+- `--config` + `--env-config` + `--mcp` tested — works. Custom commands in config file visible in evaluate scope. Chosen as loading mechanism (D8).
+- `error make` surfaces as JSON-RPC error (code -32603), session stays alive.
+- `epic_edit` substring counting validated: `split row` and `str replace` are literal by default.
+- Nu type system: `filesize` vs `int` distinction identified and resolved (D9).
+- Output format validated: MCP returns `{cwd, history_index, timestamp, output}`.
+- `epic_read`, `epic_write`, `epic_edit`, `epic_glob` all validated end-to-end via `--config` + `--mcp`.
+- `epic_read` edge cases: offset beyond EOF returns empty string (acceptable).
+
+**Remaining:**
+1. Add rg binary to `build.rs` (download-and-cache, same pattern as nu).
+2. Test `epic_grep` with rg inside nu MCP session.
+3. Test binary file handling in `epic_read` (what happens with non-UTF-8 files).
+4. Write `epic_env.nu` (output limits, PATH for rg).
 
 ### Phase 2: Tool executor translation layer
 
@@ -621,11 +748,12 @@ def epic_grep [
 5. Update `execute_tool()` dispatch: when forwarders on, translate → `nu_session.evaluate()`; when off, reject non-NuShell tool calls.
 6. Unit test the translation layer (JSON → nu command → expected string).
 
-### Phase 3: Session startup injection
+### Phase 3: Config file integration (replaces evaluate injection)
 
-1. Modify `NuSession::initialize()` to send custom command definitions after MCP handshake.
-2. Test: commands persist across subsequent `evaluate` calls in the same session.
-3. Test: command definitions don't interfere with raw NuShell commands.
+1. Embed `epic_config.nu` and `epic_env.nu` as Rust `const` strings (or write to `target/nu-cache/` at build time).
+2. Modify `NuSession` to spawn `nu --mcp --config <path> --env-config <path>`.
+3. Test: custom commands available without any evaluate preamble.
+4. Test: command definitions don't interfere with raw NuShell commands via the NuShell tool.
 
 ### Phase 4: Remove old tool layer
 
@@ -675,6 +803,15 @@ Agents rely on error messages to recover (e.g., "file not found" vs "permission 
 ### Sandbox policy for temp dirs
 
 Lot grants writable temp dir access on all platforms. This is necessary (nu needs temp space for internal operations). Temp dirs are outside the project root, so an agent writing to temp cannot affect project files. However, an agent could use temp as scratch space to work around read-only project root restrictions (read file → copy to temp → modify in temp). This is not a security concern (the agent can't write the result back to the project root), but it's worth noting.
+
+### Sandbox read access to config files
+
+The `--config` and `--env-config` paths must be readable by the nu process inside the lot sandbox. If the config files live in `target/nu-cache/`, lot must grant read access to that directory (or the files must be placed inside a path already granted). Options:
+- Place config files alongside the nu binary (lot already needs the binary's directory readable for execution).
+- Add `target/nu-cache/` as an explicit read path in the lot policy.
+- Place config files in a temp dir that lot already grants access to.
+
+The simplest approach is alongside the nu binary — lot must already allow executing from that path.
 
 ### NuShell syntax adoption
 
