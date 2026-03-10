@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Output from a `NuShell` MCP `evaluate` call.
+#[derive(Debug)]
 pub struct NuOutput {
     pub content: String,
     pub is_error: bool,
@@ -36,14 +37,14 @@ struct JsonRpcRequest<'a> {
     params: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
     id: Option<u64>,
     result: Option<serde_json::Value>,
     error: Option<JsonRpcError>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct JsonRpcError {
     message: String,
 }
@@ -657,4 +658,510 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // try_parse_response tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn try_parse_response_matching_id() {
+        let line = r#"{"jsonrpc":"2.0","id":42,"result":{"content":[{"type":"text","text":"ok"}]}}"#;
+        let resp = try_parse_response(line, 42);
+        assert!(resp.is_some());
+        assert_eq!(resp.unwrap().id, Some(42));
+    }
+
+    #[test]
+    fn try_parse_response_wrong_id() {
+        let line = r#"{"jsonrpc":"2.0","id":99,"result":{}}"#;
+        assert!(try_parse_response(line, 42).is_none());
+    }
+
+    #[test]
+    fn try_parse_response_no_id_notification() {
+        let line = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        assert!(try_parse_response(line, 0).is_none());
+    }
+
+    #[test]
+    fn try_parse_response_empty_line() {
+        assert!(try_parse_response("", 1).is_none());
+        assert!(try_parse_response("   \n", 1).is_none());
+    }
+
+    #[test]
+    fn try_parse_response_malformed_json() {
+        assert!(try_parse_response("{not json", 1).is_none());
+    }
+
+    #[test]
+    fn try_parse_response_with_error() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad request"}}"#;
+        let resp = try_parse_response(line, 1);
+        assert!(resp.is_some());
+        let resp = resp.unwrap();
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().message, "bad request");
+    }
+
+    #[test]
+    fn try_parse_response_with_surrounding_whitespace() {
+        let line = r#"  {"jsonrpc":"2.0","id":5,"result":{}}  "#;
+        let resp = try_parse_response(line, 5);
+        assert!(resp.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // read_response tests
+    // -----------------------------------------------------------------------
+
+    fn buf_reader_from_str(s: &str) -> BufReader<File> {
+        use std::io::{Seek, Write as IoWrite};
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(s.as_bytes()).unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        BufReader::new(file)
+    }
+
+    #[test]
+    fn read_response_skips_blank_lines() {
+        let data = "\n\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
+        let mut reader = buf_reader_from_str(data);
+        let resp = read_response(&mut reader, 1).unwrap();
+        assert_eq!(resp.id, Some(1));
+    }
+
+    #[test]
+    fn read_response_skips_non_matching_ids() {
+        let data = "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{}}\n\
+                    {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
+        let mut reader = buf_reader_from_str(data);
+        let resp = read_response(&mut reader, 1).unwrap();
+        assert_eq!(resp.id, Some(1));
+    }
+
+    #[test]
+    fn read_response_eof_returns_error() {
+        let data = "";
+        let mut reader = buf_reader_from_str(data);
+        let result = read_response(&mut reader, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("closed stdout"));
+    }
+
+    #[test]
+    fn read_response_too_many_skipped_lines() {
+        // MAX_SKIPPED_LINES + 2 lines of garbage, no matching response.
+        let data: String = (0..MAX_SKIPPED_LINES + 2)
+            .map(|_| "not json\n")
+            .collect();
+        let mut reader = buf_reader_from_str(&data);
+        let result = read_response(&mut reader, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too many non-response lines"));
+    }
+
+    #[test]
+    fn read_response_skips_notifications() {
+        let data = "{\"jsonrpc\":\"2.0\",\"method\":\"log\",\"params\":{}}\n\
+                    {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}\n";
+        let mut reader = buf_reader_from_str(data);
+        let resp = read_response(&mut reader, 3).unwrap();
+        assert_eq!(resp.id, Some(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // Generation-based session invalidation tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn session_new_starts_with_no_process() {
+        let session = NuSession::new();
+        let st = session.state.lock().await;
+        assert!(st.process.is_none());
+        assert_eq!(st.generation, 0);
+    }
+
+    #[tokio::test]
+    async fn kill_increments_generation() {
+        let session = NuSession::new();
+        {
+            let st = session.state.lock().await;
+            assert_eq!(st.generation, 0);
+        }
+        session.kill().await;
+        {
+            let st = session.state.lock().await;
+            assert_eq!(st.generation, 1);
+        }
+        session.kill().await;
+        {
+            let st = session.state.lock().await;
+            assert_eq!(st.generation, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn kill_on_empty_session_is_safe() {
+        let session = NuSession::new();
+        // Calling kill with no process should not panic.
+        session.kill().await;
+        session.kill().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests — spawn real nu processes
+    // -----------------------------------------------------------------------
+
+    /// Returns true if the nu binary is resolvable. Tests that need a real
+    /// nu process should call this and return early if false.
+    fn nu_available() -> bool {
+        let nu = resolve_nu_binary();
+        let path = Path::new(&nu);
+        // If resolve returned an absolute path, check existence directly.
+        if path.is_absolute() {
+            return path.exists();
+        }
+        // Bare name: try running it.
+        std::process::Command::new(&nu)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    macro_rules! skip_no_nu {
+        () => {
+            if !nu_available() {
+                eprintln!("SKIP: nu binary not available");
+                return;
+            }
+        };
+    }
+
+    fn tmp_project() -> tempfile::TempDir {
+        tempfile::TempDir::new().expect("create temp dir")
+    }
+
+    /// Format a path for use in nu commands (forward slashes).
+    fn nu_path(p: &Path) -> String {
+        p.to_str().unwrap().replace('\\', "/")
+    }
+
+    /// Try to spawn a session, returning None if sandbox setup fails
+    /// (e.g. Windows ACL errors when not running elevated).
+    async fn try_spawn(
+        session: &NuSession,
+        root: &Path,
+        grant: ToolGrant,
+    ) -> Option<()> {
+        match session.spawn(root, grant).await {
+            Ok(()) => Some(()),
+            Err(e) if e.contains("sandbox setup failed") => {
+                eprintln!("SKIP: sandbox requires elevation: {e}");
+                None
+            }
+            Err(e) => panic!("unexpected spawn error: {e}"),
+        }
+    }
+
+    /// Try to evaluate a command, returning None if sandbox setup fails.
+    async fn try_eval(
+        session: &NuSession,
+        cmd: &str,
+        timeout: u64,
+        root: &Path,
+        grant: ToolGrant,
+    ) -> Option<Result<NuOutput, String>> {
+        let result = session.evaluate(cmd, timeout, root, grant).await;
+        match &result {
+            Err(e) if e.contains("sandbox setup failed") => {
+                eprintln!("SKIP: sandbox requires elevation: {e}");
+                None
+            }
+            _ => Some(result),
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_spawn_creates_session() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+            return;
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_spawn_is_idempotent() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+            return;
+        }
+        // Second spawn with same params is a no-op.
+        session.spawn(tmp.path(), ToolGrant::NU).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn integration_drop_cleans_up() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        {
+            let session = NuSession::new();
+            if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+                return;
+            }
+        }
+        // No panic or zombie = pass.
+    }
+
+    #[tokio::test]
+    async fn integration_kill_then_evaluate_respawns() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+            return;
+        }
+        session.kill().await;
+        let Some(result) = try_eval(&session, "echo 'alive'", 30, tmp.path(), ToolGrant::NU).await
+        else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(!out.is_error);
+    }
+
+    #[tokio::test]
+    async fn integration_evaluate_simple_echo() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        let Some(result) =
+            try_eval(&session, "echo 'hello world'", 30, tmp.path(), ToolGrant::NU).await
+        else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("hello world"));
+    }
+
+    #[tokio::test]
+    async fn integration_evaluate_error_command() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        let Some(result) = try_eval(
+            &session,
+            "error make { msg: 'test error' }",
+            30,
+            tmp.path(),
+            ToolGrant::NU,
+        )
+        .await
+        else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("test error"));
+    }
+
+    #[tokio::test]
+    async fn integration_evaluate_multiple_sequential() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        let Some(result) = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::NU).await
+        else {
+            return;
+        };
+        let out1 = result.unwrap();
+        assert!(!out1.is_error);
+        assert!(out1.content.contains('3'));
+        let out2 = session
+            .evaluate("'foo' | str length", 30, tmp.path(), ToolGrant::NU)
+            .await
+            .unwrap();
+        assert!(!out2.is_error);
+        assert!(out2.content.contains('3'));
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_epic_read() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let test_file = tmp.path().join("test.txt");
+        std::fs::write(&test_file, "line one\nline two\n").unwrap();
+        let session = NuSession::new();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let cmd = format!("epic read '{}'", nu_path(&test_file));
+        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(!out.is_error, "epic read failed: {}", out.content);
+        assert!(out.content.contains("line one"));
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_epic_write() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let test_file = tmp.path().join("written.txt");
+        let session = NuSession::new();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let cmd = format!("epic write '{}' 'hello from test'", nu_path(&test_file));
+        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(!out.is_error, "epic write failed: {}", out.content);
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert_eq!(content, "hello from test");
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_epic_glob() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "").unwrap();
+        let session = NuSession::new();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let cmd = format!("epic glob '*.txt' --path '{}'", nu_path(tmp.path()));
+        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(!out.is_error, "epic glob failed: {}", out.content);
+        assert!(out.content.contains("a.txt"));
+        assert!(out.content.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_epic_edit() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let test_file = tmp.path().join("edit_me.txt");
+        std::fs::write(&test_file, "old value here").unwrap();
+        let session = NuSession::new();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let cmd = format!("epic edit '{}' 'old value' 'new value'", nu_path(&test_file));
+        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(!out.is_error, "epic edit failed: {}", out.content);
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert_eq!(content, "new value here");
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_epic_grep() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        std::fs::write(tmp.path().join("searchable.txt"), "findme in this file\n").unwrap();
+        let session = NuSession::new();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let cmd = format!("epic grep 'findme' --path '{}'", nu_path(tmp.path()));
+        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(!out.is_error, "epic grep failed: {}", out.content);
+        assert!(out.content.contains("searchable.txt"));
+    }
+
+    #[tokio::test]
+    async fn integration_timeout_kills_process() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        let Some(result) = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::NU).await
+        else {
+            return;
+        };
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("timed out"), "error: {err}");
+        // Session recovers after timeout.
+        let Some(result2) =
+            try_eval(&session, "echo 'recovered'", 30, tmp.path(), ToolGrant::NU).await
+        else {
+            return;
+        };
+        let out = result2.unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("recovered"));
+    }
+
+    #[tokio::test]
+    async fn integration_grant_change_respawns() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        let Some(result) = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::NU).await
+        else {
+            return;
+        };
+        let out1 = result.unwrap();
+        assert!(!out1.is_error);
+        // Switch to write grant — triggers respawn.
+        let Some(result2) = try_eval(
+            &session,
+            "echo 'rw'",
+            30,
+            tmp.path(),
+            ToolGrant::NU | ToolGrant::WRITE,
+        )
+        .await
+        else {
+            return;
+        };
+        let out2 = result2.unwrap();
+        assert!(!out2.is_error);
+    }
+
+    #[tokio::test]
+    async fn integration_generation_prevents_stale_writeback() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+            return;
+        }
+        let gen_before = {
+            let st = session.state.lock().await;
+            st.generation
+        };
+        session.kill().await;
+        let gen_after = {
+            let st = session.state.lock().await;
+            st.generation
+        };
+        assert!(gen_after > gen_before);
+        let st = session.state.lock().await;
+        assert!(st.process.is_none());
+    }
+
+    #[tokio::test]
+    async fn integration_env_filtering_rg_available() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        std::fs::write(tmp.path().join("needle.txt"), "haystack\n").unwrap();
+        let session = NuSession::new();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let cmd = format!("^rg --color=never haystack '{}'", nu_path(tmp.path()));
+        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(!out.is_error, "rg not available in nu session: {}", out.content);
+        assert!(out.content.contains("haystack"));
+    }
 }
