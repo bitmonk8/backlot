@@ -696,10 +696,8 @@ def "epic grep" [
 
 ### Phase 1: Remaining nu command validation
 
-1. ~~Add rg binary to `build.rs` (download-and-cache, same pattern as nu).~~ Done. ripgrep 14.1.1, same download-and-cache pattern. Both binaries share `target/nu-cache/`. `resolve_rg_binary()` added to `nu_session.rs`.
-2. ~~Test `epic grep` with rg inside nu MCP session.~~ Done. All output modes validated (files_with_matches, content, count), plus context lines, glob/type filters, case-insensitive, head_limit, no-matches exit code. Config-file loading (`--config`) confirmed working in MCP mode with platform-native paths.
-3. Test binary file handling in `epic read` (what happens with non-UTF-8 files).
-4. Write `epic_env.nu` (output limits, PATH for rg). Note: on Windows `$env.Path` is a string, not a list — use string interpolation for prepend.
+1. Test binary file handling in `epic read` (what happens with non-UTF-8 files).
+2. Write `epic_env.nu` (output limits, PATH for rg). Note: on Windows `$env.Path` is a string, not a list — use string interpolation for prepend.
 
 ### Phase 2: Tool executor translation layer
 
