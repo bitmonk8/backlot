@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**v1 complete** — All features implemented. Unified tool layer complete (Phases 1-4).
+**v1 complete** — All features implemented. Unified tool layer complete.
 
 ## What Exists
 
@@ -18,7 +18,7 @@
 - Process sandboxing via lot — nu tool runs inside a persistent `nu --mcp` process spawned inside an OS-native sandbox (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS); one nu MCP session per agent call, sandbox is mandatory (no unsandboxed fallback)
 - CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain, Flick pinned to rev `f83c56e`
 - Testability infrastructure — `ProviderResolver`/`ToolExecutor` traits (flick), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
-- Nu session tests — 21 unit tests (protocol parsing, session state, generation invalidation) and 16 integration tests (spawn lifecycle, custom command availability, timeout handling, grant change respawn, env filtering, error handling)
+- Nu session tests — 21 unit tests (protocol parsing, session state, generation invalidation) and 19 integration tests (spawn lifecycle, custom command availability, timeout handling, grant change respawn, env filtering, error handling, sandbox policy verification: read-only write prevention, rg accessibility, temp dir pivot prevention)
 
 ## Design Choices (intentional constraints)
 
@@ -36,9 +36,6 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Sandbox policy verification (Phase 5)** — Three verification items from the unified tool layer spec remain untested:
-   - Verify lot `read_path` prevents writes on all platforms (Linux, macOS, Windows)
-   - Verify rg binary is accessible within lot sandbox on all platforms
-   - Verify temp dir access cannot pivot to project root (agent copies file to temp, attempts write-back under read-only policy)
+1. **`epic setup` command for Windows sandbox ACLs** — Windows AppContainer requires `WRITE_DAC` on system directories (`System32`, `ProgramFiles`, `ProgramFiles(x86)`). Currently users must run `icacls` commands manually from an elevated shell (see `docs/WINDOWS_SANDBOX.md`). An `epic setup` subcommand should detect the platform, check whether ACLs are already configured, and apply the grants automatically (requesting elevation if needed). Alternatively, lot could be updated to avoid requiring `WRITE_DAC` on system paths entirely (see `WINDOWS_SANDBOX.md` "Future Improvement" section).
 2. **`quote_nu()` adversarial input tests** — The translation layer's `quote_nu()` has unit tests for common special characters (single/double quotes, backticks, newlines, backslashes, dollar signs, raw string delimiters). Missing adversarial cases: subshell expressions `$(...)`, null bytes, and multi-line strings containing closing delimiters. Sandbox limits blast radius, but injection causes confusing errors.
 3. **Remove unused crate dependencies** — `globset`, `walkdir`, `regex` are now unused after legacy tool removal. Blocked by Rust 1.93.1 compiler ICE triggered by `windows-sys 0.61.2` when these are removed. Revisit when toolchain updates.

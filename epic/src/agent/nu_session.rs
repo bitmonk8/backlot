@@ -1164,4 +1164,185 @@ mod tests {
         assert!(!out.is_error, "rg not available in nu session: {}", out.content);
         assert!(out.content.contains("haystack"));
     }
+
+    // -----------------------------------------------------------------------
+    // Sandbox policy verification
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_sandbox_read_only_prevents_writes() {
+        // read_path policy must block file creation/mutation inside the project root.
+        skip_no_nu!();
+        let tmp = tmp_project();
+        // Seed a file so we can also test overwrite prevention.
+        std::fs::write(tmp.path().join("existing.txt"), "original").unwrap();
+        let session = NuSession::new();
+        // NU without WRITE — sandbox uses read_path for project root.
+        let grant = ToolGrant::NU;
+
+        // Attempt 1: create a new file inside the read-only project root.
+        let write_cmd = format!(
+            "'blocked' | save '{}'",
+            nu_path(&tmp.path().join("new_file.txt"))
+        );
+        let out = session.evaluate(&write_cmd, 30, tmp.path(), grant).await.unwrap();
+        assert!(
+            out.is_error,
+            "write should fail under read-only sandbox, got: {}",
+            out.content
+        );
+        assert!(
+            !tmp.path().join("new_file.txt").exists(),
+            "file must not be created under read-only policy"
+        );
+
+        // Attempt 2: overwrite an existing file.
+        let overwrite_cmd = format!(
+            "'overwritten' | save --force '{}'",
+            nu_path(&tmp.path().join("existing.txt"))
+        );
+        let out2 = session.evaluate(&overwrite_cmd, 30, tmp.path(), grant).await.unwrap();
+        assert!(
+            out2.is_error,
+            "overwrite should fail under read-only sandbox, got: {}",
+            out2.content
+        );
+        let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
+        assert_eq!(content, "original", "file content must not change");
+
+        // Attempt 3: mkdir inside the project root.
+        let mkdir_cmd = format!("mkdir '{}'", nu_path(&tmp.path().join("subdir")));
+        let out3 = session.evaluate(&mkdir_cmd, 30, tmp.path(), grant).await.unwrap();
+        assert!(
+            out3.is_error,
+            "mkdir should fail under read-only sandbox, got: {}",
+            out3.content
+        );
+        assert!(
+            !tmp.path().join("subdir").exists(),
+            "directory must not be created under read-only policy"
+        );
+
+        // Attempt 4: rm an existing file.
+        let rm_cmd = format!("rm '{}'", nu_path(&tmp.path().join("existing.txt")));
+        let out_rm = session.evaluate(&rm_cmd, 30, tmp.path(), grant).await.unwrap();
+        assert!(
+            out_rm.is_error,
+            "rm should fail under read-only sandbox, got: {}",
+            out_rm.content
+        );
+        assert!(
+            tmp.path().join("existing.txt").exists(),
+            "file must not be deleted under read-only policy"
+        );
+
+        // Attempt 5: mv (rename) an existing file.
+        let mv_cmd = format!(
+            "mv '{}' '{}'",
+            nu_path(&tmp.path().join("existing.txt")),
+            nu_path(&tmp.path().join("renamed.txt")),
+        );
+        let out_mv = session.evaluate(&mv_cmd, 30, tmp.path(), grant).await.unwrap();
+        assert!(
+            out_mv.is_error,
+            "mv should fail under read-only sandbox, got: {}",
+            out_mv.content
+        );
+        assert!(
+            tmp.path().join("existing.txt").exists(),
+            "original file must still exist after failed mv"
+        );
+        assert!(
+            !tmp.path().join("renamed.txt").exists(),
+            "renamed file must not exist under read-only policy"
+        );
+
+        // rg must remain accessible under read-only grant (exec_path covers NU_CACHE_DIR).
+        let rg_cmd = format!(
+            "^rg --color=never original '{}'",
+            nu_path(tmp.path())
+        );
+        let out4 = session.evaluate(&rg_cmd, 30, tmp.path(), grant).await.unwrap();
+        assert!(
+            !out4.is_error,
+            "rg should be accessible in read-only sandbox: {}",
+            out4.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_temp_dir_no_pivot_to_project() {
+        // A read-only session can write to temp dirs (include_temp_dirs), but
+        // must not be able to pivot that access back to the project root —
+        // e.g. copy a file to temp, modify it, then write it back.
+        skip_no_nu!();
+        let tmp = tmp_project();
+        std::fs::write(tmp.path().join("source.txt"), "immutable content").unwrap();
+        let session = NuSession::new();
+        let grant = ToolGrant::NU;
+
+        // Copy to a temp file, modify it, then attempt to write back.
+        // This is the pivot attack: use temp dir write access to stage a
+        // modified copy, then try to overwrite the project file.
+        let pivot_cmd = format!(
+            "let tmp = (mktemp); \
+             open '{}' | save --force $tmp; \
+             'tampered' | save --force $tmp; \
+             open $tmp | save --force '{}'",
+            nu_path(&tmp.path().join("source.txt")),
+            nu_path(&tmp.path().join("source.txt")),
+        );
+        let out2 = session.evaluate(&pivot_cmd, 30, tmp.path(), grant).await.unwrap();
+        // The final `save --force` back to project root must fail.
+        assert!(
+            out2.is_error,
+            "pivot write-back should fail under read-only sandbox, got: {}",
+            out2.content
+        );
+        let content = std::fs::read_to_string(tmp.path().join("source.txt")).unwrap();
+        assert_eq!(
+            content, "immutable content",
+            "project file must remain unchanged after pivot attempt"
+        );
+
+        // Also try writing a new file to project root via temp staging.
+        let pivot_new_cmd = format!(
+            "let tmp = (mktemp); \
+             'injected' | save --force $tmp; \
+             cp $tmp '{}'",
+            nu_path(&tmp.path().join("injected.txt")),
+        );
+        let out3 = session.evaluate(&pivot_new_cmd, 30, tmp.path(), grant).await.unwrap();
+        assert!(
+            out3.is_error,
+            "cp from temp to project root should fail, got: {}",
+            out3.content
+        );
+        assert!(
+            !tmp.path().join("injected.txt").exists(),
+            "injected file must not exist in project root"
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_write_grant_permits_writes() {
+        // Write grant must allow file creation in the project root.
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let session = NuSession::new();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        let write_cmd = format!(
+            "'hello' | save '{}'",
+            nu_path(&tmp.path().join("created.txt"))
+        );
+        let out = session.evaluate(&write_cmd, 30, tmp.path(), grant).await.unwrap();
+        assert!(
+            !out.is_error,
+            "write should succeed with WRITE grant: {}",
+            out.content
+        );
+        let content = std::fs::read_to_string(tmp.path().join("created.txt")).unwrap();
+        assert_eq!(content, "hello", "file content should match what was written");
+    }
 }
