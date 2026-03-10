@@ -1,6 +1,6 @@
 # Spec: Unified Tool Layer via Nu Custom Commands
 
-**Status**: Draft — decisions recorded, approaching implementation-ready.
+**Status**: Draft — approaching implementation-ready.
 
 ## Summary
 
@@ -17,7 +17,7 @@ Epic currently enforces filesystem boundaries two ways:
 1. **`safe_path()` in tools.rs** — path canonicalization and symlink guards, applied to file tools running in epic's own process.
 2. **lot sandbox** — OS-level process isolation on the nu process.
 
-This creates three TOCTOU race conditions (see git history, formerly AUDIT.md) that are not practically exploitable but exist because epic's process is unsandboxed. Moving all file operations into the sandboxed nu process eliminates the race class by construction — lot enforces boundaries at the syscall level, before any file handle is opened.
+This creates three TOCTOU race conditions that are not practically exploitable but exist because epic's process is unsandboxed. Moving all file operations into the sandboxed nu process eliminates the race class by construction — lot enforces boundaries at the syscall level, before any file handle is opened.
 
 ### Claude Code tool alignment
 
@@ -25,13 +25,13 @@ Epic recommends Anthropic's Claude models (any model available through Flick can
 
 ## Decisions
 
-### D1: Eager spawn for tool-granted sessions (decided)
+### D1: Eager spawn for tool-granted sessions
 
-Nu processes spawn eagerly at session creation for any agent call that receives tool grants. Three agent call types never receive tools (assessment, checkpoint, assess-recovery) and skip spawning entirely. All other agent types (verify, execute, decompose, fix, recovery-design) spawn nu immediately — these sessions use tools in virtually every invocation, so lazy spawn only added first-call latency without meaningful savings.
+Nu processes spawn eagerly at session creation for any agent call that receives tool grants. Three agent call types never receive tools (assessment, checkpoint, assess-recovery) and skip spawning entirely. All other agent types (verify, execute, decompose, fix, recovery-design) spawn nu immediately — these sessions use tools in virtually every invocation, so lazy spawn only adds first-call latency without meaningful savings.
 
-### D2: Separate tool schemas, routed through nu internally (decided)
+### D2: Separate tool schemas, routed through nu internally
 
-**Revised from earlier draft.** Agents see separate tool definitions with JSON parameter schemas (Read, Write, Edit, Glob, Grep, NuShell) — not a single `evaluate` tool. Epic's tool executor translates each JSON tool call into a nu command and dispatches it through `nu_session.evaluate()`. This is invisible to agents.
+Agents see separate tool definitions with JSON parameter schemas (Read, Write, Edit, Glob, Grep, NuShell) — not a single `evaluate` tool. Epic's tool executor translates each JSON tool call into a nu command and dispatches it through `nu_session.evaluate()`. This is invisible to agents.
 
 Rationale: Claude models are trained on Claude Code's tool interface where each tool is a distinct callable with typed parameters. Collapsing everything into a single `evaluate` tool would force agents to compose nu syntax for basic file operations — an unfamiliar interface that increases error rates. Keeping separate tools with Claude Code-aligned schemas preserves the training advantage.
 
@@ -39,11 +39,11 @@ The NuShell tool maps directly to nu's `evaluate` for arbitrary commands. Nu cus
 
 Nu 0.111.0 does not support registering custom MCP tools (only exposes `evaluate`, `find_command`, `list_command`). The separation is maintained in epic's Rust layer, not in nu's MCP server.
 
-### D3: Lot sandbox is the sole access control mechanism (decided)
+### D3: Lot sandbox is the sole access control mechanism
 
 `safe_path()`, `verify_ancestors_within_root()`, and `ToolGrant::READ`/`WRITE` flags are removed. Lot's per-phase sandbox policy is the sole gatekeeper. `ToolGrant` collapses to a phase marker controlling which tool definitions are offered to the agent.
 
-### D4: Platform sandbox verification (confirmed)
+### D4: Platform sandbox verification
 
 Lot provides OS-level read/write/execute path controls on all three platforms:
 
@@ -59,7 +59,7 @@ Lot provides OS-level read/write/execute path controls on all three platforms:
 
 **Linux caveat**: Unprivileged user namespaces may be disabled by kernel config or AppArmor. This is an existing constraint (epic already depends on lot for nu), not a new one.
 
-### D5: Phase-based tool filtering (decided)
+### D5: Phase-based tool filtering
 
 Two tool sets offered to agents based on phase:
 
@@ -68,7 +68,7 @@ Two tool sets offered to agents based on phase:
 
 Security does not depend on this filtering — the lot sandbox enforces access regardless. Filtering prevents agents from wasting tokens on tool calls that will fail.
 
-### D6: Claude Code tool schema alignment (decided)
+### D6: Claude Code tool schema alignment
 
 Tool names, parameter names, and parameter semantics are modeled on Claude Code's tool interface. Specific alignment choices:
 
@@ -84,7 +84,7 @@ Tool names, parameter names, and parameter semantics are modeled on Claude Code'
 
 **Deliberately omitted from Claude Code**: `run_in_background` (epic sessions are single-threaded), `offset` on Grep (unnecessary with `head_limit`), `NotebookEdit` (not relevant), all IDE/agent/web tools (epic has its own equivalents).
 
-### D7: File tool forwarders are configurable (decided)
+### D7: File tool forwarders are configurable
 
 The file tools (Read, Write, Edit, Glob, Grep) are convenience forwarders — they translate JSON tool calls into nu custom commands. They are not strictly necessary: the NuShell tool can invoke the same nu custom commands directly, and nu's `list_command`/`find_command` MCP tools make the custom commands discoverable by agents.
 
@@ -111,7 +111,7 @@ When `file_tool_forwarders = true` (default):
 
 This enables A/B comparison of tool-use accuracy with and without forwarders.
 
-### D8: Config-file injection replaces evaluate injection (decided)
+### D8: Config-file injection for custom command loading
 
 Nu in `--mcp` mode loads user config files by default (`env.nu`, `config.nu`, vendor/user autoload dirs). This creates two problems:
 - **Reproducibility**: User config could define aliases that shadow builtins, modify PATH, or change `$env.config` settings, causing different behavior across machines.
@@ -128,11 +128,9 @@ This overrides the default config resolution, preventing user config from loadin
 - `epic_env.nu`: Minimal env setup (e.g., `$env.NU_MCP_OUTPUT_LIMIT`, PATH adjustments for rg).
 - `epic_config.nu`: All custom command definitions (`epic_read`, `epic_write`, `epic_edit`, `epic_glob`, `epic_grep`).
 
-**Validated**: `--config` + `--env-config` + `--mcp` works on nu 0.111.0. Custom commands defined in the config file are visible in the MCP `evaluate` scope. `$nu.config-path` and `$nu.env-path` point to the overridden paths, confirming no user config leakage.
+Custom commands defined in the config file are visible in the MCP `evaluate` scope. No extra MCP round-trip needed after handshake.
 
-**Consequence**: Phase 3 ("session startup injection via evaluate") is eliminated. The config file *is* the injection mechanism. No extra MCP round-trip needed after handshake.
-
-### D9: Nu-native types and structured return values (decided)
+### D9: Nu-native types and structured return values
 
 Nu has a `filesize` type distinct from `int`. `ls` returns file sizes as `filesize`, and filesize literals like `256KiB` are also `filesize`. However, `bytes length` returns `int`. The `>` operator does not allow cross-type comparison.
 
@@ -140,7 +138,7 @@ Nu has a `filesize` type distinct from `int`. `ls` returns file sizes as `filesi
 
 **Structured return values**: Nu custom commands return records and lists using nu-native types — not pre-formatted strings. The Rust translation layer parses the NUON output from the MCP response and formats it into the text format Claude expects. This keeps the nu commands idiomatic and puts format conversion at the Rust boundary where it belongs.
 
-### D10: Conversion boundary — nu-native in, Claude-formatted out (decided)
+### D10: Conversion boundary — nu-native in, Claude-formatted out
 
 Two conversion points, both in Rust:
 
@@ -164,19 +162,7 @@ This separation means:
 
 ---
 
-## Current Tool Grant Model (before)
-
-| Phase | Grant Flags | Tools Available |
-|-------|-------------|-----------------|
-| Analyze | `READ` | read_file, glob, grep |
-| Execute | `READ \| WRITE \| NU` | read_file, glob, grep, write_file, edit_file, nu |
-| Decompose | `READ \| NU` | read_file, glob, grep, nu |
-
-Assessment, checkpoint, and assess-recovery receive zero tools and use `run_structured()` (no tool loop).
-
-## Proposed Model (after)
-
-### Phase → Lot Policy → Tool Set
+## Phase → Lot Policy → Tool Set
 
 With `file_tool_forwarders = true` (default):
 
@@ -425,7 +411,7 @@ Claude Code's `type` parameter is renamed to `include_type` to avoid collision w
 
 ### NuShell
 
-Execute a NuShell command. Replaces the former `nu` tool. Parameter schema mirrors Claude Code's `Bash` tool, but the name and description steer models toward NuShell syntax.
+Execute a NuShell command. Parameter schema mirrors Claude Code's `Bash` tool, but the name and description steer models toward NuShell syntax.
 
 ```json
 {
@@ -530,7 +516,11 @@ fn format_tool_result(name: &str, nuon_output: &str) -> Result<String> {
 
 ### Error mapping
 
-Nu `error make` messages surface as JSON-RPC errors (code `-32603`). The Rust layer extracts the `msg` field from the error and returns it as tool result text. The session remains alive after errors. Sandbox permission errors (lot denying access) produce OS-level errors that nu surfaces similarly.
+Nu `error make` messages surface as JSON-RPC errors (code `-32603`), NOT as `isError: true` tool results. The session remains alive after errors — subsequent calls work normally. Epic's MCP response parser must handle JSON-RPC errors from `error make` and map them to agent-visible tool error messages. Sandbox permission errors (lot denying access) produce OS-level errors that nu surfaces similarly.
+
+### MCP evaluate parameter
+
+The MCP `evaluate` tool uses `input` (not `code`) as its parameter name.
 
 ---
 
@@ -542,15 +532,11 @@ Custom command definitions are loaded via nu's config file mechanism. Epic spawn
 
 The config file is either embedded as a Rust `const &str` and written to `target/nu-cache/epic_config.nu` at build time, or generated at runtime from the validated command definitions. The env config (`epic_env.nu`) is minimal — primarily sets `$env.NU_MCP_OUTPUT_LIMIT` and any PATH adjustments for bundled binaries (rg).
 
-Previous approaches tested and rejected:
-- `--commands` + `--mcp`: commands not visible in MCP evaluate scope.
-- Evaluate injection after handshake: works, but unnecessary now that `--config` is validated.
+Note: `--commands` + `--mcp` does NOT work — custom commands defined via `--commands` are not visible to subsequent `evaluate` calls (the MCP session runs in a separate scope).
 
 ### Command definitions
 
-Commands use nu-native types internally and return structured records/lists. Error reporting uses nu's `error make`. The Rust translation layer (D10) formats the structured output for Claude.
-
-**Validated against nu 0.111.0** (2026-03-10). `epic_read`, `epic_write`, `epic_edit`, `epic_glob` tested via `--config` + `--mcp`. `epic_grep` awaits rg binary.
+Commands use nu-native types internally and return structured records/lists. Error reporting uses nu's `error make`. The Rust translation layer (D10) formats the structured output for Claude. `split row` and `str replace` are literal by default in nu 0.111.0 (not regex).
 
 ```nu
 # epic_read — read file contents, return structured record
@@ -599,7 +585,6 @@ def epic_write [path: string, content: string] {
 }
 
 # epic_edit — exact substring replacement, return structured record
-# split row and str replace are LITERAL by default in nu 0.111.0 (not regex).
 def epic_edit [
     path: string
     old_string: string
@@ -696,44 +681,12 @@ def epic_grep [
 }
 ```
 
-### Prototype validation results (2026-03-10)
-
-| # | Item | Result |
-|---|------|--------|
-| 1 | `epic_read` line pagination | Not yet tested (deferred to implementation). |
-| 2 | `epic_edit` substring counting | **Validated.** `split row` is literal by default (not regex). `(split row $old_string \| length) - 1` correctly counts occurrences. `str replace` is also literal by default; regex requires `--regex` flag. Full `epic_edit` command tested end-to-end: uniqueness check, replace-all, not-found detection all work. |
-| 3 | `epic_grep` rg integration | **Blocked.** rg binary not yet in build cache. Needs `build.rs` addition (same download-and-cache pattern as nu). `^rg` invocation pattern is sound but untested inside lot sandbox. |
-| 4 | `epic_glob` cwd behavior | Not yet tested (deferred to implementation). |
-| 5 | Binary file handling | Not yet tested (deferred to implementation). |
-| 6 | Output format | **Validated.** MCP `evaluate` returns structured NUON: `{cwd, history_index, timestamp, output}`. The `output` field contains the command result as a string. Nu records, tables, and lists all serialize correctly through MCP. |
-| 7 | `--commands` + `--mcp` | **Does NOT work.** Custom commands defined via `--commands` are not visible to subsequent `evaluate` calls. The MCP session runs in a separate scope. |
-| 8 | `--config` + `--mcp` | **Works.** Custom commands defined in the config file are visible in the MCP `evaluate` scope. `$nu.config-path` confirms the override. **This is the chosen approach** (see D8). |
-| 9 | Type system | **`filesize` vs `int` mismatch.** `ls` size is `filesize`; `bytes length` is `int`. Cannot compare across types. **Resolved**: use `into filesize` to convert int → filesize where needed (D9). `ls` sizes compare directly to filesize literals (`> 256KiB`). `bytes length` converts via `\| into filesize` before comparing to `1MiB`. |
-| 10 | Structured return values | **Validated.** Nu records (`{path, size, total_lines, ...}`) and lists serialize as NUON through MCP `output` field. Rust parses and reformats for Claude (D10). |
-
-#### Additional findings
-
-- **MCP evaluate parameter name**: `input` (not `code`). The MCP tool schema uses `input` as the parameter for the `evaluate` tool.
-- **Error handling**: `error make` errors surface as JSON-RPC error responses (code `-32603`), NOT as `isError: true` tool results. The session remains alive after errors — subsequent calls work normally. Epic's MCP response parser must handle JSON-RPC errors from `error make` and map them to agent-visible tool error messages.
-- **User config leakage**: `nu --mcp` loads user config files by default. Epic uses `--config` + `--env-config` to override with epic-controlled files, preventing user config from affecting agent behavior (D8).
-
 ---
 
 ## Implementation Plan
 
-### Phase 1: Prototype nu custom commands (mostly complete)
+### Phase 1: Remaining nu command validation
 
-**Done:**
-- `--commands` + `--mcp` tested — does not work.
-- `--config` + `--env-config` + `--mcp` tested — works. Custom commands in config file visible in evaluate scope. Chosen as loading mechanism (D8).
-- `error make` surfaces as JSON-RPC error (code -32603), session stays alive.
-- `epic_edit` substring counting validated: `split row` and `str replace` are literal by default.
-- Nu type system: `filesize` vs `int` distinction identified and resolved (D9).
-- Output format validated: MCP returns `{cwd, history_index, timestamp, output}`.
-- `epic_read`, `epic_write`, `epic_edit`, `epic_glob` all validated end-to-end via `--config` + `--mcp`.
-- `epic_read` edge cases: offset beyond EOF returns empty string (acceptable).
-
-**Remaining:**
 1. Add rg binary to `build.rs` (download-and-cache, same pattern as nu).
 2. Test `epic_grep` with rg inside nu MCP session.
 3. Test binary file handling in `epic_read` (what happens with non-UTF-8 files).
@@ -748,7 +701,7 @@ def epic_grep [
 5. Update `execute_tool()` dispatch: when forwarders on, translate → `nu_session.evaluate()`; when off, reject non-NuShell tool calls.
 6. Unit test the translation layer (JSON → nu command → expected string).
 
-### Phase 3: Config file integration (replaces evaluate injection)
+### Phase 3: Config file integration
 
 1. Embed `epic_config.nu` and `epic_env.nu` as Rust `const` strings (or write to `target/nu-cache/` at build time).
 2. Modify `NuSession` to spawn `nu --mcp --config <path> --env-config <path>`.
@@ -798,7 +751,7 @@ File tool calls gain IPC overhead (~1ms per call). For typical agent sessions (1
 
 ### Error message fidelity
 
-Agents rely on error messages to recover (e.g., "file not found" vs "permission denied" vs "size limit exceeded"). Nu's `error make` produces structured errors that surface through MCP `evaluate` responses. The error text must be clear enough for the agent to act on. Test this explicitly during Phase 1.
+Agents rely on error messages to recover (e.g., "file not found" vs "permission denied" vs "size limit exceeded"). Nu's `error make` produces structured errors that surface through MCP `evaluate` responses. The error text must be clear enough for the agent to act on.
 
 ### Sandbox policy for temp dirs
 
