@@ -1,12 +1,13 @@
-// build.rs — Download a prebuilt NuShell binary for the target platform.
+// build.rs — Download prebuilt NuShell and ripgrep binaries for the target platform.
 //
-// On `cargo build`, this script downloads the NuShell 0.111.0 release binary
-// matching the target platform, verifies its SHA-256 checksum, extracts it
-// from the archive, and caches it under `target/nu-cache/`. The runtime uses
-// `NU_CACHE_DIR` (emitted as a compile-time env var) to locate the binary.
+// On `cargo build`, this script downloads release binaries matching the target
+// platform, verifies SHA-256 checksums, extracts them from archives, and caches
+// them under `target/nu-cache/`. The runtime uses `NU_CACHE_DIR` (emitted as a
+// compile-time env var) to locate both binaries.
 //
-// Set `NU_SKIP_DOWNLOAD=1` to skip the download (offline builds, CI with
-// pre-populated cache). The runtime falls back to PATH lookup.
+// Set `NU_SKIP_DOWNLOAD=1` or `RG_SKIP_DOWNLOAD=1` to skip individual
+// downloads (offline builds, CI with pre-populated cache). The runtime falls
+// back to PATH lookup.
 
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -14,6 +15,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const NU_VERSION: &str = "0.111.0";
+const RG_VERSION: &str = "14.1.1";
 
 struct PlatformAsset {
     asset_name: &'static str,
@@ -21,7 +23,7 @@ struct PlatformAsset {
     binary_name: &'static str,
 }
 
-fn platform_asset(os: &str, arch: &str) -> PlatformAsset {
+fn nu_platform_asset(os: &str, arch: &str) -> PlatformAsset {
     match (os, arch) {
         ("windows", "x86_64") => PlatformAsset {
             asset_name: "nu-0.111.0-x86_64-pc-windows-msvc.zip",
@@ -54,7 +56,42 @@ fn platform_asset(os: &str, arch: &str) -> PlatformAsset {
             binary_name: "nu",
         },
         _ => {
-            panic!("unsupported target: os={os} arch={arch}");
+            panic!("unsupported target for nu: os={os} arch={arch}");
+        }
+    }
+}
+
+fn rg_platform_asset(os: &str, arch: &str) -> PlatformAsset {
+    match (os, arch) {
+        ("windows", "x86_64" | "aarch64") => PlatformAsset {
+            // No aarch64-pc-windows-msvc build exists for rg. Windows ARM64
+            // runs x86_64 binaries via built-in emulation.
+            asset_name: "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip",
+            sha256: "d0f534024c42afd6cb4d38907c25cd2b249b79bbe6cc1dbee8e3e37c2b6e25a1",
+            binary_name: "rg.exe",
+        },
+        ("linux", "x86_64") => PlatformAsset {
+            asset_name: "ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz",
+            sha256: "4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e",
+            binary_name: "rg",
+        },
+        ("linux", "aarch64") => PlatformAsset {
+            asset_name: "ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz",
+            sha256: "c827481c4ff4ea10c9dc7a4022c8de5db34a5737cb74484d62eb94a95841ab2f",
+            binary_name: "rg",
+        },
+        ("macos", "x86_64") => PlatformAsset {
+            asset_name: "ripgrep-14.1.1-x86_64-apple-darwin.tar.gz",
+            sha256: "fc87e78f7cb3fea12d69072e7ef3b21509754717b746368fd40d88963630e2b3",
+            binary_name: "rg",
+        },
+        ("macos", "aarch64") => PlatformAsset {
+            asset_name: "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz",
+            sha256: "24ad76777745fbff131c8fbc466742b011f925bfa4fffa2ded6def23b5b937be",
+            binary_name: "rg",
+        },
+        _ => {
+            panic!("unsupported target for rg: os={os} arch={arch}");
         }
     }
 }
@@ -74,7 +111,10 @@ fn find_target_dir() -> PathBuf {
         }
         dir = parent;
     }
-    panic!("cannot find `target/` directory walking up from OUT_DIR={}", out_dir.display())
+    panic!(
+        "cannot find `target/` directory walking up from OUT_DIR={}",
+        out_dir.display()
+    )
 }
 
 fn sha256_file(path: &Path) -> io::Result<String> {
@@ -103,8 +143,8 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
 }
 
 fn extract_tar_gz(archive_path: &Path, binary_name: &str, dest: &Path) -> Result<(), String> {
-    let file = fs::File::open(archive_path)
-        .map_err(|e| format!("failed to open archive: {e}"))?;
+    let file =
+        fs::File::open(archive_path).map_err(|e| format!("failed to open archive: {e}"))?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
 
@@ -143,8 +183,8 @@ fn extract_tar_gz(archive_path: &Path, binary_name: &str, dest: &Path) -> Result
 }
 
 fn extract_zip(archive_path: &Path, binary_name: &str, dest: &Path) -> Result<(), String> {
-    let file = fs::File::open(archive_path)
-        .map_err(|e| format!("failed to open archive: {e}"))?;
+    let file =
+        fs::File::open(archive_path).map_err(|e| format!("failed to open archive: {e}"))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("failed to read zip: {e}"))?;
 
@@ -170,45 +210,33 @@ fn extract_zip(archive_path: &Path, binary_name: &str, dest: &Path) -> Result<()
     Err(format!("{binary_name} not found in archive"))
 }
 
-fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=NU_SKIP_DOWNLOAD");
-
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS not set");
-    let target_arch =
-        std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH not set");
-
-    let cache_dir = find_target_dir().join("nu-cache");
-    fs::create_dir_all(&cache_dir).expect("failed to create nu-cache directory");
-
-    let asset = platform_asset(&target_os, &target_arch);
+/// Download, verify, extract, and cache a single binary.
+fn download_and_cache(
+    label: &str,
+    version: &str,
+    download_base_url: &str,
+    asset: &PlatformAsset,
+    cache_dir: &Path,
+    skip_env_var: &str,
+) {
     let binary_path = cache_dir.join(asset.binary_name);
     let sentinel = cache_dir.join(format!(".verified-{}", asset.asset_name));
 
-    // Emit cache dir for runtime lookup.
-    println!(
-        "cargo:rustc-env=NU_CACHE_DIR={}",
-        cache_dir.to_str().expect("cache dir not valid UTF-8")
-    );
-
-    // If sentinel exists, the binary was already downloaded and verified.
+    // Already downloaded and verified.
     if sentinel.exists() && binary_path.exists() {
         return;
     }
 
     // Offline escape hatch.
-    if std::env::var("NU_SKIP_DOWNLOAD").is_ok_and(|v| v == "1") {
-        eprintln!("NU_SKIP_DOWNLOAD=1: skipping NuShell binary download");
+    if std::env::var(skip_env_var).is_ok_and(|v| v == "1") {
+        eprintln!("{skip_env_var}=1: skipping {label} binary download");
         return;
     }
 
-    let url = format!(
-        "https://github.com/nushell/nushell/releases/download/{NU_VERSION}/{}",
-        asset.asset_name
-    );
-
+    let url = format!("{download_base_url}/{}", asset.asset_name);
     let archive_path = cache_dir.join(asset.asset_name);
-    download(&url, &archive_path).expect("failed to download NuShell binary");
+    download(&url, &archive_path)
+        .unwrap_or_else(|e| panic!("failed to download {label} binary: {e}"));
 
     // Verify archive checksum.
     let actual_hash =
@@ -219,13 +247,13 @@ fn main() {
         asset.asset_name, asset.sha256
     );
 
-    // Extract the nu binary from the archive.
+    // Extract the binary from the archive.
     if asset.asset_name.ends_with(".tar.gz") {
         extract_tar_gz(&archive_path, asset.binary_name, &binary_path)
-            .expect("failed to extract NuShell binary from tar.gz");
+            .unwrap_or_else(|e| panic!("failed to extract {label} binary from tar.gz: {e}"));
     } else {
         extract_zip(&archive_path, asset.binary_name, &binary_path)
-            .expect("failed to extract NuShell binary from zip");
+            .unwrap_or_else(|e| panic!("failed to extract {label} binary from zip: {e}"));
     }
 
     // Clean up the archive.
@@ -235,7 +263,48 @@ fn main() {
     fs::write(&sentinel, asset.sha256).expect("failed to write sentinel file");
 
     eprintln!(
-        "NuShell {NU_VERSION} binary cached at {}",
+        "{label} {version} binary cached at {}",
         binary_path.display()
+    );
+}
+
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=NU_SKIP_DOWNLOAD");
+    println!("cargo:rerun-if-env-changed=RG_SKIP_DOWNLOAD");
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS not set");
+    let target_arch =
+        std::env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH not set");
+
+    let cache_dir = find_target_dir().join("nu-cache");
+    fs::create_dir_all(&cache_dir).expect("failed to create nu-cache directory");
+
+    // Emit cache dir for runtime lookup (both binaries share the same directory).
+    println!(
+        "cargo:rustc-env=NU_CACHE_DIR={}",
+        cache_dir.to_str().expect("cache dir not valid UTF-8")
+    );
+
+    // NuShell
+    let nu_asset = nu_platform_asset(&target_os, &target_arch);
+    download_and_cache(
+        "NuShell",
+        NU_VERSION,
+        &format!("https://github.com/nushell/nushell/releases/download/{NU_VERSION}"),
+        &nu_asset,
+        &cache_dir,
+        "NU_SKIP_DOWNLOAD",
+    );
+
+    // ripgrep
+    let rg_asset = rg_platform_asset(&target_os, &target_arch);
+    download_and_cache(
+        "ripgrep",
+        RG_VERSION,
+        &format!("https://github.com/BurntSushi/ripgrep/releases/download/{RG_VERSION}"),
+        &rg_asset,
+        &cache_dir,
+        "RG_SKIP_DOWNLOAD",
     );
 }

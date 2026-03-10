@@ -100,7 +100,7 @@ file_tool_forwarders = true
 
 When `file_tool_forwarders = false`:
 - Only the NuShell tool is offered to agents (plus phase filtering on the system prompt stating which operations are permitted).
-- Nu custom commands (`epic_read`, `epic_write`, etc.) are still loaded at session startup — agents can invoke them via the NuShell tool.
+- Nu custom commands (`epic read`, `epic write`, etc.) are still loaded at session startup — agents can invoke them via the NuShell tool.
 - The nu MCP server's `find_command`/`list_command` tools make the custom commands discoverable.
 - The translation layer in `execute_tool()` is bypassed entirely.
 
@@ -126,9 +126,13 @@ nu --mcp --config <epic_config.nu> --env-config <epic_env.nu>
 This overrides the default config resolution, preventing user config from loading. The config files are managed by epic (embedded in binary or written to `target/nu-cache/` at build time).
 
 - `epic_env.nu`: Minimal env setup (e.g., `$env.NU_MCP_OUTPUT_LIMIT`, PATH adjustments for rg).
-- `epic_config.nu`: All custom command definitions (`epic_read`, `epic_write`, `epic_edit`, `epic_glob`, `epic_grep`).
+- `epic_config.nu`: All custom command definitions (`epic read`, `epic write`, `epic edit`, `epic glob`, `epic grep`). Commands use nu subcommand syntax (`def "epic read" [...]`) for idiomatic grouping under the `epic` namespace — `help epic` lists all subcommands.
 
-Custom commands defined in the config file are visible in the MCP `evaluate` scope. No extra MCP round-trip needed after handshake.
+Custom commands defined in the config file are visible in the MCP `evaluate` scope. No extra MCP round-trip needed after handshake. Verified with nu 0.111.0: `which <command>` confirms commands are found with `type: custom` and path pointing to the config file.
+
+Note: config file paths must be absolute or resolvable on the target platform. On Windows, forward-slash paths (e.g., `C:/path/to/config.nu`) work. Unix-style paths like `/tmp/...` do NOT resolve on Windows.
+
+Note: on Windows, `$env.Path` is a semicolon-delimited string, not a list. The env config must handle this: `$env.Path = ($"<rg_dir>;($env.Path)")`.
 
 ### D9: Nu-native types and structured return values
 
@@ -182,7 +186,7 @@ With `file_tool_forwarders = false`:
 | Decompose (design, recovery-design) | `read_path(project_root)` | NuShell | Read + shell commands, OS prevents writes. |
 | Assess / Checkpoint | N/A | None | No nu process spawned. No tools. |
 
-In both modes, nu custom commands (`epic_read`, `epic_write`, etc.) are loaded at session startup and available through the NuShell tool.
+In both modes, nu custom commands (`epic read`, `epic write`, etc.) are loaded at session startup and available through the NuShell tool.
 
 ### What Changes
 
@@ -230,7 +234,7 @@ Read file contents with optional line-based pagination.
 
 **Differences from Claude Code**: `file_path` accepts project-relative paths (Claude Code requires absolute). Default `limit` is governed by the 256 KiB output cap rather than a fixed line count.
 
-**Inbound**: `epic_read $file_path --offset $offset --limit $limit`
+**Inbound**: `epic read $file_path --offset $offset --limit $limit`
 
 **Outbound**: Nu returns `{path, size, total_lines, offset, lines_returned, lines: [{line, text}, ...]}`. Rust formats `lines` into cat -n style text (`     1\tline text`), appends total line count as context.
 
@@ -261,7 +265,7 @@ Create or overwrite a file.
 
 **Differences from Claude Code**: None meaningful. Size cap (1 MiB) enforced by the nu command.
 
-**Inbound**: `epic_write $file_path $content`
+**Inbound**: `epic write $file_path $content`
 
 **Outbound**: Nu returns `{path, bytes_written}`. Rust formats as confirmation message.
 
@@ -300,7 +304,7 @@ Replace exact string in a file.
 
 **Differences from Claude Code**: None. Schema matches exactly.
 
-**Inbound**: `epic_edit $file_path $old_string $new_string --replace-all=$replace_all`
+**Inbound**: `epic edit $file_path $old_string $new_string --replace-all=$replace_all`
 
 **Outbound**: Nu returns `{path, replacements}`. Rust formats as confirmation message with count.
 
@@ -331,7 +335,7 @@ Find files by glob pattern.
 
 **Differences from Claude Code**: None. Schema matches exactly.
 
-**Inbound**: `epic_glob $pattern --path $path`
+**Inbound**: `epic glob $pattern --path $path`
 
 **Outbound**: Nu returns `list<string>`. Rust joins with newlines.
 
@@ -405,7 +409,7 @@ Search file contents by regex. Powered by ripgrep.
 
 Claude Code's `type` parameter is renamed to `include_type` to avoid collision with JSON Schema's `type` keyword.
 
-**Inbound**: `epic_grep $pattern --path $path --output-mode $output_mode --glob $glob --type $include_type --case-insensitive=$case_insensitive --line-numbers=$line_numbers --context-after=$context_after --context-before=$context_before --context=$context --multiline=$multiline --head-limit=$head_limit`
+**Inbound**: `epic grep $pattern --path $path --output-mode $output_mode --glob $glob --type $include_type --case-insensitive=$case_insensitive --line-numbers=$line_numbers --context-after=$context_after --context-before=$context_before --context=$context --multiline=$multiline --head-limit=$head_limit`
 
 **Outbound**: Nu returns `{exit_code, output}`. Rust passes through the `output` string (rg text is already Claude-compatible). Exit code 1 (no matches) is not an error.
 
@@ -460,7 +464,7 @@ fn translate_tool_call(name: &str, params: &serde_json::Value) -> Result<String>
     match name {
         "Read" => {
             let path = params["file_path"].as_str().required()?;
-            let mut cmd = format!("epic_read {}", quote_nu(path));
+            let mut cmd = format!("epic read {}", quote_nu(path));
             if let Some(offset) = params["offset"].as_i64() {
                 cmd.push_str(&format!(" --offset {offset}"));
             }
@@ -528,19 +532,24 @@ The MCP `evaluate` tool uses `input` (not `code`) as its parameter name.
 
 ### Loading mechanism
 
-Custom command definitions are loaded via nu's config file mechanism. Epic spawns nu with `--config <path>` pointing to an epic-controlled config file containing all `def` blocks. Commands are available immediately in the MCP `evaluate` scope — no extra round-trip needed.
+Custom command definitions are loaded via nu's config file mechanism. Epic spawns nu with `--config <path>` pointing to an epic-controlled config file containing all `def` blocks. Commands are available immediately in the MCP `evaluate` scope — no extra round-trip needed. Verified with nu 0.111.0: `which <command>` returns `type: custom` with path pointing to the config file.
 
-The config file is either embedded as a Rust `const &str` and written to `target/nu-cache/epic_config.nu` at build time, or generated at runtime from the validated command definitions. The env config (`epic_env.nu`) is minimal — primarily sets `$env.NU_MCP_OUTPUT_LIMIT` and any PATH adjustments for bundled binaries (rg).
+The config file is either embedded as a Rust `const &str` and written to `target/nu-cache/epic_config.nu` at build time, or generated at runtime from the validated command definitions. The env config (`epic_env.nu`) sets `$env.NU_MCP_OUTPUT_LIMIT` and PATH adjustments for bundled binaries (rg).
 
-Note: `--commands` + `--mcp` does NOT work — custom commands defined via `--commands` are not visible to subsequent `evaluate` calls (the MCP session runs in a separate scope).
+Note: `--commands` + `--mcp` does NOT work — custom commands defined via `--commands` are not visible to subsequent `evaluate` calls (the MCP session runs in a separate scope). Inline `def` via `evaluate` DOES persist across calls as a fallback mechanism, but `--config` is preferred (no extra round-trip, cleaner separation).
+
+Config file paths must be absolute or platform-resolvable. On Windows, forward-slash paths work (`C:/path/config.nu`). Unix-style paths like `/tmp/...` do NOT resolve on Windows — use the cache directory path from `build.rs`.
 
 ### Command definitions
 
-Commands use nu-native types internally and return structured records/lists. Error reporting uses nu's `error make`. The Rust translation layer (D10) formats the structured output for Claude. `split row` and `str replace` are literal by default in nu 0.111.0 (not regex).
+Commands use nu subcommand syntax (`def "epic read" [...]`) to group under the `epic` namespace. This is idiomatic nu — `help epic` lists all subcommands, `help epic read` shows specific usage. Commands use nu-native types internally and return structured records/lists. Error reporting uses nu's `error make`. The Rust translation layer (D10) formats the structured output for Claude. `split row` and `str replace` are literal by default in nu 0.111.0 (not regex).
 
 ```nu
-# epic_read — read file contents, return structured record
-def epic_read [
+# Parent command — lists all epic subcommands via help
+def epic [] { help epic }
+
+# Read file contents, return structured record
+def "epic read" [
     path: string
     --offset: int    # 1-based line number to start from
     --limit: int     # max lines to return
@@ -568,8 +577,8 @@ def epic_read [
     }
 }
 
-# epic_write — write content to file, return structured record
-def epic_write [path: string, content: string] {
+# Write content to file, return structured record
+def "epic write" [path: string, content: string] {
     let byte_size = ($content | encode utf-8 | bytes length | into filesize)
     if $byte_size > 1MiB {
         error make { msg: $"Content too large: ($byte_size), max 1 MiB" }
@@ -584,8 +593,8 @@ def epic_write [path: string, content: string] {
     }
 }
 
-# epic_edit — exact substring replacement, return structured record
-def epic_edit [
+# Exact substring replacement, return structured record
+def "epic edit" [
     path: string
     old_string: string
     new_string: string
@@ -608,8 +617,8 @@ def epic_edit [
     }
 }
 
-# epic_glob — find files by pattern, return list<string>, 1000 result cap
-def epic_glob [
+# Find files by pattern, return list<string>, 1000 result cap
+def "epic glob" [
     pattern: string
     --path: string   # directory to search in
 ] {
@@ -618,9 +627,9 @@ def epic_glob [
     glob $pattern | first 1000
 }
 
-# epic_grep — search file contents via rg, return structured record
+# Search file contents via rg, return structured record.
 # Requires rg (ripgrep) binary in the sandbox.
-def epic_grep [
+def "epic grep" [
     pattern: string
     --path: string
     --output-mode: string          # content, files_with_matches (default), count
@@ -687,10 +696,10 @@ def epic_grep [
 
 ### Phase 1: Remaining nu command validation
 
-1. Add rg binary to `build.rs` (download-and-cache, same pattern as nu).
-2. Test `epic_grep` with rg inside nu MCP session.
-3. Test binary file handling in `epic_read` (what happens with non-UTF-8 files).
-4. Write `epic_env.nu` (output limits, PATH for rg).
+1. ~~Add rg binary to `build.rs` (download-and-cache, same pattern as nu).~~ Done. ripgrep 14.1.1, same download-and-cache pattern. Both binaries share `target/nu-cache/`. `resolve_rg_binary()` added to `nu_session.rs`.
+2. ~~Test `epic grep` with rg inside nu MCP session.~~ Done. All output modes validated (files_with_matches, content, count), plus context lines, glob/type filters, case-insensitive, head_limit, no-matches exit code. Config-file loading (`--config`) confirmed working in MCP mode with platform-native paths.
+3. Test binary file handling in `epic read` (what happens with non-UTF-8 files).
+4. Write `epic_env.nu` (output limits, PATH for rg). Note: on Windows `$env.Path` is a string, not a list — use string interpolation for prepend.
 
 ### Phase 2: Tool executor translation layer
 
@@ -703,10 +712,11 @@ def epic_grep [
 
 ### Phase 3: Config file integration
 
-1. Embed `epic_config.nu` and `epic_env.nu` as Rust `const` strings (or write to `target/nu-cache/` at build time).
-2. Modify `NuSession` to spawn `nu --mcp --config <path> --env-config <path>`.
+1. Embed `epic_config.nu` and `epic_env.nu` as Rust `const` strings, written to `target/nu-cache/` at build time.
+2. Modify `NuSession` to spawn `nu --mcp --config <path> --env-config <path>` using absolute paths from `NU_CACHE_DIR`.
 3. Test: custom commands available without any evaluate preamble.
 4. Test: command definitions don't interfere with raw NuShell commands via the NuShell tool.
+5. Test: user config not loaded (verify `$nu.config-path` points to epic's file, not user default).
 
 ### Phase 4: Remove old tool layer
 
@@ -730,14 +740,14 @@ def epic_grep [
 
 ### grep implementation complexity
 
-Current Rust `tool_grep` uses the `regex` and `walkdir` crates for recursive regex search with file-size filtering. The new `epic_grep` wraps ripgrep.
+Current Rust `tool_grep` uses the `regex` and `walkdir` crates for recursive regex search with file-size filtering. The new `epic grep` wraps ripgrep.
 
 | Approach | Pros | Cons |
 |---|---|---|
 | Shell out to `rg` (ripgrep) | Feature-complete, fast, Claude Code also uses rg | Requires rg binary in sandbox; extra dependency |
 | Nu `open` + `lines` + `find` pipeline | No extra dependency | Slow on large trees, limited regex |
 
-**Decision**: Ship `rg` alongside `nu` in the build (same download-and-cache pattern in `build.rs`). `rg` is a single static binary, widely available, and is the engine behind Claude Code's Grep tool. The `epic_grep` command becomes a wrapper around `rg` with Claude Code-compatible output formatting.
+**Decision**: Ship `rg` alongside `nu` in the build (same download-and-cache pattern in `build.rs`). `rg` is a single static binary, widely available, and is the engine behind Claude Code's Grep tool. The `epic grep` command becomes a wrapper around `rg` with Claude Code-compatible output formatting.
 
 ### Parameter injection in translation layer
 

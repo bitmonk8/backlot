@@ -364,15 +364,11 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
 // Process spawning
 // ---------------------------------------------------------------------------
 
-/// Resolve the path to the `nu` binary.
-///
-/// Search order:
+/// Resolve a binary by name using a standard search order:
 /// 1. Same directory as the current executable (release packaging).
 /// 2. Build-time cache directory (set by build.rs via `NU_CACHE_DIR`).
-/// 3. Bare `nu` / `nu.exe` on PATH.
-fn resolve_nu_binary() -> OsString {
-    let binary_name = if cfg!(windows) { "nu.exe" } else { "nu" };
-
+/// 3. Bare name on PATH.
+fn resolve_cached_binary(binary_name: &str) -> OsString {
     // 1. Next to the current executable.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -383,7 +379,7 @@ fn resolve_nu_binary() -> OsString {
         }
     }
 
-    // 2. Build-time cache directory.
+    // 2. Build-time cache directory (nu and rg share the same directory).
     if let Some(cache_dir) = option_env!("NU_CACHE_DIR") {
         let candidate = Path::new(cache_dir).join(binary_name);
         if candidate.exists() {
@@ -393,6 +389,18 @@ fn resolve_nu_binary() -> OsString {
 
     // 3. PATH fallback.
     OsString::from(binary_name)
+}
+
+fn resolve_nu_binary() -> OsString {
+    resolve_cached_binary(if cfg!(windows) { "nu.exe" } else { "nu" })
+}
+
+/// Resolve the path to the `rg` (ripgrep) binary. Used by `epic_grep` inside
+/// the nu session — the resolved path is passed via environment variable so
+/// `^rg` works inside the sandbox.
+#[allow(dead_code)] // Used in a later phase (unified tool layer)
+pub fn resolve_rg_binary() -> OsString {
+    resolve_cached_binary(if cfg!(windows) { "rg.exe" } else { "rg" })
 }
 
 /// Build the sandbox policy for the nu process.
