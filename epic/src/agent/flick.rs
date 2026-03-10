@@ -192,8 +192,12 @@ impl FlickAgent {
         let client = self.build_client(config).await?;
         let mut context = flick::Context::default();
 
-        // One NuSession per agent call — spawned lazily, killed when this method returns.
+        // One NuSession per agent call — spawned eagerly, killed when this method returns.
         let nu_session = NuSession::new();
+        nu_session
+            .spawn(&self.project_root, grant)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to spawn nu session: {e}"))?;
 
         // Initial call (not counted toward MAX_TOOL_ROUNDS; the limit applies to resume rounds).
         let mut result = tokio::time::timeout(self.call_timeout, client.run(query, &mut context))

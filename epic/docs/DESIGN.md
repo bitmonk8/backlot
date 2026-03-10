@@ -427,7 +427,7 @@ ANSI coloring disabled. Rich error diagnostics with line/column details.
 
 ### Session Lifecycle
 
-One nu MCP process per agent session. Each session has a fixed phase → fixed sandbox policy. The nu process is spawned lazily at first tool call, killed when session returns structured output.
+One nu MCP process per agent session. Each session has a fixed phase → fixed sandbox policy. The nu process is spawned eagerly at session creation for any agent call that has tool grants, and killed when the session returns structured output.
 
 Sessions are oneshot — once returned, never reused. A new session gets a fresh nu process. This means:
 - No phase-change restart logic needed

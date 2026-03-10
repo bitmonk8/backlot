@@ -17,9 +17,9 @@ This creates three TOCTOU race conditions (see git history, formerly AUDIT.md) t
 
 ## Decisions
 
-### D1: Lazy spawn (decided)
+### D1: Eager spawn for tool-granted sessions (decided)
 
-Nu processes spawn lazily on first tool call. Three agent call types never receive tools (assessment, checkpoint, assess-recovery) and never spawn nu. All other agent types (verify, execute, decompose, fix, recovery-design) receive tools and their prompts explicitly instruct tool use — meaning they will call tools in virtually every session. Lazy spawn adds at most one tool-call of latency for those sessions.
+Nu processes spawn eagerly at session creation for any agent call that receives tool grants. Three agent call types never receive tools (assessment, checkpoint, assess-recovery) and skip spawning entirely. All other agent types (verify, execute, decompose, fix, recovery-design) spawn nu immediately — these sessions use tools in virtually every invocation, so lazy spawn only added first-call latency without meaningful savings.
 
 ### D2: Custom commands via evaluate, not MCP tool registration (decided)
 

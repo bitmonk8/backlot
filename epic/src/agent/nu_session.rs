@@ -1,8 +1,8 @@
 // MCP client for a persistent `nu --mcp` process.
 //
 // Manages the lifecycle of one NuShell MCP server process per agent session.
-// The process is spawned lazily on the first tool call and killed when the
-// session ends or on timeout.
+// The process is spawned eagerly at session creation (for tool-granted sessions)
+// and killed when the session ends or on timeout.
 //
 // Protocol: JSON-RPC 2.0 over stdio. Each message is a single JSON line
 // terminated by `\n`.
@@ -104,8 +104,8 @@ struct SessionState {
 
 /// Manages a persistent `nu --mcp` process.
 ///
-/// Thread-safe via internal `Mutex`. The process is spawned lazily and
-/// restarted if the grant or project root changes between calls.
+/// Thread-safe via internal `Mutex`. The process is spawned eagerly via
+/// `spawn()` and restarted if the grant or project root changes between calls.
 pub struct NuSession {
     state: Mutex<SessionState>,
 }
@@ -131,11 +131,22 @@ impl NuSession {
         }
     }
 
+    /// Eagerly spawn the nu MCP process so it is warm by the first tool call.
+    pub async fn spawn(&self, project_root: &Path, grant: ToolGrant) -> Result<(), String> {
+        let mut st = self.state.lock().await;
+        if st.process.is_some() {
+            return Ok(());
+        }
+        st.generation += 1;
+        let proc = spawn_nu_process(project_root, grant).await?;
+        st.process = Some(proc);
+        Ok(())
+    }
+
     /// Execute a NuShell command via the MCP evaluate tool.
     ///
-    /// Spawns the `nu --mcp` process lazily on first call. If the grant
-    /// or project root differs from the running process, the old process is
-    /// killed and a new one is spawned.
+    /// If the grant or project root differs from the running process, the
+    /// old process is killed and a new one is spawned.
     pub async fn evaluate(
         &self,
         command: &str,
