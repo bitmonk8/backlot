@@ -437,9 +437,8 @@ pub fn build_execute_leaf_config(
     credential: &str,
     grant: ToolGrant,
     model_config: &ModelConfig,
-    file_tool_forwarders: bool,
 ) -> anyhow::Result<flick::Config> {
-    let tools = tool_definitions(grant, file_tool_forwarders);
+    let tools = tool_definitions(grant);
     let schema = task_outcome_schema();
     build_config(
         system_prompt,
@@ -457,9 +456,8 @@ pub fn build_decompose_config(
     credential: &str,
     grant: ToolGrant,
     model_config: &ModelConfig,
-    file_tool_forwarders: bool,
 ) -> anyhow::Result<flick::Config> {
-    let tools = tool_definitions(grant, file_tool_forwarders);
+    let tools = tool_definitions(grant);
     let schema = decomposition_schema();
     build_config(
         system_prompt,
@@ -477,9 +475,8 @@ pub fn build_verify_config(
     credential: &str,
     grant: ToolGrant,
     model_config: &ModelConfig,
-    file_tool_forwarders: bool,
 ) -> anyhow::Result<flick::Config> {
-    let tools = tool_definitions(grant, file_tool_forwarders);
+    let tools = tool_definitions(grant);
     let schema = verification_schema();
     build_config(
         system_prompt,
@@ -531,9 +528,8 @@ pub fn build_recovery_plan_config(
     credential: &str,
     grant: ToolGrant,
     model_config: &ModelConfig,
-    file_tool_forwarders: bool,
 ) -> anyhow::Result<flick::Config> {
-    let tools = tool_definitions(grant, file_tool_forwarders);
+    let tools = tool_definitions(grant);
     let schema = recovery_plan_schema();
     build_config(
         system_prompt,
@@ -624,9 +620,8 @@ pub fn build_init_config(
     credential: &str,
     grant: ToolGrant,
     model_config: &ModelConfig,
-    file_tool_forwarders: bool,
 ) -> anyhow::Result<flick::Config> {
-    let tools = tool_definitions(grant, file_tool_forwarders);
+    let tools = tool_definitions(grant);
     let schema = init_findings_schema();
     build_config(
         system_prompt,
@@ -951,9 +946,8 @@ mod tests {
         let config = build_init_config(
             "You are an init explorer.",
             "test_key",
-            ToolGrant::READ,
+            ToolGrant::NU,
             &cfg,
-            false,
         )
         .unwrap();
         // build_init_config uses Model::Sonnet, which maps to cfg.balanced.

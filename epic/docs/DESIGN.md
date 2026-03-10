@@ -107,13 +107,13 @@ Cheapest to most expensive:
 
 ### Per-Phase Tool Grants
 
-| Task Path | Phase | Tools | Purpose |
+| Task Path | Phase | Grants | Purpose |
 |---|---|---|---|
 | Any | Assess | NONE | Pure classification call via `run_structured` (no tools) |
-| Leaf | Implement | READ \| WRITE \| NU | Code changes |
-| Leaf | Verify | READ | Read-only analysis |
-| Branch | Design + Decompose | READ \| NU | Research + exploration, no writes |
-| Branch | Verify | TASK | May spawn sub-agents for large diffs |
+| Leaf | Implement | WRITE \| NU | Code changes |
+| Leaf | Verify | NU | Read-only analysis via nu |
+| Branch | Design + Decompose | NU | Research + exploration, no writes |
+| Branch | Verify | NU | Verification via nu |
 
 ### Prompt Assembly
 
@@ -356,9 +356,9 @@ FixSubtasksCreated { task_id: TaskId, count: usize, round: u32 }
 
 ## Sandboxing
 
-### Security Isolation (User-Managed)
+### Security Isolation
 
-Epic does not implement OS-level security sandboxing. The only robust boundary is a user-managed VM or container.
+Epic sandboxes the nu process via lot (see [Operational Correctness](#operational-correctness-lot) below). A user-managed VM or container provides an additional defense-in-depth layer.
 
 #### Detection Signals
 
@@ -395,7 +395,7 @@ Sandbox is mandatory: if setup fails, the tool call returns an error. No unsandb
 
 Three layers, all retained:
 1. **`ToolGrant` bitflags** — controls which tools are offered per phase
-2. **`safe_path()` containment** — validates paths in epic's tool implementations
+2. **Nu custom command path containment** — nu custom commands restrict file operations to the project root
 3. **lot sandbox** — OS-level process isolation on the nu process
 
 ---

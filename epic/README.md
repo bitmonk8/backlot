@@ -49,23 +49,23 @@ Leaf execution retries at each tier before escalating (Haiku → Sonnet → Opus
 
 ### Tool Access
 
-Six tools with phase-based access control via `ToolGrant` bitflags:
+Six tools with phase-based access control via `ToolGrant` bitflags (WRITE, NU):
 
-| Tool | Permission | Description |
-|------|------------|-------------|
-| `read_file` | READ | Read file contents (max 256 KiB) |
-| `glob` | READ | Find files by glob pattern (max 1000 results) |
-| `grep` | READ | Search file contents by regex (max 64 KiB output) |
-| `write_file` | WRITE | Create or overwrite a file |
-| `edit_file` | WRITE | Replace exact substring in a file |
-| `nu` | NU | Execute NuShell command via persistent MCP session (timeout: 120s default, 600s max) |
+| Tool | Grant Required | Description |
+|------|----------------|-------------|
+| `Read` | — | Read file contents (max 256 KiB) |
+| `Glob` | — | Find files by glob pattern (max 1000 results) |
+| `Grep` | — | Search file contents by regex (max 64 KiB output) |
+| `Write` | WRITE | Create or overwrite a file |
+| `Edit` | WRITE | Replace exact substring in a file |
+| `NuShell` | NU | Execute NuShell command via persistent MCP session (timeout: 120s default, 600s max) |
 
 **Phase → tool grants:**
-- Analyze: READ
-- Execute: READ + WRITE + NU
-- Decompose: READ + NU
+- Analyze: NU
+- Execute: WRITE + NU
+- Decompose: NU
 
-All file operations are sandboxed to the project root via path canonicalization and containment checks.
+Read, Glob, and Grep require no grant and are available in all phases. Path containment is enforced by nu custom commands and the lot sandbox.
 
 ### Verification
 
@@ -167,15 +167,15 @@ The terminal interface (ratatui + crossterm) displays:
 
 ## Sandboxing
 
-Epic does not implement OS-level sandboxing. The only robust security boundary is a user-managed VM or container.
+Epic sandboxes the nu process via [lot](https://github.com/bitmonk8/lot) — AppContainer on Windows, namespaces + seccomp on Linux, Seatbelt on macOS. Sandbox setup is mandatory; failure returns an error (no unsandboxed fallback).
 
 **What epic does:**
+- OS-level sandboxing of nu via lot (per-phase read/write policies on the project root)
 - Best-effort detection of container/VM at startup (Docker, Podman, WSL, VMware, VirtualBox, KVM, QEMU, Hyper-V)
 - Warns on stderr if not running in a virtualized environment
-- Path containment checks on all file operations (project root boundary)
 - Tool grant bitflags restrict which tools each agent phase can use
 
-**Recommendation:** Run epic inside a container or VM with bind-mounted project directory and restricted network access.
+**Additional defense:** Run epic inside a container or VM with bind-mounted project directory and restricted network access for defense-in-depth beyond the lot sandbox.
 
 ## Configuration
 
@@ -263,7 +263,6 @@ src/
 | `ratatui` + `crossterm` | Terminal UI |
 | `serde` + `serde_json` + `toml` | Serialization |
 | `anyhow` + `thiserror` | Error handling |
-| `globset` + `walkdir` + `regex` | File search |
 | `bitflags` | Tool permission flags |
 | `lot` | Process sandboxing (lot library, git dependency) |
 

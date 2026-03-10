@@ -98,7 +98,6 @@ pub struct FlickAgent {
     call_timeout: Duration,
     model_config: ModelConfig,
     verification_steps: Vec<VerificationStep>,
-    file_tool_forwarders: bool,
     provider_resolver: Box<dyn ProviderResolver>,
     tool_executor: Box<dyn ToolExecutor>,
     /// When true, skip the eager `NuSession::spawn()` in `run_with_tools`.
@@ -113,7 +112,6 @@ impl FlickAgent {
         call_timeout: Duration,
         model_config: ModelConfig,
         verification_steps: Vec<VerificationStep>,
-        file_tool_forwarders: bool,
     ) -> Self {
         Self {
             project_root,
@@ -121,7 +119,6 @@ impl FlickAgent {
             call_timeout,
             model_config,
             verification_steps,
-            file_tool_forwarders,
             provider_resolver: Box::new(DefaultProviderResolver),
             tool_executor: Box::new(DefaultToolExecutor),
             skip_nu_spawn: false,
@@ -141,7 +138,6 @@ impl FlickAgent {
             call_timeout,
             model_config: ModelConfig::default(),
             verification_steps: Vec::new(),
-            file_tool_forwarders: true,
             provider_resolver,
             tool_executor,
             skip_nu_spawn: true,
@@ -279,7 +275,6 @@ impl FlickAgent {
             &self.credential_name.0,
             grant,
             &self.model_config,
-            self.file_tool_forwarders,
         )?;
 
         let wire: TaskOutcomeWire = self.run_with_tools(config, &pair.query, grant).await?;
@@ -298,7 +293,6 @@ impl FlickAgent {
             &self.credential_name.0,
             grant,
             &self.model_config,
-            self.file_tool_forwarders,
         )?;
 
         let wire: DecompositionWire = self.run_with_tools(config, &pair.query, grant).await?;
@@ -338,7 +332,6 @@ Respond with the required JSON schema.";
             &self.credential_name.0,
             grant,
             &self.model_config,
-            self.file_tool_forwarders,
         )?;
 
         self.run_with_tools(config, query, grant).await
@@ -408,7 +401,6 @@ impl AgentService for FlickAgent {
             &self.credential_name.0,
             grant,
             &self.model_config,
-            self.file_tool_forwarders,
         )?;
 
         let wire: VerificationWire = self.run_with_tools(config, &pair.query, grant).await?;
@@ -465,7 +457,6 @@ impl AgentService for FlickAgent {
             &self.credential_name.0,
             grant,
             &self.model_config,
-            self.file_tool_forwarders,
         )?;
 
         let wire: RecoveryPlanWire = self.run_with_tools(config, &pair.query, grant).await?;
@@ -593,8 +584,8 @@ mod tests {
                 },
                 flick::ContentBlock::ToolUse {
                     id: "tu_1".into(),
-                    name: "read_file".into(),
-                    input: serde_json::json!({"path": "src/main.rs"}),
+                    name: "Read".into(),
+                    input: serde_json::json!({"file_path": "src/main.rs"}),
                 },
             ],
             usage: None,
@@ -604,7 +595,7 @@ mod tests {
         let calls = extract_tool_calls(&result).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "tu_1");
-        assert_eq!(calls[0].1, "read_file");
+        assert_eq!(calls[0].1, "Read");
     }
 
     #[test]
@@ -784,8 +775,8 @@ provider:
                     thinking: Vec::new(),
                     tool_calls: vec![flick::provider::ToolCallResponse {
                         call_id: "tc_1".into(),
-                        tool_name: "read_file".into(),
-                        arguments: r#"{"path":"/tmp/test"}"#.into(),
+                        tool_name: "Read".into(),
+                        arguments: r#"{"file_path":"/tmp/test"}"#.into(),
                     }],
                     usage: flick::provider::UsageResponse::default(),
                 },
@@ -809,7 +800,7 @@ provider:
             }),
         );
         let result: anyhow::Result<serde_json::Value> = agent
-            .run_with_tools(test_config(), "test", ToolGrant::READ)
+            .run_with_tools(test_config(), "test", ToolGrant::NU)
             .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["done"], true);
@@ -844,8 +835,8 @@ provider:
                     thinking: Vec::new(),
                     tool_calls: vec![flick::provider::ToolCallResponse {
                         call_id: "tc_loop".into(),
-                        tool_name: "read_file".into(),
-                        arguments: r#"{"path":"/tmp/x"}"#.into(),
+                        tool_name: "Read".into(),
+                        arguments: r#"{"file_path":"/tmp/x"}"#.into(),
                     }],
                     usage: flick::provider::UsageResponse::default(),
                 })
@@ -871,7 +862,7 @@ provider:
             }),
         );
         let result: anyhow::Result<serde_json::Value> = agent
-            .run_with_tools(test_config(), "loop forever", ToolGrant::READ)
+            .run_with_tools(test_config(), "loop forever", ToolGrant::NU)
             .await;
         let err = result.unwrap_err();
         assert!(

@@ -80,7 +80,6 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         timeout,
         epic_config.models.clone(),
         epic_config.verification_steps.clone(),
-        epic_config.agent.file_tool_forwarders,
     );
 
     if matches!(&cli.command, Command::Init) {
