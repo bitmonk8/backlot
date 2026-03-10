@@ -1,6 +1,6 @@
 # Spec: Unified Tool Layer via Nu Custom Commands
 
-**Status**: Phases 1-2 complete. Phase 3 (config file integration) in progress.
+**Status**: Phases 1-3 complete. Phase 4 (legacy removal) pending.
 
 ## Summary
 
@@ -696,16 +696,6 @@ def "epic grep" [
 ---
 
 ## Implementation Plan
-
-Phases 1 (nu command validation) and 2 (tool executor translation layer) are complete.
-
-### Phase 3: Config file integration
-
-1. Embed `epic_config.nu` and `epic_env.nu` as Rust `const` strings, written to `target/nu-cache/` at build time.
-2. Modify `NuSession` to spawn `nu --mcp --config <path> --env-config <path>` using absolute paths from `NU_CACHE_DIR`.
-3. Test: custom commands available without any evaluate preamble.
-4. Test: command definitions don't interfere with raw NuShell commands via the NuShell tool.
-5. Test: user config not loaded (verify `$nu.config-path` points to epic's file, not user default).
 
 ### Phase 4: Remove old tool layer
 

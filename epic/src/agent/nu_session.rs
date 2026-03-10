@@ -402,9 +402,23 @@ fn resolve_nu_binary() -> OsString {
 /// Resolve the path to the `rg` (ripgrep) binary. Used by `epic_grep` inside
 /// the nu session — the resolved path is passed via environment variable so
 /// `^rg` works inside the sandbox.
-#[allow(dead_code)] // Used in a later phase (unified tool layer)
 pub fn resolve_rg_binary() -> OsString {
     resolve_cached_binary(if cfg!(windows) { "rg.exe" } else { "rg" })
+}
+
+/// Resolve config file paths from the build-time cache directory.
+///
+/// Returns `(epic_config.nu, epic_env.nu)` as absolute `PathBuf`s, or `None`
+/// if the cache directory is unavailable or files don't exist.
+fn resolve_config_files() -> Option<(PathBuf, PathBuf)> {
+    let cache_dir = option_env!("NU_CACHE_DIR")?;
+    let config = Path::new(cache_dir).join("epic_config.nu");
+    let env = Path::new(cache_dir).join("epic_env.nu");
+    if config.exists() && env.exists() {
+        Some((config, env))
+    } else {
+        None
+    }
 }
 
 /// Build the sandbox policy for the nu process.
@@ -424,26 +438,57 @@ fn build_nu_sandbox_policy(
         builder = builder.read_path(project_root);
     }
 
+    // Grant exec access to the nu-cache directory so nu can read config files
+    // and execute the rg binary from there. exec_path implies read on all
+    // platforms (Linux: MS_RDONLY without MS_NOEXEC, macOS: file-read* +
+    // process-exec, Windows: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE).
+    if let Some(cache_dir) = option_env!("NU_CACHE_DIR") {
+        builder = builder.exec_path(Path::new(cache_dir));
+    }
+
     builder.build()
 }
 
 /// Spawn a `nu --mcp` process inside a lot sandbox and perform the MCP
 /// initialization handshake. The entire spawn + handshake runs on a blocking
 /// thread to avoid blocking the async runtime.
+///
+/// If epic config files exist in the build cache, passes `--config` and
+/// `--env-config` flags so epic custom commands (`epic read`, etc.) are
+/// available immediately without an evaluate preamble.
 async fn spawn_nu_process(project_root: &Path, grant: ToolGrant) -> Result<NuProcess, String> {
     let policy = build_nu_sandbox_policy(project_root, grant)
         .map_err(|e| format!("sandbox setup failed: {e}"))?;
 
     let nu_binary = resolve_nu_binary();
+    let config_files = resolve_config_files();
+    let rg_dir = {
+        let rg = resolve_rg_binary();
+        Path::new(&rg).parent().map(Path::to_path_buf)
+    };
     let project_root = project_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut cmd = SandboxCommand::new(&nu_binary);
         cmd.arg("--mcp");
+
+        // Pass epic config files so custom commands are pre-loaded.
+        if let Some((ref config_path, ref env_path)) = config_files {
+            cmd.arg("--config");
+            cmd.arg(config_path);
+            cmd.arg("--env-config");
+            cmd.arg(env_path);
+        }
+
         cmd.cwd(&project_root);
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Null);
         cmd.stdin(SandboxStdio::Piped);
         cmd.forward_common_env();
+
+        // Set EPIC_RG_DIR so epic_env.nu can add rg to PATH inside the session.
+        if let Some(ref dir) = rg_dir {
+            cmd.env("EPIC_RG_DIR", dir);
+        }
 
         let mut child =
             lot::spawn(&policy, &cmd).map_err(|e| format!("failed to spawn nu: {e}"))?;
@@ -573,4 +618,43 @@ mod tests {
             "exec_paths should contain platform directories"
         );
     }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_includes_cache_dir_exec() {
+        // If NU_CACHE_DIR is set at compile time, the sandbox should include
+        // it in exec_paths so nu can read config files and execute rg.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU).unwrap();
+
+        if let Some(cache_dir) = option_env!("NU_CACHE_DIR") {
+            let cache_path = Path::new(cache_dir).canonicalize().unwrap_or_else(|_| PathBuf::from(cache_dir));
+            let has_cache_exec = policy
+                .exec_paths
+                .iter()
+                .any(|p| p == &cache_path || cache_path.starts_with(p));
+            assert!(
+                has_cache_exec,
+                "sandbox should grant exec access to NU_CACHE_DIR for config files and rg"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_config_files_exist_when_cache_dir_set() {
+        // If NU_CACHE_DIR is set (normal build), config files should exist
+        // because build.rs writes them.
+        if option_env!("NU_CACHE_DIR").is_some() {
+            let result = resolve_config_files();
+            assert!(
+                result.is_some(),
+                "config files should exist in NU_CACHE_DIR after build"
+            );
+            let (config, env) = result.unwrap();
+            assert!(config.exists(), "epic_config.nu should exist");
+            assert!(env.exists(), "epic_env.nu should exist");
+            assert!(config.is_absolute(), "config path should be absolute");
+            assert!(env.is_absolute(), "env path should be absolute");
+        }
+    }
+
 }
