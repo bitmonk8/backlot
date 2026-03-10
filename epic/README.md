@@ -65,7 +65,7 @@ Six tools with phase-based access control via `ToolGrant` bitflags (WRITE, NU):
 - Execute: WRITE + NU
 - Decompose: NU
 
-Read, Glob, and Grep require no grant and are available in all phases. Path containment is enforced by nu custom commands and the lot sandbox.
+Read, Glob, and Grep require no grant and are available in all phases. Path containment is enforced by the lot sandbox.
 
 ### Verification
 

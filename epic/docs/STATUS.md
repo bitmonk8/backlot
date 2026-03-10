@@ -36,4 +36,9 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 ## Next Work Candidates
 
 1. **Nu integration tests** — No integration tests for the nu MCP session (spawn, timeout, kill, env filtering, exit codes). Protocol parsing functions (`try_parse_response`, `read_response`) and generation-based session invalidation also lack unit tests. Integration tests should verify custom commands are available immediately after spawn.
-2. **Remove unused crate dependencies** — `globset`, `walkdir`, `regex` are now unused after legacy tool removal. Blocked by Rust 1.93.1 compiler ICE triggered by `windows-sys 0.61.2` when these are removed. Revisit when toolchain updates.
+2. **Sandbox policy verification (Phase 5)** — Three verification items from the unified tool layer spec remain untested:
+   - Verify lot `read_path` prevents writes on all platforms (Linux, macOS, Windows)
+   - Verify rg binary is accessible within lot sandbox on all platforms
+   - Verify temp dir access cannot pivot to project root (agent copies file to temp, attempts write-back under read-only policy)
+3. **`quote_nu()` adversarial input tests** — The translation layer's `quote_nu()` has unit tests for common special characters (single/double quotes, backticks, newlines, backslashes, dollar signs, raw string delimiters). Missing adversarial cases: subshell expressions `$(...)`, null bytes, and multi-line strings containing closing delimiters. Sandbox limits blast radius, but injection causes confusing errors.
+4. **Remove unused crate dependencies** — `globset`, `walkdir`, `regex` are now unused after legacy tool removal. Blocked by Rust 1.93.1 compiler ICE triggered by `windows-sys 0.61.2` when these are removed. Revisit when toolchain updates.

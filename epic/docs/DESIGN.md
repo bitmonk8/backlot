@@ -384,19 +384,104 @@ The nu tool spawns a persistent `nu --mcp` process inside a [lot](https://github
 | Assess / Decompose / Verify | Read-only | Writable | Allowed |
 | Execute / Fix | Writable | Writable | Allowed |
 
-Platform mechanisms:
-- **Linux**: namespaces + seccomp-BPF + rlimit
-- **macOS**: Seatbelt (`sandbox_init`) + rlimit
-- **Windows**: AppContainer + Job objects
+Platform mechanisms detailed in [Platform Sandbox Capabilities](#platform-sandbox-capabilities) below.
 
 Sandbox is mandatory: if setup fails, the tool call returns an error. No unsandboxed fallback.
 
 ### Enforcement Layers
 
-Three layers, all retained:
-1. **`ToolGrant` bitflags** — controls which tools are offered per phase
-2. **Nu custom command path containment** — nu custom commands restrict file operations to the project root
-3. **lot sandbox** — OS-level process isolation on the nu process
+Two layers:
+1. **`ToolGrant` bitflags** — phase marker controlling which tool definitions are offered to the agent (WRITE, NU). Does not enforce access — prevents agents from wasting tokens on tool calls that will fail.
+2. **lot sandbox** — OS-level process isolation on the nu process. Sole access control mechanism. All file I/O routes through the sandboxed nu process.
+
+### Platform Sandbox Capabilities
+
+| Capability | Linux | macOS | Windows |
+|---|---|---|---|
+| Read-only enforcement | Mount NS (`MS_RDONLY` remount) | Seatbelt SBPL (`file-read*` only) | AppContainer ACLs (`FILE_GENERIC_READ`) |
+| Read-write enforcement | Mount NS (no `MS_RDONLY`) | Seatbelt (`file-read*` + `file-write*`) | ACLs (`FILE_GENERIC_READ \| WRITE`) |
+| Executable control | Mount flags (`MS_NOEXEC`) | Seatbelt (`process-exec`, `file-map-executable`) | ACLs (`FILE_GENERIC_EXECUTE`) |
+| Path hiding | Full (only mounted paths exist) | Default-deny (access denied) | ACL-based (access denied) |
+| Always available? | Requires unprivileged user NS | Always | Always |
+
+**Path hiding difference**: Linux mount namespaces eliminate paths entirely; macOS/Windows deny access. Equivalent for epic's use case.
+
+**Linux caveat**: Unprivileged user namespaces may be disabled by kernel config or AppArmor.
+
+---
+
+## Unified Tool Layer
+
+### Design Rationale
+
+**TOCTOU elimination**: Prior to the unified tool layer, epic enforced filesystem boundaries two ways: `safe_path()` in the Rust process (path canonicalization, symlink guards) and lot sandbox on the nu process. This created TOCTOU race conditions because epic's process was unsandboxed. Moving all file operations into the sandboxed nu process eliminates the race class by construction — lot enforces boundaries at the syscall level.
+
+**Claude Code alignment**: Claude models are trained on Claude Code's tool interface (Read, Write, Edit, Glob, Grep, Bash). Aligning epic's tool schemas with this interface reduces tool-use errors. Epic's shell tool is named `NuShell` (not `Bash`) to steer models toward NuShell syntax.
+
+### Tool Schemas
+
+Agents see six tools with JSON parameter schemas. Epic translates each JSON tool call into a nu command via `translate_tool_call()` and formats the nu response back via `format_tool_result()`. Agents never write nu syntax for file operations.
+
+| Tool | Parameters | Required |
+|---|---|---|
+| Read | `file_path`, `offset` (int, 1-based), `limit` (int) | `file_path` |
+| Write | `file_path`, `content` | both |
+| Edit | `file_path`, `old_string`, `new_string`, `replace_all` (bool) | first three |
+| Glob | `pattern`, `path` | `pattern` |
+| Grep | `pattern`, `path`, `output_mode`, `glob`, `include_type`, `case_insensitive`, `line_numbers`, `context_after`, `context_before`, `context`, `multiline`, `head_limit` | `pattern` |
+| NuShell | `command`, `description`, `timeout` (int, default 120, max 600) | `command` |
+
+**Deliberate divergences from Claude Code**: `file_path` accepts project-relative paths (CC requires absolute). Read rejects files over 256 KiB; output is truncated at 64 KiB (`MAX_NU_OUTPUT`). Grep uses `snake_case` parameter names (`case_insensitive`, `context_after`) instead of flag-style (`-i`, `-A`). Grep's `type` parameter renamed to `include_type` to avoid JSON Schema keyword collision. NuShell has no `run_in_background` (sessions are single-threaded). NuShell's `description` parameter is accepted for logging/TUI display but does not affect execution.
+
+### Bidirectional Translation
+
+Two conversion points, both in Rust (`tools.rs`):
+
+**Inbound** (`translate_tool_call`): JSON tool parameters → quoted nu command string → `nu_session.evaluate()`. String parameters escaped via `quote_nu()` (single-quote wrapping with escaping for special characters). Example: `Read {file_path: "src/main.rs", offset: 10}` → `epic read 'src/main.rs' --offset 10`.
+
+**Outbound** (`format_tool_result`): Nu NUON response → Claude-formatted text:
+
+| Tool | Nu returns | Rust formats as |
+|---|---|---|
+| Read | `{path, size, total_lines, offset, lines_returned, lines: [{line, text}, ...]}` | Line-numbered content (cat -n style), total lines as context |
+| Write | `{path, bytes_written}` | Confirmation message |
+| Edit | `{path, replacements}` | Confirmation message with count |
+| Glob | `list<string>` | Newline-separated file paths |
+| Grep | `{exit_code, output}` | Pass-through (rg output is Claude-compatible). Exit code 1 (no matches) is not an error. |
+| NuShell | varies | Pass-through (raw MCP output) |
+
+### Error Mapping
+
+Nu `error make` messages surface as JSON-RPC errors (code `-32603`). Epic's MCP response parser converts these to `NuOutput { is_error: true }`, which becomes an `isError: true` tool result visible to the agent. The session remains alive after errors. Sandbox permission errors (lot denying access) produce OS-level errors surfaced similarly.
+
+The MCP `evaluate` tool uses `command` (not `code`) as its parameter name.
+
+### Nu Custom Commands
+
+Commands defined in `epic_config.nu`, loaded via `nu --mcp --config <path> --env-config <path>`. Use nu subcommand syntax (`def "epic read" [...]`) — `help epic` lists all subcommands. Commands use nu-native types internally and return structured records/lists. The Rust translation layer formats structured output for Claude.
+
+**Config injection rationale**: `--commands` + `--mcp` does not work — custom commands defined via `--commands` are not visible to subsequent `evaluate` calls (separate scope). `--config` overrides default config resolution, preventing user config from loading (reproducibility, sandbox-leakage prevention). Config files placed alongside nu binary in `target/nu-cache/` — lot already grants access to the binary's directory.
+
+**Platform note**: Config file paths must be absolute. On Windows, forward-slash paths work (`C:/path/config.nu`). Unix-style paths (`/tmp/...`) do not resolve on Windows.
+
+**Key implementation details**:
+- `epic read`: 256 KiB size cap via `error make`. Returns structured record with line-numbered content.
+- `epic write`: 1 MiB size cap. Creates parent directories via `mkdir`.
+- `epic edit`: `split row` and `str replace --string` are literal (not regex). Uniqueness enforced unless `--replace-all`.
+- `epic glob`: 1000 result cap.
+- `epic grep`: Wraps `rg` via `^rg ...$args | complete`. Uses `--color=never` to prevent ANSI codes.
+- Nu `filesize` type: `into filesize` converts `int` → `filesize` for cross-type comparisons (e.g., `bytes length | into filesize > 1MiB`).
+
+### Phase → Lot Policy → Tool Set
+
+| Phase | Lot Policy | Tools Offered |
+|---|---|---|
+| Analyze (verify, file-review) | `read_path(project_root)` | Read, Glob, Grep, NuShell |
+| Execute (leaf, fix-leaf) | `write_path(project_root)` | Read, Write, Edit, Glob, Grep, NuShell |
+| Decompose (design, recovery-design) | `read_path(project_root)` | Read, Glob, Grep, NuShell |
+| Assess / Checkpoint | N/A (no nu process) | None |
+
+Security does not depend on tool filtering — lot enforces access regardless.
 
 ---
 
