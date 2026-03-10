@@ -140,6 +140,9 @@ impl NuSession {
         st.generation += 1;
         let proc = spawn_nu_process(project_root, grant).await?;
         st.process = Some(proc);
+        // Release the mutex before returning so other callers (evaluate, kill)
+        // are not blocked while the caller continues.
+        drop(st);
         Ok(())
     }
 
@@ -257,6 +260,9 @@ impl NuSession {
             }
             // proc is dropped here, NuProcess::Drop will also attempt kill (idempotent).
         }
+        // Release the mutex before returning so timeout/kill callers are not
+        // blocked while the result propagates up.
+        drop(st);
 
         result
     }
