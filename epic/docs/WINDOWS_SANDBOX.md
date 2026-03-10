@@ -1,93 +1,54 @@
-# Windows Sandbox Setup
+# Windows Sandbox
 
-Epic sandboxes AI agent processes using [lot](https://github.com/bitmonk8/lot), which uses Windows AppContainer on Windows. AppContainer requires ACL modifications on directories the sandboxed process needs to access. This document explains the setup.
+Epic sandboxes the nu MCP process using [lot](https://github.com/bitmonk8/lot), which uses Windows AppContainer on Windows.
 
-## The Problem
+## What the Sandbox Needs
 
-When lot creates an AppContainer sandbox, it calls `SetNamedSecurityInfoW` to grant the AppContainer SID access to each directory in the sandbox policy. This Win32 call requires `WRITE_DAC` permission on the target directory.
+Agents need access to these directories only:
 
-Epic's sandbox policy includes these directories:
-
-| Directory | Source | Purpose |
+| Directory | Access | Purpose |
 |-----------|--------|---------|
-| Project root | epic | Read or read-write access to project files |
-| `%TEMP%` | `include_temp_dirs()` | Scratch space for agent work |
-| `%SYSTEMROOT%\System32` | `include_platform_exec_paths()` | Access to system executables (cmd.exe, etc.) |
-| `%ProgramFiles%` | `include_platform_lib_paths()` | Access to installed libraries |
-| `%ProgramFiles(x86)%` | `include_platform_lib_paths()` | Access to 32-bit installed libraries |
-| `target\nu-cache\` | epic | Access to nu binary, config files, and rg binary |
+| Project root | Read or read-write (phase-dependent) | Project files |
+| `%TEMP%` | Read-write | Scratch space |
+| `target\nu-cache\` | Read + execute | Nu binary, config files, rg binary |
 
-The user typically owns the project root, temp dir, and nu-cache dir, so `WRITE_DAC` is already available there. The system directories (`System32`, `ProgramFiles`) are owned by `TrustedInstaller` or `Administrators`, so `SetNamedSecurityInfoW` fails with `Access is denied (error 5)`.
+All three are user-owned. AppContainer ACL setup works without elevation.
 
-## Setup (One-Time, Elevated)
+Agents do not need access to system executables or installed programs. Epic runs verification (build, test, lint) itself — agents use the six provided tools (Read, Write, Edit, Glob, Grep, NuShell) and nothing else.
 
-Grant your user `WRITE_DAC` on the system directories. Open PowerShell **as Administrator** and run:
+## Current Issue
 
-```powershell
-icacls "$env:SYSTEMROOT\System32" /grant "$env:USERNAME:(WDAC)"
-icacls "$env:ProgramFiles" /grant "$env:USERNAME:(WDAC)"
-icacls "${env:ProgramFiles(x86)}" /grant "$env:USERNAME:(WDAC)"
-```
+`build_nu_sandbox_policy()` in `nu_session.rs` calls lot's `include_platform_exec_paths()` and `include_platform_lib_paths()`, which add:
 
-This grants `WRITE_DAC` on the top-level directory objects only (not recursively). Lot uses `SUB_CONTAINERS_AND_OBJECTS_INHERIT` when setting the AppContainer ACE, so the top-level grant is sufficient.
+| Directory | Lot method |
+|-----------|------------|
+| `%SYSTEMROOT%\System32` | `include_platform_exec_paths()` |
+| `%ProgramFiles%` | `include_platform_lib_paths()` |
+| `%ProgramFiles(x86)%` | `include_platform_lib_paths()` |
 
-After this, epic runs without elevation.
+These are unnecessary for epic's use case and cause two problems:
 
-### Verifying the Setup
+1. **Expanded attack surface** — agents gain access to system executables they should not be able to run.
+2. **Requires elevated setup** — AppContainer needs `WRITE_DAC` on each directory in the policy. These directories are owned by `TrustedInstaller`/`Administrators`, so `SetNamedSecurityInfoW` fails with `Access is denied (error 5)` unless the user first grants `WRITE_DAC` from an elevated shell.
 
-From a normal (non-elevated) shell:
+## Fix
 
-```
-cargo test integration_sandbox -- --nocapture
-```
+This is a fix to epic, not to lot. Lot's `WRITE_DAC` requirement is inherent to AppContainer — lot cannot avoid it. The problem is that epic opts into directories (System32, ProgramFiles) that require elevation to ACL. By not requesting those directories, epic sidesteps the elevation requirement entirely since all remaining paths (project root, temp, nu-cache) are user-owned.
 
-All three `integration_sandbox_*` tests should pass. If they fail with "sandbox setup failed: grant ACLs: Access is denied", the `WRITE_DAC` grants did not take effect — recheck the `icacls` commands.
+**Change**: Remove the `include_platform_exec_paths()` and `include_platform_lib_paths()` calls from `build_nu_sandbox_policy()` in `src/agent/nu_session.rs`. This eliminates both the security concern and the elevated setup requirement.
 
-### Reverting the Setup
-
-To remove the grants:
-
-```powershell
-icacls "$env:SYSTEMROOT\System32" /remove "$env:USERNAME"
-icacls "$env:ProgramFiles" /remove "$env:USERNAME"
-icacls "${env:ProgramFiles(x86)}" /remove "$env:USERNAME"
-```
-
-## Security Implications
-
-`WRITE_DAC` lets your user modify the ACL (not the contents) of the directory object. This is narrower than full control:
-
-- It does **not** grant read/write/execute on files within the directory.
-- It does **not** apply recursively (no `/T` flag).
-- It allows your user to add or remove ACEs on the directory itself.
-
-The risk: a process running as your user could modify the directory's ACL to grant itself broader access. This is a minor privilege escalation vector if your account is already compromised. For most development environments this is acceptable.
-
-If this is not acceptable for your environment, run epic from an elevated shell instead.
+If a nu built-in depends on a System32 binary internally, it will fail when the sandbox blocks access. The fix in that case is to grant access to that specific binary, not to all of System32.
 
 ## For Epic Developers
 
-### Running Sandbox Integration Tests
+### Sandbox Integration Tests
 
-The `integration_sandbox_*` tests in `src/agent/nu_session.rs` call `session.evaluate()` directly — they do not silently skip on sandbox failure. If the sandbox cannot be set up, the tests fail. This is intentional: these tests verify security-critical behavior and must not produce false positives.
-
-To run them:
-1. Complete the one-time setup above, OR
-2. Run `cargo test` from an elevated shell.
+The `integration_sandbox_*` tests in `src/agent/nu_session.rs` call `session.evaluate()` directly and fail on sandbox setup failure (no silent skip). After the fix, these tests should pass without elevation or workarounds.
 
 ### Platform Notes
 
 | Platform | Mechanism | Setup Required |
 |----------|-----------|----------------|
-| Windows | AppContainer + ACLs | Yes — `WRITE_DAC` grants (this document) |
+| Windows | AppContainer + ACLs | Workaround needed until fix (this document) |
 | Linux | User namespaces + seccomp | No — works if unprivileged user namespaces are enabled (kernel default) |
 | macOS | Seatbelt (SBPL) | No — always available |
-
-### Future Improvement
-
-The `WRITE_DAC` requirement is a limitation of lot's current implementation. Lot could avoid this by:
-- Using `SE_RESTORE_PRIVILEGE` token adjustment (available to Administrators without per-path grants)
-- Skipping ACL grants on system directories that AppContainer profiles already have implicit read/execute access to
-- Providing an `epic setup` command that performs the one-time elevated ACL grants automatically
-
-These changes would live in the lot crate, not in epic.
