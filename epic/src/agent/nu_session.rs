@@ -103,12 +103,26 @@ struct SessionState {
     inflight_child: Option<ChildHandle>,
 }
 
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            process: None,
+            generation: 0,
+            inflight_child: None,
+        }
+    }
+}
+
 /// Manages a persistent `nu --mcp` process.
 ///
 /// Thread-safe via internal `Mutex`. The process is spawned eagerly via
 /// `spawn()` and restarted if the grant or project root changes between calls.
 pub struct NuSession {
     state: Mutex<SessionState>,
+    /// Cache directory containing nu binary, rg binary, and config files.
+    /// Defaults to the build-time `NU_CACHE_DIR`. Tests override this to
+    /// isolate sandbox ACL operations per test.
+    cache_dir: Option<PathBuf>,
 }
 
 /// Write a JSON-RPC message as a single `\n`-terminated line.
@@ -124,11 +138,20 @@ fn send_line(sink: &mut File, payload: &[u8]) -> Result<(), String> {
 impl NuSession {
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(SessionState {
-                process: None,
-                generation: 0,
-                inflight_child: None,
-            }),
+            state: Mutex::new(SessionState::default()),
+            cache_dir: option_env!("NU_CACHE_DIR").map(PathBuf::from),
+        }
+    }
+
+    /// Create a session with an explicit cache directory override.
+    ///
+    /// Used by tests to isolate each sandbox test's exec_path, avoiding
+    /// concurrent AppContainer ACL conflicts on shared directories.
+    #[cfg(test)]
+    fn with_cache_dir(cache_dir: PathBuf) -> Self {
+        Self {
+            state: Mutex::new(SessionState::default()),
+            cache_dir: Some(cache_dir),
         }
     }
 
@@ -139,7 +162,7 @@ impl NuSession {
             return Ok(());
         }
         st.generation += 1;
-        let proc = spawn_nu_process(project_root, grant).await?;
+        let proc = spawn_nu_process(project_root, grant, self.cache_dir.as_deref()).await?;
         st.process = Some(proc);
         // Release the mutex before returning so other callers (evaluate, kill)
         // are not blocked while the caller continues.
@@ -221,7 +244,7 @@ impl NuSession {
                 // Bump generation when spawning a new process.
                 st.generation += 1;
                 st.process.take();
-                let new_proc = spawn_nu_process(project_root, grant).await?;
+                let new_proc = spawn_nu_process(project_root, grant, self.cache_dir.as_deref()).await?;
                 st.process = Some(new_proc);
             }
 
@@ -324,7 +347,7 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
         params: Some(serde_json::json!({
             "name": "evaluate",
             "arguments": {
-                "command": command
+                "input": command
             }
         })),
     };
@@ -371,9 +394,9 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
 
 /// Resolve a binary by name using a standard search order:
 /// 1. Same directory as the current executable (release packaging).
-/// 2. Build-time cache directory (set by build.rs via `NU_CACHE_DIR`).
+/// 2. Provided cache directory.
 /// 3. Bare name on PATH.
-fn resolve_cached_binary(binary_name: &str) -> OsString {
+fn resolve_cached_binary(binary_name: &str, cache_dir: Option<&Path>) -> OsString {
     // 1. Next to the current executable.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -384,9 +407,9 @@ fn resolve_cached_binary(binary_name: &str) -> OsString {
         }
     }
 
-    // 2. Build-time cache directory (nu and rg share the same directory).
-    if let Some(cache_dir) = option_env!("NU_CACHE_DIR") {
-        let candidate = Path::new(cache_dir).join(binary_name);
+    // 2. Cache directory (nu and rg share the same directory).
+    if let Some(dir) = cache_dir {
+        let candidate = dir.join(binary_name);
         if candidate.exists() {
             return candidate.into_os_string();
         }
@@ -396,25 +419,25 @@ fn resolve_cached_binary(binary_name: &str) -> OsString {
     OsString::from(binary_name)
 }
 
-fn resolve_nu_binary() -> OsString {
-    resolve_cached_binary(if cfg!(windows) { "nu.exe" } else { "nu" })
+fn resolve_nu_binary(cache_dir: Option<&Path>) -> OsString {
+    resolve_cached_binary(if cfg!(windows) { "nu.exe" } else { "nu" }, cache_dir)
 }
 
 /// Resolve the path to the `rg` (ripgrep) binary. Used by `epic_grep` inside
 /// the nu session — the resolved path is passed via environment variable so
 /// `^rg` works inside the sandbox.
-pub fn resolve_rg_binary() -> OsString {
-    resolve_cached_binary(if cfg!(windows) { "rg.exe" } else { "rg" })
+pub fn resolve_rg_binary(cache_dir: Option<&Path>) -> OsString {
+    resolve_cached_binary(if cfg!(windows) { "rg.exe" } else { "rg" }, cache_dir)
 }
 
-/// Resolve config file paths from the build-time cache directory.
+/// Resolve config file paths from the cache directory.
 ///
 /// Returns `(epic_config.nu, epic_env.nu)` as absolute `PathBuf`s, or `None`
 /// if the cache directory is unavailable or files don't exist.
-fn resolve_config_files() -> Option<(PathBuf, PathBuf)> {
-    let cache_dir = option_env!("NU_CACHE_DIR")?;
-    let config = Path::new(cache_dir).join("epic_config.nu");
-    let env = Path::new(cache_dir).join("epic_env.nu");
+fn resolve_config_files(cache_dir: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
+    let dir = cache_dir?;
+    let config = dir.join("epic_config.nu");
+    let env = dir.join("epic_env.nu");
     if config.exists() && env.exists() {
         Some((config, env))
     } else {
@@ -426,11 +449,10 @@ fn resolve_config_files() -> Option<(PathBuf, PathBuf)> {
 fn build_nu_sandbox_policy(
     project_root: &Path,
     grant: ToolGrant,
+    cache_dir: Option<&Path>,
 ) -> lot::Result<lot::SandboxPolicy> {
     let mut builder = SandboxPolicyBuilder::new()
         .include_temp_dirs()
-        .include_platform_exec_paths()
-        .include_platform_lib_paths()
         .allow_network(true);
 
     if grant.contains(ToolGrant::WRITE) {
@@ -439,12 +461,12 @@ fn build_nu_sandbox_policy(
         builder = builder.read_path(project_root);
     }
 
-    // Grant exec access to the nu-cache directory so nu can read config files
+    // Grant exec access to the cache directory so nu can read config files
     // and execute the rg binary from there. exec_path implies read on all
     // platforms (Linux: MS_RDONLY without MS_NOEXEC, macOS: file-read* +
     // process-exec, Windows: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE).
-    if let Some(cache_dir) = option_env!("NU_CACHE_DIR") {
-        builder = builder.exec_path(Path::new(cache_dir));
+    if let Some(dir) = cache_dir {
+        builder = builder.exec_path(dir);
     }
 
     builder.build()
@@ -457,14 +479,18 @@ fn build_nu_sandbox_policy(
 /// If epic config files exist in the build cache, passes `--config` and
 /// `--env-config` flags so epic custom commands (`epic read`, etc.) are
 /// available immediately without an evaluate preamble.
-async fn spawn_nu_process(project_root: &Path, grant: ToolGrant) -> Result<NuProcess, String> {
-    let policy = build_nu_sandbox_policy(project_root, grant)
+async fn spawn_nu_process(
+    project_root: &Path,
+    grant: ToolGrant,
+    cache_dir: Option<&Path>,
+) -> Result<NuProcess, String> {
+    let policy = build_nu_sandbox_policy(project_root, grant, cache_dir)
         .map_err(|e| format!("sandbox setup failed: {e}"))?;
 
-    let nu_binary = resolve_nu_binary();
-    let config_files = resolve_config_files();
+    let nu_binary = resolve_nu_binary(cache_dir);
+    let config_files = resolve_config_files(cache_dir);
     let rg_dir = {
-        let rg = resolve_rg_binary();
+        let rg = resolve_rg_binary(cache_dir);
         Path::new(&rg).parent().map(Path::to_path_buf)
     };
     let project_root = project_root.to_path_buf();
@@ -559,7 +585,7 @@ mod tests {
     #[test]
     fn test_build_nu_sandbox_policy_write_grant() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::WRITE | ToolGrant::NU).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::WRITE | ToolGrant::NU, None).unwrap();
         let canon = tmp.path().canonicalize().unwrap();
 
         let covered_by_write = policy
@@ -579,7 +605,7 @@ mod tests {
     #[test]
     fn test_build_nu_sandbox_policy_no_write_grant() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None).unwrap();
         let canon = tmp.path().canonicalize().unwrap();
 
         let overlaps_write = policy
@@ -606,56 +632,61 @@ mod tests {
     #[test]
     fn test_build_nu_sandbox_policy_allows_network() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None).unwrap();
         assert!(policy.allow_network);
     }
 
     #[test]
-    fn test_build_nu_sandbox_policy_has_exec_paths() {
+    fn test_build_nu_sandbox_policy_no_exec_paths_without_cache() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None).unwrap();
         assert!(
-            !policy.exec_paths.is_empty(),
-            "exec_paths should contain platform directories"
+            policy.exec_paths.is_empty(),
+            "exec_paths should be empty when no cache dir provided"
         );
     }
 
     #[test]
     fn test_build_nu_sandbox_policy_includes_cache_dir_exec() {
-        // If NU_CACHE_DIR is set at compile time, the sandbox should include
-        // it in exec_paths so nu can read config files and execute rg.
         let tmp = tempfile::TempDir::new().unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU).unwrap();
+        // Cache dir must not be under %TEMP% (include_temp_dirs overlap).
+        let cache = tempfile::TempDir::new_in(sandbox_test_base()).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, Some(cache.path())).unwrap();
 
-        if let Some(cache_dir) = option_env!("NU_CACHE_DIR") {
-            let cache_path = Path::new(cache_dir).canonicalize().unwrap_or_else(|_| PathBuf::from(cache_dir));
-            let has_cache_exec = policy
-                .exec_paths
-                .iter()
-                .any(|p| p == &cache_path || cache_path.starts_with(p));
-            assert!(
-                has_cache_exec,
-                "sandbox should grant exec access to NU_CACHE_DIR for config files and rg"
-            );
-        }
+        let cache_canon = cache.path().canonicalize().unwrap();
+        let has_cache_exec = policy
+            .exec_paths
+            .iter()
+            .any(|p| p == &cache_canon || cache_canon.starts_with(p));
+        assert!(
+            has_cache_exec,
+            "sandbox should grant exec access to provided cache dir"
+        );
     }
 
     #[test]
     fn test_resolve_config_files_exist_when_cache_dir_set() {
-        // If NU_CACHE_DIR is set (normal build), config files should exist
+        // When NU_CACHE_DIR is set (normal build), config files should exist
         // because build.rs writes them.
-        if option_env!("NU_CACHE_DIR").is_some() {
-            let result = resolve_config_files();
-            assert!(
-                result.is_some(),
-                "config files should exist in NU_CACHE_DIR after build"
-            );
-            let (config, env) = result.unwrap();
-            assert!(config.exists(), "epic_config.nu should exist");
-            assert!(env.exists(), "epic_env.nu should exist");
-            assert!(config.is_absolute(), "config path should be absolute");
-            assert!(env.is_absolute(), "env path should be absolute");
+        let cache_dir = option_env!("NU_CACHE_DIR").map(Path::new);
+        if cache_dir.is_none() {
+            return; // Build didn't set NU_CACHE_DIR — skip.
         }
+        let result = resolve_config_files(cache_dir);
+        assert!(
+            result.is_some(),
+            "config files should exist in NU_CACHE_DIR after build"
+        );
+        let (config, env) = result.unwrap();
+        assert!(config.exists(), "epic_config.nu should exist");
+        assert!(env.exists(), "epic_env.nu should exist");
+        assert!(config.is_absolute(), "config path should be absolute");
+        assert!(env.is_absolute(), "env path should be absolute");
+    }
+
+    #[test]
+    fn test_resolve_config_files_none_without_cache() {
+        assert!(resolve_config_files(None).is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -815,7 +846,7 @@ mod tests {
     /// Returns true if the nu binary is resolvable. Tests that need a real
     /// nu process should call this and return early if false.
     fn nu_available() -> bool {
-        let nu = resolve_nu_binary();
+        let nu = resolve_nu_binary(option_env!("NU_CACHE_DIR").map(Path::new));
         let path = Path::new(&nu);
         // If resolve returned an absolute path, check existence directly.
         if path.is_absolute() {
@@ -841,6 +872,63 @@ mod tests {
 
     fn tmp_project() -> tempfile::TempDir {
         tempfile::TempDir::new().expect("create temp dir")
+    }
+
+    /// Base directory for sandbox test temp dirs, outside of `%TEMP%`.
+    ///
+    /// `include_temp_dirs()` grants write access to `%TEMP%`, so sandbox
+    /// read-only tests fail if the project root is a subdirectory of `%TEMP%`.
+    fn sandbox_test_base() -> PathBuf {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("sandbox-test");
+        std::fs::create_dir_all(&base).expect("create sandbox test base dir");
+        base
+    }
+
+    /// Create a temp project directory outside of `%TEMP%` for sandbox tests.
+    fn tmp_sandbox_project() -> tempfile::TempDir {
+        tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox test dir")
+    }
+
+    /// Create an isolated copy of the build-time nu-cache directory.
+    ///
+    /// Each sandbox test gets its own cache dir so AppContainer ACL
+    /// operations on exec_path do not interfere between concurrent tests.
+    fn tmp_sandbox_cache() -> Option<tempfile::TempDir> {
+        let src = option_env!("NU_CACHE_DIR")?;
+        let dest = tempfile::TempDir::new_in(sandbox_test_base())
+            .expect("create sandbox cache dir");
+        for entry in std::fs::read_dir(src).expect("read cache dir") {
+            let entry = entry.expect("read dir entry");
+            let path = entry.path();
+            if path.is_file() {
+                std::fs::copy(&path, dest.path().join(path.file_name().unwrap()))
+                    .expect("copy cache file");
+            }
+        }
+        Some(dest)
+    }
+
+    /// Sandbox test environment with isolated project and cache directories.
+    struct SandboxTestEnv {
+        project: tempfile::TempDir,
+        _cache: Option<tempfile::TempDir>,
+        session: NuSession,
+    }
+
+    fn sandbox_env() -> SandboxTestEnv {
+        let project = tmp_sandbox_project();
+        let cache = tmp_sandbox_cache();
+        let session = match &cache {
+            Some(c) => NuSession::with_cache_dir(c.path().to_path_buf()),
+            None => NuSession::new(),
+        };
+        SandboxTestEnv {
+            project,
+            _cache: cache,
+            session,
+        }
     }
 
     /// Format a path for use in nu commands (forward slashes).
@@ -1167,16 +1255,20 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Sandbox policy verification
+    //
+    // Each test uses sandbox_env() for isolated project and cache dirs,
+    // eliminating shared state between concurrent tests.
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn integration_sandbox_read_only_prevents_writes() {
         // read_path policy must block file creation/mutation inside the project root.
         skip_no_nu!();
-        let tmp = tmp_project();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
         // Seed a file so we can also test overwrite prevention.
         std::fs::write(tmp.path().join("existing.txt"), "original").unwrap();
-        let session = NuSession::new();
         // NU without WRITE — sandbox uses read_path for project root.
         let grant = ToolGrant::NU;
 
@@ -1257,16 +1349,21 @@ mod tests {
             "renamed file must not exist under read-only policy"
         );
 
-        // rg must remain accessible under read-only grant (exec_path covers NU_CACHE_DIR).
+        // Attempt 6: rg (child process execution from exec_path).
+        // BUG(windows): AppContainer blocks child process execution from
+        // exec_path directories despite FILE_GENERIC_EXECUTE ACLs.
+        // See docs/WINDOWS_SANDBOX.md.
         let rg_cmd = format!(
             "^rg --color=never original '{}'",
             nu_path(tmp.path())
         );
-        let out4 = session.evaluate(&rg_cmd, 30, tmp.path(), grant).await.unwrap();
+        let out_rg = session.evaluate(&rg_cmd, 30, tmp.path(), grant).await.unwrap();
+        // BUG(windows): This assertion fails on Windows due to AppContainer
+        // blocking child process execution. See docs/WINDOWS_SANDBOX.md.
         assert!(
-            !out4.is_error,
+            !out_rg.is_error,
             "rg should be accessible in read-only sandbox: {}",
-            out4.content
+            out_rg.content
         );
     }
 
@@ -1276,9 +1373,10 @@ mod tests {
         // must not be able to pivot that access back to the project root —
         // e.g. copy a file to temp, modify it, then write it back.
         skip_no_nu!();
-        let tmp = tmp_project();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
         std::fs::write(tmp.path().join("source.txt"), "immutable content").unwrap();
-        let session = NuSession::new();
         let grant = ToolGrant::NU;
 
         // Copy to a temp file, modify it, then attempt to write back.
@@ -1328,8 +1426,9 @@ mod tests {
     async fn integration_sandbox_write_grant_permits_writes() {
         // Write grant must allow file creation in the project root.
         skip_no_nu!();
-        let tmp = tmp_project();
-        let session = NuSession::new();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
         let grant = ToolGrant::NU | ToolGrant::WRITE;
 
         let write_cmd = format!(

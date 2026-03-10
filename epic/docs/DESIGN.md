@@ -454,7 +454,7 @@ Two conversion points, both in Rust (`tools.rs`):
 
 Nu `error make` messages surface as JSON-RPC errors (code `-32603`). Epic's MCP response parser converts these to `NuOutput { is_error: true }`, which becomes an `isError: true` tool result visible to the agent. The session remains alive after errors. Sandbox permission errors (lot denying access) produce OS-level errors surfaced similarly.
 
-The MCP `evaluate` tool uses `command` (not `code`) as its parameter name.
+The MCP `evaluate` tool uses `input` as its parameter name.
 
 ### Nu Custom Commands
 
@@ -467,7 +467,7 @@ Commands defined in `epic_config.nu`, loaded via `nu --mcp --config <path> --env
 **Key implementation details**:
 - `epic read`: 256 KiB size cap via `error make`. Returns structured record with line-numbered content.
 - `epic write`: 1 MiB size cap. Creates parent directories via `mkdir`.
-- `epic edit`: `split row` and `str replace --string` are literal (not regex). Uniqueness enforced unless `--replace-all`.
+- `epic edit`: `split row` and `str replace` are literal (not regex — nu default since 0.84.0). Uniqueness enforced unless `--replace-all`.
 - `epic glob`: 1000 result cap.
 - `epic grep`: Wraps `rg` via `^rg ...$args | complete`. Uses `--color=never` to prevent ANSI codes.
 - Nu `filesize` type: `into filesize` converts `int` → `filesize` for cross-type comparisons (e.g., `bytes length | into filesize > 1MiB`).

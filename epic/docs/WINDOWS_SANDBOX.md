@@ -10,45 +10,43 @@ Agents need access to these directories only:
 |-----------|--------|---------|
 | Project root | Read or read-write (phase-dependent) | Project files |
 | `%TEMP%` | Read-write | Scratch space |
-| `target\nu-cache\` | Read + execute | Nu binary, config files, rg binary |
+| Cache dir | Read + execute | Nu binary, config files, rg binary |
 
-All three are user-owned. AppContainer ACL setup works without elevation.
+All paths are user-owned. AppContainer ACL setup works without elevation. System directory grants (`include_platform_exec_paths`, `include_platform_lib_paths`) are not used — AppContainer inherits access to system DLLs (System32) without explicit grants.
 
-Agents do not need access to system executables or installed programs. Epic runs verification (build, test, lint) itself — agents use the six provided tools (Read, Write, Edit, Glob, Grep, NuShell) and nothing else.
+## BUG: AppContainer Child Process Execution
 
-## Current Issue
+External commands spawned by nu inside AppContainer (e.g., `^rg` via `epic grep`) fail with "Permission denied" despite `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE` ACLs on the cache directory containing the binary. This breaks `epic grep` (which wraps rg) and any other tool that shells out to an external binary.
 
-`build_nu_sandbox_policy()` in `nu_session.rs` calls lot's `include_platform_exec_paths()` and `include_platform_lib_paths()`, which add:
+**Impact**: `epic grep` is non-functional on Windows. This is the only tool affected in v1 (the other five tools are implemented as nu custom commands and do not spawn child processes).
 
-| Directory | Lot method |
-|-----------|------------|
-| `%SYSTEMROOT%\System32` | `include_platform_exec_paths()` |
-| `%ProgramFiles%` | `include_platform_lib_paths()` |
-| `%ProgramFiles(x86)%` | `include_platform_lib_paths()` |
+**What we know**:
+- The rg binary exists in the cache directory and has correct ACLs applied.
+- `nu` itself launches fine from the same cache directory (it's the sandbox entrypoint, not a child process).
+- The ACL grants `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE` via lot's `exec_path()`.
+- Child process creation (not file read/execute) is what fails — the error is at process spawn time, not at binary load time.
+- The test `integration_sandbox_read_only_prevents_writes` fails on Windows due to this bug. Reproduce with: `cargo test integration_sandbox_read_only_prevents_writes`.
 
-These are unnecessary for epic's use case and cause two problems:
-
-1. **Expanded attack surface** — agents gain access to system executables they should not be able to run.
-2. **Requires elevated setup** — AppContainer needs `WRITE_DAC` on each directory in the policy. These directories are owned by `TrustedInstaller`/`Administrators`, so `SetNamedSecurityInfoW` fails with `Access is denied (error 5)` unless the user first grants `WRITE_DAC` from an elevated shell.
-
-## Fix
-
-This is a fix to epic, not to lot. Lot's `WRITE_DAC` requirement is inherent to AppContainer — lot cannot avoid it. The problem is that epic opts into directories (System32, ProgramFiles) that require elevation to ACL. By not requesting those directories, epic sidesteps the elevation requirement entirely since all remaining paths (project root, temp, nu-cache) are user-owned.
-
-**Change**: Remove the `include_platform_exec_paths()` and `include_platform_lib_paths()` calls from `build_nu_sandbox_policy()` in `src/agent/nu_session.rs`. This eliminates both the security concern and the elevated setup requirement.
-
-If a nu built-in depends on a System32 binary internally, it will fail when the sandbox blocks access. The fix in that case is to grant access to that specific binary, not to all of System32.
+**Investigation needed**:
+- Does AppContainer require additional capabilities (e.g., `lpSecurityCapabilities`) for child process creation?
+- Does lot need to add the AppContainer SID to the child binary's ACL differently than the parent?
+- Does rg dynamically link a DLL from a directory not in the sandbox policy? The sandbox does not grant access to `%ProgramFiles%` or other system library paths. If rg depends on a DLL outside System32 (which AppContainer inherits), the load would fail at process spawn time with "Permission denied".
+- Could rg be invoked differently (e.g., as a nu plugin instead of `^rg`)?
 
 ## For Epic Developers
 
 ### Sandbox Integration Tests
 
-The `integration_sandbox_*` tests in `src/agent/nu_session.rs` call `session.evaluate()` directly and fail on sandbox setup failure (no silent skip). After the fix, these tests should pass without elevation or workarounds.
+The `integration_sandbox_*` tests in `src/agent/nu_session.rs` call `session.evaluate()` directly and fail on sandbox setup failure (no silent skip). Tests pass without elevation.
+
+Each test gets isolated project and cache directories via `sandbox_env()`:
+- **Project dirs** use `target/sandbox-test/` (not `%TEMP%`) to avoid overlap with `include_temp_dirs()` write grants.
+- **Cache dirs** are per-test copies of the build-time `target/nu-cache/` contents. This isolates AppContainer ACL operations so tests run in parallel without conflicts.
 
 ### Platform Notes
 
 | Platform | Mechanism | Setup Required |
 |----------|-----------|----------------|
-| Windows | AppContainer + ACLs | Workaround needed until fix (this document) |
+| Windows | AppContainer + ACLs | None |
 | Linux | User namespaces + seccomp | No — works if unprivileged user namespaces are enabled (kernel default) |
 | macOS | Seatbelt (SBPL) | No — always available |

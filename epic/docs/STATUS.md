@@ -15,10 +15,10 @@
 - CLI via clap — `init`, `run <goal>`, `resume`, `status` subcommands
 - `epic init` — agent-driven interactive configuration scaffolding
 - Container/VM startup detection with suppressible warning
-- Process sandboxing via lot — nu tool runs inside a persistent `nu --mcp` process spawned inside an OS-native sandbox (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS); one nu MCP session per agent call, sandbox is mandatory (no unsandboxed fallback)
+- Process sandboxing via lot — nu tool runs inside a persistent `nu --mcp` process spawned inside an OS-native sandbox (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS); one nu MCP session per agent call, sandbox is mandatory (no unsandboxed fallback). System directory grants (System32, ProgramFiles) removed — sandbox uses only user-owned paths (project root, temp, nu-cache).
 - CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain, Flick pinned to rev `f83c56e`
 - Testability infrastructure — `ProviderResolver`/`ToolExecutor` traits (flick), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
-- Nu session tests — 21 unit tests (protocol parsing, session state, generation invalidation) and 19 integration tests (spawn lifecycle, custom command availability, timeout handling, grant change respawn, env filtering, error handling, sandbox policy verification: read-only write prevention, rg accessibility, temp dir pivot prevention)
+- Nu session tests — 22 unit tests (protocol parsing, session state, generation invalidation, config resolution) and 19 integration tests (spawn lifecycle, custom command availability, timeout handling, grant change respawn, env filtering, error handling, sandbox policy verification: read-only write prevention, rg child process execution, temp dir pivot prevention, write grant verification). Sandbox tests use per-test isolated cache dirs to avoid concurrent ACL conflicts.
 
 ## Design Choices (intentional constraints)
 
@@ -36,6 +36,6 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Remove unnecessary system directory grants from sandbox policy** — `build_nu_sandbox_policy()` in `nu_session.rs` calls lot's `include_platform_exec_paths()` and `include_platform_lib_paths()`, adding System32 and ProgramFiles to the sandbox policy. Epic doesn't need these (agents use the six provided tools, not system executables). Removing the calls eliminates both the expanded attack surface and the elevated setup requirement on Windows. See `docs/WINDOWS_SANDBOX.md`.
+1. **BUG: AppContainer child process execution** — External commands spawned by nu inside AppContainer (e.g., `^rg` via `epic grep`) get "Permission denied" despite exec_path ACLs on the cache directory. `epic grep` is non-functional on Windows. Investigate whether AppContainer requires additional capabilities for child process creation, or whether rg invocation needs a different approach. Test `integration_sandbox_read_only_prevents_writes` fails on Windows due to this bug. See `docs/WINDOWS_SANDBOX.md`.
 2. **`quote_nu()` adversarial input tests** — The translation layer's `quote_nu()` has unit tests for common special characters (single/double quotes, backticks, newlines, backslashes, dollar signs, raw string delimiters). Missing adversarial cases: subshell expressions `$(...)`, null bytes, and multi-line strings containing closing delimiters. Sandbox limits blast radius, but injection causes confusing errors.
 3. **Remove unused crate dependencies** — `globset`, `walkdir`, `regex` are now unused after legacy tool removal. Blocked by Rust 1.93.1 compiler ICE triggered by `windows-sys 0.61.2` when these are removed. Revisit when toolchain updates.
