@@ -1,4 +1,4 @@
-// Tool access flags: READ, WRITE, NU, TASK, WEB presets.
+// Tool grant flags, tool definitions (legacy + forwarded), nu command translation, and execution dispatch.
 
 use crate::agent::nu_session::{NuOutput, NuSession};
 use bitflags::bitflags;
@@ -26,8 +26,6 @@ bitflags! {
         const READ  = 0b0000_0001;
         const WRITE = 0b0000_0010;
         const NU    = 0b0000_0100;
-        const TASK  = 0b0000_1000;
-        const WEB   = 0b0001_0000;
     }
 }
 
@@ -43,11 +41,15 @@ pub enum AgentMethod {
 }
 
 /// Returns the tool grant set appropriate for a given agent method.
+///
+/// All phases include NU because forwarded file tools route through the nu
+/// session. Without NU, forwarded Read/Glob/Grep would be unavailable.
+/// In legacy mode this also exposes the `nu` tool to Analyze — acceptable
+/// because the lot sandbox enforces read-only access for that phase.
 pub fn phase_tools(method: AgentMethod) -> ToolGrant {
     match method {
         AgentMethod::Execute => ToolGrant::READ | ToolGrant::WRITE | ToolGrant::NU,
-        AgentMethod::Analyze => ToolGrant::READ,
-        AgentMethod::Decompose => ToolGrant::READ | ToolGrant::NU,
+        AgentMethod::Analyze | AgentMethod::Decompose => ToolGrant::READ | ToolGrant::NU,
     }
 }
 
@@ -60,7 +62,20 @@ pub struct FlickToolDef {
 }
 
 /// Returns tool definitions for all tools permitted by the given grant.
-pub fn tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
+///
+/// When `file_tool_forwarders` is true, returns Claude Code-aligned schemas
+/// (Read, Write, Edit, Glob, Grep, `NuShell`) that forward to nu custom commands.
+/// When false, returns legacy tool schemas (`read_file`, `glob`, `grep`, `write_file`,
+/// `edit_file`, `nu`) with Rust-native implementations.
+pub fn tool_definitions(grant: ToolGrant, file_tool_forwarders: bool) -> Vec<FlickToolDef> {
+    if file_tool_forwarders {
+        return forwarded_tool_definitions(grant);
+    }
+    legacy_tool_definitions(grant)
+}
+
+/// Legacy tool definitions. Used when `file_tool_forwarders` = false.
+fn legacy_tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
     let mut tools = Vec::new();
 
     if grant.contains(ToolGrant::READ) {
@@ -139,6 +154,111 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
                 "properties": {
                     "command": { "type": "string", "description": "The NuShell command to execute" },
                     "timeout": { "type": "integer", "description": "Timeout in seconds (default 120)" }
+                },
+                "required": ["command"]
+            }),
+        });
+    }
+
+    tools
+}
+
+/// Claude Code-aligned tool definitions. File tools forward to nu custom commands.
+fn forwarded_tool_definitions(grant: ToolGrant) -> Vec<FlickToolDef> {
+    let mut tools = Vec::new();
+
+    // Read-only tools: available when NU is granted (all tool-granted phases)
+    if grant.contains(ToolGrant::NU) {
+        tools.push(FlickToolDef {
+            name: "Read".into(),
+            description: "Read the contents of a file. Returns lines with line numbers. For large files, use offset and limit to read specific sections.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "Absolute or project-relative file path" },
+                    "offset": { "type": "integer", "description": "Line number to start reading from (1-based). Omit to start from the beginning." },
+                    "limit": { "type": "integer", "description": "Maximum number of lines to return. Omit to read up to the default cap." }
+                },
+                "required": ["file_path"]
+            }),
+        });
+        tools.push(FlickToolDef {
+            name: "Glob".into(),
+            description: "Find files matching a glob pattern. Returns matching file paths sorted by modification time.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Glob pattern (e.g. **/*.rs, src/**/*.ts)" },
+                    "path": { "type": "string", "description": "Directory to search in. Defaults to project root." }
+                },
+                "required": ["pattern"]
+            }),
+        });
+        tools.push(FlickToolDef {
+            name: "Grep".into(),
+            description: "Search file contents for a regex pattern. Powered by ripgrep.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Regex pattern to search for" },
+                    "path": { "type": "string", "description": "File or directory to search in. Defaults to project root." },
+                    "output_mode": { "type": "string", "enum": ["content", "files_with_matches", "count"], "description": "Output mode. 'content' shows matching lines, 'files_with_matches' shows only file paths (default), 'count' shows match counts." },
+                    "glob": { "type": "string", "description": "Glob pattern to filter files (e.g. *.js, **/*.tsx)" },
+                    "include_type": { "type": "string", "description": "File type filter (e.g. js, py, rust, go). Maps to rg --type." },
+                    "case_insensitive": { "type": "boolean", "description": "Case insensitive search. Default: false." },
+                    "line_numbers": { "type": "boolean", "description": "Show line numbers in output. Default: true. Only applies to 'content' output mode." },
+                    "context_after": { "type": "integer", "description": "Number of lines to show after each match. Only applies to 'content' output mode." },
+                    "context_before": { "type": "integer", "description": "Number of lines to show before each match. Only applies to 'content' output mode." },
+                    "context": { "type": "integer", "description": "Number of lines to show before and after each match. Only applies to 'content' output mode." },
+                    "multiline": { "type": "boolean", "description": "Enable multiline matching (pattern can span lines). Default: false." },
+                    "head_limit": { "type": "integer", "description": "Limit output to first N lines/entries." }
+                },
+                "required": ["pattern"]
+            }),
+        });
+    }
+
+    // Write tools: require both WRITE and NU (execution routes through nu session)
+    if grant.contains(ToolGrant::WRITE | ToolGrant::NU) {
+        tools.push(FlickToolDef {
+            name: "Write".into(),
+            description: "Write content to a file, creating parent directories if necessary. Overwrites existing files.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "File path to write to" },
+                    "content": { "type": "string", "description": "Content to write" }
+                },
+                "required": ["file_path", "content"]
+            }),
+        });
+        tools.push(FlickToolDef {
+            name: "Edit".into(),
+            description: "Replace an exact string match in a file. By default, old_string must appear exactly once (prevents ambiguous edits). Set replace_all to replace every occurrence.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string", "description": "File path to edit" },
+                    "old_string": { "type": "string", "description": "Exact text to find and replace" },
+                    "new_string": { "type": "string", "description": "Replacement text" },
+                    "replace_all": { "type": "boolean", "description": "Replace all occurrences instead of requiring uniqueness. Default: false." }
+                },
+                "required": ["file_path", "old_string", "new_string"]
+            }),
+        });
+    }
+
+    // NuShell tool: available when NU is granted
+    if grant.contains(ToolGrant::NU) {
+        tools.push(FlickToolDef {
+            name: "NuShell".into(),
+            description: "Execute a NuShell command or pipeline and return its output. Uses NuShell syntax (not POSIX sh). Session state (variables, env, cwd) persists across calls within the same task.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The NuShell command to execute" },
+                    "description": { "type": "string", "description": "Brief description of what this command does" },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
                 },
                 "required": ["command"]
             }),
@@ -240,14 +360,256 @@ fn verify_ancestors_within_root(dir: &Path, root_canon: &Path) -> Result<(), Str
     }
 }
 
-/// Map tool name to the required grant flag.
+/// Map tool name to the required grant flags.
+/// Handles both legacy names (`read_file`, etc.) and forwarded names (Read, etc.).
+/// Forwarded Write/Edit require both WRITE and NU since they execute through `nu_session`.
 fn required_grant(name: &str) -> Option<ToolGrant> {
     match name {
+        // Legacy tool names
         "read_file" | "glob" | "grep" => Some(ToolGrant::READ),
         "write_file" | "edit_file" => Some(ToolGrant::WRITE),
-        "nu" => Some(ToolGrant::NU),
+        // Forwarded tools all route through nu_session
+        "Write" | "Edit" => Some(ToolGrant::WRITE | ToolGrant::NU),
+        "nu" | "NuShell" | "Read" | "Glob" | "Grep" => Some(ToolGrant::NU),
         _ => None,
     }
+}
+
+/// Returns true if the tool name is a forwarded (Claude Code-aligned) tool.
+fn is_forwarded_tool(name: &str) -> bool {
+    matches!(name, "Read" | "Write" | "Edit" | "Glob" | "Grep" | "NuShell")
+}
+
+// ---------------------------------------------------------------------------
+// Nu command translation layer
+// ---------------------------------------------------------------------------
+
+/// Escape a string for safe inclusion in a nu command.
+///
+/// Uses nu single-quoted strings when possible (no escape processing).
+/// Falls back to nu raw string syntax (`r#'...'#`) when the string contains
+/// single quotes, using enough `#` characters to avoid premature closing.
+fn quote_nu(s: &str) -> String {
+    if !s.contains('\'') {
+        return format!("'{s}'");
+    }
+    let mut n = 1;
+    loop {
+        let closing = format!("'{}", "#".repeat(n));
+        if !s.contains(&closing) {
+            break;
+        }
+        n += 1;
+    }
+    let hashes = "#".repeat(n);
+    format!("r{hashes}'{s}'{hashes}")
+}
+
+/// Translate a JSON tool call into a nu command string.
+///
+/// Appends `| to json -r` so the Rust layer can parse structured output.
+/// `NuShell` is handled separately in `execute_forwarded_tool` (direct
+/// pass-through to `tool_nu`).
+fn translate_tool_call(name: &str, input: &JsonValue) -> Result<String, String> {
+    let cmd = match name {
+        "Read" => translate_read(input),
+        "Write" => translate_write(input),
+        "Edit" => translate_edit(input),
+        "Glob" => translate_glob(input),
+        "Grep" => translate_grep(input),
+        _ => Err(format!("unknown forwarded tool: {name}")),
+    }?;
+    Ok(format!("{cmd} | to json -r"))
+}
+
+fn translate_read(input: &JsonValue) -> Result<String, String> {
+    let path = get_str(input, "file_path")?;
+    let mut cmd = format!("epic read {}", quote_nu(path));
+    if let Some(offset) = input.get("offset").and_then(JsonValue::as_i64) {
+        let _ = write!(cmd, " --offset {offset}");
+    }
+    if let Some(limit) = input.get("limit").and_then(JsonValue::as_i64) {
+        let _ = write!(cmd, " --limit {limit}");
+    }
+    Ok(cmd)
+}
+
+fn translate_write(input: &JsonValue) -> Result<String, String> {
+    let path = get_str(input, "file_path")?;
+    let content = get_str(input, "content")?;
+    Ok(format!(
+        "epic write {} {}",
+        quote_nu(path),
+        quote_nu(content)
+    ))
+}
+
+fn translate_edit(input: &JsonValue) -> Result<String, String> {
+    let path = get_str(input, "file_path")?;
+    let old_string = get_str(input, "old_string")?;
+    let new_string = get_str(input, "new_string")?;
+    let mut cmd = format!(
+        "epic edit {} {} {}",
+        quote_nu(path),
+        quote_nu(old_string),
+        quote_nu(new_string)
+    );
+    if input
+        .get("replace_all")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+    {
+        cmd.push_str(" --replace-all");
+    }
+    Ok(cmd)
+}
+
+fn translate_glob(input: &JsonValue) -> Result<String, String> {
+    let pattern = get_str(input, "pattern")?;
+    let mut cmd = format!("epic glob {}", quote_nu(pattern));
+    if let Some(path) = get_str_opt(input, "path") {
+        let _ = write!(cmd, " --path {}", quote_nu(path));
+    }
+    Ok(cmd)
+}
+
+fn translate_grep(input: &JsonValue) -> Result<String, String> {
+    let pattern = get_str(input, "pattern")?;
+    let mut cmd = format!("epic grep {}", quote_nu(pattern));
+    if let Some(path) = get_str_opt(input, "path") {
+        let _ = write!(cmd, " --path {}", quote_nu(path));
+    }
+    if let Some(mode) = get_str_opt(input, "output_mode") {
+        let _ = write!(cmd, " --output-mode {}", quote_nu(mode));
+    }
+    if let Some(glob) = get_str_opt(input, "glob") {
+        let _ = write!(cmd, " --glob {}", quote_nu(glob));
+    }
+    if let Some(t) = get_str_opt(input, "include_type") {
+        let _ = write!(cmd, " --type {}", quote_nu(t));
+    }
+    if input
+        .get("case_insensitive")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+    {
+        cmd.push_str(" --case-insensitive");
+    }
+    if let Some(ln) = input.get("line_numbers").and_then(JsonValue::as_bool) {
+        if ln {
+            cmd.push_str(" --line-numbers");
+        } else {
+            cmd.push_str(" --no-line-numbers");
+        }
+    }
+    if let Some(n) = input.get("context_after").and_then(JsonValue::as_i64) {
+        let _ = write!(cmd, " --context-after {n}");
+    }
+    if let Some(n) = input.get("context_before").and_then(JsonValue::as_i64) {
+        let _ = write!(cmd, " --context-before {n}");
+    }
+    if let Some(n) = input.get("context").and_then(JsonValue::as_i64) {
+        let _ = write!(cmd, " --context {n}");
+    }
+    if input
+        .get("multiline")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+    {
+        cmd.push_str(" --multiline");
+    }
+    if let Some(n) = input.get("head_limit").and_then(JsonValue::as_i64) {
+        let _ = write!(cmd, " --head-limit {n}");
+    }
+    Ok(cmd)
+}
+
+/// Format structured JSON output from a forwarded nu command into Claude-friendly text.
+///
+/// File tools pipe their output through `| to json -r`, so `raw_output` is JSON.
+/// On parse failure, returns the raw output unchanged.
+fn format_tool_result(name: &str, raw_output: &str) -> String {
+    match name {
+        "Read" => format_read_result(raw_output),
+        "Write" => format_write_result(raw_output),
+        "Edit" => format_edit_result(raw_output),
+        "Glob" => format_glob_result(raw_output),
+        "Grep" => format_grep_result(raw_output),
+        _ => raw_output.to_owned(),
+    }
+}
+
+fn format_read_result(raw: &str) -> String {
+    let Ok(v) = serde_json::from_str::<JsonValue>(raw) else {
+        return raw.to_owned();
+    };
+
+    let total_lines = v["total_lines"].as_u64().unwrap_or(0);
+    let offset = v["offset"].as_u64().unwrap_or(1);
+    let lines_returned = v["lines_returned"].as_u64().unwrap_or(0);
+    let size = v["size"].as_u64().unwrap_or(0);
+
+    let mut output = String::new();
+    if let Some(lines) = v["lines"].as_array() {
+        for entry in lines {
+            let line_num = entry["line"].as_u64().unwrap_or(0);
+            let text = entry["text"].as_str().unwrap_or("");
+            let _ = writeln!(output, "{line_num:>6}\t{text}");
+        }
+    }
+
+    if total_lines > 0 && lines_returned > 0 {
+        let end = offset + lines_returned - 1;
+        let _ = write!(
+            output,
+            "(showing lines {offset}-{end} of {total_lines} total, {size} bytes)"
+        );
+    } else if total_lines > 0 {
+        let _ = write!(output, "(0 lines returned, {total_lines} total, {size} bytes)");
+    }
+
+    output
+}
+
+fn format_write_result(raw: &str) -> String {
+    let Ok(v) = serde_json::from_str::<JsonValue>(raw) else {
+        return raw.to_owned();
+    };
+    let path = v["path"].as_str().unwrap_or("?");
+    let bytes = v["bytes_written"].as_u64().unwrap_or(0);
+    format!("Wrote {bytes} bytes to {path}")
+}
+
+fn format_edit_result(raw: &str) -> String {
+    let Ok(v) = serde_json::from_str::<JsonValue>(raw) else {
+        return raw.to_owned();
+    };
+    let path = v["path"].as_str().unwrap_or("?");
+    let count = v["replacements"].as_u64().unwrap_or(0);
+    let s = if count == 1 { "" } else { "s" };
+    format!("Replaced {count} occurrence{s} in {path}")
+}
+
+fn format_glob_result(raw: &str) -> String {
+    let Ok(v) = serde_json::from_str::<JsonValue>(raw) else {
+        return raw.to_owned();
+    };
+    v.as_array().map_or_else(
+        || raw.to_owned(),
+        |arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+    )
+}
+
+fn format_grep_result(raw: &str) -> String {
+    let Ok(v) = serde_json::from_str::<JsonValue>(raw) else {
+        return raw.to_owned();
+    };
+    v["output"].as_str().unwrap_or(raw).to_owned()
 }
 
 fn get_str<'a>(input: &'a JsonValue, key: &str) -> Result<&'a str, String> {
@@ -262,6 +624,10 @@ fn get_str_opt<'a>(input: &'a JsonValue, key: &str) -> Option<&'a str> {
 }
 
 /// Execute a tool call, checking grants and dispatching to the implementation.
+///
+/// Handles both legacy tool names (`read_file`, `write_file`, etc.) and forwarded
+/// Claude Code-aligned names (Read, Write, etc.). Forwarded tools are translated
+/// into nu commands and dispatched through `nu_session.evaluate()`.
 pub async fn execute_tool(
     tool_use_id: String,
     name: &str,
@@ -289,23 +655,21 @@ pub async fn execute_tool(
         Some(_) => {}
     }
 
-    // Nu tool returns a richer type because non-zero exit is not a dispatch
-    // failure but must still set is_error for callers.
-    if name == "nu" {
-        return match tool_nu(input, project_root, grant, nu_session).await {
-            Ok(out) => ToolExecResult {
-                tool_use_id,
-                content: out.content,
-                is_error: out.is_error,
-            },
-            Err(msg) => ToolExecResult {
-                tool_use_id,
-                content: msg,
-                is_error: true,
-            },
-        };
+    // Forwarded tools: translate JSON params → nu command → nu_session.evaluate()
+    if is_forwarded_tool(name) {
+        return execute_forwarded_tool(tool_use_id, name, input, project_root, grant, nu_session)
+            .await;
     }
 
+    // Legacy nu tool
+    if name == "nu" {
+        return nu_result_to_exec(
+            tool_use_id,
+            tool_nu(input, project_root, grant, nu_session).await,
+        );
+    }
+
+    // Legacy file tools (Rust implementations, to be removed in Phase 4)
     let result = match name {
         "read_file" => tool_read_file(input, project_root).await,
         "glob" => tool_glob(input, project_root).await,
@@ -327,6 +691,70 @@ pub async fn execute_tool(
             is_error: true,
         },
     }
+}
+
+/// Convert a `tool_nu` result into a `ToolExecResult`.
+fn nu_result_to_exec(tool_use_id: String, result: Result<NuOutput, String>) -> ToolExecResult {
+    match result {
+        Ok(out) => ToolExecResult {
+            tool_use_id,
+            content: out.content,
+            is_error: out.is_error,
+        },
+        Err(msg) => ToolExecResult {
+            tool_use_id,
+            content: msg,
+            is_error: true,
+        },
+    }
+}
+
+/// Execute a forwarded (Claude Code-aligned) tool via the nu session.
+async fn execute_forwarded_tool(
+    tool_use_id: String,
+    name: &str,
+    input: &JsonValue,
+    project_root: &Path,
+    grant: ToolGrant,
+    nu_session: &NuSession,
+) -> ToolExecResult {
+    // NuShell is a direct pass-through (same as legacy "nu" tool)
+    if name == "NuShell" {
+        return nu_result_to_exec(
+            tool_use_id,
+            tool_nu(input, project_root, grant, nu_session).await,
+        );
+    }
+
+    // Translate JSON tool params to nu command string
+    let nu_command = match translate_tool_call(name, input) {
+        Ok(cmd) => cmd,
+        Err(msg) => {
+            return ToolExecResult {
+                tool_use_id,
+                content: msg,
+                is_error: true,
+            };
+        }
+    };
+
+    // Execute via nu session, then format+truncate successful output.
+    // Empty output is valid (Glob/Grep with no matches), so don't replace it.
+    let result = nu_session
+        .evaluate(&nu_command, DEFAULT_NU_TIMEOUT_SECS, project_root, grant)
+        .await
+        .map(|out| {
+            if out.is_error {
+                out
+            } else {
+                NuOutput {
+                    content: truncate_output(format_tool_result(name, &out.content)),
+                    is_error: false,
+                }
+            }
+        });
+
+    nu_result_to_exec(tool_use_id, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -596,11 +1024,9 @@ async fn tool_nu(
     Ok(result)
 }
 
-fn format_nu_output(raw: String) -> String {
-    if raw.is_empty() {
-        return "[no output]".into();
-    }
-
+/// Truncate output to `MAX_NU_OUTPUT` without replacing empty strings.
+/// Used for forwarded tool results where empty output is semantically valid.
+fn truncate_output(raw: String) -> String {
     if raw.len() > MAX_NU_OUTPUT {
         let mut output = raw;
         let mut end = MAX_NU_OUTPUT;
@@ -613,6 +1039,13 @@ fn format_nu_output(raw: String) -> String {
     } else {
         raw
     }
+}
+
+fn format_nu_output(raw: String) -> String {
+    if raw.is_empty() {
+        return "[no output]".into();
+    }
+    truncate_output(raw)
 }
 
 #[cfg(test)]
@@ -640,11 +1073,11 @@ mod tests {
     }
 
     #[test]
-    fn analyze_gets_read_only() {
+    fn analyze_gets_read_nu() {
         let grant = phase_tools(AgentMethod::Analyze);
         assert!(grant.contains(ToolGrant::READ));
         assert!(!grant.contains(ToolGrant::WRITE));
-        assert!(!grant.contains(ToolGrant::NU));
+        assert!(grant.contains(ToolGrant::NU));
     }
 
     #[test]
@@ -665,7 +1098,7 @@ mod tests {
 
     #[test]
     fn read_only_tools() {
-        let tools = tool_definitions(ToolGrant::READ);
+        let tools = tool_definitions(ToolGrant::READ, false);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"glob"));
@@ -677,7 +1110,7 @@ mod tests {
     #[test]
     fn full_tools() {
         let grant = ToolGrant::READ | ToolGrant::WRITE | ToolGrant::NU;
-        let tools = tool_definitions(grant);
+        let tools = tool_definitions(grant, false);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
@@ -687,7 +1120,7 @@ mod tests {
 
     #[test]
     fn empty_grant_no_tools() {
-        let tools = tool_definitions(ToolGrant::empty());
+        let tools = tool_definitions(ToolGrant::empty(), false);
         assert!(tools.is_empty());
     }
 
@@ -968,11 +1401,597 @@ mod tests {
         assert!(result.content.contains("2 times"));
     }
 
-    // -- nu tool tests --
-    //
-    // Integration tests for the nu tool require a `nu` binary (downloaded by
-    // build.rs) and lot sandbox — not yet written (TODO).
-    // Unit tests for format_nu_output are always enabled.
+    // -- forwarded tool definitions tests --
+
+    #[test]
+    fn forwarded_read_only_tools() {
+        let tools = tool_definitions(ToolGrant::READ | ToolGrant::NU, true);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"Read"));
+        assert!(names.contains(&"Glob"));
+        assert!(names.contains(&"Grep"));
+        assert!(names.contains(&"NuShell"));
+        assert!(!names.contains(&"Write"));
+        assert!(!names.contains(&"Edit"));
+    }
+
+    #[test]
+    fn forwarded_full_tools() {
+        let grant = ToolGrant::READ | ToolGrant::WRITE | ToolGrant::NU;
+        let tools = tool_definitions(grant, true);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"Read"));
+        assert!(names.contains(&"Write"));
+        assert!(names.contains(&"Edit"));
+        assert!(names.contains(&"Glob"));
+        assert!(names.contains(&"Grep"));
+        assert!(names.contains(&"NuShell"));
+    }
+
+    #[test]
+    fn forwarded_false_returns_legacy() {
+        let tools = tool_definitions(ToolGrant::READ, false);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"read_file"));
+        assert!(!names.contains(&"Read"));
+    }
+
+    #[test]
+    fn forwarded_nu_only_no_read() {
+        // READ without NU: forwarded mode offers nothing (file tools need NU)
+        let tools = tool_definitions(ToolGrant::READ, true);
+        assert!(tools.is_empty());
+    }
+
+    // -- quote_nu tests --
+
+    #[test]
+    fn test_quote_nu_simple() {
+        assert_eq!(quote_nu("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_quote_nu_with_spaces() {
+        assert_eq!(quote_nu("hello world"), "'hello world'");
+    }
+
+    #[test]
+    fn test_quote_nu_with_single_quote() {
+        let result = quote_nu("it's");
+        assert_eq!(result, r"r#'it's'#");
+    }
+
+    #[test]
+    fn test_quote_nu_with_single_quote_and_hash() {
+        // String contains '# which is the r#'...'# closing delimiter
+        let result = quote_nu("foo'#bar");
+        assert_eq!(result, r"r##'foo'#bar'##");
+    }
+
+    #[test]
+    fn test_quote_nu_double_quotes_no_escape() {
+        // Double quotes inside single-quoted string need no escaping
+        assert_eq!(quote_nu(r#"say "hi""#), r#"'say "hi"'"#);
+    }
+
+    #[test]
+    fn test_quote_nu_dollar_sign() {
+        // $ is inert in single-quoted strings
+        assert_eq!(quote_nu("$env.PATH"), "'$env.PATH'");
+    }
+
+    #[test]
+    fn test_quote_nu_newlines() {
+        assert_eq!(quote_nu("line1\nline2"), "'line1\nline2'");
+    }
+
+    #[test]
+    fn test_quote_nu_empty() {
+        assert_eq!(quote_nu(""), "''");
+    }
+
+    #[test]
+    fn test_quote_nu_backticks() {
+        assert_eq!(quote_nu("`cmd`"), "'`cmd`'");
+    }
+
+    #[test]
+    fn test_quote_nu_backslashes() {
+        // Backslashes are literal in nu single-quoted strings (important for Windows paths)
+        assert_eq!(quote_nu(r"C:\Users\foo"), r"'C:\Users\foo'");
+    }
+
+    #[test]
+    fn test_quote_nu_backslash_and_single_quote() {
+        let result = quote_nu(r"C:\it's");
+        assert_eq!(result, r"r#'C:\it's'#");
+    }
+
+    #[test]
+    fn test_quote_nu_raw_string_open_sequence() {
+        // Input containing ' triggers raw string; r#' in input has no '# substring so r#'...'# works
+        let result = quote_nu("r#'hello");
+        assert_eq!(result, "r#'r#'hello'#");
+    }
+
+    #[test]
+    fn test_quote_nu_closing_delimiter_in_input() {
+        // Input containing '# forces bump to r##'...'##
+        let result = quote_nu("x'#y");
+        assert_eq!(result, "r##'x'#y'##");
+    }
+
+    // -- translate_tool_call tests --
+
+    #[test]
+    fn test_translate_read_basic() {
+        let input = serde_json::json!({"file_path": "src/main.rs"});
+        let cmd = translate_tool_call("Read", &input).unwrap();
+        assert_eq!(cmd, "epic read 'src/main.rs' | to json -r");
+    }
+
+    #[test]
+    fn test_translate_read_with_offset_limit() {
+        let input = serde_json::json!({"file_path": "f.txt", "offset": 10, "limit": 50});
+        let cmd = translate_tool_call("Read", &input).unwrap();
+        assert_eq!(cmd, "epic read 'f.txt' --offset 10 --limit 50 | to json -r");
+    }
+
+    #[test]
+    fn test_translate_read_missing_path() {
+        let input = serde_json::json!({});
+        assert!(translate_tool_call("Read", &input).is_err());
+    }
+
+    #[test]
+    fn test_translate_write_basic() {
+        let input = serde_json::json!({"file_path": "out.txt", "content": "hello"});
+        let cmd = translate_tool_call("Write", &input).unwrap();
+        assert_eq!(cmd, "epic write 'out.txt' 'hello' | to json -r");
+    }
+
+    #[test]
+    fn test_translate_write_special_chars() {
+        let input = serde_json::json!({"file_path": "f.txt", "content": "it's a \"test\""});
+        let cmd = translate_tool_call("Write", &input).unwrap();
+        assert!(cmd.starts_with("epic write 'f.txt' r#'it's a \"test\"'#"));
+    }
+
+    #[test]
+    fn test_translate_edit_basic() {
+        let input = serde_json::json!({
+            "file_path": "f.txt",
+            "old_string": "old",
+            "new_string": "new"
+        });
+        let cmd = translate_tool_call("Edit", &input).unwrap();
+        assert_eq!(cmd, "epic edit 'f.txt' 'old' 'new' | to json -r");
+    }
+
+    #[test]
+    fn test_translate_edit_replace_all() {
+        let input = serde_json::json!({
+            "file_path": "f.txt",
+            "old_string": "old",
+            "new_string": "new",
+            "replace_all": true
+        });
+        let cmd = translate_tool_call("Edit", &input).unwrap();
+        assert_eq!(
+            cmd,
+            "epic edit 'f.txt' 'old' 'new' --replace-all | to json -r"
+        );
+    }
+
+    #[test]
+    fn test_translate_edit_replace_all_false() {
+        let input = serde_json::json!({
+            "file_path": "f.txt",
+            "old_string": "old",
+            "new_string": "new",
+            "replace_all": false
+        });
+        let cmd = translate_tool_call("Edit", &input).unwrap();
+        assert_eq!(cmd, "epic edit 'f.txt' 'old' 'new' | to json -r");
+    }
+
+    #[test]
+    fn test_translate_glob_basic() {
+        let input = serde_json::json!({"pattern": "**/*.rs"});
+        let cmd = translate_tool_call("Glob", &input).unwrap();
+        assert_eq!(cmd, "epic glob '**/*.rs' | to json -r");
+    }
+
+    #[test]
+    fn test_translate_glob_with_path() {
+        let input = serde_json::json!({"pattern": "*.txt", "path": "src"});
+        let cmd = translate_tool_call("Glob", &input).unwrap();
+        assert_eq!(cmd, "epic glob '*.txt' --path 'src' | to json -r");
+    }
+
+    #[test]
+    fn test_translate_grep_basic() {
+        let input = serde_json::json!({"pattern": "fn main"});
+        let cmd = translate_tool_call("Grep", &input).unwrap();
+        assert_eq!(cmd, "epic grep 'fn main' | to json -r");
+    }
+
+    #[test]
+    fn test_translate_grep_full_params() {
+        let input = serde_json::json!({
+            "pattern": "TODO",
+            "path": "src",
+            "output_mode": "content",
+            "glob": "*.rs",
+            "include_type": "rust",
+            "case_insensitive": true,
+            "line_numbers": false,
+            "context_after": 2,
+            "context_before": 1,
+            "multiline": true,
+            "head_limit": 100
+        });
+        let cmd = translate_tool_call("Grep", &input).unwrap();
+        assert!(cmd.contains("--path 'src'"));
+        assert!(cmd.contains("--output-mode 'content'"));
+        assert!(cmd.contains("--glob '*.rs'"));
+        assert!(cmd.contains("--type 'rust'"));
+        assert!(cmd.contains("--case-insensitive"));
+        assert!(cmd.contains("--no-line-numbers"));
+        assert!(cmd.contains("--context-after 2"));
+        assert!(cmd.contains("--context-before 1"));
+        assert!(cmd.contains("--multiline"));
+        assert!(cmd.contains("--head-limit 100"));
+    }
+
+    #[test]
+    fn test_translate_grep_context_param() {
+        let input = serde_json::json!({"pattern": "x", "context": 3});
+        let cmd = translate_tool_call("Grep", &input).unwrap();
+        assert!(cmd.contains("--context 3"));
+    }
+
+    #[test]
+    fn test_translate_grep_line_numbers_true() {
+        let input = serde_json::json!({"pattern": "x", "line_numbers": true});
+        let cmd = translate_tool_call("Grep", &input).unwrap();
+        assert!(cmd.contains("--line-numbers"));
+        assert!(!cmd.contains("--no-line-numbers"));
+    }
+
+    #[test]
+    fn test_translate_nushell_not_handled() {
+        // NuShell is handled directly in execute_forwarded_tool, not translate_tool_call
+        let input = serde_json::json!({"command": "ls | length"});
+        assert!(translate_tool_call("NuShell", &input).is_err());
+    }
+
+    #[test]
+    fn test_translate_unknown_tool() {
+        let input = serde_json::json!({});
+        assert!(translate_tool_call("Unknown", &input).is_err());
+    }
+
+    // -- format_tool_result tests --
+
+    #[test]
+    fn test_format_read_result() {
+        let json = serde_json::json!({
+            "path": "/project/src/main.rs",
+            "size": 256,
+            "total_lines": 10,
+            "offset": 1,
+            "lines_returned": 3,
+            "lines": [
+                {"line": 1, "text": "fn main() {"},
+                {"line": 2, "text": "    println!(\"hello\");"},
+                {"line": 3, "text": "}"}
+            ]
+        });
+        let result = format_read_result(&json.to_string());
+        assert!(result.contains("     1\tfn main() {"));
+        assert!(result.contains("     2\t    println!(\"hello\");"));
+        assert!(result.contains("     3\t}"));
+        assert!(result.contains("showing lines 1-3 of 10 total, 256 bytes"));
+    }
+
+    #[test]
+    fn test_format_write_result() {
+        let json = serde_json::json!({"path": "/project/out.txt", "bytes_written": 42});
+        let result = format_write_result(&json.to_string());
+        assert_eq!(result, "Wrote 42 bytes to /project/out.txt");
+    }
+
+    #[test]
+    fn test_format_edit_result_singular() {
+        let json = serde_json::json!({"path": "/project/f.txt", "replacements": 1});
+        let result = format_edit_result(&json.to_string());
+        assert_eq!(result, "Replaced 1 occurrence in /project/f.txt");
+    }
+
+    #[test]
+    fn test_format_edit_result_plural() {
+        let json = serde_json::json!({"path": "/project/f.txt", "replacements": 3});
+        let result = format_edit_result(&json.to_string());
+        assert_eq!(result, "Replaced 3 occurrences in /project/f.txt");
+    }
+
+    #[test]
+    fn test_format_glob_result() {
+        let json = serde_json::json!(["src/main.rs", "src/lib.rs"]);
+        let result = format_glob_result(&json.to_string());
+        assert_eq!(result, "src/main.rs\nsrc/lib.rs");
+    }
+
+    #[test]
+    fn test_format_grep_result() {
+        let json = serde_json::json!({"exit_code": 0, "output": "src/main.rs:1:fn main()"});
+        let result = format_grep_result(&json.to_string());
+        assert_eq!(result, "src/main.rs:1:fn main()");
+    }
+
+    #[test]
+    fn test_format_grep_no_matches() {
+        let json = serde_json::json!({"exit_code": 1, "output": ""});
+        let result = format_grep_result(&json.to_string());
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_format_result_invalid_json_passthrough() {
+        let raw = "not json at all";
+        assert_eq!(format_read_result(raw), raw);
+        assert_eq!(format_write_result(raw), raw);
+        assert_eq!(format_edit_result(raw), raw);
+        assert_eq!(format_glob_result(raw), raw);
+        assert_eq!(format_grep_result(raw), raw);
+    }
+
+    #[test]
+    fn test_format_read_result_offset_gt_1() {
+        let json = serde_json::json!({
+            "path": "/project/big.rs",
+            "size": 5000,
+            "total_lines": 200,
+            "offset": 50,
+            "lines_returned": 2,
+            "lines": [
+                {"line": 50, "text": "    let x = 1;"},
+                {"line": 51, "text": "    let y = 2;"}
+            ]
+        });
+        let result = format_read_result(&json.to_string());
+        assert!(result.contains("    50\t    let x = 1;"));
+        assert!(result.contains("    51\t    let y = 2;"));
+        assert!(result.contains("showing lines 50-51 of 200 total, 5000 bytes"));
+    }
+
+    #[test]
+    fn test_format_read_result_empty_file() {
+        let json = serde_json::json!({
+            "path": "/project/empty.txt",
+            "size": 0,
+            "total_lines": 0,
+            "offset": 1,
+            "lines_returned": 0,
+            "lines": []
+        });
+        let result = format_read_result(&json.to_string());
+        // total_lines=0, so no metadata line is emitted — output is empty
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_format_read_result_missing_lines_field() {
+        let json = serde_json::json!({"error": "file not found"});
+        let result = format_read_result(&json.to_string());
+        // No lines to format, no metadata condition met — empty output
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_format_glob_result_empty_array() {
+        assert_eq!(format_glob_result("[]"), "");
+    }
+
+    #[test]
+    fn test_format_glob_result_non_string_elements() {
+        let json = serde_json::json!([1, "a.rs", null]);
+        let result = format_glob_result(&json.to_string());
+        assert_eq!(result, "a.rs");
+    }
+
+    // -- phase_tools × file_tool_forwarders matrix --
+
+    #[test]
+    fn phase_forwarder_matrix() {
+        // Verify the tool names produced for each phase+forwarder combination.
+        for method in [AgentMethod::Analyze, AgentMethod::Decompose, AgentMethod::Execute] {
+            let grant = phase_tools(method);
+
+            // Forwarded mode
+            let fwd = tool_definitions(grant, true);
+            let fwd_names: Vec<&str> = fwd.iter().map(|t| t.name.as_str()).collect();
+            // All phases get read tools + NuShell in forwarded mode
+            assert!(fwd_names.contains(&"Read"), "{method:?} forwarded missing Read");
+            assert!(fwd_names.contains(&"NuShell"), "{method:?} forwarded missing NuShell");
+            // Only Execute gets Write/Edit
+            if matches!(method, AgentMethod::Execute) {
+                assert!(fwd_names.contains(&"Write"), "Execute forwarded missing Write");
+                assert!(fwd_names.contains(&"Edit"), "Execute forwarded missing Edit");
+            } else {
+                assert!(!fwd_names.contains(&"Write"), "{method:?} forwarded has Write");
+                assert!(!fwd_names.contains(&"Edit"), "{method:?} forwarded has Edit");
+            }
+
+            // Legacy mode
+            let leg = tool_definitions(grant, false);
+            let leg_names: Vec<&str> = leg.iter().map(|t| t.name.as_str()).collect();
+            assert!(leg_names.contains(&"read_file"), "{method:?} legacy missing read_file");
+        }
+    }
+
+    // -- required_grant for forwarded names --
+
+    #[test]
+    fn test_required_grant_forwarded_names() {
+        assert_eq!(required_grant("Read"), Some(ToolGrant::NU));
+        assert_eq!(required_grant("Glob"), Some(ToolGrant::NU));
+        assert_eq!(required_grant("Grep"), Some(ToolGrant::NU));
+        assert_eq!(required_grant("Write"), Some(ToolGrant::WRITE | ToolGrant::NU));
+        assert_eq!(required_grant("Edit"), Some(ToolGrant::WRITE | ToolGrant::NU));
+        assert_eq!(required_grant("NuShell"), Some(ToolGrant::NU));
+    }
+
+    #[test]
+    fn test_is_forwarded_tool() {
+        assert!(is_forwarded_tool("Read"));
+        assert!(is_forwarded_tool("Write"));
+        assert!(is_forwarded_tool("NuShell"));
+        assert!(!is_forwarded_tool("read_file"));
+        assert!(!is_forwarded_tool("nu"));
+        assert!(!is_forwarded_tool("Xyzzy"));
+        assert!(!is_forwarded_tool(""));
+    }
+
+    // -- execute_tool forwarded grant check --
+
+    #[tokio::test]
+    async fn test_forwarded_write_denied_without_grant() {
+        let result = exec(
+            "Write",
+            serde_json::json!({"file_path": "x.txt", "content": "hi"}),
+            ToolGrant::NU, // NU but no WRITE
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("not permitted"));
+    }
+
+    #[tokio::test]
+    async fn test_forwarded_read_denied_without_nu() {
+        let result = exec(
+            "Read",
+            serde_json::json!({"file_path": "x.txt"}),
+            ToolGrant::READ, // READ but no NU
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("not permitted"));
+    }
+
+    // -- truncate_output tests --
+
+    #[test]
+    fn test_truncate_output_under_limit() {
+        let s = "hello".to_owned();
+        assert_eq!(truncate_output(s), "hello");
+    }
+
+    #[test]
+    fn test_truncate_output_over_limit() {
+        let big = "x".repeat(MAX_NU_OUTPUT + 100);
+        let result = truncate_output(big);
+        assert!(result.ends_with("[output truncated]"));
+        assert!(result.len() <= MAX_NU_OUTPUT + 20);
+    }
+
+    #[test]
+    fn test_truncate_output_empty_preserved() {
+        assert_eq!(truncate_output(String::new()), "");
+    }
+
+    #[test]
+    fn test_truncate_output_multibyte() {
+        let emoji = "😀".repeat(MAX_NU_OUTPUT / 4 + 50);
+        let result = truncate_output(emoji);
+        assert!(result.ends_with("[output truncated]"));
+        // Valid UTF-8 (would panic on from_utf8 check).
+        String::from_utf8(result.into_bytes()).unwrap();
+    }
+
+    // -- format_tool_result dispatch --
+
+    #[test]
+    fn test_format_tool_result_unknown_passthrough() {
+        assert_eq!(format_tool_result("NuShell", "raw text"), "raw text");
+        assert_eq!(format_tool_result("unknown", "raw text"), "raw text");
+    }
+
+    // -- translate_tool_call missing-param errors --
+
+    #[test]
+    fn test_translate_write_missing_content() {
+        let input = serde_json::json!({"file_path": "f.txt"});
+        assert!(translate_tool_call("Write", &input).is_err());
+    }
+
+    #[test]
+    fn test_translate_write_missing_path() {
+        let input = serde_json::json!({"content": "hi"});
+        assert!(translate_tool_call("Write", &input).is_err());
+    }
+
+    #[test]
+    fn test_translate_edit_missing_old_string() {
+        let input = serde_json::json!({"file_path": "f.txt", "new_string": "x"});
+        assert!(translate_tool_call("Edit", &input).is_err());
+    }
+
+    #[test]
+    fn test_translate_edit_missing_new_string() {
+        let input = serde_json::json!({"file_path": "f.txt", "old_string": "x"});
+        assert!(translate_tool_call("Edit", &input).is_err());
+    }
+
+    #[test]
+    fn test_translate_glob_missing_pattern() {
+        let input = serde_json::json!({});
+        assert!(translate_tool_call("Glob", &input).is_err());
+    }
+
+    #[test]
+    fn test_translate_grep_missing_pattern() {
+        let input = serde_json::json!({});
+        assert!(translate_tool_call("Grep", &input).is_err());
+    }
+
+    // -- nu_result_to_exec tests --
+
+    #[test]
+    fn test_nu_result_to_exec_ok() {
+        let result = nu_result_to_exec(
+            "tu_1".into(),
+            Ok(NuOutput {
+                content: "hello".into(),
+                is_error: false,
+            }),
+        );
+        assert_eq!(result.content, "hello");
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn test_nu_result_to_exec_ok_error() {
+        let result = nu_result_to_exec(
+            "tu_1".into(),
+            Ok(NuOutput {
+                content: "err".into(),
+                is_error: true,
+            }),
+        );
+        assert_eq!(result.content, "err");
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn test_nu_result_to_exec_err() {
+        let result = nu_result_to_exec("tu_1".into(), Err("failed".into()));
+        assert_eq!(result.content, "failed");
+        assert!(result.is_error);
+    }
+
+    // -- format_nu_output tests --
 
     #[test]
     fn test_format_nu_output_empty() {

@@ -2,13 +2,13 @@
 
 ## Current Phase
 
-**v1 complete** — All features implemented.
+**v1 complete** — All features implemented. Unified tool layer in progress.
 
 ## What Exists
 
 - Recursive problem-solver orchestrator with DFS execution, retry/escalation, fix loops, recovery re-decomposition, checkpoint adjust/escalate
 - `FlickAgent` implementing `AgentService` via Flick library crate — config generation, structured output schemas, prompt assembly, tool loop with resume
-- 6 tools: `read_file`, `glob`, `grep`, `write_file`, `edit_file`, `nu` — path sandboxing, size limits, timeout handling
+- 6 tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `NuShell` — Claude Code-aligned schemas forwarding to nu custom commands via `translate_tool_call()` / `format_tool_result()`. Configurable via `[agent] file_tool_forwarders` (default: true). Legacy Rust-native implementations (`read_file`, `glob`, `grep`, `write_file`, `edit_file`, `nu`) retained temporarily; slated for removal in Phase 4.
 - State persistence via `.epic/state.json` — atomic writes, resume, goal mismatch detection, corrupt state handling, cycle-safe DFS
 - TUI via ratatui + crossterm — task tree, worklog, metrics panels, keyboard controls
 - CLI via clap — `init`, `run <goal>`, `resume`, `status` subcommands
@@ -34,5 +34,5 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 
 ## Next Work Candidates
 
-1. **Unified nu tool layer** — Move file tools into the sandboxed nu MCP session as nu custom commands. Spec: `docs/SPEC_NU_UNIFIED_TOOLS.md` (decisions D1-D10 recorded, 5-phase plan). Phase 1 nearly complete: all 5 custom commands validated (`epic_read`, `epic_write`, `epic_edit`, `epic_glob`, `epic_grep`). ripgrep 14.1.1 added to `build.rs` (same download-and-cache pattern as nu). Config-file injection (`--config` + `--mcp`) confirmed working with platform-native paths. **Next step**: Test binary file handling in `epic_read`, write `epic_env.nu`, then proceed to Phase 2 (tool executor translation layer).
+1. **Unified nu tool layer — Phase 3: Config file integration** — Phases 1-2 complete. Nu custom commands validated, ripgrep added to build, translation layer implemented with 27 unit tests. **Next step**: Embed `epic_config.nu` and `epic_env.nu` as Rust const strings, modify `NuSession` to spawn `nu --mcp --config <path> --env-config <path>`, test that forwarded tool calls work end-to-end through nu.
 2. **Nu integration tests** — No integration tests for the nu MCP session (spawn, timeout, kill, env filtering, exit codes). Protocol parsing functions (`try_parse_response`, `read_response`) and generation-based session invalidation also lack unit tests. Could be combined with unified tool layer work.

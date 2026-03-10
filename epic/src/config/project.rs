@@ -62,6 +62,10 @@ pub struct LimitsConfig {
 pub struct AgentConfig {
     #[serde(default = "default_runtime")]
     pub runtime: String,
+    /// Expose file tools (Read, Write, Edit, Glob, Grep) as separate tool definitions
+    /// that forward to nu custom commands. When false, only the `NuShell` tool is offered.
+    #[serde(default = "default_file_tool_forwarders")]
+    pub file_tool_forwarders: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +114,9 @@ const fn default_max_total_tasks() -> u32 {
 fn default_runtime() -> String {
     "flick".into()
 }
+const fn default_file_tool_forwarders() -> bool {
+    true
+}
 const fn default_timeout() -> u32 {
     300
 }
@@ -150,6 +157,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             runtime: default_runtime(),
+            file_tool_forwarders: default_file_tool_forwarders(),
         }
     }
 }
@@ -243,6 +251,7 @@ mod tests {
         let parsed: EpicConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.limits.max_depth, 8);
         assert_eq!(parsed.models.fast, "claude-haiku-4-5-20251001");
+        assert!(parsed.agent.file_tool_forwarders);
     }
 
     #[test]
@@ -270,6 +279,14 @@ timeout = 600
         let config: EpicConfig = toml::from_str("").unwrap();
         assert_eq!(config.limits.retry_budget, 3);
         assert!(config.verification_steps.is_empty());
+        assert!(config.agent.file_tool_forwarders);
+    }
+
+    #[test]
+    fn file_tool_forwarders_explicit_false() {
+        let config: EpicConfig =
+            toml::from_str("[agent]\nfile_tool_forwarders = false\n").unwrap();
+        assert!(!config.agent.file_tool_forwarders);
     }
 
     #[test]

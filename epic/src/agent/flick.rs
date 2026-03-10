@@ -98,8 +98,12 @@ pub struct FlickAgent {
     call_timeout: Duration,
     model_config: ModelConfig,
     verification_steps: Vec<VerificationStep>,
+    file_tool_forwarders: bool,
     provider_resolver: Box<dyn ProviderResolver>,
     tool_executor: Box<dyn ToolExecutor>,
+    /// When true, skip the eager `NuSession::spawn()` in `run_with_tools`.
+    /// Used in tests where the mock `ToolExecutor` never touches the nu session.
+    skip_nu_spawn: bool,
 }
 
 impl FlickAgent {
@@ -109,6 +113,7 @@ impl FlickAgent {
         call_timeout: Duration,
         model_config: ModelConfig,
         verification_steps: Vec<VerificationStep>,
+        file_tool_forwarders: bool,
     ) -> Self {
         Self {
             project_root,
@@ -116,8 +121,10 @@ impl FlickAgent {
             call_timeout,
             model_config,
             verification_steps,
+            file_tool_forwarders,
             provider_resolver: Box::new(DefaultProviderResolver),
             tool_executor: Box::new(DefaultToolExecutor),
+            skip_nu_spawn: false,
         }
     }
 
@@ -134,8 +141,10 @@ impl FlickAgent {
             call_timeout,
             model_config: ModelConfig::default(),
             verification_steps: Vec::new(),
+            file_tool_forwarders: true,
             provider_resolver,
             tool_executor,
+            skip_nu_spawn: true,
         }
     }
 
@@ -194,10 +203,12 @@ impl FlickAgent {
 
         // One NuSession per agent call — spawned eagerly, killed when this method returns.
         let nu_session = NuSession::new();
-        nu_session
-            .spawn(&self.project_root, grant)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to spawn nu session: {e}"))?;
+        if !self.skip_nu_spawn {
+            nu_session
+                .spawn(&self.project_root, grant)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to spawn nu session: {e}"))?;
+        }
 
         // Initial call (not counted toward MAX_TOOL_ROUNDS; the limit applies to resume rounds).
         let mut result = tokio::time::timeout(self.call_timeout, client.run(query, &mut context))
@@ -268,6 +279,7 @@ impl FlickAgent {
             &self.credential_name.0,
             grant,
             &self.model_config,
+            self.file_tool_forwarders,
         )?;
 
         let wire: TaskOutcomeWire = self.run_with_tools(config, &pair.query, grant).await?;
@@ -286,6 +298,7 @@ impl FlickAgent {
             &self.credential_name.0,
             grant,
             &self.model_config,
+            self.file_tool_forwarders,
         )?;
 
         let wire: DecompositionWire = self.run_with_tools(config, &pair.query, grant).await?;
@@ -319,12 +332,13 @@ Respond with the required JSON schema.";
         let query = "Explore this project and detect its verification steps \
 (build, lint, test, format commands). Read relevant config files to determine the correct commands.";
 
-        let grant = tools::ToolGrant::READ;
+        let grant = tools::phase_tools(tools::AgentMethod::Analyze);
         let config = config_gen::build_init_config(
             system_prompt,
             &self.credential_name.0,
             grant,
             &self.model_config,
+            self.file_tool_forwarders,
         )?;
 
         self.run_with_tools(config, query, grant).await
@@ -394,6 +408,7 @@ impl AgentService for FlickAgent {
             &self.credential_name.0,
             grant,
             &self.model_config,
+            self.file_tool_forwarders,
         )?;
 
         let wire: VerificationWire = self.run_with_tools(config, &pair.query, grant).await?;
@@ -450,6 +465,7 @@ impl AgentService for FlickAgent {
             &self.credential_name.0,
             grant,
             &self.model_config,
+            self.file_tool_forwarders,
         )?;
 
         let wire: RecoveryPlanWire = self.run_with_tools(config, &pair.query, grant).await?;

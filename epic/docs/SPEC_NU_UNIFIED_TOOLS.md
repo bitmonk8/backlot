@@ -1,6 +1,6 @@
 # Spec: Unified Tool Layer via Nu Custom Commands
 
-**Status**: Draft — approaching implementation-ready.
+**Status**: Phases 1-2 complete. Phase 3 (config file integration) in progress.
 
 ## Summary
 
@@ -41,7 +41,7 @@ Nu 0.111.0 does not support registering custom MCP tools (only exposes `evaluate
 
 ### D3: Lot sandbox is the sole access control mechanism
 
-`safe_path()`, `verify_ancestors_within_root()`, and `ToolGrant::READ`/`WRITE` flags are removed. Lot's per-phase sandbox policy is the sole gatekeeper. `ToolGrant` collapses to a phase marker controlling which tool definitions are offered to the agent.
+Once the legacy tool layer is removed (Phase 4), `safe_path()`, `verify_ancestors_within_root()`, and `ToolGrant::READ`/`WRITE` flags will be removed. Lot's per-phase sandbox policy becomes the sole gatekeeper. `ToolGrant` collapses to a phase marker controlling which tool definitions are offered to the agent.
 
 ### D4: Platform sandbox verification
 
@@ -188,16 +188,19 @@ With `file_tool_forwarders = false`:
 
 In both modes, nu custom commands (`epic read`, `epic write`, etc.) are loaded at session startup and available through the NuShell tool.
 
-### What Changes
+### What Has Changed (Phases 1-2)
+
+- `execute_tool()` conditionally translates JSON tool params → nu command string → `nu_session.evaluate()` (when forwarders enabled).
+- Tool names changed: `read_file` → `Read`, `write_file` → `Write`, `edit_file` → `Edit`, `nu` → `NuShell`.
+- Tool schemas enriched to match Claude Code (see below).
+- New config field: `[agent] file_tool_forwarders` (bool, default true).
+
+### What Changes Next (Phase 4)
 
 - Rust tool implementations (`tool_read_file`, `tool_write_file`, `tool_edit_file`, `tool_glob`, `tool_grep`) removed from `tools.rs`.
 - `safe_path()` and `verify_ancestors_within_root()` removed.
 - `ToolGrant::READ` and `ToolGrant::WRITE` flags removed. `ToolGrant` reduced to phase marker (HasTools / NoTools).
-- `execute_tool()` conditionally translates JSON tool params → nu command string → `nu_session.evaluate()` (when forwarders enabled).
-- Tool names changed: `read_file` → `Read`, `write_file` → `Write`, `edit_file` → `Edit`, `nu` → `NuShell`.
-- Tool schemas enriched to match Claude Code (see below).
 - Nu custom commands loaded at session startup regardless of forwarder setting.
-- New config field: `[agent] file_tool_forwarders` (bool, default true).
 
 ---
 
@@ -694,19 +697,7 @@ def "epic grep" [
 
 ## Implementation Plan
 
-### Phase 1: Remaining nu command validation
-
-1. Test binary file handling in `epic read` (what happens with non-UTF-8 files).
-2. Write `epic_env.nu` (output limits, PATH for rg). Note: on Windows `$env.Path` is a string, not a list — use string interpolation for prepend.
-
-### Phase 2: Tool executor translation layer
-
-1. Add `file_tool_forwarders` config field to `EpicConfig` (default: true).
-2. Implement `translate_tool_call()` in Rust: JSON tool params → nu command string.
-3. Implement `quote_nu()` string escaping for safe parameter injection.
-4. Update `tool_definitions()` to conditionally return Claude Code-aligned schemas (forwarders on) or NuShell-only (forwarders off).
-5. Update `execute_tool()` dispatch: when forwarders on, translate → `nu_session.evaluate()`; when off, reject non-NuShell tool calls.
-6. Unit test the translation layer (JSON → nu command → expected string).
+Phases 1 (nu command validation) and 2 (tool executor translation layer) are complete.
 
 ### Phase 3: Config file integration
 
@@ -721,7 +712,7 @@ def "epic grep" [
 1. Remove `tool_read_file`, `tool_write_file`, `tool_edit_file`, `tool_glob`, `tool_grep` from `tools.rs`.
 2. Remove `safe_path()`, `verify_ancestors_within_root()`.
 3. Remove `ToolGrant::READ`, `ToolGrant::WRITE`. Simplify `ToolGrant` to phase marker.
-4. Rename `nu` → `NuShell` in tool definitions and dispatch.
+4. Remove legacy `nu` tool name (forwarded layer already uses `NuShell`).
 5. Update prompt assembly (`prompts.rs`) with new tool names and descriptions.
 
 ### Phase 5: Sandbox policy consolidation and docs
@@ -729,8 +720,7 @@ def "epic grep" [
 1. Verify lot `read_path` prevents writes on all platforms (automated tests).
 2. Verify `rg` binary is accessible within lot sandbox on all platforms.
 3. Verify temp dir access cannot pivot to project root.
-4. Remove any remaining `safe_path` references.
-5. Update DESIGN.md and README.md to reflect unified model and new tool names.
+4. Update DESIGN.md and README.md to reflect unified model and new tool names.
 
 ---
 

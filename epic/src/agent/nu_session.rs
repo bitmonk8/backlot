@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// Output from a NuShell MCP evaluate call.
+/// Output from a `NuShell` MCP `evaluate` call.
 pub struct NuOutput {
     pub content: String,
     pub is_error: bool,
@@ -86,7 +86,7 @@ struct NuProcess {
 
 impl Drop for NuProcess {
     fn drop(&mut self) {
-        let mut guard = self.child_handle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.child_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref mut child) = *guard {
             let _ = child.kill();
         }
@@ -143,7 +143,7 @@ impl NuSession {
         Ok(())
     }
 
-    /// Execute a NuShell command via the MCP evaluate tool.
+    /// Execute a `NuShell` command via the MCP `evaluate` tool.
     ///
     /// If the grant or project root differs from the running process, the
     /// old process is killed and a new one is spawned.
@@ -181,7 +181,7 @@ impl NuSession {
 
         // Kill the in-flight child first (process taken out during evaluate_inner Phase 2).
         if let Some(ref handle) = st.inflight_child {
-            let mut guard = handle.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref mut child) = *guard {
                 let _ = child.kill();
             }
@@ -190,7 +190,7 @@ impl NuSession {
 
         // Kill the process if it's parked in state (not currently in-flight).
         if let Some(proc) = st.process.take() {
-            let mut child_guard = proc.child_handle.lock().unwrap_or_else(|e| e.into_inner());
+            let mut child_guard = proc.child_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref mut child) = *child_guard {
                 let _ = child.kill();
             }
@@ -224,6 +224,7 @@ impl NuSession {
             let proc = st.process.take().expect("process just spawned");
             st.inflight_child = Some(Arc::clone(&proc.child_handle));
             let generation = st.generation;
+            drop(st);
             (proc, generation)
         };
         // Lock released — blocking I/O below does not hold the async mutex,
@@ -250,7 +251,7 @@ impl NuSession {
             st.process = Some(proc);
         } else if result.is_err() {
             // Kill the process on RPC error to avoid leaking it.
-            let mut child_guard = child_handle.lock().unwrap_or_else(|e| e.into_inner());
+            let mut child_guard = child_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref mut child) = *child_guard {
                 let _ = child.kill();
             }
@@ -293,15 +294,12 @@ fn read_response(
             return Err("nu process closed stdout unexpectedly".into());
         }
 
-        match try_parse_response(&line, expected_id) {
-            Some(response) => return Ok(response),
-            None => {
-                skipped += 1;
-                if skipped > MAX_SKIPPED_LINES {
-                    return Err("too many non-response lines from nu process".into());
-                }
-                continue;
-            }
+        if let Some(response) = try_parse_response(&line, expected_id) {
+            return Ok(response);
+        }
+        skipped += 1;
+        if skipped > MAX_SKIPPED_LINES {
+            return Err("too many non-response lines from nu process".into());
         }
     }
 }
