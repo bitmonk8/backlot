@@ -1,245 +1,335 @@
 # Flick Named Models Spec
 
-Status: **proposal** — for implementation in Flick.
+Status: **draft** — design decisions in progress.
 
 ## Problem
 
-Flick's `Config` requires every call to fully specify the model's provider, model ID, max_tokens, and temperature inline:
+Flick's `Config` conflates three distinct concerns into a single struct:
 
-```yaml
-model:
-  provider: anthropic
-  name: claude-sonnet-4-6
-  max_tokens: 8192
-  temperature: 0.0
+| Field | Conceptual owner |
+|---|---|
+| `provider` (map of name → ProviderConfig) | Provider definition |
+| `model` (provider, name, max_tokens, temp, reasoning) | Model identity + per-request tuning |
+| `pricing` | Model definition |
+| `system_prompt` | Request |
+| `tools` | Request |
+| `output_schema` | Request |
 
-provider:
-  anthropic:
-    api: messages
-    credential: my-key
-```
+This worked when flick was a CLI tool where one YAML file = one invocation = one of everything. For library consumers (Epic, Reel) that make many calls with different models, prompts, and tools in a single session, it forces repetitive config rebuilding and pushes model/provider abstractions into every consumer.
 
-This is fine for Flick's CLI (one config file per invocation), but creates problems for library consumers like Reel and Epic that make many calls with different models in a single session:
+Specific symptoms:
 
 1. **Repetition**: Epic's `config_gen.rs` rebuilds the full JSON config for every agent call. Provider block, credential, temperature — all identical every time. Only model name and max_tokens vary per tier.
 
-2. **Scattered tier definitions**: Epic defines `default_max_tokens(Model)` and `resolve_model_name(Model, &ModelConfig)` in its own code because Flick has no place to put "Sonnet means this model ID with these settings." The tier abstraction leaks into every consumer.
+2. **Scattered tier definitions**: Epic defines `default_max_tokens(Model)` and `resolve_model_name(Model, &ModelConfig)` in its own code because Flick has no place to put "Sonnet means this model ID with these settings."
 
-3. **Missing indirection layer**: Flick has `provider` (named, reusable) but `model` is inline and anonymous. The config has a `provider` map but no `model` map. This asymmetry means consumers cannot name and reuse model configurations.
+3. **Asymmetric indirection**: The config has a `provider` map (named, reusable) but `model` is inline and anonymous. Providers are referenceable; models are not.
 
-## Proposed Change
+## Design: Five Types, Five Concerns
 
-Add a `models` map to Flick's config, parallel to the existing `provider` map. Each entry is a named model configuration. The top-level `model` field becomes either an inline definition (backward-compatible) or a string reference to a named model.
+The fix is to decompose the current `Config` into distinct types with clear ownership:
 
-### Config Format
+| Type | Responsibility | Storage |
+|---|---|---|
+| `ProviderRegistry` | Map of name → `ProviderInfo` | `~/.flick/providers` |
+| `ProviderInfo` | API type, base URL, encrypted credential | Entry in ProviderRegistry |
+| `ModelRegistry` | Map of name → `ModelInfo` | `~/.flick/models` |
+| `ModelInfo` | Provider ref, model ID, max_tokens, pricing | Entry in ModelRegistry |
+| `RequestConfig` | Model ref, system_prompt, tools, output_schema, temperature, reasoning | Per-invocation YAML/JSON file |
 
-```yaml
-# Named model definitions (new)
-models:
-  fast:
-    provider: anthropic
-    name: claude-haiku-4-5-20251001
-    max_tokens: 8192
-    temperature: 0.0
-  balanced:
-    provider: anthropic
-    name: claude-sonnet-4-6
-    max_tokens: 8192
-    temperature: 0.0
-  strong:
-    provider: anthropic
-    name: claude-opus-4-6
-    max_tokens: 16384
-    temperature: 0.0
+### Resolution Chain
 
-# Active model selection — reference by name
-model: balanced
-
-# Provider definitions (unchanged)
-provider:
-  anthropic:
-    api: messages
-    credential: anthropic
+```
+RequestConfig.model ("balanced")
+    → ModelRegistry["balanced"] → ModelInfo { provider: "anthropic", name: "claude-sonnet-4-6", ... }
+        → ProviderRegistry["anthropic"] → ProviderInfo { api: messages, base_url: "https://api.anthropic.com", ... }
 ```
 
-### Backward Compatibility
+Each layer references the next by string key. Resolution happens once at client construction time.
 
-The `model` field accepts two forms:
+### ProviderRegistry
 
-1. **String** (new) — references a key in the `models` map:
-   ```yaml
-   model: balanced
-   ```
+Replaces the current `~/.flick/credentials` file. Stored at `~/.flick/providers`.
 
-2. **Object** (existing) — inline model definition, works exactly as today:
-   ```yaml
-   model:
-     provider: anthropic
-     name: claude-sonnet-4-6
-   ```
+```toml
+[anthropic]
+api = "messages"
+base_url = "https://api.anthropic.com"
+key = "enc3:..."   # encrypted API key
 
-When `model` is a string, `models` must contain a matching key. When `model` is an object, `models` is not required (the inline definition is used directly).
-
-### Struct Changes
+[openrouter]
+api = "chat_completions"
+base_url = "https://openrouter.ai"
+key = "enc3:..."
+compat.explicit_tool_choice_auto = true
+```
 
 ```rust
-// New: named model map
+pub struct ProviderRegistry {
+    providers: HashMap<String, ProviderInfo>,
+}
+
+pub struct ProviderInfo {
+    pub api: ApiKind,
+    pub base_url: String,
+    pub key: String,               // encrypted on disk, decrypted in memory
+    pub compat: Option<CompatFlags>,
+}
+```
+
+This is structurally identical to the current credential store (`StoredProvider` has `key`, `api`, `base_url`). The rename makes the role explicit. Compatibility flags (`compat`) move here from the per-invocation config — they are properties of the provider endpoint, not the request.
+
+Migration: rename `~/.flick/credentials` → `~/.flick/providers`. File format unchanged.
+
+### ModelRegistry
+
+New. Stored at `~/.flick/models`.
+
+```toml
+[fast]
+provider = "anthropic"
+name = "claude-haiku-4-5-20251001"
+max_tokens = 8192
+input_per_million = 0.80
+output_per_million = 4.00
+
+[balanced]
+provider = "anthropic"
+name = "claude-sonnet-4-6"
+max_tokens = 8192
+input_per_million = 3.00
+output_per_million = 15.00
+
+[strong]
+provider = "anthropic"
+name = "claude-opus-4-6"
+max_tokens = 16384
+input_per_million = 15.00
+output_per_million = 75.00
+```
+
+```rust
+pub struct ModelRegistry {
+    models: HashMap<String, ModelInfo>,
+}
+
+pub struct ModelInfo {
+    pub provider: String,          // key into ProviderRegistry
+    pub name: String,              // model ID as known by the provider API
+    pub max_tokens: Option<u32>,
+    pub input_per_million: Option<f64>,
+    pub output_per_million: Option<f64>,
+}
+```
+
+`provider` must reference a key in the ProviderRegistry. `name` is the actual model identifier sent to the API (e.g. `claude-sonnet-4-6`, `gpt-4o`). Pricing is optional — the builtin model registry can provide defaults.
+
+### RequestConfig
+
+Renamed from `Config`. This is what the per-invocation YAML/JSON file deserializes into.
+
+```yaml
+model: balanced
+system_prompt: "You are a code assistant."
+temperature: 0.0
+reasoning:
+  level: medium
+output_schema:
+  schema:
+    type: object
+    properties:
+      answer:
+        type: string
+tools:
+  - name: read_file
+    description: "Read a file's contents"
+    parameters:
+      type: object
+      properties:
+        path:
+          type: string
+      required: [path]
+```
+
+```rust
 #[derive(Debug, Deserialize)]
-pub struct Config {
-    // Deserialized as either String or ModelConfig via custom deserializer
-    model: ModelRef,
-
-    #[serde(default)]
-    models: HashMap<String, ModelConfig>,
-
-    // ... existing fields unchanged ...
+#[serde(deny_unknown_fields)]
+pub struct RequestConfig {
+    model: String,                          // key into ModelRegistry
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default)]
+    temperature: Option<f32>,
+    #[serde(default)]
+    reasoning: Option<ReasoningConfig>,
+    #[serde(default)]
     output_schema: Option<OutputSchema>,
     #[serde(default)]
-    provider: HashMap<String, ProviderConfig>,
-    #[serde(default)]
     tools: Vec<ToolConfig>,
-    #[serde(default)]
-    pricing: Option<PricingConfig>,
-}
-
-/// Either an inline model definition or a reference to a named model.
-#[derive(Debug)]
-enum ModelRef {
-    Inline(ModelConfig),
-    Named(String),
 }
 ```
 
-### Resolution
+No `provider` block. No `pricing`. No model ID. Just a model name (resolved through registries) and per-request parameters.
 
-`Config::model()` resolves the active model:
-- If `ModelRef::Inline(config)` → return `&config`
-- If `ModelRef::Named(name)` → look up in `self.models`, error if missing
+`temperature` and `reasoning` live here because the same model may be called with different settings depending on the task.
+
+### FlickClient Construction
+
+The client resolves the full chain at construction time:
 
 ```rust
-impl Config {
-    pub fn model(&self) -> Result<&ModelConfig, ConfigError> {
-        match &self.model {
-            ModelRef::Inline(config) => Ok(config),
-            ModelRef::Named(name) => self.models.get(name).ok_or_else(|| {
-                ConfigError::UnknownModel(name.clone())
-            }),
-        }
+impl FlickClient {
+    pub fn new(
+        request: RequestConfig,
+        models: &ModelRegistry,
+        providers: &ProviderRegistry,
+    ) -> Result<FlickClient, FlickError> {
+        // 1. Resolve model name → ModelInfo
+        // 2. Resolve ModelInfo.provider → ProviderInfo
+        // 3. Build HTTP provider from ProviderInfo
+        // 4. Validate the full resolved config
+        // ...
     }
 }
 ```
 
-**Breaking change**: `model()` currently returns `&ModelConfig` infallibly (it's `const`). With named models, resolution can fail. The return type changes to `Result<&ModelConfig, ConfigError>`.
+Resolution errors (unknown model name, unknown provider reference) fail at construction, not at call time.
 
-Alternative: resolve during `validate()` and store the resolved reference, keeping `model()` infallible. This is cleaner but requires interior mutability or a resolved-config wrapper type. Recommend resolving in `validate()` and caching a reference or index.
+### CLI Flow
 
-### CLI Override
+```
+1. Load ~/.flick/providers     → ProviderRegistry
+2. Load ~/.flick/models        → ModelRegistry
+3. Parse request YAML/JSON     → RequestConfig
+4. FlickClient::new(request, &models, &providers)
+5. client.run(query, &mut context)
+```
 
-The existing `--model` flag overrides the model ID within the resolved `ModelConfig`. It does not select a different named model. A new `--use-model <name>` flag could select a named model, but this is optional for v1.
+### CLI Commands
+
+`flick setup <provider>` — unchanged behavior, writes to `~/.flick/providers` (renamed from `credentials`).
+
+`flick list` — lists providers (reads `~/.flick/providers`).
+
+`flick model add <name>` — new command, adds an entry to `~/.flick/models`. Interactive: prompts for provider, model ID, max_tokens, pricing.
+
+`flick model list` — new command, lists entries in `~/.flick/models`.
+
+`flick model remove <name>` — new command, removes an entry from `~/.flick/models`.
+
+### CLI Overrides
+
+| Flag | Effect |
+|---|---|
+| `--model <name>` | Select a different named model from the ModelRegistry (replaces current behavior of overriding model ID) |
+| `--temperature <f32>` | Override temperature from RequestConfig |
+| `--reasoning <level>` | Override reasoning level from RequestConfig (existing) |
+
+### Library Usage
+
+```rust
+use flick::{RequestConfig, ConfigFormat, ModelRegistry, ProviderRegistry, FlickClient, Context};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load registries (once at startup)
+    let providers = ProviderRegistry::load_default()?;
+    let models = ModelRegistry::load_default()?;
+
+    // Parse request config
+    let yaml = std::fs::read_to_string("request.yaml")?;
+    let request = RequestConfig::from_str(&yaml, ConfigFormat::Yaml)?;
+
+    // Build client (resolves model → provider chain)
+    let client = FlickClient::new(request, &models, &providers)?;
+
+    let mut ctx = Context::default();
+    let result = client.run("What is Rust?", &mut ctx).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+```
+
+For library consumers switching models across calls:
+
+```rust
+// Epic/Reel: build one set of registries, vary RequestConfig per call
+let providers = ProviderRegistry::load_default()?;
+let models = ModelRegistry::load_default()?;
+
+// Fast model call
+let mut request = base_request.clone();
+request.set_model("fast");
+request.set_system_prompt("Triage this issue.");
+let client = FlickClient::new(request, &models, &providers)?;
+
+// Strong model call
+let mut request = base_request.clone();
+request.set_model("strong");
+request.set_system_prompt("Write a detailed implementation plan.");
+let client = FlickClient::new(request, &models, &providers)?;
+```
 
 ### Validation
 
-During `validate()`:
-- If `model` is `Named(name)`, verify `name` exists in `models`
-- Each entry in `models` validates the same way `ModelConfig` does today (non-empty name, valid temperature, etc.)
-- Each entry's `provider` field must reference a key in the `provider` map
-- `models` entries that are not referenced by `model` are still validated (they may be used by library consumers selecting models dynamically)
+**ProviderRegistry** (validated on load):
+- Each entry has a non-empty `api` and `base_url`
+- Key decryption is deferred until provider is actually used
 
-### Library API: Selecting a Named Model
+**ModelRegistry** (validated on load):
+- Each entry has a non-empty `name`
+- `max_tokens` if present must be > 0
+- Pricing values if present must be non-negative and finite
+- `provider` field is validated against ProviderRegistry at FlickClient construction (not at registry load, since the registry file shouldn't depend on another file's contents)
 
-For library consumers (Reel, Epic), the key capability is switching models without rebuilding the config:
+**RequestConfig** (validated at FlickClient construction):
+- `model` references a key in ModelRegistry
+- `temperature` is non-negative and finite, within API-specific ceiling
+- `reasoning` + `output_schema` mutual exclusion (Messages API)
+- `budget_tokens` < `max_tokens` constraint (Anthropic with reasoning)
+- Tool names non-empty and unique
+- Tool descriptions non-empty
+- Tool parameters are JSON objects if present
 
-```rust
-impl Config {
-    /// Switch the active model to a named model from the `models` map.
-    /// Re-validates; reverts on failure.
-    pub fn select_model(&mut self, name: &str) -> Result<(), ConfigError> {
-        // ...
-    }
-}
-```
+## Migration from Current Design
 
-This is the primary motivator. Epic builds one `Config` at startup with all three tiers defined in `models`. Each agent call just calls `config.select_model("fast")` or `config.select_model("balanced")` instead of rebuilding the entire config from JSON.
-
-## Impact on Consumers
-
-### Reel
-
-Reel's `AgentConfig` holds a single `flick::Config` (built once). `AgentRequest` specifies a model name (string). Reel calls `config.select_model(&request.model)` before each agent call. No JSON rebuilding.
-
-```rust
-// Reel internals (sketch)
-pub struct AgentConfig {
-    flick_config: flick::Config,  // built once with models + providers
-    // ...
-}
-
-pub struct AgentRequest {
-    pub model: String,  // references a key in flick_config.models
-    // ...
-}
-
-impl Agent {
-    pub async fn run<T>(&self, request: AgentRequest) -> Result<RunResult<T>> {
-        let mut config = self.config.flick_config.clone();  // or select_model on a &mut
-        config.select_model(&request.model)?;
-        // ...
-    }
-}
-```
-
-### Epic
-
-Epic's `config_gen.rs` simplifies dramatically. Instead of 8 config builder functions that each rebuild JSON, epic builds one `flick::Config` at startup and passes model names per-call:
-
-```rust
-// Before (epic today): ~80 lines of JSON building per config
-let json = json!({
-    "model": { "provider": "anthropic", "name": model_name, "max_tokens": 8192, "temperature": 0.0 },
-    "provider": { "anthropic": { "api": "messages", "credential": cred } },
-    "tools": [...],
-    "output_schema": { "schema": ... }
-});
-let config = flick::Config::from_str(&json_str, Json)?;
-
-// After: build once, select per-call
-let mut config = base_config.clone();
-config.select_model("balanced")?;
-// set tools, output_schema, system_prompt per-call
-```
-
-### Flick CLI
-
-No change to existing configs. Inline `model` still works. Users who want named models can define a `models` map. The CLI `--model` flag overrides the model ID within the selected model, as today.
-
-## Per-Call Overrides
-
-With named models handling the model/provider/max_tokens bundle, the remaining per-call fields are:
-
-| Field | Varies per call? | Mechanism |
-|---|---|---|
-| model selection | Yes | `select_model("name")` |
-| system_prompt | Yes | Needs override method |
-| output_schema | Yes | Needs override method |
-| tools | Yes | Needs override method |
-| pricing | No | Set once |
-
-Flick needs override methods for system_prompt, output_schema, and tools — or alternatively, a builder pattern that layers per-call fields onto a base config. This is secondary to the named models change but worth considering together.
-
-Flick already has `override_model_name()` and `override_reasoning()`. Adding `override_system_prompt()`, `override_tools()`, and `override_output_schema()` follows the same pattern.
-
-## Summary
-
-| Change | Scope |
+| Current | New |
 |---|---|
-| Add `models: HashMap<String, ModelConfig>` to `Config` | Flick config.rs |
-| Make `model` field accept string or object | Flick config.rs (custom deser) |
-| Add `Config::select_model(&mut self, name: &str)` | Flick config.rs |
-| Add override methods for system_prompt, tools, output_schema | Flick config.rs |
-| Add `ConfigError::UnknownModel(String)` variant | Flick error.rs |
-| Validation of models map entries | Flick config.rs |
-| Update CLI `--model` semantics (optional) | Flick CLI |
-| Update existing tests, add named model tests | Flick config.rs tests |
+| `~/.flick/credentials` | `~/.flick/providers` (same format, renamed) |
+| `~/.flick/.secret_key` | Unchanged |
+| `Config` struct | `RequestConfig` struct |
+| `Config.provider` (inline map) | Removed — providers live in ProviderRegistry |
+| `Config.model` (inline ModelConfig) | `RequestConfig.model` (string key) |
+| `Config.pricing` | Moved to `ModelInfo` in ModelRegistry |
+| `ModelConfig.provider` | Moved to `ModelInfo` in ModelRegistry |
+| `ModelConfig.name` | Moved to `ModelInfo` in ModelRegistry |
+| `ModelConfig.max_tokens` | Moved to `ModelInfo` in ModelRegistry |
+| `ModelConfig.temperature` | Stays in `RequestConfig` |
+| `ModelConfig.reasoning` | Stays in `RequestConfig` |
+| `CompatFlags` (in provider config) | Moved to `ProviderInfo` in ProviderRegistry |
+| `resolve_provider()` | Absorbed into `FlickClient::new()` |
+| `flick setup` writes `credentials` | `flick setup` writes `providers` |
+
+Breaking changes to the library API:
+- `Config` renamed to `RequestConfig`
+- `FlickClient::new()` signature changes (takes three arguments)
+- `resolve_provider()` removed (resolution is internal to client construction)
+- `Config::from_str()` → `RequestConfig::from_str()`
+- `Config::model()` removed (model info is resolved internally)
+- Existing YAML configs must remove `provider:` and `pricing:` blocks, change `model:` from object to string
+
+## Open Questions
+
+Items not yet decided — each needs resolution before implementation.
+
+1. **ModelRegistry: TOML or different format?** — ProviderRegistry inherits TOML from the current credentials file. ModelRegistry is new. TOML is consistent but may be limiting for complex schemas. Alternatives: YAML, JSON.
+
+2. **Builtin models** — Should Flick ship a hardcoded set of well-known models (e.g. `claude-sonnet-4-6` with default pricing) that users can override? Or is the registry purely user-defined?
+
+3. **`--model` flag change** — Currently overrides the model ID string. Proposed: selects a named model from the registry. This changes existing CLI behavior. Acceptable?
+
+4. **Per-call override methods on RequestConfig** — `set_model()`, `set_system_prompt()`, `set_tools()`, `set_output_schema()`: implement as simple setters, or a builder pattern?
+
+5. **ProviderInfo.provider validation at registry load** — ModelInfo.provider references a ProviderRegistry key. Should this cross-reference be validated when ModelRegistry loads (requires both files), or deferred to FlickClient construction?
+
+6. **`flick init` update** — Currently generates a full Config YAML. Needs to generate a RequestConfig YAML instead. Should it also offer to populate ModelRegistry entries?
