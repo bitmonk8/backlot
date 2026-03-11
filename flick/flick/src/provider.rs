@@ -4,10 +4,10 @@ pub mod messages;
 
 use std::pin::Pin;
 
-use crate::config::ProviderConfig;
 use crate::context::Message;
 use crate::error::ProviderError;
 use crate::model::ReasoningLevel;
+use crate::provider_registry::ProviderInfo;
 
 /// Parameters for a provider request.
 pub struct RequestParams<'a> {
@@ -86,21 +86,26 @@ impl DynProvider for ProviderInstance {
     }
 }
 
-/// Construct a provider from config. `base_url` comes from the credential store.
+/// Construct a provider from resolved registry info.
 pub fn create_provider(
-    provider_config: &ProviderConfig,
-    api_key: String,
-    base_url: &str,
+    provider_info: &ProviderInfo,
     client: reqwest::Client,
 ) -> ProviderInstance {
-    match provider_config.api {
+    match provider_info.api {
         crate::ApiKind::Messages => {
-            ProviderInstance::Messages(messages::MessagesProvider::new(base_url, api_key, client))
+            ProviderInstance::Messages(messages::MessagesProvider::new(
+                &provider_info.base_url,
+                provider_info.key.clone(),
+                client,
+            ))
         }
         crate::ApiKind::ChatCompletions => {
-            let compat = provider_config.compat.clone().unwrap_or_default();
+            let compat = provider_info.compat.clone().unwrap_or_default();
             ProviderInstance::ChatCompletions(chat_completions::ChatCompletionsProvider::new(
-                base_url, api_key, compat, client,
+                &provider_info.base_url,
+                provider_info.key.clone(),
+                compat,
+                client,
             ))
         }
     }
@@ -137,21 +142,17 @@ pub(crate) mod test_helpers {
 mod tests {
     use super::*;
     use crate::ApiKind;
-    use crate::config::{CompatFlags, ProviderConfig};
+    use crate::config::CompatFlags;
 
     #[test]
     fn create_provider_messages_variant() {
-        let config = ProviderConfig {
+        let info = ProviderInfo {
             api: ApiKind::Messages,
-            credential: None,
+            base_url: "https://custom.anthropic.com".into(),
+            key: "test-key".into(),
             compat: None,
         };
-        let provider = create_provider(
-            &config,
-            "test-key".into(),
-            "https://custom.anthropic.com",
-            reqwest::Client::new(),
-        );
+        let provider = create_provider(&info, reqwest::Client::new());
         match &provider {
             ProviderInstance::Messages(p) => {
                 assert_eq!(p.base_url(), "https://custom.anthropic.com");
@@ -162,19 +163,15 @@ mod tests {
 
     #[test]
     fn create_provider_chat_completions_variant() {
-        let config = ProviderConfig {
+        let info = ProviderInfo {
             api: ApiKind::ChatCompletions,
-            credential: None,
+            base_url: "https://custom.openai.com".into(),
+            key: "test-key".into(),
             compat: Some(CompatFlags {
                 explicit_tool_choice_auto: true,
             }),
         };
-        let provider = create_provider(
-            &config,
-            "test-key".into(),
-            "https://custom.openai.com",
-            reqwest::Client::new(),
-        );
+        let provider = create_provider(&info, reqwest::Client::new());
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert_eq!(p.base_url(), "https://custom.openai.com");
@@ -185,57 +182,14 @@ mod tests {
     }
 
     #[test]
-    fn create_provider_base_url_passed_through() {
-        let messages_config = ProviderConfig {
-            api: ApiKind::Messages,
-            credential: None,
-            compat: None,
-        };
-        let provider = create_provider(
-            &messages_config,
-            "key".into(),
-            "https://api.anthropic.com",
-            reqwest::Client::new(),
-        );
-        match &provider {
-            ProviderInstance::Messages(p) => {
-                assert_eq!(p.base_url(), "https://api.anthropic.com");
-            }
-            ProviderInstance::ChatCompletions(_) => panic!("expected Messages"),
-        }
-
-        let openai_config = ProviderConfig {
-            api: ApiKind::ChatCompletions,
-            credential: None,
-            compat: None,
-        };
-        let provider = create_provider(
-            &openai_config,
-            "key".into(),
-            "https://api.openai.com",
-            reqwest::Client::new(),
-        );
-        match &provider {
-            ProviderInstance::ChatCompletions(p) => {
-                assert_eq!(p.base_url(), "https://api.openai.com");
-            }
-            ProviderInstance::Messages(_) => panic!("expected ChatCompletions"),
-        }
-    }
-
-    #[test]
     fn create_provider_chat_completions_default_flags() {
-        let config = ProviderConfig {
+        let info = ProviderInfo {
             api: ApiKind::ChatCompletions,
-            credential: None,
+            base_url: "https://api.openai.com".into(),
+            key: "key".into(),
             compat: None,
         };
-        let provider = create_provider(
-            &config,
-            "key".into(),
-            "https://api.openai.com",
-            reqwest::Client::new(),
-        );
+        let provider = create_provider(&info, reqwest::Client::new());
         match &provider {
             ProviderInstance::ChatCompletions(p) => {
                 assert!(!p.compat().explicit_tool_choice_auto);

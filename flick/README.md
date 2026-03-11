@@ -1,6 +1,6 @@
 # Flick
 
-Ultra-small, ultra-fast LLM primitive written in Rust. Available as both a **CLI tool** (`flick-cli`) and a **Rust library** (`flick`). Takes a YAML (or JSON) config and a query, makes a single LLM call, and returns a JSON result. Flick declares tool definitions to the model but never executes tools. The caller drives the agent loop externally.
+Ultra-small, ultra-fast LLM primitive written in Rust. Available as both a **CLI tool** (`flick-cli`) and a **Rust library** (`flick`). Takes a YAML (or JSON) request config and a query, makes a single LLM call, and returns a JSON result. Flick declares tool definitions to the model but never executes tools. The caller drives the agent loop externally.
 
 The project is a Cargo workspace with two crates:
 
@@ -41,32 +41,65 @@ The release binary is optimized with LTO, single codegen unit, and symbol stripp
 
 ## Quick Start
 
-1. Store an API key:
+1. Register a provider:
 
 ```sh
-flick setup anthropic
+flick provider add anthropic
 ```
 
-2. Create a config file (`config.yaml`):
+2. Register a model:
+
+```sh
+flick model add balanced
+```
+
+3. Create a request config file (`flick.yaml`):
 
 ```yaml
-model:
-  provider: anthropic
-  name: claude-sonnet-4-20250514
-  max_tokens: 8192
-
+model: balanced
 system_prompt: "You are a helpful assistant."
-
-provider:
-  anthropic:
-    api: messages
 ```
 
-3. Run a query:
+Or generate one interactively:
 
 ```sh
-flick run --config config.yaml --query "What is Rust?"
+flick init
 ```
+
+4. Run a query:
+
+```sh
+flick run --config flick.yaml --query "What is Rust?"
+```
+
+## Provider Registry
+
+Providers are stored at `~/.flick/providers` (TOML, encrypted with ChaCha20-Poly1305). A 256-bit secret key is generated on first use and stored at `~/.flick/.secret_key` with restrictive file permissions.
+
+```sh
+# Add a provider
+flick provider add anthropic
+
+# List providers
+flick provider list
+```
+
+## Model Registry
+
+Models are stored at `~/.flick/models` (TOML). Each entry maps a user-chosen name to a provider reference, model ID, max_tokens, and optional pricing.
+
+```sh
+# Add a model
+flick model add balanced
+
+# List models
+flick model list
+
+# Remove a model
+flick model remove balanced
+```
+
+No builtin models. The registry is empty until the user runs `flick model add`.
 
 ## Library Usage
 
@@ -79,14 +112,20 @@ tokio = { version = "1", features = ["rt", "macros"] }
 ```
 
 ```rust
-use flick::{Config, ConfigFormat, Context, FlickClient};
+use flick::{RequestConfig, ConfigFormat, ModelRegistry, ProviderRegistry, FlickClient, Context};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let yaml = std::fs::read_to_string("config.yaml")?;
-    let config = Config::from_str(&yaml, ConfigFormat::Yaml)?;
-    let provider = flick::resolve_provider(&config).await?;
-    let client = FlickClient::new(config, provider);
+    // Load registries (once at startup)
+    let providers = ProviderRegistry::load_default()?;
+    let models = ModelRegistry::load_default().await?;
+
+    // Parse request config
+    let yaml = std::fs::read_to_string("flick.yaml")?;
+    let request = RequestConfig::from_str(&yaml, ConfigFormat::Yaml)?;
+
+    // Build client (resolves model -> provider chain)
+    let client = FlickClient::new(request, &models, &providers).await?;
 
     let mut ctx = Context::default();
     let result = client.run("What is Rust?", &mut ctx).await?;
@@ -98,15 +137,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For callers that manage their own credentials, use `flick::provider::create_provider` directly to construct a provider, then pass it to `FlickClient::new`.
+For library consumers switching models across calls:
+
+```rust
+let providers = ProviderRegistry::load_default()?;
+let models = ModelRegistry::load_default().await?;
+
+// Fast model call
+let request = RequestConfig::builder()
+    .model("fast")
+    .system_prompt("Triage this issue.")
+    .build()?;
+let client = FlickClient::new(request, &models, &providers).await?;
+
+// Strong model call
+let request = RequestConfig::builder()
+    .model("strong")
+    .system_prompt("Write a detailed implementation plan.")
+    .tools(planning_tools)
+    .build()?;
+let client = FlickClient::new(request, &models, &providers).await?;
+```
 
 ## CLI Reference
 
 ```
 flick run --config <file> [OPTIONS]
-flick setup <provider>
+flick provider add <name>
+flick provider list
+flick model add <name>
+flick model list
+flick model remove <name>
 flick init [--output <path>]
-flick list
 ```
 
 ### `flick run`
@@ -118,28 +180,38 @@ flick list
 | `--resume <hash>` | Resume a previous session by context hash |
 | `--tool-results <path>` | JSON file containing tool results for resumed session |
 | `--dry-run` | Dump API request as JSON without calling the model |
-| `--model <id>` | Override model ID from config |
-| `--reasoning <level>` | Override reasoning level (`minimal`, `low`, `medium`, `high`) |
 
 Validation:
 - `--resume` and `--tool-results` must both be present or both absent.
 - `--query` and `--resume` are mutually exclusive.
 
+### `flick provider add`
+
+Interactive provider onboarding. Prompts for an API key, API type, and base URL, then stores them encrypted at `~/.flick/providers`.
+
+### `flick provider list`
+
+Lists providers in tab-separated columns (name, API type, base URL), sorted alphabetically.
+
+### `flick model add`
+
+Interactive model onboarding. Prompts for provider, model ID, max_tokens, and pricing. Writes to `~/.flick/models`.
+
+### `flick model list`
+
+Lists models in tab-separated columns (key, provider, model ID, max_tokens).
+
+### `flick model remove`
+
+Removes a model entry from `~/.flick/models`.
+
 ### `flick init`
 
-Interactive config generator. Walks through provider selection, model, max output tokens, and system prompt, then writes a commented YAML config file.
+Interactive config generator. Selects a model from the ModelRegistry and a system prompt, then writes a RequestConfig YAML file. If the ModelRegistry is empty, directs user to `flick model add` first.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--output <path>` | `flick.yaml` | Output file path (use `-` for stdout) |
-
-### `flick setup`
-
-Interactive credential onboarding. Prompts for an API key, API type, and base URL, then stores them encrypted at `~/.flick/credentials`.
-
-### `flick list`
-
-Lists onboarded providers in tab-separated columns (name, API type, base URL), sorted alphabetically. Produces no output if no credentials exist.
 
 ## Output Format
 
@@ -189,39 +261,22 @@ Each `flick run` makes exactly one model call and returns. The caller drives the
 
 ## Configuration
 
-Flick is configured via a YAML file (or JSON for machine-generated configs). Format is detected by file extension (`.yaml`, `.yml`, `.json`).
+Flick is configured via a RequestConfig YAML file (or JSON for machine-generated configs). Format is detected by file extension (`.yaml`, `.yml`, `.json`).
 
 Full example:
 
 ```yaml
-model:
-  provider: anthropic
-  name: claude-sonnet-4-20250514
-  max_tokens: 8192
-  temperature: 0.0
-  reasoning:
-    level: medium
-
+model: balanced
 system_prompt: "You are a code assistant."
-
+temperature: 0.0
+reasoning:
+  level: medium
 output_schema:
   schema:
     type: object
     properties:
       answer:
         type: string
-
-provider:
-  anthropic:
-    api: messages
-    credential: anthropic
-
-  openrouter:
-    api: chat_completions
-    credential: openrouter
-    compat:
-      explicit_tool_choice_auto: true
-
 tools:
   - name: read_file
     description: "Read a file's contents"
@@ -239,22 +294,13 @@ tools:
         pattern:
           type: string
       required: [pattern]
-
-pricing:
-  input_per_million: 3.0
-  output_per_million: 15.0
 ```
 
 ### `model`
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `provider` | string | yes | — | Must match a key under `provider:` |
-| `name` | string | yes | — | Model identifier |
-| `max_tokens` | u32 | no | none | Maximum output tokens (must be > 0); omitted = provider default |
-| `temperature` | f32 | no | none | Sampling temperature; omitted for reasoning models. Messages API: 0.0–1.0, Chat Completions: 0.0–2.0 |
+String key referencing an entry in the ModelRegistry (`~/.flick/models`).
 
-### `model.reasoning`
+### `reasoning`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -288,21 +334,6 @@ it as `response_format`. When using a Chat Completions provider with both `tools
 includes tools (no schema), and if the model completes without tool calls, a second
 request applies the schema (no tools). Usage from both calls is summed.
 
-### `provider.<name>`
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `api` | string | yes | — | `messages` or `chat_completions` |
-| `credential` | string | no | provider name | Key name in credential store |
-
-### `provider.<name>.compat`
-
-Compatibility flags for Chat Completions providers:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `explicit_tool_choice_auto` | bool | false | Send `tool_choice: "auto"` explicitly |
-
 ### `tools`
 
 Declare tool schemas. Flick includes these in the model request but never executes tools — the caller handles execution.
@@ -313,30 +344,12 @@ Declare tool schemas. Flick includes these in the model request but never execut
 | `description` | string | yes | Description sent to the model |
 | `parameters` | JSON value | no | JSON Schema for tool parameters |
 
-### `pricing`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `input_per_million` | f64 | yes | Cost per million input tokens (USD, non-negative) |
-| `output_per_million` | f64 | yes | Cost per million output tokens (USD, non-negative) |
-
-Optional. Overrides the builtin model registry pricing. Cost is reported in the `usage` field of the result.
-
-## Run History
-
-After each successful (non-dry-run) invocation, Flick records:
-
-- **`~/.flick/history.jsonl`** — one JSON object per line capturing timestamp, invocation args, token usage, cost, and a context hash.
-- **`~/.flick/contexts/{hash}.json`** — the full conversation context, keyed by its xxh3-128 hash (content-addressable dedup — identical contexts are stored once).
-
-History writes are non-fatal. Failures produce a stderr warning without affecting the exit code or output.
-
 ## Context Resumption
 
 Resume a session by passing `--resume` with the context hash and `--tool-results` with a JSON file:
 
 ```sh
-flick run --config config.yaml --resume 00a1b2c3d4e5f67890abcdef12345678 --tool-results results.json
+flick run --config flick.yaml --resume 00a1b2c3d4e5f67890abcdef12345678 --tool-results results.json
 ```
 
 The tool results file contains an array of results:
@@ -348,65 +361,21 @@ The tool results file contains an array of results:
 ]
 ```
 
+## Run History
+
+After each successful (non-dry-run) invocation, Flick records:
+
+- **`~/.flick/history.jsonl`** — one JSON object per line capturing timestamp, invocation args, token usage, cost, and a context hash.
+- **`~/.flick/contexts/{hash}.json`** — the full conversation context, keyed by its xxh3-128 hash (content-addressable dedup — identical contexts are stored once).
+
+History writes are non-fatal. Failures produce a stderr warning without affecting the exit code or output.
+
 ## Provider Support
 
 | API Type | Providers |
 |----------|-----------|
 | **Messages API** (native) | Anthropic (Claude) |
 | **Chat Completions** | OpenAI, OpenRouter, Groq, Mistral, Ollama, DeepSeek, etc. |
-
-### Provider Examples
-
-Anthropic:
-
-```yaml
-provider:
-  anthropic:
-    api: messages
-```
-
-OpenAI:
-
-```yaml
-provider:
-  openai:
-    api: chat_completions
-```
-
-OpenRouter:
-
-```yaml
-provider:
-  openrouter:
-    api: chat_completions
-    compat:
-      explicit_tool_choice_auto: true
-```
-
-Ollama (local):
-
-```yaml
-provider:
-  ollama:
-    api: chat_completions
-```
-
-## Credential Store
-
-Credentials are stored at `~/.flick/credentials` (encrypted with ChaCha20-Poly1305). A 256-bit secret key is generated on first use and stored at `~/.flick/.secret_key` with restrictive file permissions.
-
-```sh
-# Store a credential
-flick setup anthropic
-
-# List stored credentials
-flick list
-
-# Credentials are referenced by name in config:
-# provider:
-#   anthropic:
-#     credential: anthropic   # matches the name passed to `flick setup`
-```
 
 ## HTTP Retry
 
@@ -425,7 +394,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-333 tests (248 lib, 56 bin, 18 runner, 11 integration). One additional Unix-only test for file permissions.
+250 tests (199 lib, 22 bin, 18 runner, 11 integration). One additional Unix-only test for file permissions.
 
 ## License
 

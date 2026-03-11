@@ -109,7 +109,7 @@ pub enum CredentialError {
     #[error("secret key not found at {0}")]
     NoSecretKey(PathBuf),
 
-    #[error("credential store I/O error: {0}")]
+    #[error("provider registry I/O error: {0}")]
     Io(#[from] std::io::Error),
 
     #[error("invalid credential format: {0}")]

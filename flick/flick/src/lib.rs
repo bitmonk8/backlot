@@ -1,11 +1,12 @@
 pub mod config;
 pub mod context;
-pub mod credential;
 pub mod error;
 pub mod history;
 pub mod model;
 pub mod model_list;
+pub mod model_registry;
 pub mod provider;
+pub mod provider_registry;
 pub mod result;
 pub mod runner;
 
@@ -16,14 +17,14 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-// Re-exports for convenience — library consumers can use `flick::Config` etc.
-pub use config::{Config, ConfigFormat};
+// Re-exports for convenience
+pub use config::{ConfigFormat, RequestConfig};
 pub use context::{ContentBlock, Context, Message};
-pub use credential::CredentialStore;
 pub use error::FlickError;
+pub use model_registry::{ModelInfo, ModelRegistry};
 pub use provider::DynProvider;
+pub use provider_registry::ProviderRegistry;
 pub use result::FlickResult;
-
 use provider::create_provider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,48 +43,79 @@ impl std::fmt::Display for ApiKind {
     }
 }
 
-/// Resolve credentials from the default store and build a boxed provider.
+/// Reusable handle holding resolved config, model info, and provider.
 ///
-/// This is the standard way to construct a provider for `FlickClient`.
-/// Library callers who manage their own secrets can call `create_provider`
-/// directly via `flick::provider::create_provider`.
-pub async fn resolve_provider(config: &Config) -> Result<Box<dyn DynProvider>, FlickError> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| FlickError::Io(std::io::Error::other(e.to_string())))?;
-    let provider_config = config.active_provider()?;
-    let cred_store = CredentialStore::new()?;
-    let cred_name = provider_config
-        .credential
-        .as_deref()
-        .unwrap_or_else(|| config.model().provider());
-    let entry = cred_store.get(cred_name).await?;
-    let provider = create_provider(provider_config, entry.key, &entry.base_url, client);
-    Ok(Box::new(provider))
-}
-
-/// Reusable handle holding config and an injected provider.
-/// Provider is always caller-supplied, keeping `FlickClient` fully testable.
+/// Constructed via `FlickClient::new()` which resolves the full
+/// `RequestConfig.model → ModelRegistry → ProviderRegistry` chain.
 pub struct FlickClient {
-    config: Config,
+    config: RequestConfig,
+    model_info: ModelInfo,
+    api_kind: ApiKind,
     provider: Box<dyn DynProvider>,
 }
 
 impl FlickClient {
-    /// Build from a config and an injected provider.
+    /// Build from a `RequestConfig` by resolving model and provider from registries.
     ///
-    /// Use `resolve_provider` to construct a provider from the credential store,
-    /// or inject a mock for testing.
-    pub fn new(config: Config, provider: Box<dyn DynProvider>) -> Self {
-        Self { config, provider }
+    /// Resolution errors (unknown model, unknown provider) fail here, not at call time.
+    pub async fn new(
+        request: RequestConfig,
+        models: &ModelRegistry,
+        providers: &ProviderRegistry,
+    ) -> Result<Self, FlickError> {
+        let model_key = request.model();
+        let model_info = models.get(model_key).ok_or_else(|| {
+            FlickError::Config(error::ConfigError::InvalidModelConfig(format!(
+                "unknown model key: '{model_key}'"
+            )))
+        })?.clone();
+
+        // Resolve provider — returns error if not found.
+        let provider_info = providers.get(&model_info.provider)
+            .await
+            .map_err(FlickError::Credential)?;
+
+        // Validate request against resolved model/provider
+        request.validate_resolved(&model_info, &provider_info)?;
+
+        let api_kind = provider_info.api;
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| FlickError::Io(std::io::Error::other(e.to_string())))?;
+        let provider = create_provider(&provider_info, client);
+
+        Ok(Self {
+            config: request,
+            model_info,
+            api_kind,
+            provider: Box::new(provider),
+        })
+    }
+
+    /// Build from a `RequestConfig`, model info, and an injected provider.
+    /// For testing — skips registry resolution.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new_with_provider(
+        config: RequestConfig,
+        model_info: ModelInfo,
+        api_kind: ApiKind,
+        provider: Box<dyn DynProvider>,
+    ) -> Self {
+        Self {
+            config,
+            model_info,
+            api_kind,
+            provider,
+        }
     }
 
     /// Single-shot query. Pushes the query as a user message, makes one model
     /// call, and returns the result. The caller owns and passes the `Context`.
     pub async fn run(&self, query: &str, context: &mut Context) -> Result<FlickResult, FlickError> {
         context.push_user_text(query)?;
-        runner::run(&self.config, self.provider.as_ref(), context).await
+        runner::run(&self.config, &self.model_info, self.api_kind, self.provider.as_ref(), context).await
     }
 
     /// Resume a session with tool results. Pushes the tool results, makes one
@@ -94,7 +126,7 @@ impl FlickClient {
         tool_results: Vec<ContentBlock>,
     ) -> Result<FlickResult, FlickError> {
         context.push_tool_results(tool_results)?;
-        runner::run(&self.config, self.provider.as_ref(), context).await
+        runner::run(&self.config, &self.model_info, self.api_kind, self.provider.as_ref(), context).await
     }
 
     /// Build the API request body without sending it (dry-run).
@@ -107,15 +139,25 @@ impl FlickClient {
             .iter()
             .map(config::ToolConfig::to_definition)
             .collect();
-        let params = runner::build_params(&self.config, &context.messages, &tool_defs);
+        let params = runner::build_params(&self.config, &self.model_info, &context.messages, &tool_defs);
         self.provider
             .build_request(params)
             .map_err(FlickError::Provider)
     }
 
     /// Access the underlying config.
-    pub const fn config(&self) -> &Config {
+    pub const fn config(&self) -> &RequestConfig {
         &self.config
+    }
+
+    /// Access the resolved model info.
+    pub const fn model_info(&self) -> &ModelInfo {
+        &self.model_info
+    }
+
+    /// Access the resolved API kind.
+    pub const fn api_kind(&self) -> ApiKind {
+        self.api_kind
     }
 }
 
@@ -125,39 +167,40 @@ mod tests {
     use super::*;
     use test_support::SingleShotProvider;
 
-    fn minimal_config() -> Config {
-        Config::parse_yaml(
-            r"
-model:
-  provider: test
-  name: test-model
-  max_tokens: 1024
+    fn minimal_config() -> RequestConfig {
+        RequestConfig::parse_yaml("model: test\n").expect("minimal config should parse")
+    }
 
-provider:
-  test:
-    api: messages
-",
-        )
-        .expect("minimal config should parse")
+    fn test_model_info() -> ModelInfo {
+        ModelInfo {
+            provider: "test".into(),
+            name: "test-model".into(),
+            max_tokens: Some(1024),
+            input_per_million: None,
+            output_per_million: None,
+        }
     }
 
     #[test]
     fn new_constructs_with_mock_provider() {
-        let client = FlickClient::new(minimal_config(), SingleShotProvider::stub());
-        assert_eq!(client.config().model().name(), "test-model");
-    }
-
-    #[test]
-    fn config_returns_the_config_passed_in() {
-        let client = FlickClient::new(minimal_config(), SingleShotProvider::stub());
-        assert_eq!(client.config().model().name(), "test-model");
-        assert_eq!(client.config().model().provider(), "test");
-        assert_eq!(client.config().model().max_tokens(), Some(1024));
+        let client = FlickClient::new_with_provider(
+            minimal_config(),
+            test_model_info(),
+            ApiKind::Messages,
+            SingleShotProvider::stub(),
+        );
+        assert_eq!(client.config().model(), "test");
+        assert_eq!(client.model_info().name, "test-model");
     }
 
     #[test]
     fn build_request_returns_valid_json() {
-        let client = FlickClient::new(minimal_config(), SingleShotProvider::stub());
+        let client = FlickClient::new_with_provider(
+            minimal_config(),
+            test_model_info(),
+            ApiKind::Messages,
+            SingleShotProvider::stub(),
+        );
         let json = client.build_request("Hello, world!").unwrap();
         assert!(json.is_object());
         assert_eq!(json["model"], "test-model");
@@ -165,17 +208,9 @@ provider:
 
     #[test]
     fn build_request_includes_tools_when_configured() {
-        let config = Config::parse_yaml(
+        let config = RequestConfig::parse_yaml(
             r"
-model:
-  provider: test
-  name: test-model
-  max_tokens: 1024
-
-provider:
-  test:
-    api: messages
-
+model: test
 tools:
   - name: read_file
     description: Read a file
@@ -188,16 +223,22 @@ tools:
 ",
         )
         .expect("config should parse");
-        let provider = SingleShotProvider::stub();
-        let client = FlickClient::new(config, provider);
+        let client = FlickClient::new_with_provider(
+            config,
+            test_model_info(),
+            ApiKind::Messages,
+            SingleShotProvider::stub(),
+        );
         let json = client.build_request("read something").unwrap();
         assert!(json.is_object());
     }
 
     #[tokio::test]
     async fn run_returns_text_response() {
-        let client = FlickClient::new(
+        let client = FlickClient::new_with_provider(
             minimal_config(),
+            test_model_info(),
+            ApiKind::Messages,
             SingleShotProvider::with_text("Hello back"),
         );
         let mut ctx = Context::default();
@@ -212,10 +253,14 @@ tools:
 
     #[tokio::test]
     async fn run_pushes_user_message_to_context() {
-        let client = FlickClient::new(minimal_config(), SingleShotProvider::with_text("reply"));
+        let client = FlickClient::new_with_provider(
+            minimal_config(),
+            test_model_info(),
+            ApiKind::Messages,
+            SingleShotProvider::with_text("reply"),
+        );
         let mut ctx = Context::default();
         client.run("my query", &mut ctx).await.unwrap();
-        // Context should have user message + assistant message
         assert_eq!(ctx.messages.len(), 2);
         assert_eq!(ctx.messages[0].role, context::Role::User);
         assert_eq!(ctx.messages[1].role, context::Role::Assistant);
@@ -223,8 +268,10 @@ tools:
 
     #[tokio::test]
     async fn resume_returns_result_after_tool_results() {
-        let client = FlickClient::new(
+        let client = FlickClient::new_with_provider(
             minimal_config(),
+            test_model_info(),
+            ApiKind::Messages,
             SingleShotProvider::with_text("Done reading"),
         );
         let mut ctx = Context::default();
@@ -252,8 +299,10 @@ tools:
 
     #[tokio::test]
     async fn run_with_tool_calls_returns_pending() {
-        let client = FlickClient::new(
+        let client = FlickClient::new_with_provider(
             minimal_config(),
+            test_model_info(),
+            ApiKind::Messages,
             SingleShotProvider::with_tool_calls(vec![provider::ToolCallResponse {
                 call_id: "tc_1".into(),
                 tool_name: "read_file".into(),
@@ -263,20 +312,5 @@ tools:
         let mut ctx = Context::default();
         let result = client.run("read it", &mut ctx).await.unwrap();
         assert_eq!(result.status, result::ResultStatus::ToolCallsPending);
-    }
-
-    #[test]
-    fn parse_fails_for_unknown_provider() {
-        let yaml = r"
-model:
-  provider: nonexistent
-  name: test-model
-
-provider:
-  anthropic:
-    api: messages
-";
-        let result = Config::parse_yaml(yaml);
-        assert!(result.is_err());
     }
 }

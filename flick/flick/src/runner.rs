@@ -1,7 +1,8 @@
 use crate::ApiKind;
-use crate::config::Config;
+use crate::config::RequestConfig;
 use crate::context::{ContentBlock, Context};
 use crate::error::FlickError;
+use crate::model_registry::ModelInfo;
 use crate::provider::{DynProvider, ModelResponse, RequestParams, ToolDefinition};
 use crate::result::{FlickResult, ResultStatus, UsageSummary};
 
@@ -17,7 +18,9 @@ use crate::result::{FlickResult, ResultStatus, UsageSummary};
 /// schema), then — if the model completes without tool calls — a second
 /// call with the schema (no tools). Usage from both calls is summed.
 pub async fn run(
-    config: &Config,
+    config: &RequestConfig,
+    model_info: &ModelInfo,
+    api_kind: ApiKind,
     provider: &dyn DynProvider,
     context: &mut Context,
 ) -> Result<FlickResult, FlickError> {
@@ -29,14 +32,11 @@ pub async fn run(
 
     let has_schema = config.output_schema().is_some();
     let has_tools = !tool_defs.is_empty();
-    let is_chat_completions = config
-        .active_provider()
-        .map(|p| p.api == ApiKind::ChatCompletions)
-        .unwrap_or(false);
+    let is_chat_completions = api_kind == ApiKind::ChatCompletions;
     let needs_two_step = has_tools && has_schema && is_chat_completions;
 
     // First call: if two-step, omit schema so the API accepts tools.
-    let mut params = build_params(config, &context.messages, &tool_defs);
+    let mut params = build_params(config, model_info, &context.messages, &tool_defs);
     if needs_two_step {
         params.output_schema = None;
     }
@@ -60,16 +60,12 @@ pub async fn run(
     // Two-step: if the first call completed (no tool calls), make a second
     // call with schema and no tools to get structured output.
     if needs_two_step && status == ResultStatus::Complete {
-        // Remove the intermediate assistant message before the second call
-        // so it doesn't appear in context (and isn't left stale on error).
         if !blocks.is_empty() {
             context.messages.pop();
         }
 
-        // Second call has no tool definitions, so the model cannot produce
-        // tool_use blocks — the returned status is always Complete.
         let empty_tools: Vec<ToolDefinition> = Vec::new();
-        let params2 = build_params(config, &context.messages, &empty_tools);
+        let params2 = build_params(config, model_info, &context.messages, &empty_tools);
         let response2 = provider.call_boxed(params2).await?;
         let blocks2 = build_content(&response2)?;
 
@@ -77,14 +73,13 @@ pub async fn run(
             context.push_assistant(blocks2.clone())?;
         }
 
-        // Sum usage from both calls.
         let total_input = response.usage.input_tokens + response2.usage.input_tokens;
         let total_output = response.usage.output_tokens + response2.usage.output_tokens;
         let total_cache_creation = response.usage.cache_creation_input_tokens
             + response2.usage.cache_creation_input_tokens;
         let total_cache_read =
             response.usage.cache_read_input_tokens + response2.usage.cache_read_input_tokens;
-        let cost_usd = config.compute_cost(total_input, total_output);
+        let cost_usd = config.compute_cost(model_info, total_input, total_output);
 
         return Ok(FlickResult {
             status,
@@ -101,7 +96,11 @@ pub async fn run(
         });
     }
 
-    let cost_usd = config.compute_cost(response.usage.input_tokens, response.usage.output_tokens);
+    let cost_usd = config.compute_cost(
+        model_info,
+        response.usage.input_tokens,
+        response.usage.output_tokens,
+    );
 
     Ok(FlickResult {
         status,
@@ -154,23 +153,24 @@ fn build_content(response: &ModelResponse) -> Result<Vec<ContentBlock>, FlickErr
 ///
 /// Public because `--dry-run` in main.rs calls this directly.
 pub fn build_params<'a>(
-    config: &'a Config,
+    config: &'a RequestConfig,
+    model_info: &'a ModelInfo,
     messages: &'a [crate::context::Message],
     tool_defs: &'a [ToolDefinition],
 ) -> RequestParams<'a> {
     RequestParams {
-        model: config.model().name(),
-        max_tokens: config.model().max_tokens(),
+        model: &model_info.name,
+        max_tokens: model_info.max_tokens,
         // Strip temperature when reasoning is active (provider-agnostic)
-        temperature: if config.model().reasoning().is_some() {
+        temperature: if config.reasoning().is_some() {
             None
         } else {
-            config.model().temperature()
+            config.temperature()
         },
         system_prompt: config.system_prompt(),
         messages,
         tools: tool_defs,
-        reasoning: config.model().reasoning().map(|r| r.level),
+        reasoning: config.reasoning().map(|r| r.level),
         output_schema: config.output_schema().map(|o| &o.schema),
     }
 }

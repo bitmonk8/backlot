@@ -38,7 +38,6 @@ impl MessagesProvider {
         // Resolve: explicit → registry → 8192.
         let resolved_max = params
             .max_tokens
-            .or_else(|| crate::model::default_max_output_tokens(params.model))
             .unwrap_or(8192);
         let mut body = serde_json::json!({
             "model": params.model,
@@ -339,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn build_body_none_max_tokens_uses_registry_fallback() {
+    fn build_body_none_max_tokens_known_model_uses_default() {
         let provider = make_provider();
         let (msgs, tools) = minimal_params();
         let params = crate::provider::RequestParams {
@@ -353,8 +352,8 @@ mod tests {
             output_schema: None,
         };
         let body = provider.build_body(&params);
-        // Registry has 64000 for claude-sonnet-4
-        assert_eq!(body["max_tokens"], 64_000);
+        // No builtin registry; falls back to 8192
+        assert_eq!(body["max_tokens"], 8192);
     }
 
     #[test]

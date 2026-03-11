@@ -1,6 +1,6 @@
 # Flick Named Models Spec
 
-Status: **draft** — all design decisions resolved, ready for implementation.
+Status: **implemented**
 
 ## Problem
 

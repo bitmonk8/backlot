@@ -4,10 +4,11 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use flick::config::Config;
+use flick::config::RequestConfig;
 use flick::context::Message;
 use flick::error::ProviderError;
 use flick::model::ReasoningLevel;
+use flick::model_registry::ModelInfo;
 use flick::provider::{DynProvider, ModelResponse, RequestParams, ToolDefinition, UsageResponse};
 
 /// Owned mirror of `RequestParams` for test assertions.
@@ -111,7 +112,7 @@ pub fn text_response(text: &str, input_tokens: u64, output_tokens: u64) -> Model
 
 /// Helper to build a tool-call `ModelResponse`.
 pub fn tool_call_response(
-    calls: Vec<(&str, &str, &str)>, // (call_id, tool_name, arguments)
+    calls: Vec<(&str, &str, &str)>,
     input_tokens: u64,
     output_tokens: u64,
 ) -> ModelResponse {
@@ -164,16 +165,6 @@ pub fn mixed_response(
     }
 }
 
-fn write_temp_config(content: &str) -> tempfile::NamedTempFile {
-    use std::io::Write;
-    let mut f = tempfile::Builder::new()
-        .suffix(".yaml")
-        .tempfile()
-        .expect("create temp file");
-    f.write_all(content.as_bytes()).expect("write temp file");
-    f
-}
-
 /// Helper to build a text-only `ModelResponse` with custom cache token values.
 pub fn text_response_with_cache(
     text: &str,
@@ -197,7 +188,7 @@ pub fn text_response_with_cache(
 
 /// Helper to build a `ModelResponse` with thinking, text, and tool calls.
 pub fn full_response(
-    thinking: Vec<(&str, &str)>, // (text, signature)
+    thinking: Vec<(&str, &str)>,
     text: Option<&str>,
     calls: Vec<(&str, &str, &str)>,
     input_tokens: u64,
@@ -230,7 +221,29 @@ pub fn full_response(
     }
 }
 
-pub async fn load_config(yaml: &str) -> Config {
-    let f = write_temp_config(yaml);
-    Config::load(f.path()).await.expect("config should parse")
+/// Helper: parse a `RequestConfig` from YAML.
+pub fn parse_config(yaml: &str) -> RequestConfig {
+    RequestConfig::parse_yaml(yaml).expect("config should parse")
+}
+
+/// Helper: create a test `ModelInfo`.
+pub fn test_model_info() -> ModelInfo {
+    ModelInfo {
+        provider: "test".into(),
+        name: "mock-model".into(),
+        max_tokens: Some(1024),
+        input_per_million: None,
+        output_per_million: None,
+    }
+}
+
+/// Helper: create a test `ModelInfo` with pricing.
+pub fn test_model_info_with_pricing(input: f64, output: f64) -> ModelInfo {
+    ModelInfo {
+        provider: "test".into(),
+        name: "mock-model".into(),
+        max_tokens: Some(1024),
+        input_per_million: Some(input),
+        output_per_million: Some(output),
+    }
 }

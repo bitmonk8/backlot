@@ -50,45 +50,45 @@ Models available as of the current knowledge cutoff that are absent: OpenAI `gpt
 
 ## 4. Security & Credentials (7 items)
 
-Base URL validation, credential zeroization, secret key write atomicity, temp file cleanup. All touch `credential.rs` or its security surface.
+Base URL validation, credential zeroization, secret key write atomicity, temp file cleanup. All touch `provider_registry.rs` or its security surface.
 
-### L2. Config `base_url` not validated for URL sanity — `config.rs`
+### L2. Provider `base_url` not validated for URL sanity — `provider_registry.rs`
 
-`ProviderConfig.base_url` accepts any string. Values like `file:///etc/passwd` would be passed to reqwest (which rejects non-HTTP schemes at request time with an opaque error). An `http://localhost/...` URL could be used for SSRF if flick ever runs as a service.
+`ProviderInfo.base_url` accepts any string. Values like `file:///etc/passwd` would be passed to reqwest (which rejects non-HTTP schemes at request time with an opaque error). An `http://localhost/...` URL could be used for SSRF if flick ever runs as a service.
 
 - **M** — Fix Risk: Low — Effort: Low
 
-### L20. Unix key-write failure leaves corrupted `.secret_key` — `credential.rs:92-111`
+### L20. Unix key-write failure leaves corrupted `.secret_key` — `provider_registry.rs`
 
 On the Unix code path in `load_or_create_secret_key`, if `file.write_all(hex_key.as_bytes()).await` fails the error propagates via `?` without deleting the partially-written file. Subsequent `load_secret_key` calls fail with `InvalidFormat`; `load_or_create_secret_key` retries `create_new` which hits `AlreadyExists` and re-loads the corrupt file. The Windows path correctly deletes on write failure.
 
 - **M** — Fix Risk: Low — Effort: Trivial
 
-### T7. No provider name validation in `CredentialStore::get`/`set` — `credential.rs`
+### T7. No provider name validation in `ProviderRegistry::get`/`set` — `provider_registry.rs`
 
 Public API accepts any `&str` including TOML-special characters. Caller validates, but the store itself does not enforce invariants.
 
 - **L** — Fix Risk: Low — Effort: Trivial
 
-### T8. `encrypt` error uses wrong variant name — `credential.rs`
+### T8. `encrypt` error uses wrong variant name — `provider_registry.rs`
 
 `InvalidFormat("encryption failed")` — semantically wrong for an encryption operation. The error path is practically unreachable.
 
 - **L** — Fix Risk: None — Effort: Trivial
 
-### T48. Temp credentials file not cleaned up on `rename` failure — `credential.rs`
+### T48. Temp providers file not cleaned up on `rename` failure — `provider_registry.rs`
 
-If `tokio::fs::rename` fails (e.g., destination locked on Windows), the `.tmp` file containing all credentials is left on disk. It will be overwritten on the next `set()` call so there is no data-loss, but it is a robustness gap.
+If `tokio::fs::rename` fails (e.g., destination locked on Windows), the `.tmp` file containing all providers is left on disk. It will be overwritten on the next `set()` call so there is no data-loss, but it is a robustness gap.
 
 - **L** — Fix Risk: None — Effort: Trivial
 
-### T49. Poly1305 authentication tag size 16 is a magic number — `credential.rs`
+### T49. Poly1305 authentication tag size 16 is a magic number — `provider_registry.rs`
 
 The minimum-length check `combined.len() < NONCE_LEN + 16` uses the literal `16` (Poly1305 tag length) without a named constant.
 
 - **L** — Fix Risk: None — Effort: Trivial
 
-### T51. Secret key file not `fsync`'d before returning — `credential.rs`
+### T51. Secret key file not `fsync`'d before returning — `provider_registry.rs`
 
 Neither the Unix nor Windows path calls `sync_all()` after writing the key file. A power failure between `write_all` and OS flush leaves the file empty or truncated.
 
@@ -130,7 +130,7 @@ A serialised message with the `content` key absent fails deserialisation with "m
 
 Overloaded error variants, wrong variant names, misattributed JSON errors. One sweep through `error.rs` and its consumers.
 
-### L4. `CredentialError::InvalidFormat` overloaded for 6+ distinct failure modes — `credential.rs`, `error.rs`
+### L4. `CredentialError::InvalidFormat` overloaded for 6+ distinct failure modes — `provider_registry.rs`, `error.rs`
 
 `InvalidFormat(String)` covers: hex decode failures, key length errors, TOML parse errors, encryption failures, and Windows API errors. Makes programmatic error handling and debugging harder.
 
@@ -232,7 +232,7 @@ Missing tests for context overflow, credential edge cases, destructive mock read
 
 - **L** — Fix Risk: None — Effort: Trivial
 
-### T50. No test for `get()` when no secret key file exists — `credential.rs` (tests)
+### T50. No test for `get()` when no secret key file exists — `provider_registry.rs` (tests)
 
 All `get()` tests create a key via `set()` first. There is no test verifying that `get()` before any `set()` returns `CredentialError::NoSecretKey`.
 
