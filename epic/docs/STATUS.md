@@ -37,4 +37,4 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations in v1.
 ## Next Work Candidates
 
 1. **`quote_nu()` adversarial input tests** — The translation layer's `quote_nu()` has unit tests for common special characters (single/double quotes, backticks, newlines, backslashes, dollar signs, raw string delimiters). Missing adversarial cases: subshell expressions `$(...)`, null bytes, and multi-line strings containing closing delimiters. Sandbox limits blast radius, but injection causes confusing errors.
-2. **Remove unused crate dependencies** — `globset`, `walkdir`, `regex` are now unused after legacy tool removal. Blocked by Rust 1.93.1 compiler ICE triggered by `windows-sys 0.61.2` when these are removed. Revisit when toolchain updates.
+2. **Remove unused crate dependencies** — `globset`, `walkdir`, `regex` are unused. Blocked by Rust 1.93.1 compiler ICE triggered by `windows-sys 0.61.2` when these are removed. Revisit when toolchain updates.

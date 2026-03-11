@@ -408,6 +408,20 @@ Two layers:
 
 **Linux caveat**: Unprivileged user namespaces may be disabled by kernel config or AppArmor.
 
+### Windows: NUL Device ACL
+
+AppContainer blocks access to the `\\.\NUL` device. Nu's MCP mode sets `stdin(Stdio::null())` for external commands with empty input pipelines, which opens `\\.\NUL` — causing `rg` spawns (used by `epic grep`) to fail with `ERROR_ACCESS_DENIED`. The other five tools are nu custom commands and are unaffected.
+
+**Fix**: `epic setup` (one-time, elevated) modifies the DACL on `\\.\NUL` to grant `ALL APPLICATION PACKAGES` read/write access. The change is system-wide, persistent across reboots, and idempotent. `epic run` / `epic resume` check `lot::nul_device_accessible()` at startup and fail early if not configured.
+
+**lot API** (Windows-only, exported from crate root):
+
+| Function | Signature | Behavior |
+|---|---|---|
+| `nul_device_accessible()` | `→ bool` | Checks `\\.\NUL` DACL for an allow ACE for `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) |
+| `can_modify_nul_device()` | `→ bool` | Queries `TOKEN_ELEVATION` on current process token |
+| `grant_nul_device_access()` | `→ lot::Result<()>` | Idempotent — reads current DACL, adds ACE granting `FILE_GENERIC_READ \| FILE_GENERIC_WRITE`, applies via `SetNamedSecurityInfoW` |
+
 ---
 
 ## Unified Tool Layer
