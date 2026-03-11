@@ -51,11 +51,17 @@ Epic uses generalized prompts that work across languages. No language-specific l
 
 No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
-## Active Exploration
+## Priority: Reel Extraction
 
-- **Reel extraction** — Investigating extraction of the agent session layer (tool loop, tool definitions, NuSession, sandboxing) into a separate `reel` crate. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the spec. Status: exploring options, identifying challenges.
+Extracting the agent session layer (tool loop, tool definitions, NuSession, sandboxing) into a separate `reel` crate. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the spec.
 
-## Next Work Candidates
+**Design status**: Complete — `Agent`, `AgentEnvironment`, `AgentRequest`, `RunResult`, `ToolHandler` trait for custom tool dispatch.
+
+**Next step**: Implement Flick named models (spec in flick repo `docs/NAMED_MODELS.md`). This adds a `models` map to Flick's config so reel can select models by name instead of rebuilding configs per-call. Prerequisite for reel extraction.
+
+**After Flick**: Create reel crate, move code, wire epic as consumer.
+
+## Other Work Candidates
 
 1. **`quote_nu()` adversarial input tests** — Missing adversarial cases: subshell expressions `$(...)`, null bytes, and multi-line strings containing closing delimiters. Sandbox limits blast radius, but injection causes confusing errors.
 2. **Remove unused crate dependencies** — `globset`, `walkdir`, `regex` are unused. Blocked by Rust 1.93.1 compiler ICE triggered by `windows-sys 0.61.2` when these are removed. Revisit when toolchain updates.

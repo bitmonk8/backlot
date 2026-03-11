@@ -78,23 +78,23 @@ Epic (or any consumer) adds domain-specific tools (e.g., "research_query") by im
 pub struct Agent { /* ... */ }
 
 impl Agent {
-    pub fn new(config: AgentConfig) -> Self;
+    pub fn new(env: AgentEnvironment) -> Self;
     pub async fn run<T: DeserializeOwned>(&self, request: AgentRequest) -> Result<RunResult<T>>;
+}
+
+pub struct AgentEnvironment {
+    pub flick_config: flick::Config,  // Built once with models + providers defined
+    pub project_root: PathBuf,
+    pub timeout: Duration,
 }
 
 pub struct AgentRequest {
     pub system_prompt: String,
     pub query: String,
-    pub model: String,                 // Actual model ID string
+    pub model: String,                      // Named model key (e.g., "fast", "balanced", "strong")
     pub grant: ToolGrant,
-    pub output_schema: Option<Value>,  // JSON Schema for structured output
-}
-
-pub struct AgentConfig {
-    pub project_root: PathBuf,
-    pub credential: String,
-    pub timeout: Duration,
-    pub extra_tools: Vec<ToolDefinition>,  // Domain-specific tools
+    pub output_schema: Option<Value>,       // JSON Schema for structured output
+    pub custom_tools: Vec<Box<dyn ToolHandler>>,  // Consumer-provided tools
 }
 
 pub struct RunResult<T> {
@@ -104,9 +104,17 @@ pub struct RunResult<T> {
 }
 ```
 
-Epic doesn't touch Flick directly — it talks to reel. Reel builds `flick::Config` internally from `AgentRequest`.
+Epic doesn't touch Flick directly — it talks to reel. Reel selects models and sets per-call fields on the Flick config internally.
 
-The exact boundary between `AgentRequest` and `AgentConfig` needs further design work (deferred).
+**Depends on**: Flick named models spec (in flick repo: `docs/NAMED_MODELS.md`) — Flick must support named models and per-call override methods before reel can use this API cleanly.
+
+### AgentEnvironment vs AgentRequest
+
+`AgentEnvironment` holds the shared runtime context that doesn't change between calls: the base Flick config (with named models and providers defined), project root, and call timeout. Created once, shared across calls.
+
+`AgentRequest` holds per-call parameters: prompt, model name, grant, output schema, custom tools. A new `AgentRequest` is built for every agent call. The `model` field references a named model from the Flick config's `models` map (e.g., `"fast"`, `"balanced"`, `"strong"`).
+
+Custom tools live on `AgentRequest` (not `AgentConfig`) because different agent phases need different tools. An execute-leaf call might get the Research Service tool; an assessment call gets no custom tools. The consumer decides per-call.
 
 ### What moves to reel
 
@@ -179,19 +187,120 @@ Epic's Research Service is planned but not yet implemented (see STATUS.md). When
 
 **Why Research Service can't be a nu script**: The Research Service isn't just file I/O — it's an agent-within-an-agent. It checks a document store for existing knowledge, identifies gaps, then spawns a Haiku agent call to fill those gaps via codebase exploration or web search. A nu script cannot make API calls through Flick/reel.
 
-**Three approaches for custom tool dispatch in reel**:
-
-- **A: Tool handler trait** — Reel defines a trait for custom tool execution. Epic registers a Rust callback for `research_query`. When the agent calls that tool, reel invokes the callback instead of routing through nu. The callback can do anything, including spawning another reel agent session.
-- **B: Orchestrator-level interception** — Epic wraps reel's tool loop and intercepts specific tool names before they reach reel. Reel never sees `research_query` — epic handles it and feeds the result back into the conversation. This keeps reel simple but pushes tool-loop concerns back into epic.
-- **C: Defer** — Research Service isn't implemented yet. Design reel with only the 6 built-in tools. Add the extension mechanism when the Research Service is actually built. Risk: may require API changes to reel later.
+**Decided approach: tool handler trait.** See [Custom Tool Dispatch](#custom-tool-dispatch) below.
 
 ## Decisions
 
 - **CLI + library dual nature**: Reel follows Flick's approach — both a CLI tool (for testing and experimentation) and a library (for embedding by epic and other consumers). CLI interface and config format TBD.
 - **Nu binary provisioning**: Build-time download, same as current epic approach. NuShell changes frequently; reel must pin a known-good version. The shell exists for reel's tool execution, not for end-user interaction.
 - **Extraction is worth it**: ~3000 lines move to reel, epic shrinks from ~6000+ to ~2700 agent/orchestrator lines. Epic becomes focused on orchestration. Reel provides standalone value as a general-purpose agent-session tool — usable without epic.
+- **Custom tool dispatch**: Tool handler trait. See below.
 
-## Open Questions
+---
 
-1. **Custom tool dispatch**: How does reel route calls to consumer-registered tools? Trait object? Callback? Need to define the interface.
+## Custom Tool Dispatch
+
+### Problem
+
+Reel's 6 built-in tools all route through the sandboxed nu process. But consumers need to add domain-specific tools that run in-process (e.g., Research Service spawns nested agent calls, accesses a document store). These cannot route through nu.
+
+### Design
+
+Reel defines a `ToolHandler` trait. Consumers implement it for each custom tool, bundling the tool definition (what the model sees) with the execution logic (what happens when called).
+
+```rust
+/// A tool definition as seen by the model.
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,  // JSON Schema
+}
+
+/// Result of executing a tool call.
+pub struct ToolExecResult {
+    pub tool_use_id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+/// Consumer-implemented trait for custom tools.
+///
+/// Each implementation bundles the tool's schema (what the model sees)
+/// with its execution logic (what happens when the model calls it).
+/// The implementing struct captures whatever state it needs — database
+/// handles, agent references, config — as fields.
+pub trait ToolHandler: Send + Sync {
+    /// Returns the tool definition included in the model's tool list.
+    fn definition(&self) -> ToolDefinition;
+
+    /// Executes the tool call. Called by reel's tool loop when the model
+    /// invokes a tool whose name matches `definition().name`.
+    async fn execute(&self, tool_use_id: String, input: &serde_json::Value) -> ToolExecResult;
+}
+```
+
+### Dispatch order
+
+Reel's tool loop dispatches each tool call as follows:
+
+1. **Custom tools first**: Check `request.custom_tools` for a handler whose `definition().name` matches the tool name. If found, call `handler.execute()`.
+2. **Built-in tools**: If no custom handler matches, route to the built-in tool executor (nu session).
+3. **Unknown tool**: Return an error result to the model.
+
+Custom tools take priority so consumers can override built-in tool behavior if needed (unlikely but possible).
+
+### Tool list assembly
+
+Reel assembles the model's tool list from two sources:
+- Built-in tools filtered by `ToolGrant` (from `tool_definitions(grant)`)
+- Custom tool definitions (from `request.custom_tools.iter().map(|h| h.definition())`)
+
+Both are merged into the Flick config's tool list before the first model call.
+
+### Consumer example
+
+```rust
+// In epic — Research Service as a custom tool
+struct ResearchTool {
+    agent: Arc<reel::Agent>,
+    doc_store: Arc<DocumentStore>,
+}
+
+impl reel::ToolHandler for ResearchTool {
+    fn definition(&self) -> reel::ToolDefinition {
+        reel::ToolDefinition {
+            name: "research_query".into(),
+            description: "Query the knowledge base...".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string" },
+                    "scope": { "type": "string", "enum": ["PROJECT", "WEB", "BOTH"] }
+                },
+                "required": ["question"]
+            }),
+        }
+    }
+
+    async fn execute(&self, tool_use_id: String, input: &serde_json::Value) -> reel::ToolExecResult {
+        let question = input["question"].as_str().unwrap_or("");
+        // Can use self.agent to spawn a nested reel session
+        // Can use self.doc_store to check/update documents
+        let answer = self.doc_store.query(question).await;
+        reel::ToolExecResult {
+            tool_use_id,
+            content: answer,
+            is_error: false,
+        }
+    }
+}
+```
+
+### Grant interaction
+
+Custom tools are not governed by `ToolGrant` flags. Grant flags control the built-in tool set and the nu sandbox policy. Custom tools execute in the consumer's process — the consumer is responsible for any access control on custom tool behavior.
+
+### No open questions remaining
+
+The custom tool dispatch design is decided. Implementation details (trait object boxing, lifetime management) will be resolved during extraction.
 
