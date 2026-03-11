@@ -1,6 +1,6 @@
 # Flick Named Models Spec
 
-Status: **draft** — design decisions in progress.
+Status: **draft** — all design decisions resolved, ready for implementation.
 
 ## Problem
 
@@ -122,7 +122,7 @@ pub struct ModelInfo {
 }
 ```
 
-`provider` must reference a key in the ProviderRegistry. `name` is the actual model identifier sent to the API (e.g. `claude-sonnet-4-6`, `gpt-4o`). Pricing is optional — the builtin model registry can provide defaults.
+`provider` must reference a key in the ProviderRegistry. `name` is the actual model identifier sent to the API (e.g. `claude-sonnet-4-6`, `gpt-4o`). Pricing is optional. The registry is purely user-defined — no builtin/hardcoded models.
 
 ### RequestConfig
 
@@ -207,23 +207,19 @@ Resolution errors (unknown model name, unknown provider reference) fail at const
 
 ### CLI Commands
 
-`flick setup <provider>` — unchanged behavior, writes to `~/.flick/providers` (renamed from `credentials`).
+`flick provider add <name>` — interactive, prompts for API key, API type, base URL. Writes to `~/.flick/providers`. Replaces current `flick setup`.
 
-`flick list` — lists providers (reads `~/.flick/providers`).
+`flick provider list` — lists providers (reads `~/.flick/providers`).
 
-`flick model add <name>` — new command, adds an entry to `~/.flick/models`. Interactive: prompts for provider, model ID, max_tokens, pricing.
+`flick model add <name>` — interactive, prompts for provider, model ID, max_tokens, pricing. Writes to `~/.flick/models`.
 
-`flick model list` — new command, lists entries in `~/.flick/models`.
+`flick model list` — lists entries in `~/.flick/models`.
 
-`flick model remove <name>` — new command, removes an entry from `~/.flick/models`.
+`flick model remove <name>` — removes an entry from `~/.flick/models`.
 
-### CLI Overrides
+`flick init` — interactive, generates a RequestConfig YAML file. Prompts for model name (key from ModelRegistry), system prompt. If ModelRegistry is empty, directs user to `flick model add` first.
 
-| Flag | Effect |
-|---|---|
-| `--model <name>` | Select a different named model from the ModelRegistry (replaces current behavior of overriding model ID) |
-| `--temperature <f32>` | Override temperature from RequestConfig |
-| `--reasoning <level>` | Override reasoning level from RequestConfig (existing) |
+`flick run` — no CLI override flags (`--model`, `--temperature`, `--reasoning` removed). The RequestConfig file is the sole source of request parameters.
 
 ### Library Usage
 
@@ -258,15 +254,18 @@ let providers = ProviderRegistry::load_default()?;
 let models = ModelRegistry::load_default()?;
 
 // Fast model call
-let mut request = base_request.clone();
-request.set_model("fast");
-request.set_system_prompt("Triage this issue.");
+let request = RequestConfig::builder()
+    .model("fast")
+    .system_prompt("Triage this issue.")
+    .build()?;
 let client = FlickClient::new(request, &models, &providers)?;
 
 // Strong model call
-let mut request = base_request.clone();
-request.set_model("strong");
-request.set_system_prompt("Write a detailed implementation plan.");
+let request = RequestConfig::builder()
+    .model("strong")
+    .system_prompt("Write a detailed implementation plan.")
+    .tools(planning_tools)
+    .build()?;
 let client = FlickClient::new(request, &models, &providers)?;
 ```
 
@@ -280,7 +279,11 @@ let client = FlickClient::new(request, &models, &providers)?;
 - Each entry has a non-empty `name`
 - `max_tokens` if present must be > 0
 - Pricing values if present must be non-negative and finite
-- `provider` field is validated against ProviderRegistry at FlickClient construction (not at registry load, since the registry file shouldn't depend on another file's contents)
+**Cross-registry validation** (`validate_registries(&ModelRegistry, &ProviderRegistry)`):
+- Called once after both registries are loaded, before any FlickClient construction
+- Every `ModelInfo.provider` must reference an existing key in the ProviderRegistry
+- May grow additional checks over time
+- FlickClient construction panics if provider is not found (assumes validation already ran)
 
 **RequestConfig** (validated at FlickClient construction):
 - `model` references a key in ModelRegistry
@@ -308,28 +311,40 @@ let client = FlickClient::new(request, &models, &providers)?;
 | `ModelConfig.reasoning` | Stays in `RequestConfig` |
 | `CompatFlags` (in provider config) | Moved to `ProviderInfo` in ProviderRegistry |
 | `resolve_provider()` | Absorbed into `FlickClient::new()` |
-| `flick setup` writes `credentials` | `flick setup` writes `providers` |
+| `flick setup <provider>` | `flick provider add <name>` |
+| `flick list` | `flick provider list` |
+| `--model` CLI override flag | Removed |
+| `--reasoning` CLI override flag | Removed |
 
 Breaking changes to the library API:
 - `Config` renamed to `RequestConfig`
-- `FlickClient::new()` signature changes (takes three arguments)
+- `RequestConfig` constructed via builder pattern (`RequestConfig::builder().model("x").build()`)
+- `FlickClient::new()` signature changes (takes `RequestConfig`, `&ModelRegistry`, `&ProviderRegistry`)
 - `resolve_provider()` removed (resolution is internal to client construction)
 - `Config::from_str()` → `RequestConfig::from_str()`
 - `Config::model()` removed (model info is resolved internally)
 - Existing YAML configs must remove `provider:` and `pricing:` blocks, change `model:` from object to string
 
-## Open Questions
+Breaking changes to the CLI:
+- `flick setup` → `flick provider add`
+- `flick list` → `flick provider list`
+- `--model`, `--temperature`, `--reasoning` flags removed from `flick run`
+- Config YAML format changes (no inline provider/model blocks)
 
-Items not yet decided — each needs resolution before implementation.
+## Design Decisions
 
-1. **ModelRegistry: TOML or different format?** — ProviderRegistry inherits TOML from the current credentials file. ModelRegistry is new. TOML is consistent but may be limiting for complex schemas. Alternatives: YAML, JSON.
+All resolved. Recorded here for context.
 
-2. **Builtin models** — Should Flick ship a hardcoded set of well-known models (e.g. `claude-sonnet-4-6` with default pricing) that users can override? Or is the registry purely user-defined?
+1. **No backward compatibility.** `model` field in RequestConfig is always a string key into ModelRegistry. No inline model definitions, no dual-form deserialization.
 
-3. **`--model` flag change** — Currently overrides the model ID string. Proposed: selects a named model from the registry. This changes existing CLI behavior. Acceptable?
+2. **TOML for both registries.** `~/.flick/providers` and `~/.flick/models` are both TOML.
 
-4. **Per-call override methods on RequestConfig** — `set_model()`, `set_system_prompt()`, `set_tools()`, `set_output_schema()`: implement as simple setters, or a builder pattern?
+3. **No builtin models.** ModelRegistry is purely user-defined. Empty until the user runs `flick model add`.
 
-5. **ProviderInfo.provider validation at registry load** — ModelInfo.provider references a ProviderRegistry key. Should this cross-reference be validated when ModelRegistry loads (requires both files), or deferred to FlickClient construction?
+4. **No CLI override flags.** `--model`, `--temperature`, `--reasoning` removed. The RequestConfig file is the sole source of request parameters.
 
-6. **`flick init` update** — Currently generates a full Config YAML. Needs to generate a RequestConfig YAML instead. Should it also offer to populate ModelRegistry entries?
+5. **Builder pattern for RequestConfig.** Library consumers use `RequestConfig::builder().model("fast").system_prompt("...").build()` rather than setters on a mutable struct.
+
+6. **Cross-registry validation function.** `validate_registries(&ModelRegistry, &ProviderRegistry)` runs after both registries are loaded. Checks reference integrity (ModelInfo.provider → ProviderRegistry key). FlickClient construction panics on missing provider (assumes validation already ran).
+
+7. **`flick init` generates RequestConfig only.** Does not manage registry entries. Directs user to `flick model add` / `flick provider add` if registries are empty.
