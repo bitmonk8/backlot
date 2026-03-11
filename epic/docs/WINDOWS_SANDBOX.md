@@ -1,52 +1,127 @@
-# Windows Sandbox
+# Windows AppContainer: Child Process Execution Bug
 
-Epic sandboxes the nu MCP process using [lot](https://github.com/bitmonk8/lot), which uses Windows AppContainer on Windows.
+## Problem
 
-## What the Sandbox Needs
+External commands spawned by nu inside a lot AppContainer sandbox fail with `ERROR_ACCESS_DENIED` (os error 5). The error surfaces as "Command `rg` not found" because nu misreports spawn failures as command-not-found.
 
-Agents need access to these directories only:
+**Impact**: `epic grep` (which shells out to `rg`) is non-functional on Windows. The other five tools (`Read`, `Write`, `Edit`, `Glob`, `NuShell`) are nu custom commands and are unaffected.
 
-| Directory | Access | Purpose |
-|-----------|--------|---------|
-| Project root | Read or read-write (phase-dependent) | Project files |
-| `%TEMP%` | Read-write | Scratch space |
-| Cache dir | Read + execute | Nu binary, config files, rg binary |
+**Reproduce**: `cargo test integration_sandbox_read_only_prevents_writes -- --nocapture`
 
-All paths are user-owned. AppContainer ACL setup works without elevation. System directory grants (`include_platform_exec_paths`, `include_platform_lib_paths`) are not used — AppContainer inherits access to system DLLs (System32) without explicit grants.
+## Root Cause
 
-## BUG: AppContainer Child Process Execution
+AppContainer blocks access to the `\\.\NUL` device. Rust's `std::process::Command` opens `\\.\NUL` when stdin is set to `Stdio::null()`. Nu's MCP mode sets `stdin(Stdio::null())` for external commands with empty input pipelines (`run_external.rs:264`). The `\\.\NUL` open fails inside AppContainer, and the error propagates as the spawn failure — `CreateProcessW` is never reached.
 
-External commands spawned by nu inside AppContainer (e.g., `^rg` via `epic grep`) fail with "Permission denied" despite `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE` ACLs on the cache directory containing the binary. This breaks `epic grep` (which wraps rg) and any other tool that shells out to an external binary.
+The relevant nu code (`nushell/crates/nu-command/src/system/run_external.rs`):
 
-**Impact**: `epic grep` is non-functional on Windows. This is the only tool affected in v1 (the other five tools are implemented as nu custom commands and do not spawn child processes).
+```rust
+PipelineData::Empty => {
+    if engine_state.is_mcp {
+        command.stdin(Stdio::null());  // opens \\.\NUL → blocked by AppContainer
+    } else {
+        command.stdin(Stdio::inherit());
+    }
+    None
+}
+```
 
-**What we know**:
-- The rg binary exists in the cache directory and has correct ACLs applied.
-- `nu` itself launches fine from the same cache directory (it's the sandbox entrypoint, not a child process).
-- The ACL grants `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE` via lot's `exec_path()`.
-- Child process creation (not file read/execute) is what fails — the error is at process spawn time, not at binary load time.
-- The test `integration_sandbox_read_only_prevents_writes` fails on Windows due to this bug. Reproduce with: `cargo test integration_sandbox_read_only_prevents_writes`.
+Nu uses `Stdio::null()` in MCP mode to prevent external commands from hanging on interactive stdin prompts. This is correct outside a sandbox but incompatible with AppContainer.
 
-**Investigation needed**:
-- Does AppContainer require additional capabilities (e.g., `lpSecurityCapabilities`) for child process creation?
-- Does lot need to add the AppContainer SID to the child binary's ACL differently than the parent?
-- Does rg dynamically link a DLL from a directory not in the sandbox policy? The sandbox does not grant access to `%ProgramFiles%` or other system library paths. If rg depends on a DLL outside System32 (which AppContainer inherits), the load would fail at process spawn time with "Permission denied".
-- Could rg be invoked differently (e.g., as a nu plugin instead of `^rg`)?
+Ref: https://github.com/nushell/nushell/pull/17161#discussion_r2761243143
 
-## For Epic Developers
+### Evidence
 
-### Sandbox Integration Tests
+A custom test binary (`spawn_test.exe`) was run inside AppContainer via lot:
 
-The `integration_sandbox_*` tests in `src/agent/nu_session.rs` call `session.evaluate()` directly and fail on sandbox setup failure (no silent skip). Tests pass without elevation.
+**NUL device variants — all blocked:**
 
-Each test gets isolated project and cache directories via `sandbox_env()`:
-- **Project dirs** use `target/sandbox-test/` (not `%TEMP%`) to avoid overlap with `include_temp_dirs()` write grants.
-- **Cache dirs** are per-test copies of the build-time `target/nu-cache/` contents. This isolates AppContainer ACL operations so tests run in parallel without conflicts.
+| Device path | Result |
+|-------------|--------|
+| `\\.\NUL` | ERROR 5 |
+| `NUL` | ERROR 5 |
+| `\\?\NUL` | ERROR 5 |
 
-### Platform Notes
+Console devices (`\\.\CONIN$`, `\\.\CONOUT$`) succeed — they are special-cased by the kernel.
 
-| Platform | Mechanism | Setup Required |
-|----------|-----------|----------------|
-| Windows | AppContainer + ACLs | None |
-| Linux | User namespaces + seccomp | No — works if unprivileged user namespaces are enabled (kernel default) |
-| macOS | Seatbelt (SBPL) | No — always available |
+**Rust `Command` variants — only `Stdio::null()` fails:**
+
+| Configuration | Result |
+|---------------|--------|
+| `Command::spawn()` (inherits stdin) | OK |
+| `spawn()` + all piped | OK |
+| `spawn()` + null stdin | ERROR 5 |
+| `Command::output()` (defaults to null stdin) | ERROR 5 |
+
+**Raw `CreateProcessW` — works in all configurations:**
+
+| Configuration | Result |
+|---------------|--------|
+| Plain, no pipes | OK |
+| With pipes + `STARTF_USESTDHANDLES` | OK |
+| Full `.output()` mimic (NUL stdin + pipe stdout/stderr) | ERROR 5 at NUL open (before `CreateProcessW`) |
+
+Conclusion: `CreateProcessW` itself is not blocked. The failure is entirely the `\\.\NUL` open.
+
+## Solution: One-Time Elevated NUL Device ACL Grant
+
+### Summary
+
+Modify the DACL on `\\.\NUL` to grant `ALL APPLICATION PACKAGES` read/write access. This is a one-time operation requiring administrator elevation. The change is system-wide, persistent across reboots, and idempotent.
+
+This is a known AppContainer limitation. Microsoft acknowledged it ([win32-app-isolation#73](https://github.com/microsoft/win32-app-isolation/issues/73)) with no built-in fix. The workaround was posted in the same issue.
+
+### Why elevation is required
+
+`\\.\NUL` is owned by SYSTEM. Modifying its DACL requires `WRITE_DAC`, which only elevated (administrator) processes have. A non-elevated process cannot modify the security descriptor. Windows does not support in-place process elevation — the standard pattern is to detect the need and instruct the user to re-run elevated.
+
+### lot API (implemented, Windows-only)
+
+Three public functions exported from `lot` crate root (`lot::nul_device_accessible`, etc.):
+
+| Function | Signature | Behavior |
+|---|---|---|
+| `nul_device_accessible()` | `→ bool` | Reads `\\.\NUL` DACL via `GetNamedSecurityInfoW`, converts to SDDL, checks for an allow ACE (`(A;...;;;AC)`) for `ALL APPLICATION PACKAGES` (`S-1-15-2-1`). Returns `true` if DACL is NULL (unrestricted) or ACE exists. Returns `false` on API failure. |
+| `can_modify_nul_device()` | `→ bool` | Queries `TOKEN_ELEVATION` on the current process token. Returns `true` if elevated (administrator). Returns `false` on API failure. |
+| `grant_nul_device_access()` | `→ lot::Result<()>` | Idempotent — calls `nul_device_accessible()` first, returns `Ok(())` if already granted. Otherwise reads current DACL, builds `ALL APPLICATION PACKAGES` SID, adds ACE granting `FILE_GENERIC_READ \| FILE_GENERIC_WRITE` via `SetEntriesInAclW`, applies with `SetNamedSecurityInfoW`. Returns `SandboxError::Setup(msg)` on failure (including `ERROR_ACCESS_DENIED` when not elevated). |
+
+### epic integration (remaining work)
+
+**1. `epic setup` CLI subcommand** (new, in `cli.rs` + `main.rs`):
+
+Windows-only subcommand. On non-Windows, prints "Not applicable on this platform." and exits.
+
+Flow:
+1. Call `lot::nul_device_accessible()`. If `true` → print "NUL device access already configured." and exit 0.
+2. Call `lot::can_modify_nul_device()`. If `false` → print "This command must be run from an elevated (Administrator) prompt." and exit 1.
+3. Call `lot::grant_nul_device_access()`. On `Ok(())` → print "NUL device access granted to AppContainer processes." On `Err(e)` → print the error and exit 1.
+
+**2. Startup check** (in `epic run` / `epic resume`, Windows-only):
+
+Before spawning any nu sessions:
+1. Call `lot::nul_device_accessible()`.
+2. If `true` → proceed.
+3. If `false` → print to stderr and exit 1:
+   ```
+   AppContainer cannot access the NUL device. Child process execution (e.g., rg) will fail.
+   Run "epic setup" from an elevated (Administrator) command prompt to fix this.
+   This is a one-time operation.
+   ```
+
+**3. Conditional compilation**:
+
+All three lot functions are `#[cfg(target_os = "windows")]`. Epic's call sites must be gated with `#[cfg(target_os = "windows")]`. On non-Windows, the startup check is a no-op and `epic setup` prints the platform message.
+
+### Rejected alternatives
+
+**Patch nu to use `Stdio::piped()`**: Only fixes nu's child spawning. Any process that independently opens `\\.\NUL` still fails. Does not address the root problem. Requires maintaining a nu fork or waiting for upstream acceptance.
+
+**Temp file as null sink**: Fragile hack. Does not generalize. Still requires epic-side plumbing.
+
+**Auto-elevation via `ShellExecuteEx("runas")`**: Opens a new console window. Bad UX for a CLI tool. Mixes concerns — epic should not manage its own privilege escalation.
+
+## Appendix: Ruled Out Causes
+
+- **System directory grants**: `include_platform_exec_paths()` / `include_platform_lib_paths()` were removed from the sandbox policy. AppContainer inherits System32/DLL access without explicit grants. Adding them did not fix the bug.
+- **PATH corruption**: `build.rs` previously generated `epic_env.nu` with string interpolation instead of nu `prepend` for PATH. Fixed separately; was not the root cause.
+- **`CreateProcessW` blocked by AppContainer**: Proven false. `CreateProcessW` succeeds in all tested configurations. The failure occurs before process creation, during the `\\.\NUL` handle open.
+- **Missing execute ACLs on rg binary**: The cache directory has `FILE_GENERIC_EXECUTE` ACLs. `CreateProcessW` with the same binary succeeds when stdin is not null.

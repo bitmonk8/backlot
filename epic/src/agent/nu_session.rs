@@ -1444,4 +1444,313 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path().join("created.txt")).unwrap();
         assert_eq!(content, "hello", "file content should match what was written");
     }
+
+    // -----------------------------------------------------------------------
+    // Sandbox rg diagnosis tests
+    //
+    // Root cause: AppContainer blocks access to \\.\NUL device. Nu's MCP
+    // mode sets stdin(Stdio::null()) for external commands, which triggers
+    // Rust's stdlib to open \\.\NUL via CreateFileW. AppContainer denies
+    // this (ERROR_ACCESS_DENIED = 5). CreateProcessW itself works fine.
+    // Fix: change nu's run_external.rs to use Stdio::piped() in MCP mode.
+    // See docs/WINDOWS_SANDBOX.md for full investigation.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_nosandbox_rg_executes() {
+        // Control: rg works when invoked directly (no sandbox). Proves the
+        // binary is present and functional, isolating AppContainer as the
+        // cause when rg fails inside the sandbox.
+        skip_no_nu!();
+        let cache_dir = option_env!("NU_CACHE_DIR").map(std::path::Path::new);
+        let rg_binary = resolve_rg_binary(cache_dir);
+        let rg_path = Path::new(&rg_binary);
+        assert!(
+            rg_path.exists(),
+            "rg binary should exist at: {}",
+            rg_path.display()
+        );
+
+        // Invoke rg directly — no sandbox, no nu.
+        let output = std::process::Command::new(&rg_binary)
+            .arg("--version")
+            .output()
+            .expect("failed to execute rg binary");
+        assert!(
+            output.status.success(),
+            "rg --version should succeed outside sandbox: exit={}, stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("ripgrep"),
+            "rg output should contain 'ripgrep', got: {}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_rg_with_ancestor_traverse() {
+        // Verifies that rg execution fails inside AppContainer due to
+        // \\.\NUL device access being blocked. Nu's MCP mode sets
+        // stdin(Stdio::null()) which opens \\.\NUL, and AppContainer
+        // denies device access (os error 5). The error surfaces as
+        // "Permission denied" on rg execution and "Command not found"
+        // on system commands (since System32 isn't in nu's PATH).
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::NU;
+
+        let cache_path = match &env._cache {
+            Some(c) => c.path().to_path_buf(),
+            None => {
+                eprintln!("SKIP: no NU_CACHE_DIR available");
+                return;
+            }
+        };
+
+        // Trigger session spawn (applies sandbox ACLs via lot).
+        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let _ = init.unwrap();
+
+        // Verify rg.exe has the AppContainer ACL (RX) via inheritance.
+        let rg_exe = cache_path.join("rg.exe");
+        if cfg!(windows) {
+            let output = std::process::Command::new("icacls")
+                .arg(rg_exe.as_os_str())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output();
+            if let Ok(o) = output {
+                let acl_text = String::from_utf8_lossy(&o.stdout);
+                eprintln!("rg.exe ACLs:\n{acl_text}");
+                // The AppContainer SID should have (I)(RX).
+                assert!(
+                    acl_text.contains("(I)(RX)"),
+                    "rg.exe should have inherited RX ACL from exec_path"
+                );
+            }
+        }
+
+        // Confirm: full-path rg execution fails with Permission denied.
+        let rg_full = format!("^'{}' --version", nu_path(&rg_exe));
+        let Some(result) = try_eval(session, &rg_full, 30, tmp.path(), grant).await else {
+            return;
+        };
+        let out = result.unwrap();
+        assert!(
+            out.is_error,
+            "BUG FIXED? rg execution succeeded — AppContainer child process \
+             restriction may have been resolved. Update this test."
+        );
+        assert!(
+            out.content.contains("permission_denied")
+                || out.content.contains("Permission denied"),
+            "expected Permission denied, got: {}",
+            out.content
+        );
+
+        // Confirm: system commands also fail (System32 not in policy).
+        let Some(cmd_result) =
+            try_eval(session, "^hostname", 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let cmd_out = cmd_result.unwrap();
+        assert!(
+            cmd_out.is_error,
+            "system commands should also fail without system dir access: {}",
+            cmd_out.content
+        );
+    }
+
+    /// Diagnose whether the AppContainer blocks file READ access to rg.exe
+    /// or specifically blocks CreateProcess (child process spawning).
+    #[tokio::test]
+    async fn integration_sandbox_diagnose_rg_access() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::NU;
+
+        let cache_path = match &env._cache {
+            Some(c) => c.path().to_path_buf(),
+            None => {
+                eprintln!("SKIP: no NU_CACHE_DIR available");
+                return;
+            }
+        };
+
+        // Trigger session spawn.
+        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let _ = init.unwrap();
+
+        let rg_exe = cache_path.join("rg.exe");
+
+        // Test 1: Can nu stat rg.exe? Use ls on the cache directory.
+        let read_cmd = format!(
+            "ls '{}' | length",
+            nu_path(&cache_path)
+        );
+        let Some(read_result) = try_eval(session, &read_cmd, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let read_out = read_result.unwrap();
+        eprintln!("File read rg.exe: is_error={}, content={}", read_out.is_error, read_out.content);
+
+        // Test 2: Can nu READ a System32 DLL? (proves System32 access from inside AppContainer)
+        let sys32_cmd = "open --raw 'C:/Windows/System32/kernel32.dll' | bytes length";
+        let Some(sys32_result) = try_eval(session, sys32_cmd, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let sys32_out = sys32_result.unwrap();
+        eprintln!("File read kernel32.dll: is_error={}, content={}", sys32_out.is_error, sys32_out.content);
+
+        // Test 3: Can nu execute cmd.exe from System32? (^cmd /C echo hi)
+        let cmd_exec = "^'C:/Windows/System32/cmd.exe' /C echo hi";
+        let Some(cmd_result) = try_eval(session, cmd_exec, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let cmd_out = cmd_result.unwrap();
+        eprintln!("Execute cmd.exe: is_error={}, content={}", cmd_out.is_error, cmd_out.content);
+
+        // Test 4: Execute rg.exe with full path (expected to fail).
+        let rg_exec = format!("^'{}' --version", nu_path(&rg_exe));
+        let Some(rg_result) = try_eval(session, &rg_exec, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let rg_out = rg_result.unwrap();
+        eprintln!("Execute rg.exe: is_error={}, content={}", rg_out.is_error, rg_out.content);
+
+        // Test 5: What does `which rg` say?
+        let which_cmd = "which rg";
+        let Some(which_result) = try_eval(session, which_cmd, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let which_out = which_result.unwrap();
+        eprintln!("which rg: is_error={}, content={}", which_out.is_error, which_out.content);
+
+        // Test 6: Exact error for hostname.
+        let hostname_cmd = "^'C:/Windows/System32/hostname.exe'";
+        let Some(hostname_result) = try_eval(session, hostname_cmd, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let hostname_out = hostname_result.unwrap();
+        eprintln!("Execute hostname.exe: is_error={}, content={}", hostname_out.is_error, hostname_out.content);
+
+        // Test 7: Can nu list System32 directory? (proves directory traverse works)
+        let ls_sys32 = "ls C:/Windows/System32/cmd.exe | get name.0";
+        let Some(ls_result) = try_eval(session, ls_sys32, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let ls_out = ls_result.unwrap();
+        eprintln!("ls cmd.exe: is_error={}, content={}", ls_out.is_error, ls_out.content);
+
+        // Test 8: Use sys/exec (Rust std::process::Command) to check OS error code
+        let exec_cmd = format!(
+            "do {{ ^'{}' --version }} | complete",
+            nu_path(&rg_exe)
+        );
+        let Some(exec_result) = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let exec_out = exec_result.unwrap();
+        eprintln!("complete rg exec: is_error={}, content={}", exec_out.is_error, exec_out.content);
+    }
+
+    /// Test whether nu inside AppContainer can READ rg.exe as raw bytes.
+    /// If readable but not executable, the issue is specifically CreateProcess
+    /// being blocked, not file access. If unreadable, the issue is ACLs.
+    #[tokio::test]
+    async fn integration_sandbox_rg_file_readable() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::NU;
+
+        let cache_path = match &env._cache {
+            Some(c) => c.path().to_path_buf(),
+            None => {
+                eprintln!("SKIP: no NU_CACHE_DIR available");
+                return;
+            }
+        };
+
+        // Trigger session spawn (applies sandbox ACLs via lot).
+        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let _ = init.unwrap();
+
+        let rg_exe = cache_path.join("rg.exe");
+
+        // Test 1: Can nu LIST the cache directory (proves directory traversal)?
+        let ls_cmd = format!("ls '{}' | length", nu_path(&cache_path));
+        let Some(ls_result) = try_eval(session, &ls_cmd, 30, tmp.path(), grant).await else {
+            return;
+        };
+        let ls_out = ls_result.unwrap();
+        eprintln!("ls cache dir: is_error={}, content={}", ls_out.is_error, ls_out.content);
+
+        // Test 2: Can nu READ rg.exe as raw bytes (proves file read access)?
+        let read_cmd = format!("open --raw '{}' | length", nu_path(&rg_exe));
+        let Some(read_result) = try_eval(session, &read_cmd, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let read_out = read_result.unwrap();
+        eprintln!(
+            "read rg.exe bytes: is_error={}, content={}",
+            read_out.is_error, read_out.content
+        );
+
+        // Test 3: Can nu EXECUTE rg.exe (expected to fail)?
+        let exec_cmd = format!("^'{}' --version", nu_path(&rg_exe));
+        let Some(exec_result) = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await
+        else {
+            return;
+        };
+        let exec_out = exec_result.unwrap();
+        eprintln!(
+            "exec rg.exe: is_error={}, content={}",
+            exec_out.is_error, exec_out.content
+        );
+
+        // Conclusion: if read succeeds but exec fails, CreateProcess is
+        // specifically blocked inside the AppContainer.
+        if !read_out.is_error && exec_out.is_error {
+            eprintln!(
+                "CONCLUSION: File READ works but CreateProcess fails. \
+                 AppContainer blocks child process spawning from inside the container."
+            );
+        } else if read_out.is_error {
+            eprintln!(
+                "CONCLUSION: File READ is also blocked — ACL issue."
+            );
+        } else {
+            eprintln!(
+                "CONCLUSION: Both read and exec succeeded — sandbox is not restricting."
+            );
+        }
+    }
 }

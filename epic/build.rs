@@ -489,7 +489,7 @@ const EPIC_ENV_NU: &str = r#"
 # Add bundled rg binary directory to PATH if EPIC_RG_DIR is set.
 if "EPIC_RG_DIR" in $env {
     if $nu.os-info.name == "windows" {
-        $env.Path = ($"($env.EPIC_RG_DIR);($env.Path)")
+        $env.Path = ($env.Path | prepend $env.EPIC_RG_DIR)
     } else {
         $env.PATH = ($env.PATH | prepend $env.EPIC_RG_DIR)
     }
