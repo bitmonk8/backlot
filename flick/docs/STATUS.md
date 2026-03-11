@@ -20,5 +20,6 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 
 ## Next Work
 
+- **Named models** — implement `docs/NAMED_MODELS.md` (model alias registry with builtin + user-defined names)
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
 - Backlog items (see `BACKLOG.md` — 31 items in 7 active clusters)
