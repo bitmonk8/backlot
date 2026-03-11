@@ -34,10 +34,10 @@ use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcessId, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows_sys::core::HRESULT;
 
@@ -57,9 +57,7 @@ const SECURITY_CAPABILITY_INTERNET_CLIENT: u32 = 1;
 const SECURITY_BUILTIN_APP_PACKAGE_RID_COUNT: u8 = 2;
 const SECURITY_CAPABILITY_BASE_RID: u32 = 3;
 
-const FILE_GENERIC_READ: u32 = 0x0012_0089;
-const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
-const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
+use super::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 
 /// Check whether `AppContainer` is available on this Windows version.
 pub const fn available() -> bool {
@@ -111,6 +109,27 @@ fn sentinel_dir() -> PathBuf {
 
 fn sentinel_path(profile_name: &str) -> PathBuf {
     sentinel_dir().join(format!("lot-sentinel-{profile_name}.txt"))
+}
+
+/// Extract the PID from a profile name. Format: `lot-{pid}-{tick}-{seq}`.
+fn pid_from_profile_name(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("lot-")?;
+    let pid_str = rest.split('-').next()?;
+    pid_str.parse().ok()
+}
+
+/// Check whether a process with the given PID is still running.
+fn is_process_alive(pid: u32) -> bool {
+    // SAFETY: Querying process existence. Handle closed immediately.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    // SAFETY: Handle from OpenProcess.
+    unsafe {
+        CloseHandle(handle);
+    }
+    true
 }
 
 // ── AppContainer profile lifecycle ───────────────────────────────────
@@ -552,6 +571,14 @@ pub fn cleanup_stale() -> Result<()> {
         }
         match SentinelFile::read(&path) {
             Ok(sentinel) => {
+                // Skip sentinels owned by a still-running process — they
+                // are live, not stale. The owning process's Drop will
+                // clean them up.
+                if let Some(pid) = pid_from_profile_name(&sentinel.profile_name) {
+                    if is_process_alive(pid) {
+                        continue;
+                    }
+                }
                 if let Err(e) = restore_from_sentinel(&sentinel) {
                     errors.push(format!("{}: {e}", path.display()));
                 }
@@ -1548,13 +1575,17 @@ mod tests {
         let modified_sddl = get_sddl(tmp.path()).expect("get modified SDDL");
         assert_ne!(original_sddl, modified_sddl, "ACL should be modified");
 
-        cleanup_stale().expect("cleanup_stale");
+        // Call restore_from_sentinel directly rather than cleanup_stale.
+        // cleanup_stale skips sentinels owned by live processes (this PID),
+        // and this test is about the restore logic, not the scanning.
+        let sentinel_read = SentinelFile::read(&sentinel_path(&name)).expect("read sentinel");
+        restore_from_sentinel(&sentinel_read).expect("restore_from_sentinel");
 
         let restored_sddl = get_sddl(tmp.path()).expect("get restored SDDL");
         assert_eq!(
             normalize_sddl(&original_sddl),
             normalize_sddl(&restored_sddl),
-            "DACL ACEs should be restored by cleanup_stale"
+            "DACL ACEs should be restored by restore_from_sentinel"
         );
 
         assert!(

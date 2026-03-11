@@ -1,5 +1,11 @@
 mod appcontainer;
 mod job;
+pub(crate) mod nul_device;
+
+// Shared Win32 constants not exported by `windows-sys` without extra feature flags.
+pub(crate) const FILE_GENERIC_READ: u32 = 0x0012_0089;
+pub(crate) const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+pub(crate) const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
 
 pub use appcontainer::WindowsSandboxedChild;
 

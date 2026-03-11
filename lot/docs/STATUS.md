@@ -46,9 +46,18 @@ See `docs/PLAN.md` for the full phased plan with CI testing strategy.
 | `forward_common_env()` on `SandboxCommand` | Complete |
 | `wait_with_output_timeout()` (tokio feature) | Complete |
 
+### NUL Device Access (Windows)
+
+| Feature | Status |
+|---|---|
+| `nul_device_accessible()` | Complete |
+| `can_modify_nul_device()` | Complete |
+| `grant_nul_device_access()` | Complete |
+
 ## Known Limitations
 
 - `max_cpu_seconds` is not enforced via cgroups on Linux (cgroupv2 `cpu.max` controls bandwidth, not total time). Enforced on Windows (Job Objects) and macOS (`RLIMIT_CPU`).
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (narrowing breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
 - Linux cgroup tests require a delegated subtree writable by the test user.
+- Windows: AppContainer processes cannot access `\\.\NUL` without a one-time elevated DACL fix (see `nul_device` API).

@@ -197,11 +197,40 @@ Lot does not silently degrade. If a required mechanism is unavailable, `spawn()`
 | Windows: AppContainer creation fails | `SandboxError::Setup` |
 | Windows: ACL cleanup fails on drop | Logged, recoverable via `cleanup_stale()` |
 
+## Windows: NUL Device Access
+
+AppContainer-sandboxed processes cannot open the Windows NUL device (`\\.\NUL`) by default. All path variants return `ERROR_ACCESS_DENIED`. This breaks any child process that uses `Stdio::null()` — Rust's standard library opens `\\.\NUL` internally, and tools like Nushell set `stdin(Stdio::null())` for external commands.
+
+This is a [known Windows limitation](https://github.com/microsoft/win32-app-isolation/issues/73) with no built-in fix from Microsoft.
+
+### Fix
+
+A one-time DACL modification grants `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) read/write access to the NUL device. This requires elevation (run as administrator) and persists across reboots. It does not weaken AppContainer isolation — NUL is a data sink, not a privilege escalation vector.
+
+Three Windows-only functions:
+
+- `nul_device_accessible() -> bool` — checks if AppContainer processes can access `\\.\NUL`
+- `can_modify_nul_device() -> bool` — checks if the current process is elevated (can modify the DACL)
+- `grant_nul_device_access() -> Result<()>` — grants access (idempotent)
+
+```rust
+use lot::{nul_device_accessible, can_modify_nul_device, grant_nul_device_access};
+
+if !nul_device_accessible() {
+    if can_modify_nul_device() {
+        grant_nul_device_access().expect("failed to grant NUL device access");
+    } else {
+        eprintln!("Run as administrator to fix NUL device access for AppContainer sandboxes");
+    }
+}
+```
+
 ## Known Limitations
 
 - `max_cpu_seconds` is not enforced on Linux (cgroups v2 `cpu.max` controls bandwidth, not total time). Enforced on Windows and macOS.
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (restricting it breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
+- Windows: AppContainer processes cannot access `\\.\NUL` without a one-time system fix (see above).
 
 ## Requirements
 
