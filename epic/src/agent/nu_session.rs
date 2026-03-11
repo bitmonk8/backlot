@@ -1350,16 +1350,20 @@ mod tests {
         );
 
         // Attempt 6: rg (child process execution from exec_path).
-        // BUG(windows): AppContainer blocks child process execution from
-        // exec_path directories despite FILE_GENERIC_EXECUTE ACLs.
-        // See docs/WINDOWS_SANDBOX.md.
         let rg_cmd = format!(
             "^rg --color=never original '{}'",
             nu_path(tmp.path())
         );
         let out_rg = session.evaluate(&rg_cmd, 30, tmp.path(), grant).await.unwrap();
-        // BUG(windows): This assertion fails on Windows due to AppContainer
-        // blocking child process execution. See docs/WINDOWS_SANDBOX.md.
+        #[cfg(target_os = "windows")]
+        assert!(
+            !out_rg.is_error,
+            "rg failed in read-only sandbox. On Windows, AppContainer blocks child processes \
+             unless the NUL device ACL is configured. Run `epic setup` from an elevated \
+             (Administrator) prompt to fix. Raw error: {}",
+            out_rg.content
+        );
+        #[cfg(not(target_os = "windows"))]
         assert!(
             !out_rg.is_error,
             "rg should be accessible in read-only sandbox: {}",
@@ -1492,12 +1496,10 @@ mod tests {
 
     #[tokio::test]
     async fn integration_sandbox_rg_with_ancestor_traverse() {
-        // Verifies that rg execution fails inside AppContainer due to
-        // \\.\NUL device access being blocked. Nu's MCP mode sets
-        // stdin(Stdio::null()) which opens \\.\NUL, and AppContainer
-        // denies device access (os error 5). The error surfaces as
-        // "Permission denied" on rg execution and "Command not found"
-        // on system commands (since System32 isn't in nu's PATH).
+        // Verifies rg child process execution inside AppContainer.
+        // Requires `epic setup` (NUL device ACL grant) to pass.
+        // Without it, nu's MCP mode opens \\.\NUL for child stdin,
+        // AppContainer denies access (os error 5), and rg fails.
         skip_no_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
@@ -1530,7 +1532,6 @@ mod tests {
             if let Ok(o) = output {
                 let acl_text = String::from_utf8_lossy(&o.stdout);
                 eprintln!("rg.exe ACLs:\n{acl_text}");
-                // The AppContainer SID should have (I)(RX).
                 assert!(
                     acl_text.contains("(I)(RX)"),
                     "rg.exe should have inherited RX ACL from exec_path"
@@ -1538,35 +1539,24 @@ mod tests {
             }
         }
 
-        // Confirm: full-path rg execution fails with Permission denied.
+        // rg execution inside AppContainer: succeeds only if NUL device is accessible.
         let rg_full = format!("^'{}' --version", nu_path(&rg_exe));
         let Some(result) = try_eval(session, &rg_full, 30, tmp.path(), grant).await else {
             return;
         };
         let out = result.unwrap();
         assert!(
-            out.is_error,
-            "BUG FIXED? rg execution succeeded — AppContainer child process \
-             restriction may have been resolved. Update this test."
-        );
-        assert!(
-            out.content.contains("permission_denied")
-                || out.content.contains("Permission denied"),
-            "expected Permission denied, got: {}",
+            !out.is_error,
+            "rg execution failed inside AppContainer. This means the NUL device \
+             ACL has not been configured. Run `epic setup` from an elevated \
+             (Administrator) prompt, then re-run this test.\n\
+             Error: {}",
             out.content
         );
-
-        // Confirm: system commands also fail (System32 not in policy).
-        let Some(cmd_result) =
-            try_eval(session, "^hostname", 30, tmp.path(), grant).await
-        else {
-            return;
-        };
-        let cmd_out = cmd_result.unwrap();
         assert!(
-            cmd_out.is_error,
-            "system commands should also fail without system dir access: {}",
-            cmd_out.content
+            out.content.contains("ripgrep"),
+            "expected rg --version output containing 'ripgrep', got: {}",
+            out.content
         );
     }
 

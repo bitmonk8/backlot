@@ -40,6 +40,8 @@ pub enum Command {
     Resume,
     /// Show the current status of a run.
     Status,
+    /// One-time Windows setup: grant `AppContainer` access to the NUL device.
+    Setup,
 }
 
 #[cfg(test)]
@@ -57,5 +59,11 @@ mod tests {
     fn no_sandbox_warn_defaults_false() {
         let cli = Cli::try_parse_from(["epic", "run", "test goal"]).expect("should parse");
         assert!(!cli.no_sandbox_warn);
+    }
+
+    #[test]
+    fn setup_command_parsed() {
+        let cli = Cli::try_parse_from(["epic", "setup"]).expect("should parse");
+        assert!(matches!(cli.command, Command::Setup));
     }
 }

@@ -45,6 +45,21 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         return print_status(&state_path);
     }
 
+    if matches!(&cli.command, Command::Setup) {
+        return run_setup();
+    }
+
+    #[cfg(target_os = "windows")]
+    if matches!(&cli.command, Command::Run { .. } | Command::Resume)
+        && !lot::nul_device_accessible()
+    {
+        bail!(
+            "AppContainer cannot access the NUL device. Child process execution (e.g., rg) will fail.\n\
+             Run \"epic setup\" from an elevated (Administrator) command prompt to fix this.\n\
+             This is a one-time operation."
+        );
+    }
+
     if matches!(&cli.command, Command::Run { .. } | Command::Resume)
         && !cli.no_sandbox_warn
         && !sandbox::detect_virtualization()
@@ -124,7 +139,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             eprintln!("Resuming from {}", state_path.display());
             (state, root_id, goal_text)
         }
-        Command::Init | Command::Status => unreachable!(),
+        Command::Init | Command::Status | Command::Setup => unreachable!(),
     };
 
     let (tx, rx) = event_channel();
@@ -204,6 +219,28 @@ fn load_and_validate_state(
     };
     let goal = root_task.goal.clone();
     Ok((state, root_id, goal))
+}
+
+fn run_setup() -> anyhow::Result<()> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("Not applicable on this platform.");
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if lot::nul_device_accessible() {
+            println!("NUL device access already configured.");
+            return Ok(());
+        }
+        if !lot::can_modify_nul_device() {
+            bail!("This command must be run from an elevated (Administrator) prompt.");
+        }
+        lot::grant_nul_device_access()?;
+        println!("NUL device access granted to AppContainer processes.");
+        Ok(())
+    }
 }
 
 fn print_status(state_path: &std::path::Path) -> anyhow::Result<()> {

@@ -1,12 +1,12 @@
-# Windows AppContainer: Child Process Execution Bug
+# Windows AppContainer: NUL Device ACL Workaround
 
-## Problem
+## Background
 
-External commands spawned by nu inside a lot AppContainer sandbox fail with `ERROR_ACCESS_DENIED` (os error 5). The error surfaces as "Command `rg` not found" because nu misreports spawn failures as command-not-found.
+Without a one-time ACL fix, external commands spawned by nu inside a lot AppContainer sandbox fail with `ERROR_ACCESS_DENIED` (os error 5). The error surfaces as "Command `rg` not found" because nu misreports spawn failures as command-not-found.
 
-**Impact**: `epic grep` (which shells out to `rg`) is non-functional on Windows. The other five tools (`Read`, `Write`, `Edit`, `Glob`, `NuShell`) are nu custom commands and are unaffected.
+**Affected tool**: `epic grep` (shells out to `rg`). The other five tools (`Read`, `Write`, `Edit`, `Glob`, `NuShell`) are nu custom commands and are unaffected.
 
-**Reproduce**: `cargo test integration_sandbox_read_only_prevents_writes -- --nocapture`
+**Fix**: Run `epic setup` from an elevated (Administrator) prompt. This is a one-time operation.
 
 ## Root Cause
 
@@ -84,32 +84,24 @@ Three public functions exported from `lot` crate root (`lot::nul_device_accessib
 | `can_modify_nul_device()` | `→ bool` | Queries `TOKEN_ELEVATION` on the current process token. Returns `true` if elevated (administrator). Returns `false` on API failure. |
 | `grant_nul_device_access()` | `→ lot::Result<()>` | Idempotent — calls `nul_device_accessible()` first, returns `Ok(())` if already granted. Otherwise reads current DACL, builds `ALL APPLICATION PACKAGES` SID, adds ACE granting `FILE_GENERIC_READ \| FILE_GENERIC_WRITE` via `SetEntriesInAclW`, applies with `SetNamedSecurityInfoW`. Returns `SandboxError::Setup(msg)` on failure (including `ERROR_ACCESS_DENIED` when not elevated). |
 
-### epic integration (remaining work)
+### epic integration
 
-**1. `epic setup` CLI subcommand** (new, in `cli.rs` + `main.rs`):
+**1. `epic setup` CLI subcommand**:
 
-Windows-only subcommand. On non-Windows, prints "Not applicable on this platform." and exits.
+Checks and configures NUL device access for AppContainer sandboxing. On non-Windows, prints "Not applicable on this platform." and exits.
 
-Flow:
-1. Call `lot::nul_device_accessible()`. If `true` → print "NUL device access already configured." and exit 0.
-2. Call `lot::can_modify_nul_device()`. If `false` → print "This command must be run from an elevated (Administrator) prompt." and exit 1.
-3. Call `lot::grant_nul_device_access()`. On `Ok(())` → print "NUL device access granted to AppContainer processes." On `Err(e)` → print the error and exit 1.
+Behavior:
+1. Calls `lot::nul_device_accessible()`. If `true` → prints "NUL device access already configured." and exits 0.
+2. Calls `lot::can_modify_nul_device()`. If `false` → prints "This command must be run from an elevated (Administrator) prompt." and exits 1.
+3. Calls `lot::grant_nul_device_access()`. On `Ok(())` → prints "NUL device access granted to AppContainer processes." On `Err(e)` → prints the error and exits 1.
 
-**2. Startup check** (in `epic run` / `epic resume`, Windows-only):
+**2. Startup check in `epic run` / `epic resume`**:
 
-Before spawning any nu sessions:
-1. Call `lot::nul_device_accessible()`.
-2. If `true` → proceed.
-3. If `false` → print to stderr and exit 1:
-   ```
-   AppContainer cannot access the NUL device. Child process execution (e.g., rg) will fail.
-   Run "epic setup" from an elevated (Administrator) command prompt to fix this.
-   This is a one-time operation.
-   ```
+Windows-only (`#[cfg(target_os = "windows")]`). Before spawning nu sessions, calls `lot::nul_device_accessible()`. If `false`, prints an error directing the user to run `epic setup` from an elevated prompt and exits 1.
 
 **3. Conditional compilation**:
 
-All three lot functions are `#[cfg(target_os = "windows")]`. Epic's call sites must be gated with `#[cfg(target_os = "windows")]`. On non-Windows, the startup check is a no-op and `epic setup` prints the platform message.
+All call sites use `#[cfg(target_os = "windows")]`. On non-Windows, the startup check compiles to a no-op and `epic setup` prints the platform message.
 
 ### Rejected alternatives
 
