@@ -742,6 +742,96 @@ mod tests {
         assert_eq!(result, "r##'x'#y'##");
     }
 
+    // -- quote_nu adversarial input tests --
+
+    #[test]
+    fn test_quote_nu_subshell_expression() {
+        // $(rm -rf /) must not be interpreted as a subshell — single-quoted strings
+        // in nu treat $ as literal.
+        assert_eq!(quote_nu("$(rm -rf /)"), "'$(rm -rf /)'");
+    }
+
+    #[test]
+    fn test_quote_nu_subshell_with_single_quote() {
+        // Combine subshell syntax with single quote to force raw string path.
+        // The $ must remain inert inside the raw string.
+        let result = quote_nu("$(echo 'pwned')");
+        assert_eq!(result, r"r#'$(echo 'pwned')'#");
+    }
+
+    #[test]
+    fn test_quote_nu_null_byte() {
+        // Null bytes in input — quote_nu must not panic or produce invalid output.
+        // Nu single-quoted strings can contain \0 as a literal byte.
+        let result = quote_nu("before\0after");
+        assert_eq!(result, "'before\0after'");
+    }
+
+    #[test]
+    fn test_quote_nu_null_byte_with_single_quote() {
+        // Null byte + single quote forces raw string path.
+        let result = quote_nu("it's\0here");
+        assert_eq!(result, "r#'it's\0here'#");
+    }
+
+    #[test]
+    fn test_quote_nu_multiline_with_closing_delimiter() {
+        // Multi-line string that contains the '# closing delimiter on a separate line.
+        // Must escalate to r##'...'## to avoid premature close.
+        let input = "line1\n'#\nline3";
+        let result = quote_nu(input);
+        assert_eq!(result, "r##'line1\n'#\nline3'##");
+    }
+
+    #[test]
+    fn test_quote_nu_multiline_with_escalating_delimiters() {
+        // Contains both '# and '## — must escalate to r###'...'###.
+        let input = "a'#b\n'##c";
+        let result = quote_nu(input);
+        assert_eq!(result, "r###'a'#b\n'##c'###");
+    }
+
+    #[test]
+    fn test_quote_nu_all_single_quotes() {
+        let result = quote_nu("'''");
+        assert_eq!(result, "r#'''''#");
+    }
+
+    #[test]
+    fn test_quote_nu_semicolon_command_separator() {
+        // Semicolons separate commands in nu — must be inert inside quotes.
+        assert_eq!(quote_nu("a; rm -rf /"), "'a; rm -rf /'");
+    }
+
+    #[test]
+    fn test_quote_nu_pipe_operator() {
+        // Pipe operator must be inert inside quotes.
+        assert_eq!(quote_nu("x | malicious"), "'x | malicious'");
+    }
+
+    #[test]
+    fn test_quote_nu_glob_characters() {
+        // Glob wildcards — must be literal inside quotes.
+        assert_eq!(quote_nu("*?[abc]"), "'*?[abc]'");
+    }
+
+    #[test]
+    fn test_quote_nu_newline_with_closing_single_quote() {
+        // Multi-line where a line ends with ' — still safe in simple single quotes
+        // because nu raw strings only close on '# sequences.
+        assert_eq!(quote_nu("line1'\nline2"), "r#'line1'\nline2'#");
+    }
+
+    #[test]
+    fn test_quote_nu_crlf_line_endings() {
+        assert_eq!(quote_nu("a\r\nb"), "'a\r\nb'");
+    }
+
+    #[test]
+    fn test_quote_nu_tab_and_control_chars() {
+        assert_eq!(quote_nu("a\tb\x07c"), "'a\tb\x07c'");
+    }
+
     // -- translate_tool_call tests --
 
     #[test]
