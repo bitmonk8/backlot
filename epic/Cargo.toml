@@ -19,7 +19,8 @@ crossterm = "0.28"
 globset = "0.4"
 walkdir = "2"
 regex = "1"
-lot = { git = "https://github.com/bitmonk8/lot", rev = "8b468d7", features = ["tokio"] }
+lot = { path = "../lot", features = ["tokio"] }
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "deny"
@@ -43,5 +44,4 @@ tar = "0.4"
 zip = "2"
 
 [dev-dependencies]
-tempfile = "3"
 flick = { git = "https://github.com/bitmonk8/flick", rev = "b36e0f3", features = ["testing"] }

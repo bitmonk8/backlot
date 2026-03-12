@@ -53,17 +53,13 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
 ## Priority 1: Nu session integration test failures
 
-6 of 355 tests fail (serialized). 8 fail in parallel (2 additional concurrency-only failures). These tests cover the core tool execution path — every agent tool call routes through `NuSession` → AppContainer sandbox → nu MCP process. See [ISSUES.md](ISSUES.md) for full details.
+42 of 45 nu_session tests pass (serialized). 3 fail. See [ISSUES.md](ISSUES.md) for full details.
 
-**Lot change complete (2026-03-12):** Lot updated to rev `8b468d7` — `grant_appcontainer_prerequisites()` now grants both NUL device ACLs and ancestor traverse ACEs. Epic's `epic setup` and startup check updated to use the new API (`appcontainer_prerequisites_met`, `is_elevated`, `grant_appcontainer_prerequisites`).
+**Category A — RESOLVED (2026-03-12).** All 4 Category A tests pass after `epic setup` applied ancestor traverse ACEs. The per-session temp dir redirect + lot ancestor ACE fix is verified.
 
-**Remaining fixes are epic-side only:**
-
-- **Category A** (4 tests): Nu built-in commands (`open`, `ls <file>`, `mkdir`) fail under AppContainer because `nu_glob` traverses ancestor directories. Lot now provides the ancestor traverse ACE API. Epic needs: (1) per-session temp dir under `.epic/tmp/` instead of system `%TEMP%`, (2) run `epic setup` to apply ancestor ACEs for the project root. See ISSUES.md for details.
-- **Category B** (2 tests): No `rg.exe` binary on machine. Test environment issue, not a sandbox bug.
-- **Category C** (2 tests, parallel-only): Concurrent AppContainer profile interference. Fix deferred until Category A is resolved.
-
-**Next step**: Epic-side fixes — per-session temp dir redirect and re-run `epic setup` to apply ancestor traverse ACEs.
+- **Category A** (4 tests): **Fixed and verified.** Per-session temp dir + ancestor traverse ACEs working.
+- **Category B** (3 tests): No `rg.exe` binary on machine. Test environment issue, not a sandbox bug. `integration_custom_command_epic_grep` reclassified from A/B to B — its only remaining failure is rg-not-found.
+- **Category C** (6 tests, parallel-only): Concurrent AppContainer profile interference. 6 tests fail in parallel, all pass serialized. Now unblocked for investigation.
 
 ## Priority 2: Reel Extraction
 
@@ -73,7 +69,7 @@ Extracting the agent session layer (tool loop, tool definitions, NuSession, sand
 
 **Flick named models**: Done. Epic migrated to `ModelRegistry`/`RequestConfig` API (commit `614f6b6`).
 
-**Next step**: Create reel crate, move code, wire epic as consumer. Blocked on Priority 1 — the code being extracted is the code with failing tests.
+**Next step**: Create reel crate, move code, wire epic as consumer. Category A resolved — reel extraction is unblocked.
 
 ## Other Work Candidates
 

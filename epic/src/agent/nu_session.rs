@@ -83,6 +83,9 @@ struct NuProcess {
     project_root: PathBuf,
     /// Shared handle to the child — kept alive for cleanup, accessible for kill.
     child_handle: ChildHandle,
+    /// Per-session temp directory under `<project_root>/.epic/tmp/`.
+    /// Dropped (and cleaned up) when the process is dropped.
+    _session_temp_dir: tempfile::TempDir,
 }
 
 impl Drop for NuProcess {
@@ -90,6 +93,9 @@ impl Drop for NuProcess {
         let mut guard = self.child_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref mut child) = *guard {
             let _ = child.kill();
+            // Reap the child so it releases handles before _session_temp_dir
+            // is dropped — on Windows, open handles prevent directory deletion.
+            let _ = child.wait();
         }
     }
 }
@@ -441,9 +447,10 @@ fn build_nu_sandbox_policy(
     project_root: &Path,
     grant: ToolGrant,
     cache_dir: Option<&Path>,
+    session_temp_dir: &Path,
 ) -> lot::Result<lot::SandboxPolicy> {
     let mut builder = SandboxPolicyBuilder::new()
-        .include_temp_dirs()
+        .write_path(session_temp_dir)
         .allow_network(true);
 
     if grant.contains(ToolGrant::WRITE) {
@@ -475,7 +482,25 @@ async fn spawn_nu_process(
     grant: ToolGrant,
     cache_dir: Option<&Path>,
 ) -> Result<NuProcess, String> {
-    let policy = build_nu_sandbox_policy(project_root, grant, cache_dir)
+    // Validate project root exists before creating any directories under it.
+    if !project_root.exists() {
+        return Err(format!(
+            "project root does not exist: {}",
+            project_root.display()
+        ));
+    }
+
+    // Create a per-session temp directory under <project_root>/.epic/tmp/ so
+    // that all ancestor directories match those already granted traverse ACEs
+    // by `epic setup`. This avoids the nu_glob ancestor traversal failures
+    // that occur when temp dirs live under system %TEMP%.
+    let temp_base = project_root.join(".epic").join("tmp");
+    std::fs::create_dir_all(&temp_base)
+        .map_err(|e| format!("failed to create session temp base: {e}"))?;
+    let session_temp_dir = tempfile::TempDir::new_in(&temp_base)
+        .map_err(|e| format!("failed to create session temp dir: {e}"))?;
+
+    let policy = build_nu_sandbox_policy(project_root, grant, cache_dir, session_temp_dir.path())
         .map_err(|e| format!("sandbox setup failed: {e}"))?;
 
     let nu_binary = resolve_nu_binary(cache_dir);
@@ -501,6 +526,12 @@ async fn spawn_nu_process(
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Null);
         cmd.stdin(SandboxStdio::Piped);
+        // Override TEMP/TMP before forward_common_env — explicit env takes
+        // precedence over forwarded values. This redirects nu's temp I/O to
+        // the per-session dir under the project root, avoiding ancestor
+        // traversal failures in AppContainer.
+        cmd.env("TEMP", session_temp_dir.path());
+        cmd.env("TMP", session_temp_dir.path());
         cmd.forward_common_env();
 
         // Set EPIC_RG_DIR so epic_env.nu can add rg to PATH inside the session.
@@ -523,6 +554,7 @@ async fn spawn_nu_process(
             grant,
             project_root,
             child_handle,
+            _session_temp_dir: session_temp_dir,
         };
 
         // MCP initialization handshake.
@@ -576,7 +608,8 @@ mod tests {
     #[test]
     fn test_build_nu_sandbox_policy_write_grant() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::WRITE | ToolGrant::NU, None).unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::WRITE | ToolGrant::NU, None, sess_tmp.path()).unwrap();
         let canon = tmp.path().canonicalize().unwrap();
 
         let covered_by_write = policy
@@ -591,46 +624,50 @@ mod tests {
             !policy.read_paths.contains(&canon),
             "project root should NOT be in read_paths when WRITE granted"
         );
+        // Session temp dir writability is tested by the no_write_grant variant,
+        // where it's not subsumed by the project root write path.
     }
 
     #[test]
     fn test_build_nu_sandbox_policy_no_write_grant() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None).unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
         let canon = tmp.path().canonicalize().unwrap();
+        let sess_canon = sess_tmp.path().canonicalize().unwrap();
 
-        let overlaps_write = policy
-            .write_paths
-            .iter()
-            .any(|w| canon.starts_with(w) || w.starts_with(&canon));
-        if overlaps_write {
-            assert!(
-                !policy.read_paths.contains(&canon),
-                "project root should NOT be in read_paths when covered by write_paths"
-            );
-        } else {
-            assert!(
-                policy.read_paths.contains(&canon),
-                "project root should be in read_paths when WRITE not granted"
-            );
-        }
+        // Without WRITE grant: project root is read-only, session temp is writable.
+        assert!(
+            policy.read_paths.contains(&canon),
+            "project root should be in read_paths when WRITE not granted"
+        );
         assert!(
             !policy.write_paths.contains(&canon),
             "project root should NOT be in write_paths when WRITE not granted"
+        );
+        let has_sess_write = policy
+            .write_paths
+            .iter()
+            .any(|w| sess_canon.starts_with(w));
+        assert!(
+            has_sess_write,
+            "session temp dir should be writable regardless of grant"
         );
     }
 
     #[test]
     fn test_build_nu_sandbox_policy_allows_network() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None).unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
         assert!(policy.allow_network);
     }
 
     #[test]
     fn test_build_nu_sandbox_policy_no_exec_paths_without_cache() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None).unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
         assert!(
             policy.exec_paths.is_empty(),
             "exec_paths should be empty when no cache dir provided"
@@ -640,9 +677,10 @@ mod tests {
     #[test]
     fn test_build_nu_sandbox_policy_includes_cache_dir_exec() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // Cache dir must not be under %TEMP% (include_temp_dirs overlap).
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        // Cache dir outside test project root (tmp) to avoid exec/read overlap in policy.
         let cache = tempfile::TempDir::new_in(sandbox_test_base()).unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, Some(cache.path())).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, Some(cache.path()), sess_tmp.path()).unwrap();
 
         let cache_canon = cache.path().canonicalize().unwrap();
         let has_cache_exec = policy
@@ -865,19 +903,23 @@ mod tests {
         tempfile::TempDir::new().expect("create temp dir")
     }
 
-    /// Base directory for sandbox test temp dirs, outside of `%TEMP%`.
+    /// Base directory for sandbox test temp dirs.
     ///
-    /// `include_temp_dirs()` grants write access to `%TEMP%`, so sandbox
-    /// read-only tests fail if the project root is a subdirectory of `%TEMP%`.
+    /// Uses a sibling of the project root so that all ancestors (`C:\UnitySrc`,
+    /// `C:\`) already have `ALL APPLICATION PACKAGES` traverse ACEs from
+    /// `epic setup`. Cannot be inside the project root because intermediate
+    /// directories (e.g. `target/`) lack those ACEs, causing `nu_glob`
+    /// ancestor traversal to fail inside AppContainer.
     fn sandbox_test_base() -> PathBuf {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("sandbox-test");
+            .parent()
+            .expect("project root has parent")
+            .join("epic-sandbox-test");
         std::fs::create_dir_all(&base).expect("create sandbox test base dir");
         base
     }
 
-    /// Create a temp project directory outside of `%TEMP%` for sandbox tests.
+    /// Create a temp project directory under `sandbox_test_base()` for sandbox tests.
     fn tmp_sandbox_project() -> tempfile::TempDir {
         tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox test dir")
     }
@@ -1073,13 +1115,14 @@ mod tests {
     #[tokio::test]
     async fn integration_custom_command_epic_read() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
         let test_file = tmp.path().join("test.txt");
         std::fs::write(&test_file, "line one\nline two\n").unwrap();
-        let session = NuSession::new();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         let cmd = format!("epic read '{}'", nu_path(&test_file));
-        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let out = result.unwrap();
@@ -1090,12 +1133,13 @@ mod tests {
     #[tokio::test]
     async fn integration_custom_command_epic_write() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
         let test_file = tmp.path().join("written.txt");
-        let session = NuSession::new();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         let cmd = format!("epic write '{}' 'hello from test'", nu_path(&test_file));
-        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let out = result.unwrap();
@@ -1107,13 +1151,14 @@ mod tests {
     #[tokio::test]
     async fn integration_custom_command_epic_glob() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         std::fs::write(tmp.path().join("b.txt"), "").unwrap();
-        let session = NuSession::new();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         let cmd = format!("epic glob '*.txt' --path '{}'", nu_path(tmp.path()));
-        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let out = result.unwrap();
@@ -1125,13 +1170,14 @@ mod tests {
     #[tokio::test]
     async fn integration_custom_command_epic_edit() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
         let test_file = tmp.path().join("edit_me.txt");
         std::fs::write(&test_file, "old value here").unwrap();
-        let session = NuSession::new();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         let cmd = format!("epic edit '{}' 'old value' 'new value'", nu_path(&test_file));
-        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let out = result.unwrap();
@@ -1143,12 +1189,13 @@ mod tests {
     #[tokio::test]
     async fn integration_custom_command_epic_grep() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
         std::fs::write(tmp.path().join("searchable.txt"), "findme in this file\n").unwrap();
-        let session = NuSession::new();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         let cmd = format!("epic grep 'findme' --path '{}'", nu_path(tmp.path()));
-        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
+        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let out = result.unwrap();
@@ -1268,7 +1315,10 @@ mod tests {
             "'blocked' | save '{}'",
             nu_path(&tmp.path().join("new_file.txt"))
         );
-        let out = session.evaluate(&write_cmd, 30, tmp.path(), grant).await.unwrap();
+        let Some(result) = try_eval(session, &write_cmd, 30, tmp.path(), grant).await else {
+            return;
+        };
+        let out = result.unwrap();
         assert!(
             out.is_error,
             "write should fail under read-only sandbox, got: {}",
@@ -1364,9 +1414,9 @@ mod tests {
 
     #[tokio::test]
     async fn integration_sandbox_temp_dir_no_pivot_to_project() {
-        // A read-only session can write to temp dirs (include_temp_dirs), but
-        // must not be able to pivot that access back to the project root —
-        // e.g. copy a file to temp, modify it, then write it back.
+        // A read-only session can write to its per-session temp dir, but must
+        // not be able to pivot that access back to the project root — e.g.
+        // copy a file to temp, modify it, then write it back.
         skip_no_nu!();
         let env = sandbox_env();
         let tmp = &env.project;

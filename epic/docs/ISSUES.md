@@ -2,28 +2,33 @@
 
 ## Nu session integration test failures
 
-`src/agent/nu_session.rs` — 6 of 355 tests fail (serialized), 8 in parallel. These tests exercise the core tool execution path: every agent tool call routes through `NuSession`. Failures here mean epic cannot reliably execute tools inside the AppContainer sandbox on Windows.
+`src/agent/nu_session.rs` — 3 of 45 nu_session tests fail (serialized), 9 in parallel. These tests exercise the core tool execution path: every agent tool call routes through `NuSession`.
 
-Build and clippy are clean. 349 tests pass (serialized). Observed 2026-03-12 on Windows 11 with Rust 1.93.1.
+Build and clippy are clean. 42 nu_session tests pass (serialized). Observed 2026-03-12 on Windows 11 with Rust 1.93.1.
 
-**Status: Lot-side fix complete (rev `8b468d7`).** Remaining fixes are epic-side only. Category C deferred.
+**Status: Category A RESOLVED (2026-03-12).** Lot ancestor ACEs + epic per-session temp dir fix verified. Remaining: Category B (rg not found, 3 tests), Category C (parallel interference, 6 tests).
 
 ### Test results
 
-Parallel run (default): 8 failures. Serialized (`--test-threads=1`): 6 failures. The 2 concurrency-only failures are marked.
+Parallel run (default): 9 failures. Serialized (`--test-threads=1`): 3 failures. The 6 concurrency-only failures are marked.
 
-| # | Test | Parallel error | Serialized error | Category |
-|---|------|----------------|------------------|----------|
-| 1 | `integration_custom_command_epic_read` | `$env.PWD non-existent` | `No matches found for DoNotExpand(...)` — `ls $full` fails | A |
-| 2 | `integration_custom_command_epic_write` | `$env.PWD non-existent` | `Permission denied` | A |
-| 3 | `integration_custom_command_epic_glob` | directory not found | **passes** | C |
-| 4 | `integration_custom_command_epic_edit` | timeout 30s | `Input type not supported` — `open` returns nothing | A |
-| 5 | `integration_custom_command_epic_grep` | `$env.PWD non-existent` | `Command rg not found` | A/B |
-| 6 | `integration_env_filtering_rg_available` | timeout 30s | `Command rg not found` | B |
-| 7 | `integration_sandbox_read_only_prevents_writes` | `Command rg not found` | `Command rg not found` | B |
-| 8 | `integration_kill_then_evaluate_respawns` | `stdout closed` | **passes** | C |
+| # | Test | Parallel | Serialized | Category |
+|---|------|----------|------------|----------|
+| 1 | `integration_custom_command_epic_read` | **passes** | **passes** | A (resolved) |
+| 2 | `integration_custom_command_epic_write` | **passes** | **passes** | A (resolved) |
+| 3 | `integration_custom_command_epic_edit` | **passes** | **passes** | A (resolved) |
+| 4 | `integration_custom_command_epic_glob` | **passes** | **passes** | A (resolved) |
+| 5 | `integration_custom_command_epic_grep` | `rg not found` | `rg not found` | B |
+| 6 | `integration_env_filtering_rg_available` | `rg not found` | `rg not found` | B |
+| 7 | `integration_sandbox_read_only_prevents_writes` | `rg not found` | `rg not found` | B |
+| 8 | `integration_spawn_creates_session` | `stdout closed` | **passes** | C |
+| 9 | `integration_evaluate_simple_echo` | `stdout closed` | **passes** | C |
+| 10 | `integration_evaluate_multiple_sequential` | `stdout closed` | **passes** | C |
+| 11 | `integration_drop_cleans_up` | `stdout closed` | **passes** | C |
+| 12 | `integration_timeout_kills_process` | `stdout closed` | **passes** | C |
+| 13 | `integration_grant_change_respawns` | `stdout closed` | **passes** | C |
 
-### Category A — Nu built-ins fail under AppContainer (4 tests, all fail serialized)
+### Category A — Nu built-ins fail under AppContainer (RESOLVED — all 4 pass)
 
 **Affects**: epic_read, epic_write, epic_edit, epic_grep — the four custom commands that do filesystem I/O.
 
@@ -81,37 +86,32 @@ Both `open` and `ls <file>` route through `nu_engine::glob_from()` → `nu_glob:
 
 `icacls` confirms no ancestor directory has an `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) ACE. The capability SIDs (`S-1-15-3-*`) present on `C:\`, `C:\Users`, `C:\Users\thomasa` are from other apps and do not match lot's AppContainer profiles. `C:\Users\thomasa\AppData` and `...\AppData\Local` have no AppContainer ACEs at all. Every ancestor in every policy path chain needs a traverse ACE.
 
-See [CHANGE_REQUEST_FOR_EPIC.md](../../lot/docs/CHANGE_REQUEST_FOR_EPIC.md) for full survey table and proposed fix.
+Full survey table and proposed fix were in `lot/docs/CHANGE_REQUEST_FOR_EPIC.md` (lot repo). The fix is now implemented.
 
-#### Resolution: lot change (done) + epic temp dir redirect (pending)
+#### Resolution: lot change (done) + epic temp dir redirect (done)
 
 Two changes work together to fix Category A:
 
 **1. Lot: ancestor traverse ACEs — DONE (rev `8b468d7`)**
 
-Lot now provides `grant_appcontainer_prerequisites(paths)` which grants `FILE_TRAVERSE | SYNCHRONIZE` ACEs on all ancestor directories up to the volume root, plus NUL device access. Epic's `epic setup` and startup check updated to use the new API. Running `epic setup` from an elevated prompt will apply these ACEs for the project root.
+Lot now provides `grant_appcontainer_prerequisites(paths)` which grants `FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE` ACEs on all ancestor directories up to the volume root, plus NUL device access. Epic's `epic setup` and startup check updated to use the new API. Running `epic setup` from an elevated prompt will apply these ACEs for the project root.
 
-**2. Epic: per-session temp directory under `.epic/` — PENDING**
+**2. Epic: per-session temp directory under `.epic/` — DONE (2026-03-12)**
 
-Currently epic uses the system temp directory (`%TEMP%`, typically `C:\Users\<user>\AppData\Local\Temp`) for nu sessions via `include_temp_dirs()`. This creates two problems: (a) the `AppData\Local\Temp` ancestor chain needs traverse ACEs, and (b) concurrent nu sessions share a temp directory, weakening isolation.
+Each nu session now gets its own temp directory under `<project_root>/.epic/tmp/` via `tempfile::TempDir`. Changes:
+- `spawn_nu_process()` creates `.epic/tmp/` base, creates a `TempDir` inside it
+- `TEMP`/`TMP` env vars set before `forward_common_env()` (explicit env takes precedence)
+- `build_nu_sandbox_policy()` uses `write_path(session_temp_dir)` instead of `include_temp_dirs()`
+- `NuProcess` holds the `TempDir` handle — auto-cleaned on drop
+- Lot policy validation updated to allow write-path children under read-path parents
+- `tempfile` moved from dev-dependencies to dependencies
+- Project root existence validated before temp dir creation
 
-Change `NuSession` to give each session its own temp directory under `.epic/tmp/<session-id>/`:
-- Create the directory before spawning nu
-- Set `cmd.env("TEMP", session_temp_dir)` before `cmd.forward_common_env()` (explicit env takes precedence over forwarded values)
-- Replace `include_temp_dirs()` with `write_path(session_temp_dir)` in the sandbox policy
-- Clean up the session temp directory when the session is dropped
-- Nu reads `TEMP` via `std::env::temp_dir()`, so `$nu.temp-dir`, `mktemp`, and child processes all use the redirected path
-- For tests: use a subfolder of the test's temp directory (same pattern, different root)
+**Verified (2026-03-12).** `epic setup` applied ancestor traverse ACEs. All 4 Category A tests pass serialized. Category A is resolved.
 
-Benefits:
-- Eliminates the entire `AppData\Local\Temp` ancestor chain — session temp dir ancestors are the same as project root ancestors (already covered by `epic setup`)
-- Each nu session has an isolated temp directory — no cross-session temp file leakage
-- Sandbox policy is tighter: write access only to project root and the session's own temp dir, not the system-wide temp directory
-- No functional change to nu — `std::env::temp_dir()` returns whatever `TEMP` is set to
+### Category B — `Command rg not found` (3 tests, all fail serialized)
 
-### Category B — `Command rg not found` (2 tests, both fail serialized)
-
-**Affects**: env_filtering_rg_available, sandbox_read_only_prevents_writes — any test that executes `^rg` inside the sandbox.
+**Affects**: custom_command_epic_grep, env_filtering_rg_available, sandbox_read_only_prevents_writes — any test that executes `^rg` inside the sandbox.
 
 **Root cause: CONFIRMED.** No `rg.exe` binary exists on this machine. The `rg` command available in bash is a Claude Code shell function that proxies to `claude.exe` — it is not a standalone executable. The nu session's `resolve_rg_binary()` checks three locations and all fail:
 1. Same directory as current executable — no `rg.exe` there
@@ -124,22 +124,19 @@ NUL device is not a factor (see Step 1 in investigation results). The test asser
 
 This is a test environment issue, not a sandbox bug. Options: (a) `build.rs` downloads rg alongside nu (it already does for nu), (b) tests skip when rg is unavailable, (c) install rg on the dev machine.
 
-### Category C — Concurrency-only failures (2 tests, pass serialized)
+### Category C — Concurrency-only failures (6 tests, all pass serialized)
 
-**Affects**: epic_glob, kill_then_evaluate_respawns.
+**Affects**: spawn_creates_session, evaluate_simple_echo, evaluate_multiple_sequential, drop_cleans_up, timeout_kills_process, grant_change_respawns.
 
-These pass with `--test-threads=1` but fail under parallel execution:
+These pass with `--test-threads=1` but fail under parallel execution with `nu process closed stdout unexpectedly`.
 
-- **kill_then_evaluate_respawns**: `nu process closed stdout unexpectedly` — concurrent AppContainer profile create/destroy races.
-- **epic_glob**: Transient directory-not-found error under concurrent profile management.
-
-Root cause: AppContainer profiles created by concurrent test processes interfere. The sandbox tests use per-test isolated cache dirs, but these non-sandbox tests share the build-time cache dir.
+Root cause: AppContainer profiles created by concurrent test processes interfere. The sandbox tests use per-test isolated cache dirs, but these non-sandbox tests share the build-time cache dir. Now unblocked for investigation (Category A resolved).
 
 ### Investigation results
 
 Steps 1–6 completed 2026-03-12. Key findings incorporated into Category A, B, and C sections above. Summary: (1) NUL device ACL configured — not a factor in any category. (2) ACL inheritance correct, no path mismatch. (3) Not `%TEMP%`-specific. (4) 19 isolated tests confirmed which nu built-ins fail vs work. (5) Relative paths fail identically (glob_from converts to absolute). (6) Traced to `nu_glob::fill_todo()` → `fs::metadata()` on ancestor directories.
 
-**Remaining: Address concurrency (Category C).** PENDING — deferred until Category A fix is verified.
+**Remaining:** Category B (install/download rg) and Category C (parallel AppContainer interference). Category A resolved — these are unblocked.
 
 ---
 
@@ -185,3 +182,32 @@ Steps 1–6 completed 2026-03-12. Key findings incorporated into Category A, B, 
 ### 9. Deprecated `TempDir::into_path()` warning
 
 `src/agent/tools.rs:1247` — Uses `TempDir::new().unwrap().into_path()` which triggers a deprecation warning: `use of deprecated method tempfile::TempDir::into_path: use TempDir::keep()`. Replace with `TempDir::keep()` when convenient.
+
+### 10. `lot` dependency uses local path override
+
+`Cargo.toml` — `lot = { path = "../lot" }` is a local dev override. Must revert to a pinned git rev before merge. Blocked on committing the lot policy.rs changes (directional overlap validation) to the lot repo first.
+
+### 11. Per-session temp dir test gaps
+
+`src/agent/nu_session.rs` — Missing test cases for the per-session temp dir feature:
+- No integration test verifying nu sees the overridden `TEMP`/`TMP` env vars (e.g., `$env.TEMP` should point under `.epic/tmp/`).
+- No positive test that a read-only session can write to its per-session temp dir (complement to `integration_sandbox_temp_dir_no_pivot_to_project`).
+- No test verifying temp dir cleanup on `NuProcess` drop (though `tempfile::TempDir` cleanup is well-tested upstream).
+- No unit test for `spawn_nu_process` with a nonexistent `project_root` (new validation path).
+- No policy test asserts absence of system temp dirs from `write_paths` — a regression re-adding `include_temp_dirs()` would go undetected.
+
+### 12. Policy test boilerplate duplication
+
+`src/agent/nu_session.rs:606-689` — 5 `build_nu_sandbox_policy` tests repeat identical `TempDir` + `TempDir::new_in` setup. Extract a helper like `fn policy_test_dirs() -> (TempDir, TempDir)`. **Category: Simplification.**
+
+### 13. Double `.join()` in temp base path construction
+
+`src/agent/nu_session.rs:494` — `.join(".epic").join("tmp")` can be `.join(".epic/tmp")`. **Category: Simplification.**
+
+### 14. `NuProcess::drop` uses unbounded `wait()` after `kill()`
+
+`src/agent/nu_session.rs:95` — `child.wait()` in the `Drop` impl uses `WaitForSingleObject(INFINITE)`. If `kill()` fails silently (e.g., `ERROR_ACCESS_DENIED` during process exit), `wait()` could block the thread indefinitely. Practical likelihood is very low on Windows (`TerminateProcess` is reliable), but a bounded wait or `try_wait` fallback would be more defensive. Drop impl also relies on struct field declaration order for the kill→wait→TempDir-drop sequence; an explicit `drop()` call would make the dependency clearer. **Category: Correctness (edge case).**
+
+### 15. `spawn_nu_process` responsibilities exceed name
+
+`src/agent/nu_session.rs:480` — Function now handles 6 concerns: project_root validation, temp dir creation, sandbox policy building, binary resolution, process spawning, MCP handshake. The MCP handshake could be extracted into a method on `NuProcess`. Defer to reel extraction when this code moves to its own crate. **Category: Naming / Separation of Concerns.**
