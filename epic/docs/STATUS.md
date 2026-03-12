@@ -61,5 +61,4 @@ Extracting the agent session layer (tool loop, tool definitions, NuSession, sand
 
 ## Other Work Candidates
 
-1. **`quote_nu()` adversarial input tests** — Complete. 14 adversarial tests added covering subshell expressions `$(...)`, null bytes, multi-line strings with closing delimiters, escalating delimiter sequences, command separators (`;`, `|`), glob characters, control characters, and CRLF line endings.
-2. **Remove unused crate dependencies** — `globset`, `walkdir`, `regex` are unused. Blocked by Rust 1.93.1 compiler ICE triggered by `windows-sys 0.61.2` when these are removed. Revisit when toolchain updates.
+1. **Remove unused crate dependencies** — `globset`, `walkdir`, `regex` are unused. Blocked by Rust 1.93.1 compiler ICE triggered by `windows-sys 0.61.2` when these are removed. Revisit when toolchain updates.
