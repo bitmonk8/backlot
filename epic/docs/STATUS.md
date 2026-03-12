@@ -51,7 +51,20 @@ Epic uses generalized prompts that work across languages. No language-specific l
 
 No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
-## Priority: Reel Extraction
+## Priority 1: Nu session integration test failures (CRITICAL)
+
+9 of 355 tests fail. These tests cover the core tool execution path — every agent tool call routes through `NuSession` → AppContainer sandbox → nu MCP process. Failures mean epic cannot reliably execute tools on Windows. See [ISSUES.md](ISSUES.md) for full details.
+
+**Failure categories**:
+- **Category A** (4 tests): AppContainer blocks file access to files in `%TEMP%` created before sandbox spawn. Custom commands (epic read/write/edit/grep) cannot see or modify files. Fails even serialized.
+- **Category B** (2 tests): `^rg` not found inside sandbox. External command execution broken. May be caused by missing NUL device ACL (`epic setup` not run).
+- **Category C** (3 tests): Concurrent AppContainer profile interference. Pass serialized, fail parallel.
+
+**Current status**: Observations documented, root causes hypothesized but **unverified**. The parallel-run error messages (PWD errors, timeouts) mask the real failures — serialized runs reveal the actual errors.
+
+**Next step**: Execute the 5-step investigation plan in ISSUES.md. Diagnosis first — do not attempt fixes until root causes are confirmed. Step 1 (check NUL device ACL state) may resolve Category B immediately and inform Category A.
+
+## Priority 2: Reel Extraction
 
 Extracting the agent session layer (tool loop, tool definitions, NuSession, sandboxing) into a separate `reel` crate. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the spec.
 
@@ -59,7 +72,7 @@ Extracting the agent session layer (tool loop, tool definitions, NuSession, sand
 
 **Flick named models**: Done. Epic migrated to `ModelRegistry`/`RequestConfig` API (commit `614f6b6`).
 
-**Next step**: Create reel crate, move code, wire epic as consumer.
+**Next step**: Create reel crate, move code, wire epic as consumer. Blocked on Priority 1 — the code being extracted is the code with failing tests.
 
 ## Other Work Candidates
 
