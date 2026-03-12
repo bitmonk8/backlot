@@ -949,6 +949,20 @@ mod tests {
         Some(dest)
     }
 
+    /// Create a NuSession with an isolated copy of the build-time cache dir.
+    ///
+    /// Each test gets its own cache dir so concurrent AppContainer profiles
+    /// do not interfere via ACL grant/restore on a shared directory.
+    /// The returned `Option<TempDir>` must be held alive for the test duration.
+    fn isolated_session() -> (NuSession, Option<tempfile::TempDir>) {
+        let cache = tmp_sandbox_cache();
+        let session = match &cache {
+            Some(c) => NuSession::with_cache_dir(c.path().to_path_buf()),
+            None => NuSession::new(),
+        };
+        (session, cache)
+    }
+
     /// Sandbox test environment with isolated project and cache directories.
     struct SandboxTestEnv {
         project: tempfile::TempDir,
@@ -958,11 +972,7 @@ mod tests {
 
     fn sandbox_env() -> SandboxTestEnv {
         let project = tmp_sandbox_project();
-        let cache = tmp_sandbox_cache();
-        let session = match &cache {
-            Some(c) => NuSession::with_cache_dir(c.path().to_path_buf()),
-            None => NuSession::new(),
-        };
+        let (session, cache) = isolated_session();
         SandboxTestEnv {
             project,
             _cache: cache,
@@ -1014,7 +1024,7 @@ mod tests {
     async fn integration_spawn_creates_session() {
         skip_no_nu!();
         let tmp = tmp_project();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
             return;
         }
@@ -1024,7 +1034,7 @@ mod tests {
     async fn integration_spawn_is_idempotent() {
         skip_no_nu!();
         let tmp = tmp_project();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
             return;
         }
@@ -1037,7 +1047,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         {
-            let session = NuSession::new();
+            let (session, _cache) = isolated_session();
             if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
                 return;
             }
@@ -1049,7 +1059,7 @@ mod tests {
     async fn integration_kill_then_evaluate_respawns() {
         skip_no_nu!();
         let tmp = tmp_project();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
             return;
         }
@@ -1066,7 +1076,7 @@ mod tests {
     async fn integration_evaluate_simple_echo() {
         skip_no_nu!();
         let tmp = tmp_project();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         let Some(result) =
             try_eval(&session, "echo 'hello world'", 30, tmp.path(), ToolGrant::NU).await
         else {
@@ -1081,7 +1091,7 @@ mod tests {
     async fn integration_evaluate_error_command() {
         skip_no_nu!();
         let tmp = tmp_project();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         let Some(result) = try_eval(
             &session,
             "error make { msg: 'test error' }",
@@ -1102,7 +1112,7 @@ mod tests {
     async fn integration_evaluate_multiple_sequential() {
         skip_no_nu!();
         let tmp = tmp_project();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         let Some(result) = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::NU).await
         else {
             return;
@@ -1213,7 +1223,7 @@ mod tests {
     async fn integration_timeout_kills_process() {
         skip_no_nu!();
         let tmp = tmp_project();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         let Some(result) = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::NU).await
         else {
             return;
@@ -1236,7 +1246,7 @@ mod tests {
     async fn integration_grant_change_respawns() {
         skip_no_nu!();
         let tmp = tmp_project();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         let Some(result) = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::NU).await
         else {
             return;
@@ -1263,7 +1273,7 @@ mod tests {
     async fn integration_generation_prevents_stale_writeback() {
         skip_no_nu!();
         let tmp = tmp_project();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
             return;
         }
@@ -1286,7 +1296,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         std::fs::write(tmp.path().join("needle.txt"), "haystack\n").unwrap();
-        let session = NuSession::new();
+        let (session, _cache) = isolated_session();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         // Use EPIC_RG_PATH (absolute path) instead of bare `^rg`. NuShell's
         // PATH-based command lookup fails under AppContainer on Windows.

@@ -2,31 +2,31 @@
 
 ## Nu session integration test failures
 
-`src/agent/nu_session.rs` — 3 of 45 nu_session tests fail (serialized), 9 in parallel. These tests exercise the core tool execution path: every agent tool call routes through `NuSession`.
+`src/agent/nu_session.rs` — 45 of 45 nu_session tests pass (parallel and serialized). These tests exercise the core tool execution path: every agent tool call routes through `NuSession`.
 
-Build and clippy are clean. 42 nu_session tests pass (serialized). Observed 2026-03-12 on Windows 11 with Rust 1.93.1.
+Build and clippy are clean. Observed 2026-03-12 on Windows 11 with Rust 1.93.1.
 
-**Status: Category A RESOLVED (2026-03-12). Category B RESOLVED (2026-03-12).** Lot ancestor ACEs + epic per-session temp dir fix verified. Remaining: Category C (parallel interference, 6 tests).
+**Status: All categories RESOLVED (2026-03-12).** Category A: lot ancestor ACEs + per-session temp dir. Category B: `EPIC_RG_PATH` absolute path. Category C: per-test isolated cache dirs.
 
 ### Test results
 
-Parallel run (default): 6 failures. Serialized (`--test-threads=1`): 0 failures. The 6 concurrency-only failures are marked.
+All 45 tests pass in both parallel (default) and serialized modes.
 
-| # | Test | Parallel | Serialized | Category |
-|---|------|----------|------------|----------|
-| 1 | `integration_custom_command_epic_read` | **passes** | **passes** | A (resolved) |
-| 2 | `integration_custom_command_epic_write` | **passes** | **passes** | A (resolved) |
-| 3 | `integration_custom_command_epic_edit` | **passes** | **passes** | A (resolved) |
-| 4 | `integration_custom_command_epic_glob` | **passes** | **passes** | A (resolved) |
-| 5 | `integration_custom_command_epic_grep` | **passes** | **passes** | B (resolved) |
-| 6 | `integration_env_filtering_rg_available` | **passes** | **passes** | B (resolved) |
-| 7 | `integration_sandbox_read_only_prevents_writes` | **passes** | **passes** | B (resolved) |
-| 8 | `integration_spawn_creates_session` | `stdout closed` | **passes** | C |
-| 9 | `integration_evaluate_simple_echo` | `stdout closed` | **passes** | C |
-| 10 | `integration_evaluate_multiple_sequential` | `stdout closed` | **passes** | C |
-| 11 | `integration_drop_cleans_up` | `stdout closed` | **passes** | C |
-| 12 | `integration_timeout_kills_process` | `stdout closed` | **passes** | C |
-| 13 | `integration_grant_change_respawns` | `stdout closed` | **passes** | C |
+| # | Test | Category |
+|---|------|----------|
+| 1 | `integration_custom_command_epic_read` | A |
+| 2 | `integration_custom_command_epic_write` | A |
+| 3 | `integration_custom_command_epic_edit` | A |
+| 4 | `integration_custom_command_epic_glob` | A |
+| 5 | `integration_custom_command_epic_grep` | B |
+| 6 | `integration_env_filtering_rg_available` | B |
+| 7 | `integration_sandbox_read_only_prevents_writes` | B |
+| 8 | `integration_spawn_creates_session` | C |
+| 9 | `integration_evaluate_simple_echo` | C |
+| 10 | `integration_evaluate_multiple_sequential` | C |
+| 11 | `integration_drop_cleans_up` | C |
+| 12 | `integration_timeout_kills_process` | C |
+| 13 | `integration_grant_change_respawns` | C |
 
 ### Category A — Nu built-ins fail under AppContainer (RESOLVED — all 4 pass)
 
@@ -86,7 +86,7 @@ Both `open` and `ls <file>` route through `nu_engine::glob_from()` → `nu_glob:
 
 `icacls` confirms no ancestor directory has an `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) ACE. The capability SIDs (`S-1-15-3-*`) present on `C:\`, `C:\Users`, `C:\Users\thomasa` are from other apps and do not match lot's AppContainer profiles. `C:\Users\thomasa\AppData` and `...\AppData\Local` have no AppContainer ACEs at all. Every ancestor in every policy path chain needs a traverse ACE.
 
-Full survey table and proposed fix were in `lot/docs/CHANGE_REQUEST_FOR_EPIC.md` (lot repo). The fix is now implemented.
+Full survey table and proposed fix in `lot/docs/CHANGE_REQUEST_FOR_EPIC.md` (lot repo). Implemented in lot rev `8b468d7`.
 
 #### Resolution: lot change (done) + epic temp dir redirect (done)
 
@@ -123,19 +123,21 @@ Each nu session now gets its own temp directory under `<project_root>/.epic/tmp/
 - `EPIC_RG_DIR` and the PATH-prepend block in `epic_env.nu` removed (dead code after this fix).
 - Tests updated to use `^$env.EPIC_RG_PATH` instead of bare `^rg`.
 
-### Category C — Concurrency-only failures (6 tests, all pass serialized)
+### Category C — Concurrency-only failures (RESOLVED — all 6 pass)
 
 **Affects**: spawn_creates_session, evaluate_simple_echo, evaluate_multiple_sequential, drop_cleans_up, timeout_kills_process, grant_change_respawns.
 
-These pass with `--test-threads=1` but fail under parallel execution with `nu process closed stdout unexpectedly`.
+These passed with `--test-threads=1` but failed under parallel execution with `nu process closed stdout unexpectedly`.
 
-Root cause: AppContainer profiles created by concurrent test processes interfere. The sandbox tests use per-test isolated cache dirs, but these non-sandbox tests share the build-time cache dir. Now unblocked for investigation (Category A resolved).
+**Root cause**: All non-sandbox tests used `NuSession::new()` which shares the build-time `NU_CACHE_DIR`. When concurrent tests spawn AppContainer processes, each grants ACLs on this shared cache directory. When one test's process drops and `restore_from_sentinel()` reverts the DACL to pre-sandbox state, other concurrent tests' processes lose access and fail with `stdout closed unexpectedly`.
+
+**Resolution (2026-03-12)**: Introduced `isolated_session()` helper that creates a per-test copy of the cache directory (via `tmp_sandbox_cache()`) and passes it to `NuSession::with_cache_dir()`. All tests that spawn nu processes now use `isolated_session()` instead of `NuSession::new()`, giving each test its own cache dir for ACL operations. This matches the pattern sandbox tests already used via `sandbox_env()`, which was refactored to use `isolated_session()` internally.
 
 ### Investigation results
 
 Steps 1–6 completed 2026-03-12. Key findings incorporated into Category A, B, and C sections above. Summary: (1) NUL device ACL configured — not a factor in any category. (2) ACL inheritance correct, no path mismatch. (3) Not `%TEMP%`-specific. (4) 19 isolated tests confirmed which nu built-ins fail vs work. (5) Relative paths fail identically (glob_from converts to absolute). (6) Traced to `nu_glob::fill_todo()` → `fs::metadata()` on ancestor directories.
 
-**Remaining:** Category C (parallel AppContainer interference). Categories A and B resolved.
+All three categories resolved (2026-03-12).
 
 ---
 
@@ -230,3 +232,11 @@ Resolved 2026-03-12: `resolve_rg_binary` now returns `Option<PathBuf>`, validati
 ### 20. `resolve_rg_binary` has no direct unit tests
 
 `src/agent/nu_session.rs` — The `pub` function is tested only indirectly through integration tests. No unit test verifies resolution order (next to exe, cache dir, PATH fallback → None). **Category: Testing.**
+
+### 21. `isolated_session()` silent fallback defeats isolation
+
+`src/agent/nu_session.rs` — When `tmp_sandbox_cache()` returns `None` (no build-time cache), `isolated_session()` silently falls back to `NuSession::new()` which shares the default cache dir — the exact condition the helper was created to prevent. Should panic or log instead. In practice only happens when nu binary isn't built, so low risk. **Category: Testing.**
+
+### 22. No mechanism to prevent future `NuSession::new()` in tests
+
+`src/agent/nu_session.rs` — Nothing prevents a new test from calling `NuSession::new()` directly instead of `isolated_session()`, reintroducing the shared-directory ACL interference. A grep-based CI check or code comment convention could catch regressions. **Category: Testing.**

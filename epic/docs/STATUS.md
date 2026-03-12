@@ -51,15 +51,7 @@ Epic uses generalized prompts that work across languages. No language-specific l
 
 No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
-## Priority 1: Nu session integration test failures
-
-45 of 45 nu_session tests pass (serialized). See [ISSUES.md](ISSUES.md) for history.
-
-- **Category A** (4 tests): **RESOLVED (2026-03-12).** Per-session temp dir + ancestor traverse ACEs.
-- **Category B** (3 tests): **RESOLVED (2026-03-12).** Root cause was nu's PATH splitting under AppContainer — `^rg` lookup failed even with correct dir on PATH. Fix: `EPIC_RG_PATH` env var provides absolute path to rg binary; `epic grep` uses `^$env.EPIC_RG_PATH` instead of `^rg`.
-- **Category C** (6 tests, parallel-only): Concurrent AppContainer profile interference. 6 tests fail in parallel, all pass serialized.
-
-## Priority 2: Reel Extraction
+## Priority 1: Reel Extraction
 
 Extracting the agent session layer (tool loop, tool definitions, NuSession, sandboxing) into a separate `reel` crate. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the spec.
 
@@ -67,7 +59,7 @@ Extracting the agent session layer (tool loop, tool definitions, NuSession, sand
 
 **Flick named models**: Done. Epic migrated to `ModelRegistry`/`RequestConfig` API (commit `614f6b6`).
 
-**Next step**: Create reel crate, move code, wire epic as consumer. Category A resolved — reel extraction is unblocked.
+**Next step**: Create reel crate, move code, wire epic as consumer. All nu session test categories resolved — reel extraction is unblocked.
 
 ## Other Work Candidates
 
