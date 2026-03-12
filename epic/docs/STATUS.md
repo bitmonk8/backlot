@@ -57,9 +57,9 @@ Extracting the agent session layer (tool loop, tool definitions, NuSession, sand
 
 **Design status**: Complete — `Agent`, `AgentEnvironment`, `AgentRequest`, `RunResult`, `ToolHandler` trait for custom tool dispatch.
 
-**Next step**: Implement Flick named models (spec in flick repo `docs/NAMED_MODELS.md`). This adds a `models` map to Flick's config so reel can select models by name instead of rebuilding configs per-call. Prerequisite for reel extraction.
+**Flick named models**: Done. Epic migrated to `ModelRegistry`/`RequestConfig` API (commit `614f6b6`).
 
-**After Flick**: Create reel crate, move code, wire epic as consumer.
+**Next step**: Create reel crate, move code, wire epic as consumer.
 
 ## Other Work Candidates
 
