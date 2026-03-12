@@ -6,7 +6,7 @@
 
 ## What Exists
 
-- Full public API: `spawn()`, `probe()`, `cleanup_stale()`, `SandboxedChild`, `SandboxPolicy`, `SandboxPolicyBuilder`, `SandboxCommand`, `SandboxStdio`, `PlatformCapabilities`, `SandboxError`, `ResourceLimits`
+- Full public API: `spawn()`, `probe()`, `cleanup_stale()`, `SandboxedChild`, `SandboxPolicy`, `SandboxPolicyBuilder`, `SandboxCommand`, `SandboxStdio`, `PlatformCapabilities`, `SandboxError`, `ResourceLimits`, `grant_appcontainer_prerequisites()`, `appcontainer_prerequisites_met()`, `is_elevated()`
 - Policy validation with path canonicalization, overlap detection, resource limit checks
 - `SandboxPolicyBuilder`: auto-canonicalization, overlap deduction, platform default paths (exec, lib, temp)
 - `SandboxCommand::forward_common_env()`: forwards 17 standard env vars from parent
@@ -46,15 +46,7 @@ See `docs/PLAN.md` for the full phased plan with CI testing strategy.
 | `forward_common_env()` on `SandboxCommand` | Complete |
 | `wait_with_output_timeout()` (tokio feature) | Complete |
 
-### NUL Device Access (Windows)
-
-| Feature | Status |
-|---|---|
-| `nul_device_accessible()` | Complete |
-| `can_modify_nul_device()` | Complete |
-| `grant_nul_device_access()` | Complete |
-
-### AppContainer Ancestor Traverse ACEs (Windows) — NEXT
+### AppContainer Ancestor Traverse ACEs (Windows)
 
 Change request: `docs/CHANGE_REQUEST_FOR_EPIC.md`
 
@@ -62,12 +54,12 @@ AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor direct
 
 | Task | Status |
 |---|---|
-| `grant_appcontainer_prerequisites(paths)` — one-time elevated setup granting traverse ACEs on ancestors + NUL device | Not started |
-| `appcontainer_prerequisites_met(paths)` — check all ancestors + NUL device | Not started |
-| `can_elevate()` — replaces `can_modify_nul_device()` | Not started |
-| `compute_ancestors(paths)` internal helper | Not started |
-| `grant_traverse(path)` / `has_traverse_ace(path)` internals | Not started |
-| Deprecate `grant_nul_device_access()`, `nul_device_accessible()`, `can_modify_nul_device()` | Not started |
+| `grant_appcontainer_prerequisites(paths)` — one-time elevated setup granting traverse ACEs on ancestors + NUL device | Complete |
+| `appcontainer_prerequisites_met(paths)` — check all ancestors + NUL device | Complete |
+| `is_elevated()` — replaces `can_modify_nul_device()` | Complete |
+| `compute_ancestors(paths)` internal helper | Complete |
+| `grant_traverse(path)` / `has_traverse_ace(path)` internals | Complete |
+| Remove `grant_nul_device_access()`, `nul_device_accessible()`, `can_modify_nul_device()` | Complete |
 
 ## Known Limitations
 
@@ -75,4 +67,4 @@ AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor direct
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (narrowing breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
 - Linux cgroup tests require a delegated subtree writable by the test user.
-- Windows: AppContainer processes cannot access `\\.\NUL` without a one-time elevated DACL fix (see `nul_device` API).
+- Windows: AppContainer processes need a one-time elevated setup for NUL device access and ancestor directory traverse ACEs (see `grant_appcontainer_prerequisites()` API).

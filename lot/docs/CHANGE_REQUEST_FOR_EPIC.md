@@ -52,9 +52,9 @@ pub fn grant_appcontainer_prerequisites(paths: &[&Path]) -> lot::Result<()>;
 /// ALL APPLICATION PACKAGES traverse ACE, and the NUL device ACE exists.
 pub fn appcontainer_prerequisites_met(paths: &[&Path]) -> bool;
 
-/// Returns true if the current process has elevation.
-/// Renamed from `can_modify_nul_device()` to reflect broader scope.
-pub fn can_elevate() -> bool;
+/// Returns true if the current process is elevated (running as administrator).
+/// Replaces `can_modify_nul_device()`.
+pub fn is_elevated() -> bool;
 ```
 
 Callers pass the paths they intend to use as policy paths (e.g., a project root directory). Lot computes the ancestors, deduplicates, and grants traverse ACEs on each.
@@ -81,12 +81,12 @@ Using `ALL APPLICATION PACKAGES` rather than a per-profile SID means:
 
 ### Implementation Scope
 
-1. **New public API**: `grant_appcontainer_prerequisites(paths)`, `appcontainer_prerequisites_met(paths)`, `can_elevate()`
+1. **New public API**: `grant_appcontainer_prerequisites(paths)`, `appcontainer_prerequisites_met(paths)`, `is_elevated()`
 2. **Internal: `compute_ancestors(paths) -> Vec<PathBuf>`** — for each path, walk parents up to volume root, collect into a deduplicated set
 3. **Internal: `grant_traverse(path)`** — read current DACL via `GetNamedSecurityInfoW`, add `FILE_TRAVERSE | SYNCHRONIZE` ACE with `NO_INHERITANCE` for `ALL APPLICATION PACKAGES` via `SetEntriesInAclW`, apply via `SetNamedSecurityInfoW`. Same pattern as `grant_access()` but with a different access mask and no inheritance.
 4. **Internal: `has_traverse_ace(path) -> bool`** — read DACL, check for an existing allow ACE for `S-1-15-2-1` with at least `FILE_TRAVERSE | SYNCHRONIZE`
 5. **Fold NUL device logic into `grant_appcontainer_prerequisites()`** — the new function handles both NUL device and ancestor ACEs
-6. **Deprecate** `grant_nul_device_access()`, `nul_device_accessible()`, `can_modify_nul_device()` — keep as thin wrappers calling the new API for backward compatibility
+6. **Remove** `grant_nul_device_access()`, `nul_device_accessible()`, `can_modify_nul_device()` — pre-1.0 crate, no backward-compatibility obligation
 ## Motivation
 
 Epic (an AI orchestration tool) spawns NuShell inside a lot AppContainer sandbox. Nu's `open`, `ls`, and `mkdir` commands all fail because of this ancestor traversal issue. The fix in lot would benefit any lot consumer that runs programs using glob-based path resolution or `create_dir_all` inside AppContainer sandboxes.

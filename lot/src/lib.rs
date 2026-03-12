@@ -118,7 +118,7 @@ pub fn cleanup_stale() -> Result<()> {
 
 #[cfg(target_os = "windows")]
 pub use windows::nul_device::{
-    can_modify_nul_device, grant_nul_device_access, nul_device_accessible,
+    appcontainer_prerequisites_met, grant_appcontainer_prerequisites, is_elevated,
 };
 
 /// A running sandboxed process.
