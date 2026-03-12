@@ -6,7 +6,7 @@
 
 Build and clippy are clean. 346 tests pass. Observed 2026-03-12 on Windows 11 with Rust 1.93.1.
 
-**Status: Root cause diagnosis required before fixes.** See investigation plan below.
+**Status: Root causes confirmed for Categories A and B.** Category C root cause identified (concurrent profile interference), fix deferred. See investigation results below.
 
 ### Test results
 
@@ -26,32 +26,84 @@ Parallel run (default): 9 failures. Serialized (`--test-threads=1`): 6 failures.
 
 `integration_generation_prevents_stale_writeback` passes in both modes (was suspected but is not failing).
 
-### Category A — AppContainer blocks file access (4 tests, all fail serialized)
+### Category A — Nu built-ins fail under AppContainer (4 tests, all fail serialized)
 
 **Affects**: epic_read, epic_write, epic_edit, epic_grep — the four custom commands that do filesystem I/O.
 
-Serialized execution reveals the real errors (parallel runs mask them with stale-PWD and timeout noise):
+#### Nu built-ins that FAIL under AppContainer
 
-- **epic_read**: `No matches found for DoNotExpand("C:\\...\\Temp\\.tmpTdKVcR\\test.txt")` — nu's `ls $full` cannot see the file despite it existing on disk.
-- **epic_write**: `Permission denied` — `save` cannot write despite `ToolGrant::WRITE` and `include_temp_dirs()`.
-- **epic_edit**: Timeout (30s) — likely the same access failure as read, but nu hangs instead of erroring.
-- **epic_grep**: Fails with rg/PWD errors — compounds with Category B.
+| Command | Behavior | Used by |
+|---------|----------|---------|
+| `open <file>` | Returns nothing (silent failure, no error) | `epic read`, `epic edit` |
+| `open <file> --raw` | Returns nothing (silent failure, no error) | `epic read`, `epic edit` |
+| `ls <file_path>` | `No matches found for DoNotExpand(...)` | `epic read` (size check) |
+| `mkdir <dir>` | `Permission denied` (even with write ACLs) | `epic write` |
 
-These tests use `tmp_project()` → `TempDir::new()` (in `%TEMP%`) with `NuSession::new()` (shared cache dir). The sandbox has `write_path(%TEMP%)` via `include_temp_dirs()` and `exec_path(cache_dir)`.
+#### Nu built-ins that WORK under AppContainer
 
-**Hypothesized root cause**: AppContainer ACLs are applied to the directory, but files created by the *parent* process (outside the sandbox) before the child spawns may not inherit the ACL. Files pre-created by the test are invisible to the sandboxed nu process. The sandbox tests (`sandbox_env()`) work differently — they use `tmp_sandbox_project()` (outside `%TEMP%`) with `write_path` on the specific directory.
+| Command | Notes |
+|---------|-------|
+| `save <file>` / `save --force <file>` | File creation and overwrite work |
+| `ls <directory>` | Directory listing works; individual file stat does not |
+| `path exists` | File existence check works |
+| `path expand`, `path dirname` | Path manipulation works |
+| `echo`, `lines`, `encode`, `bytes length` | String/data operations work |
 
-**This is unverified.** It could also be: ACL canonicalization mismatch (junction/symlink in `%TEMP%` path), or a lot bug in `write_path` inheritance propagation.
+#### Root cause: `nu_glob` component-by-component traversal fails on ancestor directories
+
+**CONFIRMED via nushell source analysis (2026-03-12).**
+
+Both `open` and `ls <file>` route through `nu_engine::glob_from()` → `nu_glob::glob_with()`. The chain:
+
+1. `glob_from()` always converts paths to absolute (`absolute_with(path, cwd)`), so even `open test.txt` becomes `open C:\Users\...\test.txt`.
+2. `nu_glob::glob_with()` decomposes the absolute path into a root (`C:\`) and component patterns (`Users`, `thomasa`, ..., `test.txt`).
+3. `fill_todo()` walks components one-by-one, calling `fs::metadata()` on each intermediate directory (`C:\`, `C:\Users`, etc.).
+4. `fs::metadata()` on Windows calls `CreateFileW(path, access=0, FILE_FLAG_BACKUP_SEMANTICS)`, which implicitly requires `SYNCHRONIZE` — needs an ACE in the target's DACL for the AppContainer SID.
+5. `lot` only grants ACEs on policy paths (project root, temp dirs, cache dir) with `SUB_CONTAINERS_AND_OBJECTS_INHERIT`. It does NOT grant ACEs on `C:\`, `C:\Users`, or other ancestor directories outside the policy paths.
+6. `fs::metadata("C:\\")` fails with `ACCESS_DENIED` → `is_dir("C:\\")` returns `false` → `fill_todo` adds nothing to the iterator → zero results.
+7. `open` returns `PipelineData::empty()` (nushell `nothing` type — silent). `ls` checks `paths_peek.peek().is_none()` and returns `ShellError::GenericError("No matches found")`.
+
+**Why `path exists` works:** Calls `fs::metadata()` on the **complete path** at once. Windows kernel uses `SeChangeNotifyPrivilege` (which AppContainer processes have) to bypass traverse checks on intermediate directories. The access check is performed only on the target object, which has the inherited AppContainer ACE.
+
+**Why `save` works:** Does not use `nu_glob` at all — directly calls `CreateFileW(GENERIC_WRITE)` on the target path.
+
+**Why relative paths fail:** `glob_from()` converts them to absolute before passing to `nu_glob`.
+
+**`mkdir` fails independently** — `std::fs::create_dir_all()` also calls `fs::metadata()` on ancestors to check what exists, triggering the same volume-root access failure.
+
+#### Eliminated hypotheses
+
+- ~~ACL inheritance failure~~ — `icacls` confirms inherited `(I)(RX,W)` for `ALL APPLICATION PACKAGES`
+- ~~Path canonicalization mismatch~~ — No junctions/symlinks/8.3 names in paths
+- ~~NUL device ACL~~ — Configured and working
+- ~~`%TEMP%`-specific~~ — Same failures in `target/test-step3/` and inside sandbox
+- ~~Custom command issue~~ — Raw `open` and `ls <file>` fail identically outside custom commands
+- ~~Relative paths bypass volume root~~ — `glob_from()` converts relative→absolute, so all paths traverse the volume root
+
+#### Resolution options
+
+Three fix options, from least to most invasive:
+
+1. **Grant traverse ACEs on ancestor directories in lot** — Add read-only ACEs for the AppContainer SID on each ancestor directory from the policy path up to (and including) the volume root. This lets `fs::metadata()` succeed on `C:\`, `C:\Users`, etc. Minimally invasive to epic. Trade-off: reveals directory structure to sandboxed process (acceptable — AppContainer already allows `path exists` on any path via `SeChangeNotifyPrivilege`).
+
+2. **Patch `nu_glob` to use `GetFileAttributesW` instead of `CreateFileW`** — `GetFileAttributesW` does not open a handle and may not require the same DACL ACE. Or patch `nu_glob` to catch `ACCESS_DENIED` on intermediate directories and continue traversal (treat inaccessible ancestor as traversable if the final target is accessible). Trade-off: upstream patch, maintenance burden.
+
+3. **Move file I/O to Rust** — Execute `Read`, `Write`, `Edit` in the epic Rust process instead of routing through nu. `NuShell`, `Glob`, `Grep` remain in nu. Trade-off: changes security model (file I/O no longer sandboxed).
 
 ### Category B — `Command rg not found` (2 tests, both fail serialized)
 
 **Affects**: env_filtering_rg_available, sandbox_read_only_prevents_writes — any test that executes `^rg` inside the sandbox.
 
-- **`integration_env_filtering_rg_available`**: Uses shared cache dir. `resolve_rg_binary()` finds rg.exe in cache, sets `EPIC_RG_DIR`, `epic_env.nu` prepends to `$env.Path`. AppContainer may block execution due to missing ACLs on the shared cache dir.
+**Root cause: CONFIRMED.** No `rg.exe` binary exists on this machine. The `rg` command available in bash is a Claude Code shell function that proxies to `claude.exe` — it is not a standalone executable. The nu session's `resolve_rg_binary()` checks three locations and all fail:
+1. Same directory as current executable — no `rg.exe` there
+2. Cache directory (`NU_CACHE_DIR`) — compile-time `option_env!()` macro, not set at build time
+3. Bare `rg.exe` on `PATH` — does not exist (`where.exe rg` confirms)
 
-- **`integration_sandbox_read_only_prevents_writes`**: Uses isolated cache dir copy with `exec_path(cache_dir)`. Possible causes: (1) `std::fs::copy` doesn't preserve ACLs on the copied rg.exe, (2) AppContainer blocks child process spawning without an explicit ACE for `ALL APPLICATION PACKAGES`, (3) the NUL device ACL is not configured — `epic setup` must be run from an elevated prompt first.
+NUL device is not a factor (see Step 1 in investigation results). The test assertion message in `integration_sandbox_read_only_prevents_writes` misleadingly suggests running `epic setup` — that message needs updating.
 
-**Unresolved question**: Has `epic setup` been run on this machine? If not, *all* external commands fail in AppContainer because nu opens `\\.\NUL` for stdin piping. This would explain both Category B tests and possibly contribute to Category A failures.
+#### Resolution options
+
+This is a test environment issue, not a sandbox bug. Options: (a) `build.rs` downloads rg alongside nu (it already does for nu), (b) tests skip when rg is unavailable, (c) install rg on the dev machine.
 
 ### Category C — Concurrency-only failures (3 tests, pass serialized)
 
@@ -64,24 +116,11 @@ These pass with `--test-threads=1` but fail under parallel execution:
 
 Root cause: AppContainer profiles created by concurrent test processes interfere. The sandbox tests use per-test isolated cache dirs, but these non-sandbox tests share the build-time cache dir.
 
-### Investigation plan
+### Investigation results
 
-Each step depends on findings from the previous step. Do not skip ahead.
+Steps 1–6 completed 2026-03-12. Key findings incorporated into Category A, B, and C sections above. Summary: (1) NUL device ACL configured — not a factor in any category. (2) ACL inheritance correct, no path mismatch. (3) Not `%TEMP%`-specific. (4) 19 isolated tests confirmed which nu built-ins fail vs work. (5) Relative paths fail identically (glob_from converts to absolute). (6) Traced to `nu_glob::fill_todo()` → `fs::metadata()` on ancestor directories.
 
-**Step 1 — Establish NUL device state.**
-Run `epic setup` status check (or `lot::nul_device_accessible()` in a test) to determine if the NUL device ACL is configured. If not, run `epic setup` from an elevated prompt and re-run all tests. If Category B tests pass after this, the rg issue is resolved and Category A can be investigated in isolation.
-
-**Step 2 — Isolate ACL inheritance vs path mismatch.**
-Write a minimal reproducer: create a file in `%TEMP%` outside the sandbox, then try to read it from inside AppContainer with `write_path(%TEMP%)`. If it fails, the issue is in lot's ACL inheritance (lot bug). If it passes, the issue is in epic's test setup or path handling.
-
-**Step 3 — Check path canonicalization.**
-Print `std::fs::canonicalize(std::env::temp_dir())` and compare with the actual `TempDir::new()` path. If they differ (e.g., junction resolution), the ACL is being applied to a different path than the one nu receives.
-
-**Step 4 — Test `sandbox_env()` for custom commands.**
-Temporarily change the failing custom command tests to use `sandbox_env()` (project root outside `%TEMP%`). If they pass, the issue is specific to `%TEMP%` path handling and `include_temp_dirs()`.
-
-**Step 5 — Address concurrency.**
-If Steps 1-4 resolve Category A and B, add `#[serial]` to the 3 Category C tests, or switch all integration tests to use isolated cache dirs.
+**Remaining: Address concurrency (Category C).** PENDING — deferred until Category A fix is verified.
 
 ---
 

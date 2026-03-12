@@ -55,14 +55,13 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
 9 of 355 tests fail. These tests cover the core tool execution path — every agent tool call routes through `NuSession` → AppContainer sandbox → nu MCP process. Failures mean epic cannot reliably execute tools on Windows. See [ISSUES.md](ISSUES.md) for full details.
 
-**Failure categories**:
-- **Category A** (4 tests): AppContainer blocks file access to files in `%TEMP%` created before sandbox spawn. Custom commands (epic read/write/edit/grep) cannot see or modify files. Fails even serialized.
-- **Category B** (2 tests): `^rg` not found inside sandbox. External command execution broken. May be caused by missing NUL device ACL (`epic setup` not run).
-- **Category C** (3 tests): Concurrent AppContainer profile interference. Pass serialized, fail parallel.
+**Root causes identified (2026-03-12):**
 
-**Current status**: Observations documented, root causes hypothesized but **unverified**. The parallel-run error messages (PWD errors, timeouts) mask the real failures — serialized runs reveal the actual errors.
+- **Category A** (4 tests): **Root cause confirmed.** Nu built-in commands (`open`, `ls <file>`, `mkdir`) fail under AppContainer because `nu_glob` traverses ancestor directories lacking AppContainer ACEs. See ISSUES.md for full analysis.
+- **Category B** (2 tests): **Root cause confirmed.** No `rg.exe` binary on machine. Test environment issue, not a sandbox bug. See ISSUES.md.
+- **Category C** (3 tests): Root cause identified — concurrent AppContainer profile interference. Fix deferred until Category A is resolved.
 
-**Next step**: Execute the 5-step investigation plan in ISSUES.md. Diagnosis first — do not attempt fixes until root causes are confirmed. Step 1 (check NUL device ACL state) may resolve Category B immediately and inform Category A.
+**Next step**: Implement fix option 1 from ISSUES.md (traverse ACEs on ancestor directories in `lot`). See ISSUES.md for alternatives.
 
 ## Priority 2: Reel Extraction
 
