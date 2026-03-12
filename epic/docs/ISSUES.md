@@ -1,30 +1,27 @@
 # Known Issues
 
-## CRITICAL — Nu session integration test failures
+## Nu session integration test failures
 
-`src/agent/nu_session.rs` — 9 of 355 tests fail. These tests exercise the core tool execution path: every agent tool call routes through `NuSession`. Failures here mean epic cannot reliably execute tools inside the AppContainer sandbox on Windows.
+`src/agent/nu_session.rs` — 6 of 355 tests fail (serialized), 8 in parallel. These tests exercise the core tool execution path: every agent tool call routes through `NuSession`. Failures here mean epic cannot reliably execute tools inside the AppContainer sandbox on Windows.
 
-Build and clippy are clean. 346 tests pass. Observed 2026-03-12 on Windows 11 with Rust 1.93.1.
+Build and clippy are clean. 349 tests pass (serialized). Observed 2026-03-12 on Windows 11 with Rust 1.93.1.
 
-**Status: Root causes confirmed for Categories A and B.** Category C root cause identified (concurrent profile interference), fix deferred. See investigation results below.
+**Status: Lot-side fix complete (rev `8b468d7`).** Remaining fixes are epic-side only. Category C deferred.
 
 ### Test results
 
-Parallel run (default): 9 failures. Serialized (`--test-threads=1`): 6 failures. The 3 concurrency-only failures are marked.
+Parallel run (default): 8 failures. Serialized (`--test-threads=1`): 6 failures. The 2 concurrency-only failures are marked.
 
 | # | Test | Parallel error | Serialized error | Category |
 |---|------|----------------|------------------|----------|
-| 1 | `integration_custom_command_epic_read` | timeout 30s | `No matches found for DoNotExpand("...\\test.txt")` — `ls $full` fails | A |
+| 1 | `integration_custom_command_epic_read` | `$env.PWD non-existent` | `No matches found for DoNotExpand(...)` — `ls $full` fails | A |
 | 2 | `integration_custom_command_epic_write` | `$env.PWD non-existent` | `Permission denied` | A |
-| 3 | `integration_custom_command_epic_glob` | `$env.PWD non-existent` | **passes** | C |
-| 4 | `integration_custom_command_epic_edit` | timeout 30s | timeout 30s (likely same as read) | A |
-| 5 | `integration_custom_command_epic_grep` | `$env.PWD non-existent` | still fails | A/B |
-| 6 | `integration_env_filtering_rg_available` | `$env.PWD non-existent` | `Command rg not found` | B |
-| 7 | `integration_grant_change_respawns` | `stdout closed` | **passes** | C |
-| 8 | `integration_spawn_is_idempotent` | `stdout closed` | **passes** | C |
-| 9 | `integration_sandbox_read_only_prevents_writes` | `Command rg not found` | `Command rg not found` | B |
-
-`integration_generation_prevents_stale_writeback` passes in both modes (was suspected but is not failing).
+| 3 | `integration_custom_command_epic_glob` | directory not found | **passes** | C |
+| 4 | `integration_custom_command_epic_edit` | timeout 30s | `Input type not supported` — `open` returns nothing | A |
+| 5 | `integration_custom_command_epic_grep` | `$env.PWD non-existent` | `Command rg not found` | A/B |
+| 6 | `integration_env_filtering_rg_available` | timeout 30s | `Command rg not found` | B |
+| 7 | `integration_sandbox_read_only_prevents_writes` | `Command rg not found` | `Command rg not found` | B |
+| 8 | `integration_kill_then_evaluate_respawns` | `stdout closed` | **passes** | C |
 
 ### Category A — Nu built-ins fail under AppContainer (4 tests, all fail serialized)
 
@@ -86,11 +83,15 @@ Both `open` and `ls <file>` route through `nu_engine::glob_from()` → `nu_glob:
 
 See [CHANGE_REQUEST_FOR_EPIC.md](../../lot/docs/CHANGE_REQUEST_FOR_EPIC.md) for full survey table and proposed fix.
 
-#### Resolution: lot change request + epic temp dir redirect
+#### Resolution: lot change (done) + epic temp dir redirect (pending)
 
 Two changes work together to fix Category A:
 
-**1. Epic: per-session temp directory under `.epic/`**
+**1. Lot: ancestor traverse ACEs — DONE (rev `8b468d7`)**
+
+Lot now provides `grant_appcontainer_prerequisites(paths)` which grants `FILE_TRAVERSE | SYNCHRONIZE` ACEs on all ancestor directories up to the volume root, plus NUL device access. Epic's `epic setup` and startup check updated to use the new API. Running `epic setup` from an elevated prompt will apply these ACEs for the project root.
+
+**2. Epic: per-session temp directory under `.epic/` — PENDING**
 
 Currently epic uses the system temp directory (`%TEMP%`, typically `C:\Users\<user>\AppData\Local\Temp`) for nu sessions via `include_temp_dirs()`. This creates two problems: (a) the `AppData\Local\Temp` ancestor chain needs traverse ACEs, and (b) concurrent nu sessions share a temp directory, weakening isolation.
 
@@ -103,14 +104,10 @@ Change `NuSession` to give each session its own temp directory under `.epic/tmp/
 - For tests: use a subfolder of the test's temp directory (same pattern, different root)
 
 Benefits:
-- Eliminates the entire `AppData\Local\Temp` ancestor chain from the lot change request — session temp dir ancestors are the same as project root ancestors (already covered)
+- Eliminates the entire `AppData\Local\Temp` ancestor chain — session temp dir ancestors are the same as project root ancestors (already covered by `epic setup`)
 - Each nu session has an isolated temp directory — no cross-session temp file leakage
 - Sandbox policy is tighter: write access only to project root and the session's own temp dir, not the system-wide temp directory
 - No functional change to nu — `std::env::temp_dir()` returns whatever `TEMP` is set to
-
-**2. Lot: ancestor traverse ACEs for project root**
-
-With temp dirs redirected under `.epic/`, the only ancestors needing traverse ACEs are those of the project root (e.g., `C:\`, `C:\UnitySrc` for `C:\UnitySrc\epic`). See [CHANGE_REQUEST_FOR_EPIC.md](../../lot/docs/CHANGE_REQUEST_FOR_EPIC.md) for the change request.
 
 ### Category B — `Command rg not found` (2 tests, both fail serialized)
 
@@ -127,14 +124,14 @@ NUL device is not a factor (see Step 1 in investigation results). The test asser
 
 This is a test environment issue, not a sandbox bug. Options: (a) `build.rs` downloads rg alongside nu (it already does for nu), (b) tests skip when rg is unavailable, (c) install rg on the dev machine.
 
-### Category C — Concurrency-only failures (3 tests, pass serialized)
+### Category C — Concurrency-only failures (2 tests, pass serialized)
 
-**Affects**: epic_glob, spawn_is_idempotent, grant_change_respawns.
+**Affects**: epic_glob, kill_then_evaluate_respawns.
 
 These pass with `--test-threads=1` but fail under parallel execution:
 
-- **spawn_is_idempotent** and **grant_change_respawns**: `nu process closed stdout unexpectedly` — concurrent AppContainer profile create/destroy races.
-- **epic_glob**: Transient PWD resolution failure under concurrent profile management.
+- **kill_then_evaluate_respawns**: `nu process closed stdout unexpectedly` — concurrent AppContainer profile create/destroy races.
+- **epic_glob**: Transient directory-not-found error under concurrent profile management.
 
 Root cause: AppContainer profiles created by concurrent test processes interfere. The sandbox tests use per-test isolated cache dirs, but these non-sandbox tests share the build-time cache dir.
 

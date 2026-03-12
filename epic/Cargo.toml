@@ -19,7 +19,7 @@ crossterm = "0.28"
 globset = "0.4"
 walkdir = "2"
 regex = "1"
-lot = { git = "https://github.com/bitmonk8/lot", rev = "c9518a4", features = ["tokio"] }
+lot = { git = "https://github.com/bitmonk8/lot", rev = "8b468d7", features = ["tokio"] }
 
 [lints.rust]
 unsafe_code = "deny"

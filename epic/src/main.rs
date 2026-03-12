@@ -46,15 +46,15 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     }
 
     if matches!(&cli.command, Command::Setup) {
-        return run_setup();
+        return run_setup(&project_root);
     }
 
     #[cfg(target_os = "windows")]
     if matches!(&cli.command, Command::Run { .. } | Command::Resume)
-        && !lot::nul_device_accessible()
+        && !lot::appcontainer_prerequisites_met(&[project_root.as_path()])
     {
         bail!(
-            "AppContainer cannot access the NUL device. Child process execution (e.g., rg) will fail.\n\
+            "AppContainer prerequisites not met. Nu built-in commands will fail under sandbox.\n\
              Run \"epic setup\" from an elevated (Administrator) command prompt to fix this.\n\
              This is a one-time operation."
         );
@@ -221,24 +221,27 @@ fn load_and_validate_state(
     Ok((state, root_id, goal))
 }
 
-fn run_setup() -> anyhow::Result<()> {
+fn run_setup(project_root: &std::path::Path) -> anyhow::Result<()> {
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = project_root;
         println!("Not applicable on this platform.");
         return Ok(());
     }
 
     #[cfg(target_os = "windows")]
     {
-        if lot::nul_device_accessible() {
-            println!("NUL device access already configured.");
+        if lot::appcontainer_prerequisites_met(&[project_root]) {
+            println!("AppContainer prerequisites already configured.");
             return Ok(());
         }
-        if !lot::can_modify_nul_device() {
+        if !lot::is_elevated() {
             bail!("This command must be run from an elevated (Administrator) prompt.");
         }
-        lot::grant_nul_device_access()?;
-        println!("NUL device access granted to AppContainer processes.");
+        lot::grant_appcontainer_prerequisites(&[project_root])?;
+        println!(
+            "AppContainer prerequisites configured: NUL device access and ancestor traverse ACEs granted."
+        );
         Ok(())
     }
 }

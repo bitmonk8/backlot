@@ -15,7 +15,7 @@
 - CLI via clap — `init`, `run <goal>`, `resume`, `status`, `setup` subcommands
 - `epic init` — agent-driven interactive configuration scaffolding
 - Container/VM startup detection with suppressible warning
-- Process sandboxing via lot — nu tool runs inside a persistent `nu --mcp` process spawned inside an OS-native sandbox (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS); one nu MCP session per agent call, sandbox is mandatory (no unsandboxed fallback). `epic setup` grants AppContainer access to `\\.\NUL` device (one-time elevated operation); `run`/`resume` check and fail early if not configured.
+- Process sandboxing via lot — nu tool runs inside a persistent `nu --mcp` process spawned inside an OS-native sandbox (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS); one nu MCP session per agent call, sandbox is mandatory (no unsandboxed fallback). `epic setup` grants AppContainer prerequisites (NUL device ACL + ancestor traverse ACEs) via one-time elevated operation; `run`/`resume` check `appcontainer_prerequisites_met(&[project_root])` and fail early if not configured.
 - Context propagation — `TaskContext` carries discoveries, parent goals, sibling summaries, checkpoint guidance. Structural map injection in prompts (ancestor chain, completed/pending siblings).
 - Discovery flow — in-memory tracking via `task.discoveries`. Inter-subtask checkpoint with Haiku classification (proceed/adjust/escalate). Discovery bubbling to parent.
 - Assessment — Haiku call returns path (leaf/branch) + model selection. Root forced to branch, max-depth forced to leaf.
@@ -51,17 +51,19 @@ Epic uses generalized prompts that work across languages. No language-specific l
 
 No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
-## Priority 1: Nu session integration test failures (CRITICAL)
+## Priority 1: Nu session integration test failures
 
-9 of 355 tests fail. These tests cover the core tool execution path — every agent tool call routes through `NuSession` → AppContainer sandbox → nu MCP process. Failures mean epic cannot reliably execute tools on Windows. See [ISSUES.md](ISSUES.md) for full details.
+6 of 355 tests fail (serialized). 8 fail in parallel (2 additional concurrency-only failures). These tests cover the core tool execution path — every agent tool call routes through `NuSession` → AppContainer sandbox → nu MCP process. See [ISSUES.md](ISSUES.md) for full details.
 
-**Root causes identified (2026-03-12):**
+**Lot change complete (2026-03-12):** Lot updated to rev `8b468d7` — `grant_appcontainer_prerequisites()` now grants both NUL device ACLs and ancestor traverse ACEs. Epic's `epic setup` and startup check updated to use the new API (`appcontainer_prerequisites_met`, `is_elevated`, `grant_appcontainer_prerequisites`).
 
-- **Category A** (4 tests): **Root cause confirmed.** Nu built-in commands (`open`, `ls <file>`, `mkdir`) fail under AppContainer because `nu_glob` traverses ancestor directories lacking AppContainer ACEs. See ISSUES.md for full analysis.
-- **Category B** (2 tests): **Root cause confirmed.** No `rg.exe` binary on machine. Test environment issue, not a sandbox bug. See ISSUES.md.
-- **Category C** (3 tests): Root cause identified — concurrent AppContainer profile interference. Fix deferred until Category A is resolved.
+**Remaining fixes are epic-side only:**
 
-**Next step**: Implement lot change request — ancestor traverse ACEs via one-time elevated setup. See [CHANGE_REQUEST_FOR_EPIC.md](../../lot/docs/CHANGE_REQUEST_FOR_EPIC.md) for full spec, [ISSUES.md](ISSUES.md) for root cause details.
+- **Category A** (4 tests): Nu built-in commands (`open`, `ls <file>`, `mkdir`) fail under AppContainer because `nu_glob` traverses ancestor directories. Lot now provides the ancestor traverse ACE API. Epic needs: (1) per-session temp dir under `.epic/tmp/` instead of system `%TEMP%`, (2) run `epic setup` to apply ancestor ACEs for the project root. See ISSUES.md for details.
+- **Category B** (2 tests): No `rg.exe` binary on machine. Test environment issue, not a sandbox bug.
+- **Category C** (2 tests, parallel-only): Concurrent AppContainer profile interference. Fix deferred until Category A is resolved.
+
+**Next step**: Epic-side fixes — per-session temp dir redirect and re-run `epic setup` to apply ancestor traverse ACEs.
 
 ## Priority 2: Reel Extraction
 
