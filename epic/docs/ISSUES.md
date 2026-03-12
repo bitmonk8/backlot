@@ -80,15 +80,37 @@ Both `open` and `ls <file>` route through `nu_engine::glob_from()` → `nu_glob:
 - ~~Custom command issue~~ — Raw `open` and `ls <file>` fail identically outside custom commands
 - ~~Relative paths bypass volume root~~ — `glob_from()` converts relative→absolute, so all paths traverse the volume root
 
-#### Resolution options
+#### Ancestor ACL survey (2026-03-12)
 
-Three fix options, from least to most invasive:
+`icacls` confirms no ancestor directory has an `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) ACE. The capability SIDs (`S-1-15-3-*`) present on `C:\`, `C:\Users`, `C:\Users\thomasa` are from other apps and do not match lot's AppContainer profiles. `C:\Users\thomasa\AppData` and `...\AppData\Local` have no AppContainer ACEs at all. Every ancestor in every policy path chain needs a traverse ACE.
 
-1. **Grant traverse ACEs on ancestor directories in lot** — Add read-only ACEs for the AppContainer SID on each ancestor directory from the policy path up to (and including) the volume root. This lets `fs::metadata()` succeed on `C:\`, `C:\Users`, etc. Minimally invasive to epic. Trade-off: reveals directory structure to sandboxed process (acceptable — AppContainer already allows `path exists` on any path via `SeChangeNotifyPrivilege`).
+See [LOT_CHANGE_REQUEST.md](LOT_CHANGE_REQUEST.md) for full survey table and proposed fix.
 
-2. **Patch `nu_glob` to use `GetFileAttributesW` instead of `CreateFileW`** — `GetFileAttributesW` does not open a handle and may not require the same DACL ACE. Or patch `nu_glob` to catch `ACCESS_DENIED` on intermediate directories and continue traversal (treat inaccessible ancestor as traversable if the final target is accessible). Trade-off: upstream patch, maintenance burden.
+#### Resolution: lot change request + epic temp dir redirect
 
-3. **Move file I/O to Rust** — Execute `Read`, `Write`, `Edit` in the epic Rust process instead of routing through nu. `NuShell`, `Glob`, `Grep` remain in nu. Trade-off: changes security model (file I/O no longer sandboxed).
+Two changes work together to fix Category A:
+
+**1. Epic: per-session temp directory under `.epic/`**
+
+Currently epic uses the system temp directory (`%TEMP%`, typically `C:\Users\<user>\AppData\Local\Temp`) for nu sessions via `include_temp_dirs()`. This creates two problems: (a) the `AppData\Local\Temp` ancestor chain needs traverse ACEs, and (b) concurrent nu sessions share a temp directory, weakening isolation.
+
+Change `NuSession` to give each session its own temp directory under `.epic/tmp/<session-id>/`:
+- Create the directory before spawning nu
+- Set `cmd.env("TEMP", session_temp_dir)` before `cmd.forward_common_env()` (explicit env takes precedence over forwarded values)
+- Replace `include_temp_dirs()` with `write_path(session_temp_dir)` in the sandbox policy
+- Clean up the session temp directory when the session is dropped
+- Nu reads `TEMP` via `std::env::temp_dir()`, so `$nu.temp-dir`, `mktemp`, and child processes all use the redirected path
+- For tests: use a subfolder of the test's temp directory (same pattern, different root)
+
+Benefits:
+- Eliminates the entire `AppData\Local\Temp` ancestor chain from the lot change request — session temp dir ancestors are the same as project root ancestors (already covered)
+- Each nu session has an isolated temp directory — no cross-session temp file leakage
+- Sandbox policy is tighter: write access only to project root and the session's own temp dir, not the system-wide temp directory
+- No functional change to nu — `std::env::temp_dir()` returns whatever `TEMP` is set to
+
+**2. Lot: ancestor traverse ACEs for project root**
+
+With temp dirs redirected under `.epic/`, the only ancestors needing traverse ACEs are those of the project root (e.g., `C:\`, `C:\UnitySrc` for `C:\UnitySrc\epic`). See [LOT_CHANGE_REQUEST.md](LOT_CHANGE_REQUEST.md) for the change request.
 
 ### Category B — `Command rg not found` (2 tests, both fail serialized)
 

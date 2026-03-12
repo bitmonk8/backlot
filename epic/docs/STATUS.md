@@ -61,7 +61,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 - **Category B** (2 tests): **Root cause confirmed.** No `rg.exe` binary on machine. Test environment issue, not a sandbox bug. See ISSUES.md.
 - **Category C** (3 tests): Root cause identified — concurrent AppContainer profile interference. Fix deferred until Category A is resolved.
 
-**Next step**: Implement fix option 1 from ISSUES.md (traverse ACEs on ancestor directories in `lot`). See ISSUES.md for alternatives.
+**Next step**: Implement lot change request — ancestor traverse ACEs via one-time elevated setup. See [LOT_CHANGE_REQUEST.md](LOT_CHANGE_REQUEST.md) for full spec, [ISSUES.md](ISSUES.md) for root cause details.
 
 ## Priority 2: Reel Extraction
 
