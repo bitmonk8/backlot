@@ -54,6 +54,21 @@ See `docs/PLAN.md` for the full phased plan with CI testing strategy.
 | `can_modify_nul_device()` | Complete |
 | `grant_nul_device_access()` | Complete |
 
+### AppContainer Ancestor Traverse ACEs (Windows) — NEXT
+
+Change request: `docs/CHANGE_REQUEST_FOR_EPIC.md`
+
+AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor directories of policy paths because those directories lack an ACE for `ALL APPLICATION PACKAGES`. This breaks NuShell glob traversal, `create_dir_all`, and similar patterns.
+
+| Task | Status |
+|---|---|
+| `grant_appcontainer_prerequisites(paths)` — one-time elevated setup granting traverse ACEs on ancestors + NUL device | Not started |
+| `appcontainer_prerequisites_met(paths)` — check all ancestors + NUL device | Not started |
+| `can_elevate()` — replaces `can_modify_nul_device()` | Not started |
+| `compute_ancestors(paths)` internal helper | Not started |
+| `grant_traverse(path)` / `has_traverse_ace(path)` internals | Not started |
+| Deprecate `grant_nul_device_access()`, `nul_device_accessible()`, `can_modify_nul_device()` | Not started |
+
 ## Known Limitations
 
 - `max_cpu_seconds` is not enforced via cgroups on Linux (cgroupv2 `cpu.max` controls bandwidth, not total time). Enforced on Windows (Job Objects) and macOS (`RLIMIT_CPU`).
