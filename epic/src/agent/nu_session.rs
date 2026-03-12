@@ -95,22 +95,13 @@ impl Drop for NuProcess {
 }
 
 /// Combined session state behind a single mutex to prevent lock-ordering deadlocks.
+#[derive(Default)]
 struct SessionState {
     process: Option<NuProcess>,
     generation: u64,
     /// Shared child handle kept here so `kill()` can reach the child even when
     /// the `NuProcess` has been taken out for blocking I/O in `evaluate_inner`.
     inflight_child: Option<ChildHandle>,
-}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self {
-            process: None,
-            generation: 0,
-            inflight_child: None,
-        }
-    }
 }
 
 /// Manages a persistent `nu --mcp` process.

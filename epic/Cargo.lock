@@ -566,7 +566,7 @@ dependencies = [
 [[package]]
 name = "flick"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/flick?rev=f83c56e#f83c56e7f551e1f422688a31de7c042366f44c46"
+source = "git+https://github.com/bitmonk8/flick?rev=b36e0f3#b36e0f304200cdab9a417dc50c6c07c87444f49f"
 dependencies = [
  "chacha20poly1305",
  "hex",

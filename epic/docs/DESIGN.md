@@ -135,10 +135,15 @@ Flick returns structured JSON via `output_schema`. Epic deserializes response te
 Epic depends on Flick as a git crate dependency. Agent calls use `FlickClient::run()` and `FlickClient::resume()` directly — no process spawning, no YAML config files, no tool result files.
 
 ```
-Epic
- |-- Build flick::Config from JSON in-memory
- |-- resolve_provider(&config).await
- |-- FlickClient::new(config, provider)
+Epic (startup)
+ |-- build_model_registry(ModelConfig, credential_name)
+ |      → ModelRegistry with "fast", "balanced", "strong" entries
+ |-- ProviderRegistry::load_default()
+ |      → resolves credential stores (~/.flick/)
+ |
+Epic (per agent call)
+ |-- Build flick::RequestConfig from JSON in-memory
+ |-- FlickClient::new(config, &model_registry, &provider_registry).await
  |-- client.run(query, &mut context).await
  |
  |   (if ToolCallsPending)
@@ -154,13 +159,15 @@ Epic
 
 | Epic usage | Flick type |
 |---|---|
-| Config construction | `flick::Config` (parsed from JSON via `Config::from_str`) |
+| Per-request config | `flick::RequestConfig` (parsed from JSON via `RequestConfig::from_str`) |
+| Model registry | `flick::ModelRegistry` (built once at startup from `ModelConfig`) |
+| Provider registry | `flick::ProviderRegistry` (loaded once at startup) |
+| Model entry | `flick::ModelInfo` (provider, name, max_tokens) |
 | Client | `flick::FlickClient` |
 | Conversation state | `flick::Context` |
 | Response | `flick::FlickResult` |
 | Content blocks | `flick::ContentBlock` (Text, Thinking, ToolUse, ToolResult) |
 | Result status | `flick::result::ResultStatus` (Complete, ToolCallsPending, Error) |
-| Provider resolution | `flick::resolve_provider()` |
 | Errors | `flick::FlickError` |
 
 #### Timeout Handling
@@ -169,7 +176,7 @@ Epic
 
 #### Credential Management
 
-Flick's `CredentialStore` (default `~/.flick/`) resolves API keys. Credential name passed via `--credential` CLI option (default: `anthropic`).
+Flick's `ProviderRegistry` (loaded via `load_default()`) resolves API keys from credential stores (default `~/.flick/`). Each `ModelInfo` entry references a provider name; the registry maps that to credentials. Credential name passed via `--credential` CLI option (default: `anthropic`).
 
 ---
 

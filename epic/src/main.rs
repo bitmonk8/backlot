@@ -91,11 +91,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let agent = FlickAgent::new(
         project_root.clone(),
-        cli.credential,
+        &cli.credential,
         timeout,
-        epic_config.models.clone(),
+        &epic_config.models,
         epic_config.verification_steps.clone(),
-    );
+    )?;
 
     if matches!(&cli.command, Command::Init) {
         return init::run_init(&agent, &project_root).await;

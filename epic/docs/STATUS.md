@@ -22,15 +22,15 @@
 - Verification & fix loops — leaf fix loop with model escalation (Haiku→Sonnet→Opus, 3 retries per tier), branch fix loop (3 Sonnet rounds + 1 Opus round for root), scope circuit breaker (3x magnitude estimate via `git diff --numstat`).
 - Recovery — Opus recovery assessment, incremental vs full re-decomposition, recovery round budgets inherited to prevent exponential growth.
 - Event system — 19 event variants driving TUI and JSONL logging.
-- CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain, Flick pinned to rev `f83c56e`
-- Testability infrastructure — `ProviderResolver`/`ToolExecutor` traits (flick), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
+- CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain, Flick pinned to rev `b36e0f3`
+- Testability infrastructure — `ClientFactory`/`ToolExecutor` traits (flick), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
 - Nu session tests — 19 unit tests (protocol parsing, session state, generation invalidation, config resolution) and 23 integration tests (spawn lifecycle, custom command availability, timeout handling, grant change respawn, env filtering, error handling, sandbox policy verification: read-only write prevention, rg child process execution, temp dir pivot prevention, write grant verification). Sandbox tests use per-test isolated cache dirs to avoid concurrent ACL conflicts.
 
 ## What Is NOT Implemented
 
 These features are described in DESIGN.md but have no corresponding code:
 
-- **Document Store** — No `.epic/docs/` persistence, no librarian agent, no bootstrap/query/record operations. Discoveries exist only in-memory on `task.discoveries`. The `src/services/` module structure shown in README does not exist.
+- **Document Store** — No `.epic/docs/` persistence, no librarian agent, no bootstrap/query/record operations. Discoveries exist only in-memory on `task.discoveries`.
 - **Research Service** — No `research_query` tool, no gap-filling via web search or codebase exploration, no integration with document store. Not exposed as a tool during any agent phase.
 - **File-level review** — Leaf verification does not include a separate file-level review step. Deferred per code comment in `verify.rs`.
 - **Simplification review** — No local simplification review on leaf output, no aggregate simplification review on branch output. Both deferred.

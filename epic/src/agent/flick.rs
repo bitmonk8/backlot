@@ -17,6 +17,7 @@ use anyhow::{Context, bail};
 use flick::result::ResultStatus;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
@@ -27,12 +28,11 @@ const MAX_TOOL_ROUNDS: u32 = 50;
 // Injection seams for testability
 // ---------------------------------------------------------------------------
 
-type ResolverFuture<'a> = Pin<
-    Box<dyn std::future::Future<Output = anyhow::Result<Box<dyn flick::DynProvider>>> + Send + 'a>,
->;
+type ClientFactoryFuture<'a> =
+    Pin<Box<dyn std::future::Future<Output = anyhow::Result<flick::FlickClient>> + Send + 'a>>;
 
-pub trait ProviderResolver: Send + Sync {
-    fn resolve<'a>(&'a self, config: &'a flick::Config) -> ResolverFuture<'a>;
+pub trait ClientFactory: Send + Sync {
+    fn build(&self, config: flick::RequestConfig) -> ClientFactoryFuture<'_>;
 }
 
 pub trait ToolExecutor: Send + Sync {
@@ -47,14 +47,17 @@ pub trait ToolExecutor: Send + Sync {
     ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>>;
 }
 
-struct DefaultProviderResolver;
+struct DefaultClientFactory {
+    model_registry: flick::ModelRegistry,
+    provider_registry: flick::ProviderRegistry,
+}
 
-impl ProviderResolver for DefaultProviderResolver {
-    fn resolve<'a>(&'a self, config: &'a flick::Config) -> ResolverFuture<'a> {
-        Box::pin(async {
-            flick::resolve_provider(config)
+impl ClientFactory for DefaultClientFactory {
+    fn build(&self, config: flick::RequestConfig) -> ClientFactoryFuture<'_> {
+        Box::pin(async move {
+            flick::FlickClient::new(config, &self.model_registry, &self.provider_registry)
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to resolve provider: {e}"))
+                .map_err(|e| anyhow::anyhow!("failed to create flick client: {e}"))
         })
     }
 }
@@ -77,28 +80,38 @@ impl ToolExecutor for DefaultToolExecutor {
     }
 }
 
-struct RedactedString(String);
-
-impl std::fmt::Debug for RedactedString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[REDACTED]")
+/// Build a `ModelRegistry` from epic's `ModelConfig` and credential name.
+///
+/// Registers three entries ("fast", "balanced", "strong") mapping to the
+/// actual model names from `ModelConfig`. The provider field is set to
+/// `credential_name` so Flick's `ProviderRegistry` can resolve the API key.
+fn build_model_registry(
+    model_config: &ModelConfig,
+    credential_name: &str,
+) -> anyhow::Result<flick::ModelRegistry> {
+    let mut map = BTreeMap::new();
+    for tier in [Model::Haiku, Model::Sonnet, Model::Opus] {
+        map.insert(
+            config_gen::model_key(tier).to_string(),
+            flick::ModelInfo {
+                provider: credential_name.to_string(),
+                name: model_config.name_for(tier).to_string(),
+                max_tokens: Some(config_gen::default_max_tokens(tier)),
+                input_per_million: None,
+                output_per_million: None,
+            },
+        );
     }
-}
-
-impl std::fmt::Display for RedactedString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[REDACTED]")
-    }
+    flick::ModelRegistry::from_map(map)
+        .map_err(|e| anyhow::anyhow!("failed to build model registry: {e}"))
 }
 
 /// `FlickAgent` invokes the Flick library for each agent call.
 pub struct FlickAgent {
     project_root: PathBuf,
-    credential_name: RedactedString,
     call_timeout: Duration,
-    model_config: ModelConfig,
     verification_steps: Vec<VerificationStep>,
-    provider_resolver: Box<dyn ProviderResolver>,
+    client_factory: Box<dyn ClientFactory>,
     tool_executor: Box<dyn ToolExecutor>,
     /// When true, skip the eager `NuSession::spawn()` in `run_with_tools`.
     /// Used in tests where the mock `ToolExecutor` never touches the nu session.
@@ -108,49 +121,53 @@ pub struct FlickAgent {
 impl FlickAgent {
     pub fn new(
         project_root: PathBuf,
-        credential_name: String,
+        credential_name: &str,
         call_timeout: Duration,
-        model_config: ModelConfig,
+        model_config: &ModelConfig,
         verification_steps: Vec<VerificationStep>,
-    ) -> Self {
-        Self {
+    ) -> anyhow::Result<Self> {
+        let model_registry = build_model_registry(model_config, credential_name)?;
+        let provider_registry = flick::ProviderRegistry::load_default()
+            .map_err(|e| anyhow::anyhow!("failed to load provider registry: {e}"))?;
+        Ok(Self {
             project_root,
-            credential_name: RedactedString(credential_name),
             call_timeout,
-            model_config,
             verification_steps,
-            provider_resolver: Box::new(DefaultProviderResolver),
+            client_factory: Box::new(DefaultClientFactory {
+                model_registry,
+                provider_registry,
+            }),
             tool_executor: Box::new(DefaultToolExecutor),
             skip_nu_spawn: false,
-        }
+        })
     }
 
     #[cfg(test)]
     fn with_injected(
         project_root: PathBuf,
         call_timeout: Duration,
-        provider_resolver: Box<dyn ProviderResolver>,
+        client_factory: Box<dyn ClientFactory>,
         tool_executor: Box<dyn ToolExecutor>,
     ) -> Self {
         Self {
             project_root,
-            credential_name: RedactedString(String::new()),
             call_timeout,
-            model_config: ModelConfig::default(),
             verification_steps: Vec::new(),
-            provider_resolver,
+            client_factory,
             tool_executor,
             skip_nu_spawn: true,
         }
     }
 
     // -----------------------------------------------------------------------
-    // Core: build a FlickClient from a Config
+    // Core: build a FlickClient from a RequestConfig
     // -----------------------------------------------------------------------
 
-    async fn build_client(&self, config: flick::Config) -> anyhow::Result<flick::FlickClient> {
-        let provider = self.provider_resolver.resolve(&config).await?;
-        Ok(flick::FlickClient::new(config, provider))
+    async fn build_client(
+        &self,
+        config: flick::RequestConfig,
+    ) -> anyhow::Result<flick::FlickClient> {
+        self.client_factory.build(config).await
     }
 
     // -----------------------------------------------------------------------
@@ -159,7 +176,7 @@ impl FlickAgent {
 
     async fn run_structured<T: DeserializeOwned>(
         &self,
-        config: flick::Config,
+        config: flick::RequestConfig,
         query: &str,
     ) -> anyhow::Result<T> {
         let client = self.build_client(config).await?;
@@ -190,7 +207,7 @@ impl FlickAgent {
 
     async fn run_with_tools<T: DeserializeOwned>(
         &self,
-        config: flick::Config,
+        config: flick::RequestConfig,
         query: &str,
         grant: ToolGrant,
     ) -> anyhow::Result<T> {
@@ -269,13 +286,7 @@ impl FlickAgent {
         model: Model,
     ) -> anyhow::Result<LeafResult> {
         let grant = tools::phase_tools(AgentMethod::Execute);
-        let config = config_gen::build_execute_leaf_config(
-            &pair.system_prompt,
-            model,
-            &self.credential_name.0,
-            grant,
-            &self.model_config,
-        )?;
+        let config = config_gen::build_execute_leaf_config(&pair.system_prompt, model, grant)?;
 
         let wire: TaskOutcomeWire = self.run_with_tools(config, &pair.query, grant).await?;
         LeafResult::try_from(wire)
@@ -287,13 +298,7 @@ impl FlickAgent {
         model: Model,
     ) -> anyhow::Result<DecompositionResult> {
         let grant = tools::phase_tools(AgentMethod::Decompose);
-        let config = config_gen::build_decompose_config(
-            &pair.system_prompt,
-            model,
-            &self.credential_name.0,
-            grant,
-            &self.model_config,
-        )?;
+        let config = config_gen::build_decompose_config(&pair.system_prompt, model, grant)?;
 
         let wire: DecompositionWire = self.run_with_tools(config, &pair.query, grant).await?;
         DecompositionResult::try_from(wire)
@@ -327,12 +332,7 @@ Respond with the required JSON schema.";
 (build, lint, test, format commands). Read relevant config files to determine the correct commands.";
 
         let grant = tools::phase_tools(tools::AgentMethod::Analyze);
-        let config = config_gen::build_init_config(
-            system_prompt,
-            &self.credential_name.0,
-            grant,
-            &self.model_config,
-        )?;
+        let config = config_gen::build_init_config(system_prompt, grant)?;
 
         self.run_with_tools(config, query, grant).await
     }
@@ -345,12 +345,7 @@ Respond with the required JSON schema.";
 impl AgentService for FlickAgent {
     async fn assess(&self, ctx: &TaskContext) -> anyhow::Result<AssessmentResult> {
         let pair = prompts::build_assess(ctx);
-        let config = config_gen::build_assess_config(
-            &pair.system_prompt,
-            Model::Haiku,
-            &self.credential_name.0,
-            &self.model_config,
-        )?;
+        let config = config_gen::build_assess_config(&pair.system_prompt, Model::Haiku)?;
 
         let wire: AssessmentWire = self.run_structured(config, &pair.query).await?;
         AssessmentResult::try_from(wire)
@@ -395,13 +390,7 @@ impl AgentService for FlickAgent {
     async fn verify(&self, ctx: &TaskContext, model: Model) -> anyhow::Result<VerificationResult> {
         let pair = prompts::build_verify(ctx, &self.verification_steps);
         let grant = tools::phase_tools(AgentMethod::Analyze);
-        let config = config_gen::build_verify_config(
-            &pair.system_prompt,
-            model,
-            &self.credential_name.0,
-            grant,
-            &self.model_config,
-        )?;
+        let config = config_gen::build_verify_config(&pair.system_prompt, model, grant)?;
 
         let wire: VerificationWire = self.run_with_tools(config, &pair.query, grant).await?;
         VerificationResult::try_from(wire)
@@ -413,12 +402,7 @@ impl AgentService for FlickAgent {
         discoveries: &[String],
     ) -> anyhow::Result<CheckpointDecision> {
         let pair = prompts::build_checkpoint(ctx, discoveries);
-        let config = config_gen::build_checkpoint_config(
-            &pair.system_prompt,
-            Model::Haiku,
-            &self.credential_name.0,
-            &self.model_config,
-        )?;
+        let config = config_gen::build_checkpoint_config(&pair.system_prompt, Model::Haiku)?;
 
         let wire: CheckpointWire = self.run_structured(config, &pair.query).await?;
         CheckpointDecision::try_from(wire)
@@ -430,12 +414,7 @@ impl AgentService for FlickAgent {
         failure_reason: &str,
     ) -> anyhow::Result<Option<String>> {
         let pair = prompts::build_assess_recovery(ctx, failure_reason);
-        let config = config_gen::build_recovery_config(
-            &pair.system_prompt,
-            Model::Opus,
-            &self.credential_name.0,
-            &self.model_config,
-        )?;
+        let config = config_gen::build_recovery_config(&pair.system_prompt, Model::Opus)?;
 
         let wire: RecoveryWire = self.run_structured(config, &pair.query).await?;
         Ok(wire.into_strategy())
@@ -451,13 +430,7 @@ impl AgentService for FlickAgent {
         let pair =
             prompts::build_design_recovery_subtasks(ctx, failure_reason, strategy, recovery_round);
         let grant = tools::phase_tools(AgentMethod::Decompose);
-        let config = config_gen::build_recovery_plan_config(
-            &pair.system_prompt,
-            Model::Opus,
-            &self.credential_name.0,
-            grant,
-            &self.model_config,
-        )?;
+        let config = config_gen::build_recovery_plan_config(&pair.system_prompt, Model::Opus, grant)?;
 
         let wire: RecoveryPlanWire = self.run_with_tools(config, &pair.query, grant).await?;
         RecoveryPlan::try_from(wire)
@@ -527,10 +500,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redacted_string_hides_value() {
-        let r = RedactedString("anthropic_key".into());
-        assert_eq!(format!("{r:?}"), "[REDACTED]");
-        assert_eq!(format!("{r}"), "[REDACTED]");
+    fn build_model_registry_produces_correct_entries() {
+        let cfg = ModelConfig {
+            fast: "my-haiku".into(),
+            balanced: "my-sonnet".into(),
+            strong: "my-opus".into(),
+        };
+        let registry = build_model_registry(&cfg, "my-cred").unwrap();
+
+        let fast = registry.get("fast").expect("missing 'fast' entry");
+        assert_eq!(fast.name, "my-haiku");
+        assert_eq!(fast.provider, "my-cred");
+        assert_eq!(fast.max_tokens, Some(config_gen::default_max_tokens(Model::Haiku)));
+
+        let balanced = registry.get("balanced").expect("missing 'balanced' entry");
+        assert_eq!(balanced.name, "my-sonnet");
+        assert_eq!(balanced.provider, "my-cred");
+        assert_eq!(balanced.max_tokens, Some(config_gen::default_max_tokens(Model::Sonnet)));
+
+        let strong = registry.get("strong").expect("missing 'strong' entry");
+        assert_eq!(strong.name, "my-opus");
+        assert_eq!(strong.provider, "my-cred");
+        assert_eq!(strong.max_tokens, Some(config_gen::default_max_tokens(Model::Opus)));
     }
 
     #[test]
@@ -676,30 +667,49 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// Generic resolver: wraps any `Fn() -> Box<dyn DynProvider>` factory.
-    struct FnResolver<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync>(F);
-
-    impl<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync> ProviderResolver for FnResolver<F> {
-        fn resolve<'a>(&'a self, _config: &'a flick::Config) -> ResolverFuture<'a> {
-            let provider = (self.0)();
-            Box::pin(async move { Ok(provider) })
+    fn test_model_info() -> flick::ModelInfo {
+        flick::ModelInfo {
+            provider: "test".into(),
+            name: "test-model".into(),
+            max_tokens: Some(1024),
+            input_per_million: None,
+            output_per_million: None,
         }
     }
 
-    fn mock_resolver<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync + 'static>(
+    /// Client factory that wraps any `Fn() -> Box<dyn DynProvider>` factory.
+    struct FnClientFactory<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync>(F);
+
+    impl<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync> ClientFactory
+        for FnClientFactory<F>
+    {
+        fn build<'a>(&'a self, config: flick::RequestConfig) -> ClientFactoryFuture<'a> {
+            let provider = (self.0)();
+            Box::pin(async move {
+                Ok(flick::FlickClient::new_with_provider(
+                    config,
+                    test_model_info(),
+                    flick::ApiKind::Messages,
+                    provider,
+                ))
+            })
+        }
+    }
+
+    fn mock_client_factory<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync + 'static>(
         factory: F,
-    ) -> Box<dyn ProviderResolver> {
-        Box::new(FnResolver(factory))
+    ) -> Box<dyn ClientFactory> {
+        Box::new(FnClientFactory(factory))
     }
 
     fn test_agent(
-        resolver: Box<dyn ProviderResolver>,
+        client_factory: Box<dyn ClientFactory>,
         executor: Box<dyn ToolExecutor>,
     ) -> FlickAgent {
         FlickAgent::with_injected(
             PathBuf::from("/tmp"),
             Duration::from_secs(30),
-            resolver,
+            client_factory,
             executor,
         )
     }
@@ -729,26 +739,14 @@ mod tests {
         }
     }
 
-    fn test_config() -> flick::Config {
-        flick::Config::parse_yaml(
-            r"
-model:
-  provider: test
-  name: test-model
-  max_tokens: 1024
-
-provider:
-  test:
-    api: messages
-",
-        )
-        .expect("test config should parse")
+    fn test_config() -> flick::RequestConfig {
+        flick::RequestConfig::parse_yaml("model: test\n").expect("test config should parse")
     }
 
     #[tokio::test]
-    async fn build_client_uses_injected_resolver() {
+    async fn build_client_uses_injected_factory() {
         let agent = test_agent(
-            mock_resolver(|| SingleShotProvider::with_text(r#"{"status":"success"}"#)),
+            mock_client_factory(|| SingleShotProvider::with_text(r#"{"status":"success"}"#)),
             Box::new(DefaultToolExecutor),
         );
         let client = agent.build_client(test_config()).await;
@@ -758,7 +756,7 @@ provider:
     #[tokio::test]
     async fn run_structured_with_mock_provider() {
         let agent = test_agent(
-            mock_resolver(|| SingleShotProvider::with_text(r#"{"status":"success"}"#)),
+            mock_client_factory(|| SingleShotProvider::with_text(r#"{"status":"success"}"#)),
             Box::new(DefaultToolExecutor),
         );
         let result: anyhow::Result<serde_json::Value> =
@@ -767,8 +765,8 @@ provider:
         assert_eq!(result.unwrap()["status"], "success");
     }
 
-    fn tool_then_complete_resolver() -> Box<dyn ProviderResolver> {
-        mock_resolver(|| {
+    fn tool_then_complete_factory() -> Box<dyn ClientFactory> {
+        mock_client_factory(|| {
             MultiShotProvider::new(vec![
                 flick::provider::ModelResponse {
                     text: None,
@@ -794,7 +792,7 @@ provider:
     async fn run_with_tools_calls_injected_executor() {
         let tool_calls = Arc::new(AtomicU32::new(0));
         let agent = test_agent(
-            tool_then_complete_resolver(),
+            tool_then_complete_factory(),
             Box::new(CountingToolExecutor {
                 call_count: Arc::clone(&tool_calls),
             }),
@@ -856,7 +854,9 @@ provider:
         let agent = FlickAgent::with_injected(
             PathBuf::from("/tmp"),
             Duration::from_secs(60),
-            mock_resolver(|| Box::new(AlwaysToolCallProvider) as Box<dyn flick::DynProvider>),
+            mock_client_factory(|| {
+                Box::new(AlwaysToolCallProvider) as Box<dyn flick::DynProvider>
+            }),
             Box::new(CountingToolExecutor {
                 call_count: Arc::new(AtomicU32::new(0)),
             }),
@@ -916,7 +916,7 @@ provider:
         let agent = FlickAgent::with_injected(
             PathBuf::from("/tmp"),
             Duration::from_millis(10),
-            mock_resolver(|| Box::new(SlowProvider) as Box<dyn flick::DynProvider>),
+            mock_client_factory(|| Box::new(SlowProvider) as Box<dyn flick::DynProvider>),
             Box::new(DefaultToolExecutor),
         );
         let result: anyhow::Result<serde_json::Value> =
@@ -929,25 +929,25 @@ provider:
     }
 
     // -----------------------------------------------------------------------
-    // Issue 14: ProviderResolver failure
+    // Issue 14: ClientFactory failure
     // -----------------------------------------------------------------------
 
-    struct FailingResolver;
+    struct FailingClientFactory;
 
-    impl ProviderResolver for FailingResolver {
-        fn resolve<'a>(&'a self, _config: &'a flick::Config) -> ResolverFuture<'a> {
-            Box::pin(async { Err(anyhow::anyhow!("resolver broke")) })
+    impl ClientFactory for FailingClientFactory {
+        fn build<'a>(&'a self, _config: flick::RequestConfig) -> ClientFactoryFuture<'a> {
+            Box::pin(async { Err(anyhow::anyhow!("factory broke")) })
         }
     }
 
     #[tokio::test]
-    async fn build_client_propagates_resolver_error() {
-        let agent = test_agent(Box::new(FailingResolver), Box::new(DefaultToolExecutor));
+    async fn build_client_propagates_factory_error() {
+        let agent = test_agent(Box::new(FailingClientFactory), Box::new(DefaultToolExecutor));
         match agent.build_client(test_config()).await {
-            Ok(_) => panic!("expected resolver error, got Ok"),
+            Ok(_) => panic!("expected factory error, got Ok"),
             Err(err) => assert!(
-                err.to_string().contains("resolver broke"),
-                "expected 'resolver broke' in error, got: {err}"
+                err.to_string().contains("factory broke"),
+                "expected 'factory broke' in error, got: {err}"
             ),
         }
     }

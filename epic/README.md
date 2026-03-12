@@ -108,7 +108,7 @@ Task state is persisted to `.epic/state.json` with atomic writes (write to temp,
 
 ### Event System
 
-The orchestrator emits events for every state change (26 event types). The TUI consumes these to render a live task tree, worklog, and metrics panel. In headless mode, events are printed to stderr.
+The orchestrator emits events for every state change (19 event types). The TUI consumes these to render a live task tree, worklog, and metrics panel. In headless mode, events are printed to stderr.
 
 ## Usage
 
@@ -194,9 +194,9 @@ name = "test"
 command = "cargo test"
 
 [models]
-haiku = "claude-haiku-4-5-20251001"
-sonnet = "claude-sonnet-4-6"
-opus = "claude-opus-4-6"
+fast = "claude-haiku-4-5-20251001"
+balanced = "claude-sonnet-4-6"
+strong = "claude-opus-4-6"
 
 [limits]
 max_depth = 8
@@ -205,9 +205,6 @@ max_recovery_rounds = 2
 branch_fix_rounds = 3
 root_fix_rounds = 4
 max_total_tasks = 100
-
-[agent]
-credential = "anthropic"
 ```
 
 All fields have defaults. No `epic.toml` is required — epic runs with sensible defaults if the file is absent.
@@ -241,11 +238,6 @@ src/
 ├── config/
 │   ├── mod.rs               # Config module
 │   └── project.rs           # EpicConfig, ModelConfig, LimitsConfig, VerificationStep
-├── services/
-│   ├── mod.rs               # Services module
-│   ├── document_store.rs    # Document storage
-│   ├── research.rs          # Research service
-│   └── verification.rs      # Verification service
 └── tui/
     ├── mod.rs               # TuiApp: event consumer, ratatui rendering
     ├── task_tree.rs          # Task tree panel

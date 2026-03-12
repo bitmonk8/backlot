@@ -35,7 +35,7 @@ These components implement "run a request with tools until done":
 These components encode epic's domain — task types, prompt templates, wire formats:
 
 - **`prompts.rs`**: 8 prompt builders (`build_assess`, `build_execute_leaf`, `build_verify`, etc.) that format `TaskContext` into system/user prompts. Every prompt references epic concepts: task tree position, sibling context, verification criteria, checkpoint guidance, recovery strategy.
-- **`config_gen.rs`**: Wire format types (`AssessmentWire`, `CheckpointWire`, `DecompositionWire`, etc.) and Flick `Config` builders (`build_assess_config`, `build_execute_leaf_config`, etc.). Each config builder sets model, output schema, credential, and tool list for a specific epic agent method.
+- **`config_gen.rs`**: Wire format types (`AssessmentWire`, `CheckpointWire`, `DecompositionWire`, etc.) and Flick `RequestConfig` builders (`build_assess_config`, `build_execute_leaf_config`, etc.). Each config builder sets model key, output schema, and tool list for a specific epic agent method.
 - **`mod.rs` — `AgentService` trait**: 9 async methods mapping 1:1 to epic's orchestrator needs (assess, execute_leaf, verify, checkpoint, fix_leaf, design_fix_subtasks, assess_recovery, design_recovery_subtasks, design_and_decompose).
 - **`mod.rs` — `TaskContext`**: Context bundle with parent goals, sibling summaries, checkpoint guidance, child statuses — all epic orchestration concepts.
 - **`flick.rs` — `FlickAgent` impl of `AgentService`**: 9 method implementations that each: (1) call a `prompts::build_*` function, (2) call a `config_gen::build_*_config` function, (3) delegate to `run_structured` or `run_with_tools`, (4) convert wire types to domain types.
@@ -104,7 +104,7 @@ pub struct RunResult<T> {
 }
 ```
 
-Epic doesn't touch Flick directly — it talks to reel. Reel selects models and sets per-call fields on the Flick config internally.
+Epic doesn't touch Flick directly — it talks to reel. Reel selects models and builds `flick::RequestConfig` internally from `AgentRequest`.
 
 **Depends on**: Flick named models spec (in flick repo: `docs/NAMED_MODELS.md`) — Flick must support named models and per-call override methods before reel can use this API cleanly.
 
@@ -169,9 +169,9 @@ If reel owns NuSession, it needs the nu binary and config files. Recommended app
 
 `prompts.rs` is deeply epic-specific (references `TaskContext`, sibling summaries, checkpoint guidance). It stays in epic. Reel takes strings — epic builds them.
 
-### 4. The `ProviderResolver` / `ToolExecutor` test seams
+### 4. The `ClientFactory` / `ToolExecutor` test seams
 
-`FlickAgent` uses injected `ProviderResolver` and `ToolExecutor` traits for testing. These seams move to reel's `Agent` struct.
+`FlickAgent` uses injected `ClientFactory` and `ToolExecutor` traits for testing. These seams move to reel's `Agent` struct.
 
 ### 5. Event emission
 

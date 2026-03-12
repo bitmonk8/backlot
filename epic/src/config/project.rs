@@ -121,6 +121,17 @@ impl Default for ModelConfig {
     }
 }
 
+impl ModelConfig {
+    /// Look up the model name for a given tier.
+    pub fn name_for(&self, model: crate::task::Model) -> &str {
+        match model {
+            crate::task::Model::Haiku => &self.fast,
+            crate::task::Model::Sonnet => &self.balanced,
+            crate::task::Model::Opus => &self.strong,
+        }
+    }
+}
+
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {

@@ -1,14 +1,14 @@
 // Flick configuration generation: in-memory config, wire format types, output schemas.
 
 use crate::agent::tools::{FlickToolDef, ToolGrant, tool_definitions};
-use crate::config::project::{ModelConfig, VerificationStep};
+use crate::config::project::VerificationStep;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
 use crate::task::verify::{VerificationOutcome, VerificationResult};
 use crate::task::{
     LeafResult, Magnitude, MagnitudeEstimate, Model, RecoveryPlan, TaskOutcome, TaskPath,
 };
-use anyhow::{Context, bail};
+use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -329,45 +329,32 @@ pub fn recovery_plan_schema() -> JsonValue {
 // ---------------------------------------------------------------------------
 
 /// Default max token budget for a given model tier.
-const fn default_max_tokens(model: Model) -> u32 {
+pub const fn default_max_tokens(model: Model) -> u32 {
     match model {
         Model::Haiku | Model::Sonnet => 8192,
         Model::Opus => 16384,
     }
 }
 
-/// Resolve the Flick model name for a tier, using config overrides.
-fn resolve_model_name(model: Model, model_config: &ModelConfig) -> &str {
+/// Model registry key for a given tier.
+pub const fn model_key(model: Model) -> &'static str {
     match model {
-        Model::Haiku => &model_config.fast,
-        Model::Sonnet => &model_config.balanced,
-        Model::Opus => &model_config.strong,
+        Model::Haiku => "fast",
+        Model::Sonnet => "balanced",
+        Model::Opus => "strong",
     }
 }
 
 fn build_config_json(
     system_prompt: &str,
     model: Model,
-    credential_name: &str,
     tools: &[FlickToolDef],
-    output_schema: Option<&JsonValue>,
-    model_config: &ModelConfig,
+    output_schema: &JsonValue,
 ) -> JsonValue {
-    let model_name = resolve_model_name(model, model_config);
     let mut json = serde_json::json!({
+        "model": model_key(model),
         "system_prompt": system_prompt,
-        "model": {
-            "provider": "anthropic",
-            "name": model_name,
-            "max_tokens": default_max_tokens(model),
-            "temperature": 0.0
-        },
-        "provider": {
-            "anthropic": {
-                "api": "messages",
-                "credential": credential_name
-            }
-        }
+        "temperature": 0.0
     });
 
     if !tools.is_empty() {
@@ -384,9 +371,7 @@ fn build_config_json(
         json["tools"] = JsonValue::Array(tool_array);
     }
 
-    if let Some(schema) = output_schema {
-        json["output_schema"] = serde_json::json!({ "schema": schema });
-    }
+    json["output_schema"] = serde_json::json!({ "schema": output_schema });
 
     json
 }
@@ -394,151 +379,78 @@ fn build_config_json(
 fn build_config(
     system_prompt: &str,
     model: Model,
-    credential_name: &str,
     tools: &[FlickToolDef],
-    output_schema: Option<&JsonValue>,
-    model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
-    let json = build_config_json(
-        system_prompt,
-        model,
-        credential_name,
-        tools,
-        output_schema,
-        model_config,
-    );
-    let json_str = serde_json::to_string(&json).context("failed to serialize config JSON")?;
-    flick::Config::from_str(&json_str, flick::ConfigFormat::Json).map_err(|e| {
-        let msg = e.to_string().replace(credential_name, "[REDACTED]");
-        anyhow::anyhow!("failed to parse flick config: {msg}")
-    })
+    output_schema: &JsonValue,
+) -> anyhow::Result<flick::RequestConfig> {
+    let json = build_config_json(system_prompt, model, tools, output_schema);
+    let json_str =
+        serde_json::to_string(&json).map_err(|e| anyhow::anyhow!("config serialize: {e}"))?;
+    flick::RequestConfig::from_str(&json_str, flick::ConfigFormat::Json)
+        .map_err(|e| anyhow::anyhow!("failed to parse flick config: {e}"))
 }
 
 pub fn build_assess_config(
     system_prompt: &str,
     model: Model,
-    credential: &str,
-    model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
+) -> anyhow::Result<flick::RequestConfig> {
     let schema = assessment_schema();
-    build_config(
-        system_prompt,
-        model,
-        credential,
-        &[],
-        Some(&schema),
-        model_config,
-    )
+    build_config(system_prompt, model, &[], &schema)
 }
 
 pub fn build_execute_leaf_config(
     system_prompt: &str,
     model: Model,
-    credential: &str,
     grant: ToolGrant,
-    model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
+) -> anyhow::Result<flick::RequestConfig> {
     let tools = tool_definitions(grant);
     let schema = task_outcome_schema();
-    build_config(
-        system_prompt,
-        model,
-        credential,
-        &tools,
-        Some(&schema),
-        model_config,
-    )
+    build_config(system_prompt, model, &tools, &schema)
 }
 
 pub fn build_decompose_config(
     system_prompt: &str,
     model: Model,
-    credential: &str,
     grant: ToolGrant,
-    model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
+) -> anyhow::Result<flick::RequestConfig> {
     let tools = tool_definitions(grant);
     let schema = decomposition_schema();
-    build_config(
-        system_prompt,
-        model,
-        credential,
-        &tools,
-        Some(&schema),
-        model_config,
-    )
+    build_config(system_prompt, model, &tools, &schema)
 }
 
 pub fn build_verify_config(
     system_prompt: &str,
     model: Model,
-    credential: &str,
     grant: ToolGrant,
-    model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
+) -> anyhow::Result<flick::RequestConfig> {
     let tools = tool_definitions(grant);
     let schema = verification_schema();
-    build_config(
-        system_prompt,
-        model,
-        credential,
-        &tools,
-        Some(&schema),
-        model_config,
-    )
+    build_config(system_prompt, model, &tools, &schema)
 }
 
 pub fn build_checkpoint_config(
     system_prompt: &str,
     model: Model,
-    credential: &str,
-    model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
+) -> anyhow::Result<flick::RequestConfig> {
     let schema = checkpoint_schema();
-    build_config(
-        system_prompt,
-        model,
-        credential,
-        &[],
-        Some(&schema),
-        model_config,
-    )
+    build_config(system_prompt, model, &[], &schema)
 }
 
 pub fn build_recovery_config(
     system_prompt: &str,
     model: Model,
-    credential: &str,
-    model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
+) -> anyhow::Result<flick::RequestConfig> {
     let schema = recovery_schema();
-    build_config(
-        system_prompt,
-        model,
-        credential,
-        &[],
-        Some(&schema),
-        model_config,
-    )
+    build_config(system_prompt, model, &[], &schema)
 }
 
 pub fn build_recovery_plan_config(
     system_prompt: &str,
     model: Model,
-    credential: &str,
     grant: ToolGrant,
-    model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
+) -> anyhow::Result<flick::RequestConfig> {
     let tools = tool_definitions(grant);
     let schema = recovery_plan_schema();
-    build_config(
-        system_prompt,
-        model,
-        credential,
-        &tools,
-        Some(&schema),
-        model_config,
-    )
+    build_config(system_prompt, model, &tools, &schema)
 }
 
 // ---------------------------------------------------------------------------
@@ -617,20 +529,11 @@ pub fn init_findings_schema() -> JsonValue {
 
 pub fn build_init_config(
     system_prompt: &str,
-    credential: &str,
     grant: ToolGrant,
-    model_config: &ModelConfig,
-) -> anyhow::Result<flick::Config> {
+) -> anyhow::Result<flick::RequestConfig> {
     let tools = tool_definitions(grant);
     let schema = init_findings_schema();
-    build_config(
-        system_prompt,
-        Model::Sonnet,
-        credential,
-        &tools,
-        Some(&schema),
-        model_config,
-    )
+    build_config(system_prompt, Model::Sonnet, &tools, &schema)
 }
 
 // ---------------------------------------------------------------------------
@@ -795,49 +698,27 @@ mod tests {
 
     #[test]
     fn config_builds_with_correct_content() {
-        let schema = assessment_schema();
-        let json = serde_json::json!({
-            "system_prompt": "You are an assessor.",
-            "model": {
-                "provider": "anthropic",
-                "name": "claude-sonnet-4-6",
-                "max_tokens": 8192,
-                "temperature": 0.0
-            },
-            "provider": {
-                "anthropic": {
-                    "api": "messages",
-                    "credential": "anthropic_key"
-                }
-            },
-            "output_schema": { "schema": schema }
-        });
+        let json = build_config_json(
+            "You are an assessor.",
+            Model::Sonnet,
+            &[],
+            &assessment_schema(),
+        );
 
-        // Verify the JSON structure matches expectations
-        assert_eq!(json["model"]["name"], "claude-sonnet-4-6");
-        assert_eq!(json["provider"]["anthropic"]["credential"], "anthropic_key");
+        assert_eq!(json["model"], "balanced");
+        assert_eq!(json["temperature"], 0.0);
         // assess config should have no tools
         assert!(json.get("tools").is_none());
         assert!(json["output_schema"]["schema"]["properties"]["path"].is_object());
 
         // Verify Flick accepts it
-        let config = build_assess_config(
-            "You are an assessor.",
-            Model::Sonnet,
-            "anthropic_key",
-            &ModelConfig::default(),
-        );
+        let config = build_assess_config("You are an assessor.", Model::Sonnet);
         assert!(config.is_ok());
     }
 
     #[test]
     fn config_no_tools_no_tools_key() {
-        let config = build_checkpoint_config(
-            "You are a checkpoint agent.",
-            Model::Haiku,
-            "key",
-            &ModelConfig::default(),
-        );
+        let config = build_checkpoint_config("You are a checkpoint agent.", Model::Haiku);
         assert!(config.is_ok());
     }
 
@@ -908,50 +789,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_name_with_config() {
-        let cfg = ModelConfig {
-            fast: "my-custom-haiku".into(),
-            balanced: "my-custom-sonnet".into(),
-            strong: "my-custom-opus".into(),
-        };
-        assert_eq!(resolve_model_name(Model::Haiku, &cfg), "my-custom-haiku");
-        assert_eq!(resolve_model_name(Model::Sonnet, &cfg), "my-custom-sonnet");
-        assert_eq!(resolve_model_name(Model::Opus, &cfg), "my-custom-opus");
+    fn model_key_mapping() {
+        assert_eq!(model_key(Model::Haiku), "fast");
+        assert_eq!(model_key(Model::Sonnet), "balanced");
+        assert_eq!(model_key(Model::Opus), "strong");
     }
 
     #[test]
-    fn resolve_model_name_default_config_matches_flick_ids() {
-        let default_cfg = ModelConfig::default();
-        assert_eq!(
-            resolve_model_name(Model::Haiku, &default_cfg),
-            "claude-haiku-4-5-20251001"
-        );
-        assert_eq!(
-            resolve_model_name(Model::Sonnet, &default_cfg),
-            "claude-sonnet-4-6"
-        );
-        assert_eq!(
-            resolve_model_name(Model::Opus, &default_cfg),
-            "claude-opus-4-6"
-        );
-    }
-
-    #[test]
-    fn build_init_config_respects_model_config() {
-        let cfg = ModelConfig {
-            fast: "my-custom-haiku".into(),
-            balanced: "my-custom-sonnet".into(),
-            strong: "my-custom-opus".into(),
-        };
-        let config = build_init_config(
-            "You are an init explorer.",
-            "test_key",
-            ToolGrant::NU,
-            &cfg,
-        )
-        .unwrap();
-        // build_init_config uses Model::Sonnet, which maps to cfg.balanced.
-        assert_eq!(config.model().name(), "my-custom-sonnet");
+    fn build_init_config_uses_sonnet_tier() {
+        let config = build_init_config("You are an init explorer.", ToolGrant::NU).unwrap();
+        // build_init_config uses Model::Sonnet → "balanced" key
+        assert_eq!(config.model(), "balanced");
     }
 
     #[test]
