@@ -16,9 +16,6 @@ bitflags = "2"
 clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.29"
 crossterm = "0.28"
-globset = "0.4"
-walkdir = "2"
-regex = "1"
 lot = { path = "../lot", features = ["tokio"] }
 tempfile = "3"
 
