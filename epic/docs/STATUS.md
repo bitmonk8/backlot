@@ -9,7 +9,7 @@
 - Recursive problem-solver orchestrator with DFS execution, retry/escalation, fix loops, recovery re-decomposition, checkpoint adjust/escalate
 - `FlickAgent` implementing `AgentService` (9 methods) via Flick library crate — config generation, structured output schemas, prompt assembly, tool loop with resume
 - 6 tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `NuShell` — Claude Code-aligned schemas executed as nu custom commands via `translate_tool_call()` / `format_tool_result()`. All tool execution routes through `execute_tool()` → nu MCP session.
-- Nu config integration — `epic_config.nu` and `epic_env.nu` written to `target/nu-cache/` by `build.rs`, loaded via `nu --mcp --config <path> --env-config <path>`. Custom commands (`epic read`, `epic write`, `epic edit`, `epic glob`, `epic grep`) available immediately in MCP sessions without evaluate preamble. `EPIC_RG_DIR` env var injects rg binary path into nu session; `epic_env.nu` prepends it to PATH. Sandbox policy grants exec access to cache dir for config files and rg binary.
+- Nu config integration — `epic_config.nu` and `epic_env.nu` written to `target/nu-cache/` by `build.rs`, loaded via `nu --mcp --config <path> --env-config <path>`. Custom commands (`epic read`, `epic write`, `epic edit`, `epic glob`, `epic grep`) available immediately in MCP sessions without evaluate preamble. `EPIC_RG_PATH` env var injects rg binary absolute path into nu session; `epic grep` uses `^$env.EPIC_RG_PATH` for direct invocation (bypasses nu PATH splitting issues under AppContainer). Sandbox policy grants exec access to cache dir for config files and rg binary.
 - State persistence via `.epic/state.json` — atomic writes, resume, goal mismatch detection, corrupt state handling, cycle-safe DFS
 - TUI via ratatui + crossterm — task tree, worklog, metrics panels, keyboard controls
 - CLI via clap — `init`, `run <goal>`, `resume`, `status`, `setup` subcommands
@@ -53,13 +53,11 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
 ## Priority 1: Nu session integration test failures
 
-42 of 45 nu_session tests pass (serialized). 3 fail. See [ISSUES.md](ISSUES.md) for full details.
+45 of 45 nu_session tests pass (serialized). See [ISSUES.md](ISSUES.md) for history.
 
-**Category A — RESOLVED (2026-03-12).** All 4 Category A tests pass after `epic setup` applied ancestor traverse ACEs. The per-session temp dir redirect + lot ancestor ACE fix is verified.
-
-- **Category A** (4 tests): **Fixed and verified.** Per-session temp dir + ancestor traverse ACEs working.
-- **Category B** (3 tests): No `rg.exe` binary on machine. Test environment issue, not a sandbox bug. `integration_custom_command_epic_grep` reclassified from A/B to B — its only remaining failure is rg-not-found.
-- **Category C** (6 tests, parallel-only): Concurrent AppContainer profile interference. 6 tests fail in parallel, all pass serialized. Now unblocked for investigation.
+- **Category A** (4 tests): **RESOLVED (2026-03-12).** Per-session temp dir + ancestor traverse ACEs.
+- **Category B** (3 tests): **RESOLVED (2026-03-12).** Root cause was nu's PATH splitting under AppContainer — `^rg` lookup failed even with correct dir on PATH. Fix: `EPIC_RG_PATH` env var provides absolute path to rg binary; `epic grep` uses `^$env.EPIC_RG_PATH` instead of `^rg`.
+- **Category C** (6 tests, parallel-only): Concurrent AppContainer profile interference. 6 tests fail in parallel, all pass serialized.
 
 ## Priority 2: Reel Extraction
 

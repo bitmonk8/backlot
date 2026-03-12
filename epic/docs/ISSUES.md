@@ -6,11 +6,11 @@
 
 Build and clippy are clean. 42 nu_session tests pass (serialized). Observed 2026-03-12 on Windows 11 with Rust 1.93.1.
 
-**Status: Category A RESOLVED (2026-03-12).** Lot ancestor ACEs + epic per-session temp dir fix verified. Remaining: Category B (rg not found, 3 tests), Category C (parallel interference, 6 tests).
+**Status: Category A RESOLVED (2026-03-12). Category B RESOLVED (2026-03-12).** Lot ancestor ACEs + epic per-session temp dir fix verified. Remaining: Category C (parallel interference, 6 tests).
 
 ### Test results
 
-Parallel run (default): 9 failures. Serialized (`--test-threads=1`): 3 failures. The 6 concurrency-only failures are marked.
+Parallel run (default): 6 failures. Serialized (`--test-threads=1`): 0 failures. The 6 concurrency-only failures are marked.
 
 | # | Test | Parallel | Serialized | Category |
 |---|------|----------|------------|----------|
@@ -18,9 +18,9 @@ Parallel run (default): 9 failures. Serialized (`--test-threads=1`): 3 failures.
 | 2 | `integration_custom_command_epic_write` | **passes** | **passes** | A (resolved) |
 | 3 | `integration_custom_command_epic_edit` | **passes** | **passes** | A (resolved) |
 | 4 | `integration_custom_command_epic_glob` | **passes** | **passes** | A (resolved) |
-| 5 | `integration_custom_command_epic_grep` | `rg not found` | `rg not found` | B |
-| 6 | `integration_env_filtering_rg_available` | `rg not found` | `rg not found` | B |
-| 7 | `integration_sandbox_read_only_prevents_writes` | `rg not found` | `rg not found` | B |
+| 5 | `integration_custom_command_epic_grep` | **passes** | **passes** | B (resolved) |
+| 6 | `integration_env_filtering_rg_available` | **passes** | **passes** | B (resolved) |
+| 7 | `integration_sandbox_read_only_prevents_writes` | **passes** | **passes** | B (resolved) |
 | 8 | `integration_spawn_creates_session` | `stdout closed` | **passes** | C |
 | 9 | `integration_evaluate_simple_echo` | `stdout closed` | **passes** | C |
 | 10 | `integration_evaluate_multiple_sequential` | `stdout closed` | **passes** | C |
@@ -109,20 +109,19 @@ Each nu session now gets its own temp directory under `<project_root>/.epic/tmp/
 
 **Verified (2026-03-12).** `epic setup` applied ancestor traverse ACEs. All 4 Category A tests pass serialized. Category A is resolved.
 
-### Category B — `Command rg not found` (3 tests, all fail serialized)
+### Category B — `Command rg not found` (RESOLVED — all 3 pass)
 
-**Affects**: custom_command_epic_grep, env_filtering_rg_available, sandbox_read_only_prevents_writes — any test that executes `^rg` inside the sandbox.
+**Affected**: custom_command_epic_grep, env_filtering_rg_available, sandbox_read_only_prevents_writes — tests that executed rg inside the sandbox.
 
-**Root cause: CONFIRMED.** No `rg.exe` binary exists on this machine. The `rg` command available in bash is a Claude Code shell function that proxies to `claude.exe` — it is not a standalone executable. The nu session's `resolve_rg_binary()` checks three locations and all fail:
-1. Same directory as current executable — no `rg.exe` there
-2. Cache directory (`NU_CACHE_DIR`) — compile-time `option_env!()` macro, not set at build time
-3. Bare `rg.exe` on `PATH` — does not exist (`where.exe rg` confirms)
+**Background**: `build.rs` downloaded rg to `target/nu-cache/` and `resolve_rg_binary()` found it correctly. The binary was present on disk.
 
-NUL device is not a factor (see Step 1 in investigation results). The test assertion message in `integration_sandbox_read_only_prevents_writes` misleadingly suggests running `epic setup` — that message needs updating.
+**Root cause**: NuShell's PATH-based external command lookup (`^rg`, `which rg`) fails under AppContainer on Windows. `forward_common_env()` forwards `PATH` as a single semicolon-joined string. Nu stores it as one list element and does not split semicolons for executable search. Even after `epic_env.nu` prepended the rg dir, `which rg` returned `[]` despite the file existing at that location.
 
-#### Resolution options
-
-This is a test environment issue, not a sandbox bug. Options: (a) `build.rs` downloads rg alongside nu (it already does for nu), (b) tests skip when rg is unavailable, (c) install rg on the dev machine.
+**Resolution (2026-03-12):**
+- `spawn_nu_process()` sets `EPIC_RG_PATH` env var with the full absolute path to the rg binary.
+- `epic_config.nu`: `epic grep` uses `^$env.EPIC_RG_PATH` to invoke rg by absolute path, bypassing nu's broken PATH lookup.
+- `EPIC_RG_DIR` and the PATH-prepend block in `epic_env.nu` removed (dead code after this fix).
+- Tests updated to use `^$env.EPIC_RG_PATH` instead of bare `^rg`.
 
 ### Category C — Concurrency-only failures (6 tests, all pass serialized)
 
@@ -136,7 +135,7 @@ Root cause: AppContainer profiles created by concurrent test processes interfere
 
 Steps 1–6 completed 2026-03-12. Key findings incorporated into Category A, B, and C sections above. Summary: (1) NUL device ACL configured — not a factor in any category. (2) ACL inheritance correct, no path mismatch. (3) Not `%TEMP%`-specific. (4) 19 isolated tests confirmed which nu built-ins fail vs work. (5) Relative paths fail identically (glob_from converts to absolute). (6) Traced to `nu_glob::fill_todo()` → `fs::metadata()` on ancestor directories.
 
-**Remaining:** Category B (install/download rg) and Category C (parallel AppContainer interference). Category A resolved — these are unblocked.
+**Remaining:** Category C (parallel AppContainer interference). Categories A and B resolved.
 
 ---
 
@@ -211,3 +210,23 @@ Steps 1–6 completed 2026-03-12. Key findings incorporated into Category A, B, 
 ### 15. `spawn_nu_process` responsibilities exceed name
 
 `src/agent/nu_session.rs:480` — Function now handles 6 concerns: project_root validation, temp dir creation, sandbox policy building, binary resolution, process spawning, MCP handshake. The MCP handshake could be extracted into a method on `NuProcess`. Defer to reel extraction when this code moves to its own crate. **Category: Naming / Separation of Concerns.**
+
+### 16. Tests assume `EPIC_RG_PATH` is always set
+
+`src/agent/nu_session.rs` — Two tests use `^$env.EPIC_RG_PATH` directly without guarding for its absence. If `resolve_rg_binary` ever returns a non-absolute path (the PATH fallback case), `EPIC_RG_PATH` won't be set and tests will fail with an opaque nu error. In practice, `build.rs` always provides the cached absolute path. Add a guard or `try_eval`-style skip if this becomes fragile. **Category: Testing.**
+
+### 17. ~~`resolve_rg_binary` validation at call site~~ (RESOLVED)
+
+Resolved 2026-03-12: `resolve_rg_binary` now returns `Option<PathBuf>`, validating `is_absolute() && exists()` internally. `spawn_nu_process` consumes the `Option` directly.
+
+### 18. No test for `rg_binary = None` branch in `spawn_nu_process`
+
+`src/agent/nu_session.rs` — No test covers the case where `resolve_rg_binary` returns `None` (rg not present), verifying that `EPIC_RG_PATH` is correctly omitted and the session still starts. Narrow edge case. **Category: Testing.**
+
+### 19. No test for `epic grep` nu-side `"rg"` fallback
+
+`build.rs` (`EPIC_CONFIG_NU`) — The `epic grep` command's `else { "rg" }` branch (when `EPIC_RG_PATH` is absent) is never tested. This fallback doesn't work under AppContainer — it exists only for non-sandboxed development. **Category: Testing.**
+
+### 20. `resolve_rg_binary` has no direct unit tests
+
+`src/agent/nu_session.rs` — The `pub` function is tested only indirectly through integration tests. No unit test verifies resolution order (next to exe, cache dir, PATH fallback → None). **Category: Testing.**
