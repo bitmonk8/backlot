@@ -84,7 +84,7 @@ Both `open` and `ls <file>` route through `nu_engine::glob_from()` → `nu_glob:
 
 `icacls` confirms no ancestor directory has an `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) ACE. The capability SIDs (`S-1-15-3-*`) present on `C:\`, `C:\Users`, `C:\Users\thomasa` are from other apps and do not match lot's AppContainer profiles. `C:\Users\thomasa\AppData` and `...\AppData\Local` have no AppContainer ACEs at all. Every ancestor in every policy path chain needs a traverse ACE.
 
-See [LOT_CHANGE_REQUEST.md](LOT_CHANGE_REQUEST.md) for full survey table and proposed fix.
+See [CHANGE_REQUEST_FOR_EPIC.md](../../lot/docs/CHANGE_REQUEST_FOR_EPIC.md) for full survey table and proposed fix.
 
 #### Resolution: lot change request + epic temp dir redirect
 
@@ -110,7 +110,7 @@ Benefits:
 
 **2. Lot: ancestor traverse ACEs for project root**
 
-With temp dirs redirected under `.epic/`, the only ancestors needing traverse ACEs are those of the project root (e.g., `C:\`, `C:\UnitySrc` for `C:\UnitySrc\epic`). See [LOT_CHANGE_REQUEST.md](LOT_CHANGE_REQUEST.md) for the change request.
+With temp dirs redirected under `.epic/`, the only ancestors needing traverse ACEs are those of the project root (e.g., `C:\`, `C:\UnitySrc` for `C:\UnitySrc\epic`). See [CHANGE_REQUEST_FOR_EPIC.md](../../lot/docs/CHANGE_REQUEST_FOR_EPIC.md) for the change request.
 
 ### Category B — `Command rg not found` (2 tests, both fail serialized)
 
