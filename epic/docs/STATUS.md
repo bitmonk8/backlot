@@ -57,9 +57,7 @@ Extracting the agent session layer (tool loop, tool definitions, NuSession, sand
 
 **Design status**: Complete — `Agent`, `AgentEnvironment`, `AgentRequest`, `RunResult`, `ToolHandler` trait for custom tool dispatch.
 
-**Flick named models**: Done. Epic migrated to `ModelRegistry`/`RequestConfig` API (commit `614f6b6`).
-
-**Next step**: Create reel crate, move code, wire epic as consumer. All nu session test categories resolved — reel extraction is unblocked.
+**Next step**: Create reel crate, move code, wire epic as consumer.
 
 ## Other Work Candidates
 

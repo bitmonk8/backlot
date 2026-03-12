@@ -1,146 +1,5 @@
 # Known Issues
 
-## Nu session integration test failures
-
-`src/agent/nu_session.rs` — 45 of 45 nu_session tests pass (parallel and serialized). These tests exercise the core tool execution path: every agent tool call routes through `NuSession`.
-
-Build and clippy are clean. Observed 2026-03-12 on Windows 11 with Rust 1.93.1.
-
-**Status: All categories RESOLVED (2026-03-12).** Category A: lot ancestor ACEs + per-session temp dir. Category B: `EPIC_RG_PATH` absolute path. Category C: per-test isolated cache dirs.
-
-### Test results
-
-All 45 tests pass in both parallel (default) and serialized modes.
-
-| # | Test | Category |
-|---|------|----------|
-| 1 | `integration_custom_command_epic_read` | A |
-| 2 | `integration_custom_command_epic_write` | A |
-| 3 | `integration_custom_command_epic_edit` | A |
-| 4 | `integration_custom_command_epic_glob` | A |
-| 5 | `integration_custom_command_epic_grep` | B |
-| 6 | `integration_env_filtering_rg_available` | B |
-| 7 | `integration_sandbox_read_only_prevents_writes` | B |
-| 8 | `integration_spawn_creates_session` | C |
-| 9 | `integration_evaluate_simple_echo` | C |
-| 10 | `integration_evaluate_multiple_sequential` | C |
-| 11 | `integration_drop_cleans_up` | C |
-| 12 | `integration_timeout_kills_process` | C |
-| 13 | `integration_grant_change_respawns` | C |
-
-### Category A — Nu built-ins fail under AppContainer (RESOLVED — all 4 pass)
-
-**Affects**: epic_read, epic_write, epic_edit, epic_grep — the four custom commands that do filesystem I/O.
-
-#### Nu built-ins that FAIL under AppContainer
-
-| Command | Behavior | Used by |
-|---------|----------|---------|
-| `open <file>` | Returns nothing (silent failure, no error) | `epic read`, `epic edit` |
-| `open <file> --raw` | Returns nothing (silent failure, no error) | `epic read`, `epic edit` |
-| `ls <file_path>` | `No matches found for DoNotExpand(...)` | `epic read` (size check) |
-| `mkdir <dir>` | `Permission denied` (even with write ACLs) | `epic write` |
-
-#### Nu built-ins that WORK under AppContainer
-
-| Command | Notes |
-|---------|-------|
-| `save <file>` / `save --force <file>` | File creation and overwrite work |
-| `ls <directory>` | Directory listing works; individual file stat does not |
-| `path exists` | File existence check works |
-| `path expand`, `path dirname` | Path manipulation works |
-| `echo`, `lines`, `encode`, `bytes length` | String/data operations work |
-
-#### Root cause: `nu_glob` component-by-component traversal fails on ancestor directories
-
-**CONFIRMED via nushell source analysis (2026-03-12).**
-
-Both `open` and `ls <file>` route through `nu_engine::glob_from()` → `nu_glob::glob_with()`. The chain:
-
-1. `glob_from()` always converts paths to absolute (`absolute_with(path, cwd)`), so even `open test.txt` becomes `open C:\Users\...\test.txt`.
-2. `nu_glob::glob_with()` decomposes the absolute path into a root (`C:\`) and component patterns (`Users`, `thomasa`, ..., `test.txt`).
-3. `fill_todo()` walks components one-by-one, calling `fs::metadata()` on each intermediate directory (`C:\`, `C:\Users`, etc.).
-4. `fs::metadata()` on Windows calls `CreateFileW(path, access=0, FILE_FLAG_BACKUP_SEMANTICS)`, which implicitly requires `SYNCHRONIZE` — needs an ACE in the target's DACL for the AppContainer SID.
-5. `lot` only grants ACEs on policy paths (project root, temp dirs, cache dir) with `SUB_CONTAINERS_AND_OBJECTS_INHERIT`. It does NOT grant ACEs on `C:\`, `C:\Users`, or other ancestor directories outside the policy paths.
-6. `fs::metadata("C:\\")` fails with `ACCESS_DENIED` → `is_dir("C:\\")` returns `false` → `fill_todo` adds nothing to the iterator → zero results.
-7. `open` returns `PipelineData::empty()` (nushell `nothing` type — silent). `ls` checks `paths_peek.peek().is_none()` and returns `ShellError::GenericError("No matches found")`.
-
-**Why `path exists` works:** Calls `fs::metadata()` on the **complete path** at once. Windows kernel uses `SeChangeNotifyPrivilege` (which AppContainer processes have) to bypass traverse checks on intermediate directories. The access check is performed only on the target object, which has the inherited AppContainer ACE.
-
-**Why `save` works:** Does not use `nu_glob` at all — directly calls `CreateFileW(GENERIC_WRITE)` on the target path.
-
-**Why relative paths fail:** `glob_from()` converts them to absolute before passing to `nu_glob`.
-
-**`mkdir` fails independently** — `std::fs::create_dir_all()` also calls `fs::metadata()` on ancestors to check what exists, triggering the same volume-root access failure.
-
-#### Eliminated hypotheses
-
-- ~~ACL inheritance failure~~ — `icacls` confirms inherited `(I)(RX,W)` for `ALL APPLICATION PACKAGES`
-- ~~Path canonicalization mismatch~~ — No junctions/symlinks/8.3 names in paths
-- ~~NUL device ACL~~ — Configured and working
-- ~~`%TEMP%`-specific~~ — Same failures in `target/test-step3/` and inside sandbox
-- ~~Custom command issue~~ — Raw `open` and `ls <file>` fail identically outside custom commands
-- ~~Relative paths bypass volume root~~ — `glob_from()` converts relative→absolute, so all paths traverse the volume root
-
-#### Ancestor ACL survey (2026-03-12)
-
-`icacls` confirms no ancestor directory has an `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) ACE. The capability SIDs (`S-1-15-3-*`) present on `C:\`, `C:\Users`, `C:\Users\thomasa` are from other apps and do not match lot's AppContainer profiles. `C:\Users\thomasa\AppData` and `...\AppData\Local` have no AppContainer ACEs at all. Every ancestor in every policy path chain needs a traverse ACE.
-
-Full survey table and proposed fix in `lot/docs/CHANGE_REQUEST_FOR_EPIC.md` (lot repo). Implemented in lot rev `8b468d7`.
-
-#### Resolution: lot change (done) + epic temp dir redirect (done)
-
-Two changes work together to fix Category A:
-
-**1. Lot: ancestor traverse ACEs — DONE (rev `8b468d7`)**
-
-Lot now provides `grant_appcontainer_prerequisites(paths)` which grants `FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE` ACEs on all ancestor directories up to the volume root, plus NUL device access. Epic's `epic setup` and startup check updated to use the new API. Running `epic setup` from an elevated prompt will apply these ACEs for the project root.
-
-**2. Epic: per-session temp directory under `.epic/` — DONE (2026-03-12)**
-
-Each nu session now gets its own temp directory under `<project_root>/.epic/tmp/` via `tempfile::TempDir`. Changes:
-- `spawn_nu_process()` creates `.epic/tmp/` base, creates a `TempDir` inside it
-- `TEMP`/`TMP` env vars set before `forward_common_env()` (explicit env takes precedence)
-- `build_nu_sandbox_policy()` uses `write_path(session_temp_dir)` instead of `include_temp_dirs()`
-- `NuProcess` holds the `TempDir` handle — auto-cleaned on drop
-- Lot policy validation updated to allow write-path children under read-path parents
-- `tempfile` moved from dev-dependencies to dependencies
-- Project root existence validated before temp dir creation
-
-**Verified (2026-03-12).** `epic setup` applied ancestor traverse ACEs. All 4 Category A tests pass serialized. Category A is resolved.
-
-### Category B — `Command rg not found` (RESOLVED — all 3 pass)
-
-**Affected**: custom_command_epic_grep, env_filtering_rg_available, sandbox_read_only_prevents_writes — tests that executed rg inside the sandbox.
-
-**Background**: `build.rs` downloaded rg to `target/nu-cache/` and `resolve_rg_binary()` found it correctly. The binary was present on disk.
-
-**Root cause**: NuShell's PATH-based external command lookup (`^rg`, `which rg`) fails under AppContainer on Windows. `forward_common_env()` forwards `PATH` as a single semicolon-joined string. Nu stores it as one list element and does not split semicolons for executable search. Even after `epic_env.nu` prepended the rg dir, `which rg` returned `[]` despite the file existing at that location.
-
-**Resolution (2026-03-12):**
-- `spawn_nu_process()` sets `EPIC_RG_PATH` env var with the full absolute path to the rg binary.
-- `epic_config.nu`: `epic grep` uses `^$env.EPIC_RG_PATH` to invoke rg by absolute path, bypassing nu's broken PATH lookup.
-- `EPIC_RG_DIR` and the PATH-prepend block in `epic_env.nu` removed (dead code after this fix).
-- Tests updated to use `^$env.EPIC_RG_PATH` instead of bare `^rg`.
-
-### Category C — Concurrency-only failures (RESOLVED — all 6 pass)
-
-**Affects**: spawn_creates_session, evaluate_simple_echo, evaluate_multiple_sequential, drop_cleans_up, timeout_kills_process, grant_change_respawns.
-
-These passed with `--test-threads=1` but failed under parallel execution with `nu process closed stdout unexpectedly`.
-
-**Root cause**: All non-sandbox tests used `NuSession::new()` which shares the build-time `NU_CACHE_DIR`. When concurrent tests spawn AppContainer processes, each grants ACLs on this shared cache directory. When one test's process drops and `restore_from_sentinel()` reverts the DACL to pre-sandbox state, other concurrent tests' processes lose access and fail with `stdout closed unexpectedly`.
-
-**Resolution (2026-03-12)**: Introduced `isolated_session()` helper that creates a per-test copy of the cache directory (via `tmp_sandbox_cache()`) and passes it to `NuSession::with_cache_dir()`. All tests that spawn nu processes now use `isolated_session()` instead of `NuSession::new()`, giving each test its own cache dir for ACL operations. This matches the pattern sandbox tests already used via `sandbox_env()`, which was refactored to use `isolated_session()` internally.
-
-### Investigation results
-
-Steps 1–6 completed 2026-03-12. Key findings incorporated into Category A, B, and C sections above. Summary: (1) NUL device ACL configured — not a factor in any category. (2) ACL inheritance correct, no path mismatch. (3) Not `%TEMP%`-specific. (4) 19 isolated tests confirmed which nu built-ins fail vs work. (5) Relative paths fail identically (glob_from converts to absolute). (6) Traced to `nu_glob::fill_todo()` → `fs::metadata()` on ancestor directories.
-
-All three categories resolved (2026-03-12).
-
----
-
 ## Non-critical issues
 
 ### 1. `run_structured` ToolCallsPending branch is untested
@@ -217,26 +76,22 @@ All three categories resolved (2026-03-12).
 
 `src/agent/nu_session.rs` — Two tests use `^$env.EPIC_RG_PATH` directly without guarding for its absence. If `resolve_rg_binary` ever returns a non-absolute path (the PATH fallback case), `EPIC_RG_PATH` won't be set and tests will fail with an opaque nu error. In practice, `build.rs` always provides the cached absolute path. Add a guard or `try_eval`-style skip if this becomes fragile. **Category: Testing.**
 
-### 17. ~~`resolve_rg_binary` validation at call site~~ (RESOLVED)
-
-Resolved 2026-03-12: `resolve_rg_binary` now returns `Option<PathBuf>`, validating `is_absolute() && exists()` internally. `spawn_nu_process` consumes the `Option` directly.
-
-### 18. No test for `rg_binary = None` branch in `spawn_nu_process`
+### 17. No test for `rg_binary = None` branch in `spawn_nu_process`
 
 `src/agent/nu_session.rs` — No test covers the case where `resolve_rg_binary` returns `None` (rg not present), verifying that `EPIC_RG_PATH` is correctly omitted and the session still starts. Narrow edge case. **Category: Testing.**
 
-### 19. No test for `epic grep` nu-side `"rg"` fallback
+### 18. No test for `epic grep` nu-side `"rg"` fallback
 
 `build.rs` (`EPIC_CONFIG_NU`) — The `epic grep` command's `else { "rg" }` branch (when `EPIC_RG_PATH` is absent) is never tested. This fallback doesn't work under AppContainer — it exists only for non-sandboxed development. **Category: Testing.**
 
-### 20. `resolve_rg_binary` has no direct unit tests
+### 19. `resolve_rg_binary` has no direct unit tests
 
 `src/agent/nu_session.rs` — The `pub` function is tested only indirectly through integration tests. No unit test verifies resolution order (next to exe, cache dir, PATH fallback → None). **Category: Testing.**
 
-### 21. `isolated_session()` silent fallback defeats isolation
+### 20. `isolated_session()` silent fallback defeats isolation
 
 `src/agent/nu_session.rs` — When `tmp_sandbox_cache()` returns `None` (no build-time cache), `isolated_session()` silently falls back to `NuSession::new()` which shares the default cache dir — the exact condition the helper was created to prevent. Should panic or log instead. In practice only happens when nu binary isn't built, so low risk. **Category: Testing.**
 
-### 22. No mechanism to prevent future `NuSession::new()` in tests
+### 21. No mechanism to prevent future `NuSession::new()` in tests
 
 `src/agent/nu_session.rs` — Nothing prevents a new test from calling `NuSession::new()` directly instead of `isolated_session()`, reintroducing the shared-directory ACL interference. A grep-based CI check or code comment convention could catch regressions. **Category: Testing.**
