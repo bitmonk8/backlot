@@ -483,10 +483,10 @@ max_total_tasks = 50
 
     #[test]
     fn legacy_agent_file_tool_forwarders_field_ignored() {
-        let toml_str = r#"
+        let toml_str = r"
 [agent]
 file_tool_forwarders = true
-"#;
+";
         // serde should silently ignore the unknown [agent] section
         let config: EpicConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config, EpicConfig::default());

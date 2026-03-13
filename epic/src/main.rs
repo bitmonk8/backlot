@@ -221,6 +221,7 @@ fn load_and_validate_state(
     Ok((state, root_id, goal))
 }
 
+#[allow(clippy::unnecessary_wraps, clippy::needless_return)]
 fn run_setup(project_root: &std::path::Path) -> anyhow::Result<()> {
     #[cfg(not(target_os = "windows"))]
     {

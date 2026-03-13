@@ -3,11 +3,11 @@
 // Thin adapter: builds prompts and wire types (epic-specific), delegates
 // tool loop and tool execution to reel.
 
+use crate::agent::prompts;
 use crate::agent::wire::{
     self, AssessmentWire, CheckpointWire, DecompositionWire, RecoveryPlanWire, RecoveryWire,
     TaskOutcomeWire, VerificationWire,
 };
-use crate::agent::prompts;
 use crate::agent::{AgentService, TaskContext};
 use crate::config::project::{ModelConfig, VerificationStep};
 use crate::task::assess::AssessmentResult;
@@ -160,7 +160,13 @@ impl ReelAgent {
     ) -> anyhow::Result<DecompositionResult> {
         let schema = wire::decomposition_schema();
         let wire: DecompositionWire = self
-            .run_request(&pair.system_prompt, &pair.query, model, readonly_grant(), schema)
+            .run_request(
+                &pair.system_prompt,
+                &pair.query,
+                model,
+                readonly_grant(),
+                schema,
+            )
             .await?;
         DecompositionResult::try_from(wire)
     }
@@ -175,8 +181,14 @@ impl ReelAgent {
     pub async fn explore_for_init(&self) -> anyhow::Result<wire::InitFindingsWire> {
         let pair = prompts::build_explore_for_init();
         let schema = wire::init_findings_schema();
-        self.run_request(&pair.system_prompt, &pair.query, Model::Sonnet, readonly_grant(), schema)
-            .await
+        self.run_request(
+            &pair.system_prompt,
+            &pair.query,
+            Model::Sonnet,
+            readonly_grant(),
+            schema,
+        )
+        .await
     }
 }
 
@@ -189,7 +201,13 @@ impl AgentService for ReelAgent {
         let pair = prompts::build_assess(ctx);
         let schema = wire::assessment_schema();
         let wire: AssessmentWire = self
-            .run_request(&pair.system_prompt, &pair.query, Model::Haiku, reel::ToolGrant::empty(), schema)
+            .run_request(
+                &pair.system_prompt,
+                &pair.query,
+                Model::Haiku,
+                reel::ToolGrant::empty(),
+                schema,
+            )
             .await?;
         AssessmentResult::try_from(wire)
     }
@@ -234,7 +252,13 @@ impl AgentService for ReelAgent {
         let pair = prompts::build_verify(ctx, &self.verification_steps);
         let schema = wire::verification_schema();
         let wire: VerificationWire = self
-            .run_request(&pair.system_prompt, &pair.query, model, readonly_grant(), schema)
+            .run_request(
+                &pair.system_prompt,
+                &pair.query,
+                model,
+                readonly_grant(),
+                schema,
+            )
             .await?;
         VerificationResult::try_from(wire)
     }
@@ -247,7 +271,13 @@ impl AgentService for ReelAgent {
         let pair = prompts::build_checkpoint(ctx, discoveries);
         let schema = wire::checkpoint_schema();
         let wire: CheckpointWire = self
-            .run_request(&pair.system_prompt, &pair.query, Model::Haiku, reel::ToolGrant::empty(), schema)
+            .run_request(
+                &pair.system_prompt,
+                &pair.query,
+                Model::Haiku,
+                reel::ToolGrant::empty(),
+                schema,
+            )
             .await?;
         CheckpointDecision::try_from(wire)
     }
@@ -260,7 +290,13 @@ impl AgentService for ReelAgent {
         let pair = prompts::build_assess_recovery(ctx, failure_reason);
         let schema = wire::recovery_schema();
         let wire: RecoveryWire = self
-            .run_request(&pair.system_prompt, &pair.query, Model::Opus, reel::ToolGrant::empty(), schema)
+            .run_request(
+                &pair.system_prompt,
+                &pair.query,
+                Model::Opus,
+                reel::ToolGrant::empty(),
+                schema,
+            )
             .await?;
         Ok(wire.into_strategy())
     }
@@ -276,7 +312,13 @@ impl AgentService for ReelAgent {
             prompts::build_design_recovery_subtasks(ctx, failure_reason, strategy, recovery_round);
         let schema = wire::recovery_plan_schema();
         let wire: RecoveryPlanWire = self
-            .run_request(&pair.system_prompt, &pair.query, Model::Opus, readonly_grant(), schema)
+            .run_request(
+                &pair.system_prompt,
+                &pair.query,
+                Model::Opus,
+                readonly_grant(),
+                schema,
+            )
             .await?;
         RecoveryPlan::try_from(wire)
     }

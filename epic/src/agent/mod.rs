@@ -1,8 +1,8 @@
 // Agent abstraction over reel agent runtime (library dependency).
 
+mod prompts;
 pub mod reel_adapter;
 pub mod wire;
-mod prompts;
 
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
