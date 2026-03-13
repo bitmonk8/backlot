@@ -2,6 +2,8 @@
 
 Status: **exploration** — identifying seams and challenges. No implementation.
 
+**Repository**: https://github.com/bitmonk8/reel — empty scaffold (workspace with `reel` library + `reel-cli` binary crates, CI, lint settings). Local path: `C:\UnitySrc\reel`.
+
 ## Concept
 
 Three layers of AI agent abstraction:
