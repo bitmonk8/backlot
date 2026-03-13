@@ -46,7 +46,7 @@ Root task is always forced to branch (guarantees recovery machinery exists). Tas
 
 1. Implement (model chosen by assessment)
    - Research Service available as a tool
-   - Structured output via Flick `output_schema`
+   - Structured output via reel `output_schema`
 2. Verification gates — configurable per-project via `epic.toml`
 3. File-level review — model: `max(Haiku, implementing_model)`, capped at Sonnet
 4. Local simplification review — same model as file-level review
@@ -128,55 +128,30 @@ Research Service is exposed as a tool during implementation and design+decompose
 
 ### Structured Output
 
-Flick returns structured JSON via `output_schema`. Epic deserializes response text into wire format types (e.g., `AssessmentWire`, `CheckpointWire`) via serde, then converts to domain types via `TryFrom`.
+Reel returns structured JSON via `output_schema`. Epic deserializes response text into wire format types (e.g., `AssessmentWire`, `CheckpointWire`) via serde, then converts to domain types via `TryFrom`.
 
-### Flick Integration
+### Reel Integration
 
-Epic depends on Flick as a git crate dependency. Agent calls use `FlickClient::run()` and `FlickClient::resume()` directly — no process spawning, no YAML config files, no tool result files.
+Epic delegates agent execution to reel. No direct Flick calls — reel owns the conversation turn loop, tool dispatch, and NuShell runtime.
 
-```
-Epic (startup)
- |-- build_model_registry(ModelConfig, credential_name)
- |      → ModelRegistry with "fast", "balanced", "strong" entries
- |-- ProviderRegistry::load_default()
- |      → resolves credential stores (~/.flick/)
- |
-Epic (per agent call)
- |-- Build flick::RequestConfig from JSON in-memory
- |-- FlickClient::new(config, &model_registry, &provider_registry).await
- |-- client.run(query, &mut context).await
- |
- |   (if ToolCallsPending)
- |-- Execute tools locally
- |-- Build Vec<ContentBlock::ToolResult>
- |-- client.resume(&mut context, tool_results).await
- |   (repeat until Complete)
- |
- |-- Extract text from FlickResult.content
-```
+**Startup**: Epic builds a `reel::AgentEnvironment` once, containing the model registry (built from `ModelConfig` + credential name), provider registry (loaded from flick's config directory), project root, and call timeout. A `reel::Agent` is constructed from this environment.
+
+**Per agent call**: Epic builds a `reel::AgentRequestConfig` containing a `reel::RequestConfig` (model key, system prompt, output schema), a `reel::ToolGrant` (phase-dependent), and custom tools (currently empty). Then calls `reel::Agent::run()`.
+
+**Return**: Reel returns `reel::RunResult<T>` with the parsed output, token usage, tool call count, and response hash.
 
 #### Key Types
 
-| Epic usage | Flick type |
+| Epic usage | Reel type |
 |---|---|
-| Per-request config | `flick::RequestConfig` (parsed from JSON via `RequestConfig::from_str`) |
-| Model registry | `flick::ModelRegistry` (built once at startup from `ModelConfig`) |
-| Provider registry | `flick::ProviderRegistry` (loaded once at startup) |
-| Model entry | `flick::ModelInfo` (provider, name, max_tokens) |
-| Client | `flick::FlickClient` |
-| Conversation state | `flick::Context` |
-| Response | `flick::FlickResult` |
-| Content blocks | `flick::ContentBlock` (Text, Thinking, ToolUse, ToolResult) |
-| Result status | `flick::result::ResultStatus` (Complete, ToolCallsPending, Error) |
-| Errors | `flick::FlickError` |
-
-#### Timeout Handling
-
-`tokio::time::timeout` wraps `client.run()` and `client.resume()`. On timeout, the HTTP request inside Flick is dropped (reqwest future cancelled).
-
-#### Credential Management
-
-Flick's `ProviderRegistry` (loaded via `load_default()`) resolves API keys from credential stores (default `~/.flick/`). Each `ModelInfo` entry references a provider name; the registry maps that to credentials. Credential name passed via `--credential` CLI option (default: `anthropic`).
+| Agent entry point | `reel::Agent` |
+| Startup environment | `reel::AgentEnvironment` |
+| Per-call config | `reel::AgentRequestConfig` |
+| Run result | `reel::RunResult<T>` |
+| Phase tool access | `reel::ToolGrant` |
+| Request parameters | `reel::RequestConfig` |
+| Model registry | `reel::ModelRegistry` |
+| Provider registry | `reel::ProviderRegistry` |
 
 ---
 
@@ -205,7 +180,7 @@ Centralized knowledge at `.epic/docs/`. All tasks see all accumulated knowledge,
 
 ### Librarian
 
-A Flick agent (Haiku, read-only tools) manages document placement, merging, and restructuring. Prevents unbounded growth. Handles deduplication.
+A Haiku agent (read-only tools) manages document placement, merging, and restructuring. Prevents unbounded growth. Handles deduplication.
 
 ### Research Service
 
@@ -436,6 +411,8 @@ AppContainer sandboxes require two prerequisites for nu commands to work correct
 
 ## Unified Tool Layer
 
+> The tool layer lives in the reel crate. This section documents reel's design for reference.
+
 ### Design Rationale
 
 **TOCTOU elimination**: Prior to the unified tool layer, epic enforced filesystem boundaries two ways: `safe_path()` in the Rust process (path canonicalization, symlink guards) and lot sandbox on the nu process. This created TOCTOU race conditions because epic's process was unsandboxed. Moving all file operations into the sandboxed nu process eliminates the race class by construction — lot enforces boundaries at the syscall level.
@@ -459,9 +436,9 @@ Agents see six tools with JSON parameter schemas. Epic translates each JSON tool
 
 ### Bidirectional Translation
 
-Two conversion points, both in Rust (`tools.rs`):
+Two conversion points, both in reel's `tools.rs`:
 
-**Inbound** (`translate_tool_call`): JSON tool parameters → quoted nu command string → `nu_session.evaluate()`. String parameters escaped via `quote_nu()` (single-quote wrapping with escaping for special characters). Example: `Read {file_path: "src/main.rs", offset: 10}` → `epic read 'src/main.rs' --offset 10`.
+**Inbound** (`translate_tool_call`): JSON tool parameters → quoted nu command string → `nu_session.evaluate()`. String parameters escaped via `quote_nu()` (single-quote wrapping with escaping for special characters). Example: `Read {file_path: "src/main.rs", offset: 10}` → `reel read 'src/main.rs' --offset 10`.
 
 **Outbound** (`format_tool_result`): Nu NUON response → Claude-formatted text:
 
@@ -482,18 +459,18 @@ The MCP `evaluate` tool uses `input` as its parameter name.
 
 ### Nu Custom Commands
 
-Commands defined in `epic_config.nu`, loaded via `nu --mcp --config <path> --env-config <path>`. Use nu subcommand syntax (`def "epic read" [...]`) — `help epic` lists all subcommands. Commands use nu-native types internally and return structured records/lists. The Rust translation layer formats structured output for Claude.
+Commands defined in `reel_config.nu`, loaded via `nu --mcp --config <path> --env-config <path>`. Use nu subcommand syntax (`def "reel read" [...]`) — `help reel` lists all subcommands. Commands use nu-native types internally and return structured records/lists. The Rust translation layer formats structured output for Claude.
 
 **Config injection rationale**: `--commands` + `--mcp` does not work — custom commands defined via `--commands` are not visible to subsequent `evaluate` calls (separate scope). `--config` overrides default config resolution, preventing user config from loading (reproducibility, sandbox-leakage prevention). Config files placed alongside nu binary in `target/nu-cache/` — lot already grants access to the binary's directory.
 
 **Platform note**: Config file paths must be absolute. On Windows, forward-slash paths work (`C:/path/config.nu`). Unix-style paths (`/tmp/...`) do not resolve on Windows.
 
 **Key implementation details**:
-- `epic read`: 256 KiB size cap via `error make`. Returns structured record with line-numbered content.
-- `epic write`: 1 MiB size cap. Creates parent directories via `mkdir`.
-- `epic edit`: `split row` and `str replace` are literal (not regex — nu default since 0.84.0). Uniqueness enforced unless `--replace-all`.
-- `epic glob`: 1000 result cap.
-- `epic grep`: Wraps `rg` via `^rg ...$args | complete`. Uses `--color=never` to prevent ANSI codes.
+- `reel read`: 256 KiB size cap via `error make`. Returns structured record with line-numbered content.
+- `reel write`: 1 MiB size cap. Creates parent directories via `mkdir`.
+- `reel edit`: `split row` and `str replace` are literal (not regex — nu default since 0.84.0). Uniqueness enforced unless `--replace-all`.
+- `reel glob`: 1000 result cap.
+- `reel grep`: Wraps `rg` via `^rg ...$args | complete`. Uses `--color=never` to prevent ANSI codes.
 - Nu `filesize` type: `into filesize` converts `int` → `filesize` for cross-type comparisons (e.g., `bytes length | into filesize > 1MiB`).
 
 ### Phase → Lot Policy → Tool Set
@@ -510,6 +487,8 @@ Security does not depend on tool filtering — lot enforces access regardless.
 ---
 
 ## NuShell Runtime
+
+> The NuShell runtime lives in the reel crate. This section documents reel's design for reference.
 
 ### MCP Server
 
@@ -560,11 +539,11 @@ On timeout, epic kills the nu MCP process and returns an error. Next tool call s
 
 | Component | Location |
 |---|---|
-| Binary | `build.rs` + `target/nu-cache/` |
-| MCP client | `src/agent/nu_session.rs` (`NuSession`) |
-| Tool layer | `src/agent/tools.rs` (`tool_nu` → `NuSession::evaluate`) |
-| Sandbox policy | `src/agent/nu_session.rs` (`build_nu_sandbox_policy`) |
-| Flick integration | `src/agent/flick.rs` (`ToolExecutor::execute` takes `&NuSession`) |
+| Binary | reel `build.rs` + `target/nu-cache/` |
+| MCP client | reel `src/nu_session.rs` (`NuSession`) |
+| Tool layer | reel `src/tools.rs` (`tool_nu` → `NuSession::evaluate`) |
+| Sandbox policy | reel `src/nu_session.rs` (`build_nu_sandbox_policy`) |
+| Agent adapter | `src/agent/reel_adapter.rs` (`ReelAgent` → `reel::Agent`) |
 
 ---
 
@@ -706,7 +685,7 @@ Fallback: no markers detected → minimal config with empty verification and com
 All major components receive dependencies explicitly. No globals, statics, or singletons.
 
 Key dependency types:
-- `TaskContext` and `FlickAgent` — bundle Flick config, document store, verification config. Each agent call creates a new `FlickClient` (stateless per-call)
+- `TaskContext` and `ReelAgent` — bundle reel config, document store, verification config. Each agent call builds a `reel::AgentRequestConfig` and calls `reel::Agent::run()`
 - `EventEmitter` — trait object for logging/TUI events
 - `ProjectConfig` — verification steps, paths, model preferences (loaded from TOML)
 - `EpicState` — task tree and session state (owned by orchestrator)

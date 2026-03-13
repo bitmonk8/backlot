@@ -473,23 +473,17 @@ name = "epic"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bitflags",
  "clap",
  "crossterm",
- "flate2",
- "flick",
  "lot",
  "ratatui",
+ "reel",
  "serde",
  "serde_json",
- "sha2",
- "tar",
  "tempfile",
  "thiserror",
  "tokio",
  "toml",
- "ureq",
- "zip",
 ]
 
 [[package]]
@@ -544,7 +538,7 @@ dependencies = [
 [[package]]
 name = "flick"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/flick?rev=b36e0f3#b36e0f304200cdab9a417dc50c6c07c87444f49f"
+source = "git+https://github.com/bitmonk8/flick?rev=84424ce#84424cef0b562636baa26d344d04ee76d9dee89f"
 dependencies = [
  "chacha20poly1305",
  "hex",
@@ -1456,6 +1450,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce70a74e890531977d37e532c34d45e9055d2409ed08ddba14529471ed0be16"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "reel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitflags",
+ "flate2",
+ "flick",
+ "lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
+ "ureq",
+ "zip",
 ]
 
 [[package]]

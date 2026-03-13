@@ -49,7 +49,7 @@ Leaf execution retries at each tier before escalating (Haiku → Sonnet → Opus
 
 ### Tool Access
 
-Six tools with phase-based access control via `ToolGrant` bitflags (WRITE, NU):
+Six tools with phase-based access control via `ToolGrant` bitflags (WRITE, NU). Tool definitions and execution are provided by the reel crate:
 
 | Tool | Grant Required | Description |
 |------|----------------|-------------|
@@ -74,15 +74,15 @@ Every task is verified after execution. Verification commands are configured per
 ```toml
 [[verification]]
 name = "build"
-command = "cargo build"
+command = ["cargo", "build"]
 
 [[verification]]
 name = "test"
-command = "cargo test"
+command = ["cargo", "test"]
 
 [[verification]]
 name = "lint"
-command = "cargo clippy -- -D warnings"
+command = ["cargo", "clippy", "--", "-D", "warnings"]
 ```
 
 On verification failure, fix loops attempt to repair the work:
@@ -148,7 +148,7 @@ Prints the goal, root task phase, and task counts (completed/in-progress/pending
 
 | Option | Env Var | Default | Description |
 |--------|---------|---------|-------------|
-| `--credential <NAME>` | `EPIC_CREDENTIAL` | `anthropic` | Credential name for Flick |
+| `--credential <NAME>` | `EPIC_CREDENTIAL` | `anthropic` | Credential name for provider resolution |
 | `--no-tui` | `EPIC_NO_TUI` | off | Disable TUI, run headless |
 | `--no-sandbox-warn` | `EPIC_NO_SANDBOX_WARN` | off | Suppress container/VM warning |
 
@@ -187,11 +187,11 @@ name = "my-project"
 
 [[verification]]
 name = "build"
-command = "cargo build"
+command = ["cargo", "build"]
 
 [[verification]]
 name = "test"
-command = "cargo test"
+command = ["cargo", "test"]
 
 [models]
 fast = "claude-haiku-4-5-20251001"
@@ -217,18 +217,15 @@ src/
 ├── cli.rs                   # Clap CLI definition
 ├── orchestrator.rs          # DFS task execution, retry/escalation, fix/recovery loops
 ├── state.rs                 # EpicState: task tree, JSON persistence, DFS ordering
-├── events.rs                # Event enum (26 variants), channel types
+├── events.rs                # Event enum (19 variants), channel types
 ├── init.rs                  # epic init: agent-driven project exploration
 ├── sandbox.rs               # Container/VM detection (best-effort)
-├── git.rs                   # Git operations
-├── metrics.rs               # Metrics collection
+├── test_support.rs          # MockAgentService, test helpers
 ├── agent/
 │   ├── mod.rs               # AgentService trait (9 async methods)
-│   ├── flick.rs             # FlickAgent: Flick library integration
-│   ├── config_gen.rs        # Wire format types, structured output schemas
-│   ├── nu_session.rs        # NuShell MCP client — resolves and manages prebuilt nu binary
-│   ├── prompts.rs           # Prompt assembly for all agent calls
-│   └── tools.rs             # ToolGrant flags, tool definitions, execute_tool
+│   ├── reel_adapter.rs      # ReelAgent: thin adapter over reel::Agent
+│   ├── wire.rs              # Wire format types, structured output schemas
+│   └── prompts.rs           # Prompt assembly for all agent calls
 ├── task/
 │   ├── mod.rs               # Task, TaskPhase, Model, TaskOutcome, LeafResult
 │   ├── assess.rs            # AssessmentResult
@@ -249,18 +246,14 @@ src/
 
 | Crate | Purpose |
 |-------|---------|
-| `flick` | Agent runtime (Flick library, git dependency) |
+| `reel` | Agent session layer (tool loop, NuShell, sandbox) |
 | `tokio` | Async runtime |
 | `clap` | CLI argument parsing |
 | `ratatui` + `crossterm` | Terminal UI |
 | `serde` + `serde_json` + `toml` | Serialization |
 | `anyhow` + `thiserror` | Error handling |
-| `bitflags` | Tool permission flags |
-| `lot` | Process sandboxing (lot library, git dependency) |
-
-### NuShell Binary
-
-Epic's `build.rs` downloads a prebuilt NuShell 0.111.0 binary from GitHub releases, verifies its SHA-256 checksum, and caches it in `target/nu-cache/`. At runtime, epic resolves the `nu` binary by checking: (1) same directory as the epic executable, (2) build-time cache, (3) `PATH`.
+| `lot` | Process sandboxing (via reel) |
+| `tempfile` | Atomic file writes |
 
 ## Troubleshooting
 

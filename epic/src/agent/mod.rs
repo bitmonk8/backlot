@@ -1,10 +1,8 @@
-// Agent abstraction over Flick agent runtime (library dependency).
+// Agent abstraction over reel agent runtime (library dependency).
 
-pub mod config_gen;
-pub mod flick;
-pub mod nu_session;
+pub mod reel_adapter;
+pub mod wire;
 mod prompts;
-pub mod tools;
 
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};

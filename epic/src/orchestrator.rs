@@ -94,21 +94,29 @@ fn evaluate_scope(numstat_output: &str, magnitude: &Magnitude) -> ScopeCheck {
     }
 
     let multiplier = 3;
-    if total_added > magnitude.max_lines_added * multiplier {
+    // Skip dimensions where the estimate is zero — zero means "unconstrained"
+    // (the LLM omitted this dimension). Checking 3×0 = 0 would trip on any change.
+    if magnitude.max_lines_added > 0
+        && total_added > magnitude.max_lines_added * multiplier
+    {
         return ScopeCheck::Exceeded {
             metric: "lines_added".into(),
             actual: total_added,
             limit: magnitude.max_lines_added * multiplier,
         };
     }
-    if total_modified > magnitude.max_lines_modified * multiplier {
+    if magnitude.max_lines_modified > 0
+        && total_modified > magnitude.max_lines_modified * multiplier
+    {
         return ScopeCheck::Exceeded {
             metric: "lines_modified".into(),
             actual: total_modified,
             limit: magnitude.max_lines_modified * multiplier,
         };
     }
-    if total_deleted > magnitude.max_lines_deleted * multiplier {
+    if magnitude.max_lines_deleted > 0
+        && total_deleted > magnitude.max_lines_deleted * multiplier
+    {
         return ScopeCheck::Exceeded {
             metric: "lines_deleted".into(),
             actual: total_deleted,

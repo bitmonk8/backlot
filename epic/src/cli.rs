@@ -9,7 +9,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// Credential name passed to Flick.
+    /// Credential name passed to reel.
     #[arg(
         long,
         env = "EPIC_CREDENTIAL",

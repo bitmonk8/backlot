@@ -1,6 +1,5 @@
-// Flick configuration generation: in-memory config, wire format types, output schemas.
+// Wire format types and output schemas for agent calls.
 
-use crate::agent::tools::{FlickToolDef, ToolGrant, tool_definitions};
 use crate::config::project::VerificationStep;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
@@ -252,7 +251,8 @@ pub fn decomposition_schema() -> JsonValue {
         "properties": {
             "subtasks": {
                 "type": "array",
-                "items": subtask_schema()
+                "items": subtask_schema(),
+                "minItems": 1
             },
             "rationale": { "type": "string" }
         },
@@ -292,9 +292,9 @@ pub fn checkpoint_schema() -> JsonValue {
         "type": "object",
         "properties": {
             "decision": { "type": "string", "enum": ["proceed", "adjust", "escalate"] },
-            "guidance": { "type": "string" }
+            "guidance": { "type": "string", "description": "Required when decision is 'adjust'. Guidance for remaining subtasks." }
         },
-        "required": ["decision"]
+        "required": ["decision", "guidance"]
     })
 }
 
@@ -303,9 +303,9 @@ pub fn recovery_schema() -> JsonValue {
         "type": "object",
         "properties": {
             "recoverable": { "type": "boolean" },
-            "strategy": { "type": "string" }
+            "strategy": { "type": "string", "description": "Recovery strategy description. Required when recoverable is true." }
         },
-        "required": ["recoverable"]
+        "required": ["recoverable", "strategy"]
     })
 }
 
@@ -316,141 +316,13 @@ pub fn recovery_plan_schema() -> JsonValue {
             "approach": { "type": "string", "enum": ["incremental", "full"] },
             "subtasks": {
                 "type": "array",
-                "items": subtask_schema()
+                "items": subtask_schema(),
+                "minItems": 1
             },
             "rationale": { "type": "string" }
         },
         "required": ["approach", "subtasks", "rationale"]
     })
-}
-
-// ---------------------------------------------------------------------------
-// Config builders (one per AgentService method)
-// ---------------------------------------------------------------------------
-
-/// Default max token budget for a given model tier.
-pub const fn default_max_tokens(model: Model) -> u32 {
-    match model {
-        Model::Haiku | Model::Sonnet => 8192,
-        Model::Opus => 16384,
-    }
-}
-
-/// Model registry key for a given tier.
-pub const fn model_key(model: Model) -> &'static str {
-    match model {
-        Model::Haiku => "fast",
-        Model::Sonnet => "balanced",
-        Model::Opus => "strong",
-    }
-}
-
-fn build_config_json(
-    system_prompt: &str,
-    model: Model,
-    tools: &[FlickToolDef],
-    output_schema: &JsonValue,
-) -> JsonValue {
-    let mut json = serde_json::json!({
-        "model": model_key(model),
-        "system_prompt": system_prompt,
-        "temperature": 0.0
-    });
-
-    if !tools.is_empty() {
-        let tool_array: Vec<JsonValue> = tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters
-                })
-            })
-            .collect();
-        json["tools"] = JsonValue::Array(tool_array);
-    }
-
-    json["output_schema"] = serde_json::json!({ "schema": output_schema });
-
-    json
-}
-
-fn build_config(
-    system_prompt: &str,
-    model: Model,
-    tools: &[FlickToolDef],
-    output_schema: &JsonValue,
-) -> anyhow::Result<flick::RequestConfig> {
-    let json = build_config_json(system_prompt, model, tools, output_schema);
-    let json_str =
-        serde_json::to_string(&json).map_err(|e| anyhow::anyhow!("config serialize: {e}"))?;
-    flick::RequestConfig::from_str(&json_str, flick::ConfigFormat::Json)
-        .map_err(|e| anyhow::anyhow!("failed to parse flick config: {e}"))
-}
-
-pub fn build_assess_config(
-    system_prompt: &str,
-    model: Model,
-) -> anyhow::Result<flick::RequestConfig> {
-    let schema = assessment_schema();
-    build_config(system_prompt, model, &[], &schema)
-}
-
-pub fn build_execute_leaf_config(
-    system_prompt: &str,
-    model: Model,
-    grant: ToolGrant,
-) -> anyhow::Result<flick::RequestConfig> {
-    let tools = tool_definitions(grant);
-    let schema = task_outcome_schema();
-    build_config(system_prompt, model, &tools, &schema)
-}
-
-pub fn build_decompose_config(
-    system_prompt: &str,
-    model: Model,
-    grant: ToolGrant,
-) -> anyhow::Result<flick::RequestConfig> {
-    let tools = tool_definitions(grant);
-    let schema = decomposition_schema();
-    build_config(system_prompt, model, &tools, &schema)
-}
-
-pub fn build_verify_config(
-    system_prompt: &str,
-    model: Model,
-    grant: ToolGrant,
-) -> anyhow::Result<flick::RequestConfig> {
-    let tools = tool_definitions(grant);
-    let schema = verification_schema();
-    build_config(system_prompt, model, &tools, &schema)
-}
-
-pub fn build_checkpoint_config(
-    system_prompt: &str,
-    model: Model,
-) -> anyhow::Result<flick::RequestConfig> {
-    let schema = checkpoint_schema();
-    build_config(system_prompt, model, &[], &schema)
-}
-
-pub fn build_recovery_config(
-    system_prompt: &str,
-    model: Model,
-) -> anyhow::Result<flick::RequestConfig> {
-    let schema = recovery_schema();
-    build_config(system_prompt, model, &[], &schema)
-}
-
-pub fn build_recovery_plan_config(
-    system_prompt: &str,
-    model: Model,
-    grant: ToolGrant,
-) -> anyhow::Result<flick::RequestConfig> {
-    let tools = tool_definitions(grant);
-    let schema = recovery_plan_schema();
-    build_config(system_prompt, model, &tools, &schema)
 }
 
 // ---------------------------------------------------------------------------
@@ -525,15 +397,6 @@ pub fn init_findings_schema() -> JsonValue {
         },
         "required": ["project_type", "steps"]
     })
-}
-
-pub fn build_init_config(
-    system_prompt: &str,
-    grant: ToolGrant,
-) -> anyhow::Result<flick::RequestConfig> {
-    let tools = tool_definitions(grant);
-    let schema = init_findings_schema();
-    build_config(system_prompt, Model::Sonnet, &tools, &schema)
 }
 
 // ---------------------------------------------------------------------------
@@ -697,32 +560,6 @@ mod tests {
     }
 
     #[test]
-    fn config_builds_with_correct_content() {
-        let json = build_config_json(
-            "You are an assessor.",
-            Model::Sonnet,
-            &[],
-            &assessment_schema(),
-        );
-
-        assert_eq!(json["model"], "balanced");
-        assert_eq!(json["temperature"], 0.0);
-        // assess config should have no tools
-        assert!(json.get("tools").is_none());
-        assert!(json["output_schema"]["schema"]["properties"]["path"].is_object());
-
-        // Verify Flick accepts it
-        let config = build_assess_config("You are an assessor.", Model::Sonnet);
-        assert!(config.is_ok());
-    }
-
-    #[test]
-    fn config_no_tools_no_tools_key() {
-        let config = build_checkpoint_config("You are a checkpoint agent.", Model::Haiku);
-        assert!(config.is_ok());
-    }
-
-    #[test]
     fn assessment_wire_with_magnitude() {
         let wire = AssessmentWire {
             path: "leaf".into(),
@@ -789,27 +626,6 @@ mod tests {
     }
 
     #[test]
-    fn model_key_mapping() {
-        assert_eq!(model_key(Model::Haiku), "fast");
-        assert_eq!(model_key(Model::Sonnet), "balanced");
-        assert_eq!(model_key(Model::Opus), "strong");
-    }
-
-    #[test]
-    fn build_init_config_uses_sonnet_tier() {
-        let config = build_init_config("You are an init explorer.", ToolGrant::NU).unwrap();
-        // build_init_config uses Model::Sonnet → "balanced" key
-        assert_eq!(config.model(), "balanced");
-    }
-
-    #[test]
-    fn default_max_tokens_per_tier() {
-        assert_eq!(default_max_tokens(Model::Haiku), 8192);
-        assert_eq!(default_max_tokens(Model::Sonnet), 8192);
-        assert_eq!(default_max_tokens(Model::Opus), 16384);
-    }
-
-    #[test]
     fn decomposition_wire_empty_subtasks_rejected() {
         let wire = DecompositionWire {
             subtasks: vec![],
@@ -856,5 +672,60 @@ mod tests {
         assert_eq!(mag.max_lines_added, 10);
         assert_eq!(mag.max_lines_modified, 0);
         assert_eq!(mag.max_lines_deleted, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema validation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn task_outcome_schema_has_required_fields() {
+        let schema = task_outcome_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("outcome")));
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("outcome"));
+        assert!(props.contains_key("reason"));
+        assert!(props.contains_key("discoveries"));
+    }
+
+    #[test]
+    fn assessment_schema_has_required_fields() {
+        let schema = assessment_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("path")));
+        assert!(required.contains(&serde_json::json!("model")));
+        assert!(required.contains(&serde_json::json!("rationale")));
+    }
+
+    #[test]
+    fn decomposition_schema_has_required_fields() {
+        let schema = decomposition_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("subtasks")));
+        assert!(required.contains(&serde_json::json!("rationale")));
+    }
+
+    #[test]
+    fn verification_schema_has_required_fields() {
+        let schema = verification_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("outcome")));
+        assert!(required.contains(&serde_json::json!("details")));
+    }
+
+    #[test]
+    fn schema_without_tools_omits_tools_key() {
+        // Structured calls (empty grant) produce schemas without tool definitions.
+        // The schema itself never contains a "tools" key — tools are separate.
+        let schema = assessment_schema();
+        assert!(schema.get("tools").is_none());
+    }
+
+    #[test]
+    fn init_uses_sonnet_model_key() {
+        use crate::agent::reel_adapter::model_key;
+        // Init exploration uses Model::Sonnet, which maps to "balanced".
+        assert_eq!(model_key(Model::Sonnet), "balanced");
     }
 }

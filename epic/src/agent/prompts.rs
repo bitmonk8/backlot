@@ -4,7 +4,7 @@ use crate::agent::{ChildStatus, TaskContext};
 use crate::config::project::VerificationStep;
 use crate::task::{TaskOutcome, TaskPath};
 
-/// A system prompt + user query pair for a Flick call.
+/// A system prompt + user query pair for an agent call.
 pub struct PromptPair {
     pub system_prompt: String,
     pub query: String,
@@ -66,10 +66,35 @@ fn format_context(ctx: &TaskContext) -> String {
         .map(|g| format!("\n\n## Checkpoint Guidance\n{g}"))
         .unwrap_or_default();
 
+    let children_section = if ctx.children.is_empty() {
+        String::new()
+    } else {
+        let items = ctx
+            .children
+            .iter()
+            .map(|c| {
+                let status_label = match &c.status {
+                    ChildStatus::Completed => "COMPLETED".to_string(),
+                    ChildStatus::Failed { reason } => format!("FAILED: {reason}"),
+                    ChildStatus::Pending => "PENDING".to_string(),
+                    ChildStatus::InProgress => "IN-PROGRESS".to_string(),
+                };
+                let disc = if c.discoveries.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | Discoveries: {}", c.discoveries.join(", "))
+                };
+                format!("- [{}] {}{disc}", status_label, c.goal)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\n## Child Subtasks\n{items}")
+    };
+
     format!(
         "## Task\nGoal: {goal}\nVerification criteria:\n- {criteria}\n\n\
          ## Position\nDepth: {depth}\nParent goal: {parent}\nAncestor chain:\n{ancestors}\n\n\
-         ## Siblings\nCompleted:\n{completed}\nPending:\n{pending}{guidance_section}{rationale_section}",
+         ## Siblings\nCompleted:\n{completed}\nPending:\n{pending}{guidance_section}{rationale_section}{children_section}",
         goal = ctx.task.goal,
         depth = ctx.task.depth,
         parent = parent_line,
@@ -315,32 +340,8 @@ Respond with the required JSON schema."
         .collect::<Vec<_>>()
         .join("\n");
 
-    let children_text = if ctx.children.is_empty() {
-        "None".into()
-    } else {
-        ctx.children
-            .iter()
-            .map(|c| {
-                let status_label = match &c.status {
-                    ChildStatus::Completed => "COMPLETED".to_string(),
-                    ChildStatus::Failed { reason } => format!("FAILED: {reason}"),
-                    ChildStatus::Pending => "PENDING".to_string(),
-                    ChildStatus::InProgress => "IN-PROGRESS".to_string(),
-                };
-                let disc = if c.discoveries.is_empty() {
-                    String::new()
-                } else {
-                    format!(" | Discoveries: {}", c.discoveries.join(", "))
-                };
-                format!("- [{}] {}{disc}", status_label, c.goal)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
     let query = format!(
         "{context}\n\n\
-         ## Child Subtasks\n{children_text}\n\n\
          ## Recent Discoveries\n{disc_text}\n\n\
          Review the child subtask status and discoveries, then decide how to proceed.",
         context = format_context(ctx),
@@ -433,6 +434,34 @@ Respond with the required JSON schema."
          Assess whether this failure is recoverable and suggest a strategy if so.",
         context = format_context(ctx),
     );
+
+    PromptPair {
+        system_prompt,
+        query,
+    }
+}
+
+pub fn build_explore_for_init() -> PromptPair {
+    let system_prompt = "\
+You are a project analyzer. Explore the project directory to detect its build system, \
+test framework, linters, and formatters.
+
+Look for:
+- Build system markers: Cargo.toml, package.json, pyproject.toml, Makefile, CMakeLists.txt, \
+build.gradle, go.mod, etc.
+- Test frameworks: test directories, test config files (jest.config, pytest.ini, etc.)
+- Linters/formatters: clippy, eslint, ruff, black, prettier, golangci-lint, etc.
+- CI config: .github/workflows/, .gitlab-ci.yml — extract build/test/lint commands as hints.
+
+Use tools to explore the project directory. Read key config files to understand the setup.
+Do NOT look in .git, node_modules, target, or other build artifact directories.
+
+Respond with the required JSON schema."
+        .into();
+
+    let query = "Explore this project and detect its verification steps \
+(build, lint, test, format commands). Read relevant config files to determine the correct commands."
+        .into();
 
     PromptPair {
         system_prompt,

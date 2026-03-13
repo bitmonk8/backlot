@@ -1,7 +1,7 @@
 // `epic init` — agent-driven interactive configuration scaffolding.
 
-use crate::agent::config_gen::{DetectedStepWire, InitFindingsWire};
-use crate::agent::flick::FlickAgent;
+use crate::agent::reel_adapter::ReelAgent;
+use crate::agent::wire::{DetectedStepWire, InitFindingsWire};
 use crate::config::project::{EpicConfig, LimitsConfig, ModelConfig, VerificationStep};
 use anyhow::bail;
 use std::fmt::Write as FmtWrite;
@@ -9,7 +9,7 @@ use std::io::{self, BufRead, Write};
 use std::path::Path;
 
 /// Run the full init flow: agent exploration + interactive confirmation + write epic.toml.
-pub async fn run_init(agent: &FlickAgent, project_root: &Path) -> anyhow::Result<()> {
+pub async fn run_init(agent: &ReelAgent, project_root: &Path) -> anyhow::Result<()> {
     let config_path = project_root.join("epic.toml");
     if config_path.exists() {
         bail!(

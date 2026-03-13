@@ -7,24 +7,23 @@
 ## What Is Implemented
 
 - Recursive problem-solver orchestrator with DFS execution, retry/escalation, fix loops, recovery re-decomposition, checkpoint adjust/escalate
-- `FlickAgent` implementing `AgentService` (9 methods) via Flick library crate — config generation, structured output schemas, prompt assembly, tool loop with resume
-- 6 tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`, `NuShell` — Claude Code-aligned schemas executed as nu custom commands via `translate_tool_call()` / `format_tool_result()`. All tool execution routes through `execute_tool()` → nu MCP session.
-- Nu config integration — `epic_config.nu` and `epic_env.nu` written to `target/nu-cache/` by `build.rs`, loaded via `nu --mcp --config <path> --env-config <path>`. Custom commands (`epic read`, `epic write`, `epic edit`, `epic glob`, `epic grep`) available immediately in MCP sessions without evaluate preamble. `EPIC_RG_PATH` env var injects rg binary absolute path into nu session; `epic grep` uses `^$env.EPIC_RG_PATH` for direct invocation (bypasses nu PATH splitting issues under AppContainer). Sandbox policy grants exec access to cache dir for config files and rg binary.
+- `ReelAgent` implementing `AgentService` (9 methods) — thin adapter building `reel::AgentRequestConfig` per phase, delegates tool loop and tool execution to reel crate
+- **Reel crate** (`../reel/reel`) — standalone agent session layer extracted from epic. Contains: `Agent` runtime (tool loop with resume), 6 built-in tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `NuShell`), `NuSession` (persistent `nu --mcp` process inside lot sandbox), `ToolHandler` trait for custom tool dispatch, `ToolGrant` bitflags (WRITE/NU), `ModelRegistry`/`ProviderRegistry` re-exports from flick. Nu config — `reel_config.nu` and `reel_env.nu` written to `target/nu-cache/` by `build.rs`, custom commands (`reel read`, `reel write`, `reel edit`, `reel glob`, `reel grep`). `REEL_RG_PATH` env var for rg binary injection.
 - State persistence via `.epic/state.json` — atomic writes, resume, goal mismatch detection, corrupt state handling, cycle-safe DFS
 - TUI via ratatui + crossterm — task tree, worklog, metrics panels, keyboard controls
 - CLI via clap — `init`, `run <goal>`, `resume`, `status`, `setup` subcommands
 - `epic init` — agent-driven interactive configuration scaffolding
 - Container/VM startup detection with suppressible warning
-- Process sandboxing via lot — nu tool runs inside a persistent `nu --mcp` process spawned inside an OS-native sandbox (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS); one nu MCP session per agent call, sandbox is mandatory (no unsandboxed fallback). `epic setup` grants AppContainer prerequisites (NUL device ACL + ancestor traverse ACEs) via one-time elevated operation; `run`/`resume` check `appcontainer_prerequisites_met(&[project_root])` and fail early if not configured.
+- Process sandboxing delegated to reel (which uses lot) — nu tool runs inside a persistent `nu --mcp` process spawned inside an OS-native sandbox (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS); one nu MCP session per agent call, sandbox is mandatory (no unsandboxed fallback). `epic setup` grants AppContainer prerequisites via `lot::grant_appcontainer_prerequisites()`; `run`/`resume` check `lot::appcontainer_prerequisites_met(&[project_root])` and fail early if not configured.
 - Context propagation — `TaskContext` carries discoveries, parent goals, sibling summaries, checkpoint guidance. Structural map injection in prompts (ancestor chain, completed/pending siblings).
 - Discovery flow — in-memory tracking via `task.discoveries`. Inter-subtask checkpoint with Haiku classification (proceed/adjust/escalate). Discovery bubbling to parent.
 - Assessment — Haiku call returns path (leaf/branch) + model selection. Root forced to branch, max-depth forced to leaf.
 - Verification & fix loops — leaf fix loop with model escalation (Haiku→Sonnet→Opus, 3 retries per tier), branch fix loop (3 Sonnet rounds + 1 Opus round for root), scope circuit breaker (3x magnitude estimate via `git diff --numstat`).
 - Recovery — Opus recovery assessment, incremental vs full re-decomposition, recovery round budgets inherited to prevent exponential growth.
 - Event system — 19 event variants driving TUI and JSONL logging.
-- CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain, Flick pinned to rev `b36e0f3`
-- Testability infrastructure — `ClientFactory`/`ToolExecutor` traits (flick), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
-- Nu session tests — 19 unit tests (protocol parsing, session state, generation invalidation, config resolution) and 23 integration tests (spawn lifecycle, custom command availability, timeout handling, grant change respawn, env filtering, error handling, sandbox policy verification: read-only write prevention, rg child process execution, temp dir pivot prevention, write grant verification). Sandbox tests use per-test isolated cache dirs to avoid concurrent ACL conflicts.
+- CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain
+- Testability infrastructure — `ClientFactory`/`ToolExecutor` traits (reel, internal), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
+- Reel test suite — 142 tests: agent tool loop tests (mock providers, timeout, max rounds), 19 nu session unit tests (protocol parsing, session state, generation invalidation, config resolution), 23 nu session integration tests (spawn lifecycle, custom command availability, timeout handling, grant change respawn, env filtering, error handling, sandbox policy verification). Epic retains 215 tests (orchestrator, state, TUI, config, prompts, init).
 
 ## What Is NOT Implemented
 
@@ -51,14 +50,12 @@ Epic uses generalized prompts that work across languages. No language-specific l
 
 No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
-## Priority 1: Reel Extraction
+## Completed Work
 
-Extracting the agent session layer (tool loop, tool definitions, NuSession, sandboxing) into a separate `reel` crate. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the spec.
+### Reel Extraction
 
-**Design status**: Complete — `Agent`, `AgentEnvironment`, `AgentRequest`, `RunResult`, `ToolHandler` trait for custom tool dispatch.
+Agent session layer extracted into standalone `reel` workspace at `../reel/` (library crate at `../reel/reel`). Epic is now a thin consumer. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the original spec.
 
-**Next step**: Create reel crate, move code, wire epic as consumer.
-
-## Other Work Candidates
+## Work Candidates
 
 (none)

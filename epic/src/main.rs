@@ -12,7 +12,7 @@ mod tui;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use agent::flick::FlickAgent;
+use agent::reel_adapter::ReelAgent;
 use cli::{Cli, Command};
 use config::project::EpicConfig;
 use events::event_channel;
@@ -71,15 +71,19 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         );
     }
 
-    // Check epic.toml existence before constructing agent (avoids requiring credentials for this error).
+    // Handle Init before general agent construction — init needs only default
+    // config and should work on a fresh project without epic.toml.
     if matches!(&cli.command, Command::Init) {
-        let config_path = project_root.join("epic.toml");
-        if config_path.exists() {
-            bail!(
-                "epic.toml already exists at {}. Delete it first to reinitialize.",
-                config_path.display()
-            );
-        }
+        let defaults = EpicConfig::default();
+        let timeout = Duration::from_secs(300);
+        let agent = ReelAgent::new(
+            project_root.clone(),
+            &cli.credential,
+            timeout,
+            &defaults.models,
+            defaults.verification_steps.clone(),
+        )?;
+        return init::run_init(&agent, &project_root).await;
     }
 
     std::fs::create_dir_all(&work_dir)?;
@@ -89,17 +93,13 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let timeout = Duration::from_secs(300);
 
-    let agent = FlickAgent::new(
+    let agent = ReelAgent::new(
         project_root.clone(),
         &cli.credential,
         timeout,
         &epic_config.models,
         epic_config.verification_steps.clone(),
     )?;
-
-    if matches!(&cli.command, Command::Init) {
-        return init::run_init(&agent, &project_root).await;
-    }
 
     let (state, root_id, goal_text) = match &cli.command {
         Command::Run { goal } => {
