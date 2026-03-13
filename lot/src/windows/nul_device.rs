@@ -34,9 +34,13 @@ const SECURITY_APP_PACKAGE_ALL_PACKAGES_RID: u32 = 1;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
 /// Minimum rights for `fs::metadata()` to succeed on a directory.
+// FILE_TRAVERSE: required for path traversal (SeChangeNotifyPrivilege bypass).
+// SYNCHRONIZE: required by CreateFileW(access=0, FILE_FLAG_BACKUP_SEMANTICS).
+// FILE_READ_ATTRIBUTES: required by GetFileAttributesExW (used by fs::metadata).
 const FILE_TRAVERSE: u32 = 0x0020;
+const FILE_READ_ATTRIBUTES: u32 = 0x0080;
 const SYNCHRONIZE: u32 = 0x0010_0000;
-const TRAVERSE_MASK: u32 = FILE_TRAVERSE | SYNCHRONIZE;
+const TRAVERSE_MASK: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
 use super::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 
@@ -577,7 +581,6 @@ fn apply_traverse_dacl(
             std::ptr::null(),
         )
     };
-
     // SAFETY: new_dacl allocated by SetEntriesInAclW.
     unsafe {
         LocalFree(new_dacl.cast());

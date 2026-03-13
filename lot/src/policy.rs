@@ -72,6 +72,37 @@ fn check_cross_overlap(
     Ok(())
 }
 
+/// Like [`check_cross_overlap`] but allows `b` (higher-privilege) children
+/// under `a` (lower-privilege) parents.  Rejects exact duplicates, `a` children
+/// under `b` parents (redundant), and `b` parents over `a` children.
+fn check_cross_overlap_directional(
+    a_paths: &[PathBuf],
+    a_name: &str,
+    b_paths: &[PathBuf],
+    b_name: &str,
+) -> Result<(), SandboxError> {
+    for a in a_paths {
+        for b in b_paths {
+            if a == b {
+                return Err(SandboxError::InvalidPolicy(format!(
+                    "path appears in both {a_name} and {b_name}: {}",
+                    a.display()
+                )));
+            }
+            // b child under a parent is allowed (elevated subdirectory).
+            // a child under b parent is redundant (b already covers a).
+            if is_parent_of(b, a) {
+                return Err(SandboxError::InvalidPolicy(format!(
+                    "parent/child overlap between {b_name} and {a_name}: {} contains {}",
+                    b.display(),
+                    a.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Check for parent/child overlaps within a single named set.
 fn check_intra_overlap(paths: &[PathBuf], name: &str) -> Result<(), SandboxError> {
     for (i, a) in paths.iter().enumerate() {
@@ -130,7 +161,14 @@ impl SandboxPolicy {
         check_intra_overlap(&exec_canon, "exec_paths")?;
 
         // Check for cross-set overlaps (exact match + parent/child).
-        check_cross_overlap(&read_canon, "read_paths", &write_canon, "write_paths")?;
+        //
+        // A write child under a read parent is allowed: it grants elevated
+        // permissions to a specific subdirectory while the parent remains
+        // read-only. The reverse (read child under write parent) is redundant
+        // and rejected.
+        check_cross_overlap_directional(
+            &read_canon, "read_paths", &write_canon, "write_paths",
+        )?;
         check_cross_overlap(&read_canon, "read_paths", &exec_canon, "exec_paths")?;
         check_cross_overlap(&write_canon, "write_paths", &exec_canon, "exec_paths")?;
 
@@ -259,7 +297,9 @@ mod tests {
     }
 
     #[test]
-    fn parent_child_overlap_read_write_rejected() {
+    fn write_child_under_read_parent_allowed() {
+        // A write child under a read parent is valid: it grants elevated
+        // permissions to a specific subdirectory.
         let tmp = make_temp_dir();
         let parent = tmp.path().to_path_buf();
         let child = tmp.path().join("sub");
@@ -271,14 +311,9 @@ mod tests {
             allow_network: false,
             limits: ResourceLimits::default(),
         };
-        let err = policy.validate().unwrap_err();
-        let msg = err.to_string();
-        assert!(matches!(err, SandboxError::InvalidPolicy(_)));
-        assert!(
-            msg.contains("overlap"),
-            "error should mention overlap: {msg}"
-        );
+        policy.validate().expect("write child under read parent should be valid");
     }
+
 
     #[test]
     fn parent_child_overlap_write_read_rejected() {
