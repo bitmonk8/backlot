@@ -85,20 +85,20 @@ Failing tests:
 - `test_build_nu_sandbox_policy_includes_cache_dir_exec`
 - `integration_sandbox_temp_dir_no_pivot_to_project`
 
-#### 9b. Nu custom commands not loaded (5 tests)
+#### ~~9b. Nu custom commands not loaded (5 tests)~~ (FIXED)
 
-`reel read`, `reel write`, `reel edit`, `reel glob`, `reel grep` are defined in `reel_config.nu` and loaded via `nu --config`. The tests use `isolated_session()` which copies config files from `NU_CACHE_DIR` into a temp dir, but nu reports `reel` as "not a known command". The config file is not reaching the nu process — likely `resolve_config_files()` returns `None` because the cache dir path does not propagate correctly through the test session lifecycle.
+Fixed: `reel_config.nu` used `str replace --string` which was removed in nu 0.111.0 (literal replace is now the default). The config file failed to parse at startup, so custom commands were never defined. Removed the `--string` flag. Two tests (glob, grep) now pass; the remaining three (read, write, edit) fail due to AppContainer sandbox access issues (see 9c).
 
-Error: `External command failed: "reel" is neither a Nushell built-in or a known external command`
+#### 9c. AppContainer sandbox blocks file access in custom command tests (3 tests)
+
+`reel read`, `reel write`, `reel edit` commands fail inside the AppContainer sandbox because nu's `open`, `ls`, and `save` commands cannot access files in the test project directory. The sandbox grants write access to the project root, but nu's internal operations (which use `nu_glob` and `fs::metadata`) need ancestor traversal ACEs on intermediate directories.
 
 Failing tests:
-- `integration_custom_command_reel_read`
-- `integration_custom_command_reel_write`
-- `integration_custom_command_reel_glob`
-- `integration_custom_command_reel_edit`
-- `integration_custom_command_reel_grep`
+- `integration_custom_command_reel_read` — `ls` fails: "Pattern, file or folder not found"
+- `integration_custom_command_reel_write` — `save` fails: "Already exists"
+- `integration_custom_command_reel_edit` — `open --raw` returns nothing, `split row` fails on `nothing` input
 
-**Category: Testing / Correctness.**
+**Category: Testing / Sandbox.**
 
 ### 10. `extract_text` uses mutable loop instead of iterator
 

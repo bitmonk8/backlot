@@ -401,10 +401,10 @@ def "reel edit" [
         if $count > 1 {
             error make { msg: $"old_string found ($count) times, must be unique" }
         }
-        ($content | str replace --string $old_string $new_string) | save --force $full
+        ($content | str replace $old_string $new_string) | save --force $full
         { path: $full, replacements: 1 }
     } else {
-        ($content | str replace --string --all $old_string $new_string) | save --force $full
+        ($content | str replace --all $old_string $new_string) | save --force $full
         { path: $full, replacements: $count }
     }
 }
