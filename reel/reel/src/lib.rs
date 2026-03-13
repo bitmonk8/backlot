@@ -18,11 +18,11 @@ pub use tools::ToolDefinition;
 pub use tools::{ToolExecResult, ToolGrant, tool_definitions};
 
 // Re-export flick types consumers need for building AgentEnvironment / config.
-pub use flick::{ConfigFormat, ModelInfo, ModelRegistry, ProviderRegistry, RequestConfig};
 /// Opaque tool configuration type. Used when injecting tools into a
 /// `RequestConfig` via `add_tools()`. Convert from `ToolDefinition` using
 /// `ToolConfig::new(name, description, Some(parameters))`.
 pub use flick::ToolConfig;
+pub use flick::{ConfigFormat, ModelInfo, ModelRegistry, ProviderRegistry, RequestConfig};
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support {

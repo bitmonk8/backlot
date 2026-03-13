@@ -295,11 +295,7 @@ fn translate_grep(input: &JsonValue) -> Result<String, String> {
     {
         cmd.push_str(" --case-insensitive");
     }
-    if input
-        .get("line_numbers")
-        .and_then(JsonValue::as_bool)
-        == Some(false)
-    {
+    if input.get("line_numbers").and_then(JsonValue::as_bool) == Some(false) {
         cmd.push_str(" --no-line-numbers");
     }
     if let Some(n) = input.get("context_after").and_then(JsonValue::as_u64) {
@@ -365,7 +361,10 @@ fn format_read_result(raw: &str) -> String {
             "(showing lines {offset}-{end} of {total_lines} total, {size} bytes)"
         );
     } else if total_lines > 0 {
-        let _ = write!(output, "(0 lines returned, {total_lines} total, {size} bytes)");
+        let _ = write!(
+            output,
+            "(0 lines returned, {total_lines} total, {size} bytes)"
+        );
     }
 
     output
@@ -1094,8 +1093,14 @@ mod tests {
         assert_eq!(required_grant("Read"), Some(ToolGrant::NU));
         assert_eq!(required_grant("Glob"), Some(ToolGrant::NU));
         assert_eq!(required_grant("Grep"), Some(ToolGrant::NU));
-        assert_eq!(required_grant("Write"), Some(ToolGrant::WRITE | ToolGrant::NU));
-        assert_eq!(required_grant("Edit"), Some(ToolGrant::WRITE | ToolGrant::NU));
+        assert_eq!(
+            required_grant("Write"),
+            Some(ToolGrant::WRITE | ToolGrant::NU)
+        );
+        assert_eq!(
+            required_grant("Edit"),
+            Some(ToolGrant::WRITE | ToolGrant::NU)
+        );
         assert_eq!(required_grant("NuShell"), Some(ToolGrant::NU));
         assert_eq!(required_grant("unknown"), None);
     }
@@ -1321,7 +1326,12 @@ mod tests {
     #[tokio::test]
     async fn test_legacy_tool_names_rejected() {
         for name in ["read_file", "write_file", "edit_file", "glob", "grep", "nu"] {
-            let result = exec(name, serde_json::json!({}), ToolGrant::WRITE | ToolGrant::NU).await;
+            let result = exec(
+                name,
+                serde_json::json!({}),
+                ToolGrant::WRITE | ToolGrant::NU,
+            )
+            .await;
             assert!(result.is_error, "{name} should be rejected");
             assert!(
                 result.content.contains("unknown tool"),
@@ -1330,5 +1340,4 @@ mod tests {
             );
         }
     }
-
 }

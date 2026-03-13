@@ -102,9 +102,8 @@ fn find_target_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
         return PathBuf::from(dir);
     }
-    let out_dir = PathBuf::from(
-        std::env::var("OUT_DIR").unwrap_or_else(|e| panic!("OUT_DIR not set: {e}")),
-    );
+    let out_dir =
+        PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|e| panic!("OUT_DIR not set: {e}")));
     // OUT_DIR is typically target/<profile>/build/<crate>-<hash>/out
     // Walk up looking for a directory that contains a `.cargo-lock` or is named `target`.
     let mut dir = out_dir.as_path();
@@ -146,8 +145,7 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
 }
 
 fn extract_tar_gz(archive_path: &Path, binary_name: &str, dest: &Path) -> Result<(), String> {
-    let file =
-        fs::File::open(archive_path).map_err(|e| format!("failed to open archive: {e}"))?;
+    let file = fs::File::open(archive_path).map_err(|e| format!("failed to open archive: {e}"))?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
 
@@ -160,10 +158,7 @@ fn extract_tar_gz(archive_path: &Path, binary_name: &str, dest: &Path) -> Result
             .path()
             .map_err(|e| format!("bad tar entry path: {e}"))?;
 
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if file_name == binary_name {
             let mut out = fs::File::create(dest)
@@ -186,10 +181,8 @@ fn extract_tar_gz(archive_path: &Path, binary_name: &str, dest: &Path) -> Result
 }
 
 fn extract_zip(archive_path: &Path, binary_name: &str, dest: &Path) -> Result<(), String> {
-    let file =
-        fs::File::open(archive_path).map_err(|e| format!("failed to open archive: {e}"))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("failed to read zip: {e}"))?;
+    let file = fs::File::open(archive_path).map_err(|e| format!("failed to open archive: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("failed to read zip: {e}"))?;
 
     for i in 0..archive.len() {
         let mut entry = archive
@@ -242,9 +235,8 @@ fn download_and_cache(
         .unwrap_or_else(|e| panic!("failed to download {label} binary: {e}"));
 
     // Verify archive checksum.
-    let actual_hash =
-        sha256_file(&archive_path)
-            .unwrap_or_else(|e| panic!("failed to compute SHA-256 of downloaded archive: {e}"));
+    let actual_hash = sha256_file(&archive_path)
+        .unwrap_or_else(|e| panic!("failed to compute SHA-256 of downloaded archive: {e}"));
     assert_eq!(
         actual_hash, asset.sha256,
         "SHA-256 mismatch for {}: expected {}, got {actual_hash}",
@@ -327,7 +319,10 @@ fn main() {
 /// runtime so that `reel read`, `reel write`, etc. are available immediately
 /// in the MCP session without an evaluate preamble.
 fn write_nu_config_files(cache_dir: &Path) {
-    for (name, content) in [("reel_config.nu", REEL_CONFIG_NU), ("reel_env.nu", REEL_ENV_NU)] {
+    for (name, content) in [
+        ("reel_config.nu", REEL_CONFIG_NU),
+        ("reel_env.nu", REEL_ENV_NU),
+    ] {
         let path = cache_dir.join(name);
         fs::write(&path, content)
             .unwrap_or_else(|e| panic!("failed to write {name} to {}: {e}", path.display()));

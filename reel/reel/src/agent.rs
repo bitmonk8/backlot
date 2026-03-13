@@ -197,9 +197,7 @@ impl Agent {
     // Config building
     // -----------------------------------------------------------------------
 
-    fn build_request_config(
-        request: &AgentRequestConfig,
-    ) -> anyhow::Result<flick::RequestConfig> {
+    fn build_request_config(request: &AgentRequestConfig) -> anyhow::Result<flick::RequestConfig> {
         let built_in_tools = tools::tool_definitions(request.grant);
         let custom_tool_defs = request.custom_tools.iter().map(|h| h.definition());
 
@@ -210,8 +208,7 @@ impl Agent {
             .collect();
 
         // Reconstruct via builder from the caller's config, then inject tools.
-        let mut builder = flick::RequestConfig::builder()
-            .model(request.config.model());
+        let mut builder = flick::RequestConfig::builder().model(request.config.model());
 
         if let Some(sp) = request.config.system_prompt() {
             builder = builder.system_prompt(sp);
@@ -329,13 +326,10 @@ impl Agent {
                 });
             }
 
-            result = tokio::time::timeout(
-                self.timeout,
-                client.resume(&mut context, tool_results),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("agent call timed out after {:?}", self.timeout))?
-            .map_err(|e| anyhow::anyhow!("agent resume failed: {e}"))?;
+            result = tokio::time::timeout(self.timeout, client.resume(&mut context, tool_results))
+                .await
+                .map_err(|_| anyhow::anyhow!("agent call timed out after {:?}", self.timeout))?
+                .map_err(|e| anyhow::anyhow!("agent resume failed: {e}"))?;
         }
 
         if matches!(result.status, ResultStatus::ToolCallsPending) {
@@ -397,8 +391,7 @@ fn finalize_result<T: DeserializeOwned>(
     // model output when no output_schema is set), wrap it as a JSON string
     // and try again — this succeeds when T is serde_json::Value or String.
     let output: T = serde_json::from_str(&text).or_else(|orig_err| {
-        let quoted = serde_json::to_string(&text)
-            .with_context(|| "string serialization failed")?;
+        let quoted = serde_json::to_string(&text).with_context(|| "string serialization failed")?;
         serde_json::from_str(&quoted)
             .with_context(|| format!("failed to parse model output ({orig_err}): {text}"))
     })?;
@@ -625,9 +618,7 @@ mod tests {
     /// Client factory that wraps any `Fn() -> Box<dyn DynProvider>` factory.
     struct FnClientFactory<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync>(F);
 
-    impl<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync> ClientFactory
-        for FnClientFactory<F>
-    {
+    impl<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync> ClientFactory for FnClientFactory<F> {
         fn build(&self, config: flick::RequestConfig) -> ClientFactoryFuture<'_> {
             let provider = (self.0)();
             Box::pin(async move {
@@ -705,7 +696,10 @@ mod tests {
         let result: anyhow::Result<RunResult<serde_json::Value>> =
             agent.run(&request, "test").await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap_or_else(|e| panic!("{e}")).output["status"], "success");
+        assert_eq!(
+            result.unwrap_or_else(|e| panic!("{e}")).output["status"],
+            "success"
+        );
     }
 
     fn tool_then_complete_factory() -> Box<dyn ClientFactory> {
@@ -799,9 +793,7 @@ mod tests {
         let agent = Agent::with_injected(
             PathBuf::from("/tmp"),
             Duration::from_secs(60),
-            mock_client_factory(|| {
-                Box::new(AlwaysToolCallProvider) as Box<dyn flick::DynProvider>
-            }),
+            mock_client_factory(|| Box::new(AlwaysToolCallProvider) as Box<dyn flick::DynProvider>),
             Box::new(CountingToolExecutor {
                 call_count: Arc::new(AtomicU32::new(0)),
             }),
@@ -889,7 +881,10 @@ mod tests {
 
     #[tokio::test]
     async fn build_client_propagates_factory_error() {
-        let agent = test_agent(Box::new(FailingClientFactory), Box::new(DefaultToolExecutor));
+        let agent = test_agent(
+            Box::new(FailingClientFactory),
+            Box::new(DefaultToolExecutor),
+        );
         let request = test_request();
         let result: anyhow::Result<RunResult<serde_json::Value>> =
             agent.run(&request, "test").await;
