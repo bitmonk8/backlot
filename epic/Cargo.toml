@@ -14,9 +14,9 @@ toml = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 ratatui = "0.29"
 crossterm = "0.28"
-lot = { git = "https://github.com/bitmonk8/lot", rev = "8b468d7", features = ["tokio"] }
+lot = { git = "https://github.com/bitmonk8/lot", rev = "f131ad9", features = ["tokio"] }
 tempfile = "3"
-reel = { git = "https://github.com/bitmonk8/reel", rev = "6574ee1" }
+reel = { git = "https://github.com/bitmonk8/reel", rev = "51eb559" }
 
 [lints.rust]
 unsafe_code = "deny"
@@ -33,4 +33,4 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 
 [dev-dependencies]
-reel = { git = "https://github.com/bitmonk8/reel", rev = "6574ee1", features = ["testing"] }
+reel = { git = "https://github.com/bitmonk8/reel", rev = "51eb559", features = ["testing"] }
