@@ -166,9 +166,7 @@ impl SandboxPolicy {
         // permissions to a specific subdirectory while the parent remains
         // read-only. The reverse (read child under write parent) is redundant
         // and rejected.
-        check_cross_overlap_directional(
-            &read_canon, "read_paths", &write_canon, "write_paths",
-        )?;
+        check_cross_overlap_directional(&read_canon, "read_paths", &write_canon, "write_paths")?;
         check_cross_overlap(&read_canon, "read_paths", &exec_canon, "exec_paths")?;
         check_cross_overlap(&write_canon, "write_paths", &exec_canon, "exec_paths")?;
 
@@ -311,9 +309,10 @@ mod tests {
             allow_network: false,
             limits: ResourceLimits::default(),
         };
-        policy.validate().expect("write child under read parent should be valid");
+        policy
+            .validate()
+            .expect("write child under read parent should be valid");
     }
-
 
     #[test]
     fn parent_child_overlap_write_read_rejected() {
