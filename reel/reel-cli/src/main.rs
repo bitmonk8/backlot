@@ -119,7 +119,7 @@ fn parse_config(text: &str) -> Result<(reel::RequestConfig, reel::ToolGrant), St
         serde_yml::from_str(text).map_err(|e| format!("config parse: {e}"))?;
 
     if let serde_yml::Value::Mapping(ref mut m) = map {
-        m.remove(&serde_yml::Value::String("grant".into()));
+        m.remove(serde_yml::Value::String("grant".into()));
     }
 
     let stripped = serde_yml::to_string(&map).map_err(|e| format!("config re-serialize: {e}"))?;
@@ -236,7 +236,7 @@ async fn cmd_run(args: RunArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_setup(args: SetupArgs) -> Result<(), String> {
+fn cmd_setup(args: &SetupArgs) -> Result<(), String> {
     if args.check {
         eprintln!("Checking prerequisites...");
         check_windows_prerequisites(args.verbose)
@@ -253,7 +253,10 @@ fn check_windows_prerequisites(verbose: bool) -> Result<(), String> {
     let ok = lot::appcontainer_prerequisites_met(&paths);
 
     if verbose {
-        eprintln!("AppContainer prerequisites: {}", if ok { "OK" } else { "MISSING" });
+        eprintln!(
+            "AppContainer prerequisites: {}",
+            if ok { "OK" } else { "MISSING" }
+        );
     }
 
     if !ok {
@@ -273,20 +276,23 @@ fn configure_windows_prerequisites(verbose: bool) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("failed to get cwd: {e}"))?;
     let paths: Vec<&std::path::Path> = vec![cwd.as_path()];
 
-    lot::grant_appcontainer_prerequisites(&paths)
-        .map_err(|e| format!("Failed to grant AppContainer prerequisites: {e}. Try running as administrator."))?;
+    lot::grant_appcontainer_prerequisites(&paths).map_err(|e| {
+        format!("Failed to grant AppContainer prerequisites: {e}. Try running as administrator.")
+    })?;
 
     eprintln!("Setup complete.");
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::unnecessary_wraps)]
 fn check_windows_prerequisites(_verbose: bool) -> Result<(), String> {
     eprintln!("No setup required on this platform.");
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::unnecessary_wraps)]
 fn configure_windows_prerequisites(_verbose: bool) -> Result<(), String> {
     eprintln!("No setup required on this platform.");
     Ok(())
@@ -315,7 +321,7 @@ async fn main() -> ExitCode {
 
     let result = match cli.command {
         Commands::Run(args) => cmd_run(args).await,
-        Commands::Setup(args) => cmd_setup(args),
+        Commands::Setup(args) => cmd_setup(&args),
     };
 
     match result {

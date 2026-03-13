@@ -90,7 +90,10 @@ struct NuProcess {
 
 impl Drop for NuProcess {
     fn drop(&mut self) {
-        let mut guard = self.child_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .child_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref mut child) = *guard {
             let _ = child.kill();
             // Reap the child so it releases handles before _session_temp_dir
@@ -205,7 +208,9 @@ impl NuSession {
 
         // Kill the in-flight child first (process taken out during evaluate_inner Phase 2).
         if let Some(ref handle) = st.inflight_child {
-            let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref mut child) = *guard {
                 let _ = child.kill();
             }
@@ -214,7 +219,10 @@ impl NuSession {
 
         // Kill the process if it's parked in state (not currently in-flight).
         if let Some(proc) = st.process.take() {
-            let mut child_guard = proc.child_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut child_guard = proc
+                .child_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref mut child) = *child_guard {
                 let _ = child.kill();
             }
@@ -241,11 +249,15 @@ impl NuSession {
                 // Bump generation when spawning a new process.
                 st.generation += 1;
                 st.process.take();
-                let new_proc = spawn_nu_process(project_root, grant, self.cache_dir.as_deref()).await?;
+                let new_proc =
+                    spawn_nu_process(project_root, grant, self.cache_dir.as_deref()).await?;
                 st.process = Some(new_proc);
             }
 
-            let proc = st.process.take().ok_or("internal: process unavailable after spawn")?;
+            let proc = st
+                .process
+                .take()
+                .ok_or("internal: process unavailable after spawn")?;
             st.inflight_child = Some(Arc::clone(&proc.child_handle));
             let generation = st.generation;
             drop(st);
@@ -275,7 +287,9 @@ impl NuSession {
             st.process = Some(proc);
         } else if result.is_err() {
             // Kill the process on RPC error to avoid leaking it.
-            let mut child_guard = child_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut child_guard = child_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref mut child) = *child_guard {
                 let _ = child.kill();
             }
@@ -349,8 +363,8 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
         })),
     };
 
-    let request_bytes = serde_json::to_vec(&request)
-        .map_err(|e| format!("failed to serialize request: {e}"))?;
+    let request_bytes =
+        serde_json::to_vec(&request).map_err(|e| format!("failed to serialize request: {e}"))?;
 
     send_line(&mut proc.stdin, &request_bytes)?;
 
@@ -617,7 +631,13 @@ mod tests {
     fn test_build_nu_sandbox_policy_write_grant() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::WRITE | ToolGrant::NU, None, sess_tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(
+            tmp.path(),
+            ToolGrant::WRITE | ToolGrant::NU,
+            None,
+            sess_tmp.path(),
+        )
+        .unwrap();
         let canon = tmp.path().canonicalize().unwrap();
 
         let covered_by_write = policy
@@ -640,7 +660,8 @@ mod tests {
     fn test_build_nu_sandbox_policy_no_write_grant() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
+        let policy =
+            build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
         let canon = tmp.path().canonicalize().unwrap();
         let sess_canon = sess_tmp.path().canonicalize().unwrap();
 
@@ -653,10 +674,7 @@ mod tests {
             !policy.write_paths.contains(&canon),
             "project root should NOT be in write_paths when WRITE not granted"
         );
-        let has_sess_write = policy
-            .write_paths
-            .iter()
-            .any(|w| sess_canon.starts_with(w));
+        let has_sess_write = policy.write_paths.iter().any(|w| sess_canon.starts_with(w));
         assert!(
             has_sess_write,
             "session temp dir should be writable regardless of grant"
@@ -667,7 +685,8 @@ mod tests {
     fn test_build_nu_sandbox_policy_allows_network() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
+        let policy =
+            build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
         assert!(policy.allow_network);
     }
 
@@ -675,7 +694,8 @@ mod tests {
     fn test_build_nu_sandbox_policy_no_exec_paths_without_cache() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
+        let policy =
+            build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
         assert!(
             policy.exec_paths.is_empty(),
             "exec_paths should be empty when no cache dir provided"
@@ -688,7 +708,13 @@ mod tests {
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
         // Cache dir outside test project root (tmp) to avoid exec/read overlap in policy.
         let cache = tempfile::TempDir::new_in(sandbox_test_base()).unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, Some(cache.path()), sess_tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(
+            tmp.path(),
+            ToolGrant::NU,
+            Some(cache.path()),
+            sess_tmp.path(),
+        )
+        .unwrap();
 
         let cache_canon = cache.path().canonicalize().unwrap();
         let has_cache_exec = policy
@@ -732,7 +758,8 @@ mod tests {
 
     #[test]
     fn try_parse_response_matching_id() {
-        let line = r#"{"jsonrpc":"2.0","id":42,"result":{"content":[{"type":"text","text":"ok"}]}}"#;
+        let line =
+            r#"{"jsonrpc":"2.0","id":42,"result":{"content":[{"type":"text","text":"ok"}]}}"#;
         let resp = try_parse_response(line, 42);
         assert!(resp.is_some());
         assert_eq!(resp.unwrap().id, Some(42));
@@ -819,9 +846,7 @@ mod tests {
     #[test]
     fn read_response_too_many_skipped_lines() {
         // MAX_SKIPPED_LINES + 2 lines of garbage, no matching response.
-        let data: String = (0..MAX_SKIPPED_LINES + 2)
-            .map(|_| "not json\n")
-            .collect();
+        let data: String = (0..MAX_SKIPPED_LINES + 2).map(|_| "not json\n").collect();
         let mut reader = buf_reader_from_str(&data);
         let result = read_response(&mut reader, 1);
         assert!(result.is_err());
@@ -938,8 +963,8 @@ mod tests {
     /// operations on exec_path do not interfere between concurrent tests.
     fn tmp_sandbox_cache() -> Option<tempfile::TempDir> {
         let src = option_env!("NU_CACHE_DIR")?;
-        let dest = tempfile::TempDir::new_in(sandbox_test_base())
-            .expect("create sandbox cache dir");
+        let dest =
+            tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox cache dir");
         for entry in std::fs::read_dir(src).expect("read cache dir") {
             let entry = entry.expect("read dir entry");
             let path = entry.path();
@@ -989,11 +1014,7 @@ mod tests {
 
     /// Try to spawn a session, returning None if sandbox setup fails
     /// (e.g. Windows ACL errors when not running elevated).
-    async fn try_spawn(
-        session: &NuSession,
-        root: &Path,
-        grant: ToolGrant,
-    ) -> Option<()> {
+    async fn try_spawn(session: &NuSession, root: &Path, grant: ToolGrant) -> Option<()> {
         match session.spawn(root, grant).await {
             Ok(()) => Some(()),
             Err(e) if e.contains("sandbox setup failed") => {
@@ -1027,7 +1048,10 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+        if try_spawn(&session, tmp.path(), ToolGrant::NU)
+            .await
+            .is_none()
+        {
             return;
         }
     }
@@ -1037,7 +1061,10 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+        if try_spawn(&session, tmp.path(), ToolGrant::NU)
+            .await
+            .is_none()
+        {
             return;
         }
         // Second spawn with same params is a no-op.
@@ -1050,7 +1077,10 @@ mod tests {
         let tmp = tmp_project();
         {
             let (session, _cache) = isolated_session();
-            if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+            if try_spawn(&session, tmp.path(), ToolGrant::NU)
+                .await
+                .is_none()
+            {
                 return;
             }
         }
@@ -1062,7 +1092,10 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+        if try_spawn(&session, tmp.path(), ToolGrant::NU)
+            .await
+            .is_none()
+        {
             return;
         }
         session.kill().await;
@@ -1079,8 +1112,14 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        let Some(result) =
-            try_eval(&session, "echo 'hello world'", 30, tmp.path(), ToolGrant::NU).await
+        let Some(result) = try_eval(
+            &session,
+            "echo 'hello world'",
+            30,
+            tmp.path(),
+            ToolGrant::NU,
+        )
+        .await
         else {
             return;
         };
@@ -1115,8 +1154,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        let Some(result) = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::NU).await
-        else {
+        let Some(result) = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::NU).await else {
             return;
         };
         let out1 = result.unwrap();
@@ -1194,7 +1232,10 @@ mod tests {
         let test_file = tmp.path().join("edit_me.txt");
         std::fs::write(&test_file, "old value here").unwrap();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
-        let cmd = format!("reel edit '{}' 'old value' 'new value'", nu_path(&test_file));
+        let cmd = format!(
+            "reel edit '{}' 'old value' 'new value'",
+            nu_path(&test_file)
+        );
         let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
             return;
         };
@@ -1276,7 +1317,10 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        if try_spawn(&session, tmp.path(), ToolGrant::NU).await.is_none() {
+        if try_spawn(&session, tmp.path(), ToolGrant::NU)
+            .await
+            .is_none()
+        {
             return;
         }
         let gen_before = {
@@ -1310,7 +1354,11 @@ mod tests {
             return;
         };
         let out = result.unwrap();
-        assert!(!out.is_error, "rg not available in nu session: {}", out.content);
+        assert!(
+            !out.is_error,
+            "rg not available in nu session: {}",
+            out.content
+        );
         assert!(out.content.contains("haystack"));
     }
 
@@ -1322,6 +1370,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn integration_sandbox_read_only_prevents_writes() {
         // read_path policy must block file creation/mutation inside the project root.
         skip_no_nu!();
@@ -1357,7 +1406,10 @@ mod tests {
             "'overwritten' | save --force '{}'",
             nu_path(&tmp.path().join("existing.txt"))
         );
-        let out2 = session.evaluate(&overwrite_cmd, 30, tmp.path(), grant).await.unwrap();
+        let out2 = session
+            .evaluate(&overwrite_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
         assert!(
             out2.is_error,
             "overwrite should fail under read-only sandbox, got: {}",
@@ -1368,7 +1420,10 @@ mod tests {
 
         // Attempt 3: mkdir inside the project root.
         let mkdir_cmd = format!("mkdir '{}'", nu_path(&tmp.path().join("subdir")));
-        let out3 = session.evaluate(&mkdir_cmd, 30, tmp.path(), grant).await.unwrap();
+        let out3 = session
+            .evaluate(&mkdir_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
         assert!(
             out3.is_error,
             "mkdir should fail under read-only sandbox, got: {}",
@@ -1381,7 +1436,10 @@ mod tests {
 
         // Attempt 4: rm an existing file.
         let rm_cmd = format!("rm '{}'", nu_path(&tmp.path().join("existing.txt")));
-        let out_rm = session.evaluate(&rm_cmd, 30, tmp.path(), grant).await.unwrap();
+        let out_rm = session
+            .evaluate(&rm_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
         assert!(
             out_rm.is_error,
             "rm should fail under read-only sandbox, got: {}",
@@ -1398,7 +1456,10 @@ mod tests {
             nu_path(&tmp.path().join("existing.txt")),
             nu_path(&tmp.path().join("renamed.txt")),
         );
-        let out_mv = session.evaluate(&mv_cmd, 30, tmp.path(), grant).await.unwrap();
+        let out_mv = session
+            .evaluate(&mv_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
         assert!(
             out_mv.is_error,
             "mv should fail under read-only sandbox, got: {}",
@@ -1419,7 +1480,10 @@ mod tests {
             "^$env.REEL_RG_PATH --color=never original '{}'",
             nu_path(tmp.path())
         );
-        let out_rg = session.evaluate(&rg_cmd, 30, tmp.path(), grant).await.unwrap();
+        let out_rg = session
+            .evaluate(&rg_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
         #[cfg(target_os = "windows")]
         assert!(
             !out_rg.is_error,
@@ -1459,7 +1523,10 @@ mod tests {
             nu_path(&tmp.path().join("source.txt")),
             nu_path(&tmp.path().join("source.txt")),
         );
-        let out2 = session.evaluate(&pivot_cmd, 30, tmp.path(), grant).await.unwrap();
+        let out2 = session
+            .evaluate(&pivot_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
         // The final `save --force` back to project root must fail.
         assert!(
             out2.is_error,
@@ -1479,7 +1546,10 @@ mod tests {
              cp $tmp '{}'",
             nu_path(&tmp.path().join("injected.txt")),
         );
-        let out3 = session.evaluate(&pivot_new_cmd, 30, tmp.path(), grant).await.unwrap();
+        let out3 = session
+            .evaluate(&pivot_new_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
         assert!(
             out3.is_error,
             "cp from temp to project root should fail, got: {}",
@@ -1504,14 +1574,20 @@ mod tests {
             "'hello' | save '{}'",
             nu_path(&tmp.path().join("created.txt"))
         );
-        let out = session.evaluate(&write_cmd, 30, tmp.path(), grant).await.unwrap();
+        let out = session
+            .evaluate(&write_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
         assert!(
             !out.is_error,
             "write should succeed with WRITE grant: {}",
             out.content
         );
         let content = std::fs::read_to_string(tmp.path().join("created.txt")).unwrap();
-        assert_eq!(content, "hello", "file content should match what was written");
+        assert_eq!(
+            content, "hello",
+            "file content should match what was written"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1577,8 +1653,7 @@ mod tests {
         };
 
         // Trigger session spawn (applies sandbox ACLs via lot).
-        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await
-        else {
+        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await else {
             return;
         };
         let _ = init.unwrap();
@@ -1641,8 +1716,7 @@ mod tests {
         };
 
         // Trigger session spawn.
-        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await
-        else {
+        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await else {
             return;
         };
         let _ = init.unwrap();
@@ -1650,52 +1724,59 @@ mod tests {
         let rg_exe = cache_path.join("rg.exe");
 
         // Test 1: Can nu stat rg.exe? Use ls on the cache directory.
-        let read_cmd = format!(
-            "ls '{}' | length",
-            nu_path(&cache_path)
-        );
-        let Some(read_result) = try_eval(session, &read_cmd, 30, tmp.path(), grant).await
-        else {
+        let read_cmd = format!("ls '{}' | length", nu_path(&cache_path));
+        let Some(read_result) = try_eval(session, &read_cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let read_out = read_result.unwrap();
-        eprintln!("File read rg.exe: is_error={}, content={}", read_out.is_error, read_out.content);
+        eprintln!(
+            "File read rg.exe: is_error={}, content={}",
+            read_out.is_error, read_out.content
+        );
 
         // Test 2: Can nu READ a System32 DLL? (proves System32 access from inside AppContainer)
         let sys32_cmd = "open --raw 'C:/Windows/System32/kernel32.dll' | bytes length";
-        let Some(sys32_result) = try_eval(session, sys32_cmd, 30, tmp.path(), grant).await
-        else {
+        let Some(sys32_result) = try_eval(session, sys32_cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let sys32_out = sys32_result.unwrap();
-        eprintln!("File read kernel32.dll: is_error={}, content={}", sys32_out.is_error, sys32_out.content);
+        eprintln!(
+            "File read kernel32.dll: is_error={}, content={}",
+            sys32_out.is_error, sys32_out.content
+        );
 
         // Test 3: Can nu execute cmd.exe from System32? (^cmd /C echo hi)
         let cmd_exec = "^'C:/Windows/System32/cmd.exe' /C echo hi";
-        let Some(cmd_result) = try_eval(session, cmd_exec, 30, tmp.path(), grant).await
-        else {
+        let Some(cmd_result) = try_eval(session, cmd_exec, 30, tmp.path(), grant).await else {
             return;
         };
         let cmd_out = cmd_result.unwrap();
-        eprintln!("Execute cmd.exe: is_error={}, content={}", cmd_out.is_error, cmd_out.content);
+        eprintln!(
+            "Execute cmd.exe: is_error={}, content={}",
+            cmd_out.is_error, cmd_out.content
+        );
 
         // Test 4: Execute rg.exe with full path (expected to fail).
         let rg_exec = format!("^'{}' --version", nu_path(&rg_exe));
-        let Some(rg_result) = try_eval(session, &rg_exec, 30, tmp.path(), grant).await
-        else {
+        let Some(rg_result) = try_eval(session, &rg_exec, 30, tmp.path(), grant).await else {
             return;
         };
         let rg_out = rg_result.unwrap();
-        eprintln!("Execute rg.exe: is_error={}, content={}", rg_out.is_error, rg_out.content);
+        eprintln!(
+            "Execute rg.exe: is_error={}, content={}",
+            rg_out.is_error, rg_out.content
+        );
 
         // Test 5: What does `which rg` say?
         let which_cmd = "which rg";
-        let Some(which_result) = try_eval(session, which_cmd, 30, tmp.path(), grant).await
-        else {
+        let Some(which_result) = try_eval(session, which_cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let which_out = which_result.unwrap();
-        eprintln!("which rg: is_error={}, content={}", which_out.is_error, which_out.content);
+        eprintln!(
+            "which rg: is_error={}, content={}",
+            which_out.is_error, which_out.content
+        );
 
         // Test 6: Exact error for hostname.
         let hostname_cmd = "^'C:/Windows/System32/hostname.exe'";
@@ -1704,28 +1785,32 @@ mod tests {
             return;
         };
         let hostname_out = hostname_result.unwrap();
-        eprintln!("Execute hostname.exe: is_error={}, content={}", hostname_out.is_error, hostname_out.content);
+        eprintln!(
+            "Execute hostname.exe: is_error={}, content={}",
+            hostname_out.is_error, hostname_out.content
+        );
 
         // Test 7: Can nu list System32 directory? (proves directory traverse works)
         let ls_sys32 = "ls C:/Windows/System32/cmd.exe | get name.0";
-        let Some(ls_result) = try_eval(session, ls_sys32, 30, tmp.path(), grant).await
-        else {
+        let Some(ls_result) = try_eval(session, ls_sys32, 30, tmp.path(), grant).await else {
             return;
         };
         let ls_out = ls_result.unwrap();
-        eprintln!("ls cmd.exe: is_error={}, content={}", ls_out.is_error, ls_out.content);
+        eprintln!(
+            "ls cmd.exe: is_error={}, content={}",
+            ls_out.is_error, ls_out.content
+        );
 
         // Test 8: Use sys/exec (Rust std::process::Command) to check OS error code
-        let exec_cmd = format!(
-            "do {{ ^'{}' --version }} | complete",
-            nu_path(&rg_exe)
-        );
-        let Some(exec_result) = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await
-        else {
+        let exec_cmd = format!("do {{ ^'{}' --version }} | complete", nu_path(&rg_exe));
+        let Some(exec_result) = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let exec_out = exec_result.unwrap();
-        eprintln!("complete rg exec: is_error={}, content={}", exec_out.is_error, exec_out.content);
+        eprintln!(
+            "complete rg exec: is_error={}, content={}",
+            exec_out.is_error, exec_out.content
+        );
     }
 
     /// Test whether nu inside AppContainer can READ rg.exe as raw bytes.
@@ -1748,8 +1833,7 @@ mod tests {
         };
 
         // Trigger session spawn (applies sandbox ACLs via lot).
-        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await
-        else {
+        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await else {
             return;
         };
         let _ = init.unwrap();
@@ -1762,12 +1846,14 @@ mod tests {
             return;
         };
         let ls_out = ls_result.unwrap();
-        eprintln!("ls cache dir: is_error={}, content={}", ls_out.is_error, ls_out.content);
+        eprintln!(
+            "ls cache dir: is_error={}, content={}",
+            ls_out.is_error, ls_out.content
+        );
 
         // Test 2: Can nu READ rg.exe as raw bytes (proves file read access)?
         let read_cmd = format!("open --raw '{}' | length", nu_path(&rg_exe));
-        let Some(read_result) = try_eval(session, &read_cmd, 30, tmp.path(), grant).await
-        else {
+        let Some(read_result) = try_eval(session, &read_cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let read_out = read_result.unwrap();
@@ -1778,8 +1864,7 @@ mod tests {
 
         // Test 3: Can nu EXECUTE rg.exe (expected to fail)?
         let exec_cmd = format!("^'{}' --version", nu_path(&rg_exe));
-        let Some(exec_result) = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await
-        else {
+        let Some(exec_result) = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await else {
             return;
         };
         let exec_out = exec_result.unwrap();
@@ -1796,13 +1881,9 @@ mod tests {
                  AppContainer blocks child process spawning from inside the container."
             );
         } else if read_out.is_error {
-            eprintln!(
-                "CONCLUSION: File READ is also blocked — ACL issue."
-            );
+            eprintln!("CONCLUSION: File READ is also blocked — ACL issue.");
         } else {
-            eprintln!(
-                "CONCLUSION: Both read and exec succeeded — sandbox is not restricting."
-            );
+            eprintln!("CONCLUSION: Both read and exec succeeded — sandbox is not restricting.");
         }
     }
 }
