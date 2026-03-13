@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 // Re-exports for convenience
-pub use config::{ConfigFormat, RequestConfig};
+pub use config::{ConfigFormat, RequestConfig, ToolConfig};
 pub use context::{ContentBlock, Context, Message};
 pub use error::FlickError;
 pub use model_registry::{ModelInfo, ModelRegistry};

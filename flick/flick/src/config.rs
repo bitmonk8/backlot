@@ -71,6 +71,19 @@ pub struct ToolConfig {
 }
 
 impl ToolConfig {
+    /// Construct a tool config programmatically.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -168,6 +181,12 @@ impl RequestConfig {
 
     pub fn tools(&self) -> &[ToolConfig] {
         &self.tools
+    }
+
+    /// Append tool definitions post-parse. Validates the combined set.
+    pub fn add_tools(&mut self, tools: Vec<ToolConfig>) -> Result<(), ConfigError> {
+        self.tools.extend(tools);
+        self.validate_local()
     }
 
     /// Validate fields that don't require registry lookups.
