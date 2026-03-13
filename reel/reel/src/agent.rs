@@ -1,0 +1,902 @@
+// Agent: tool loop runtime.
+//
+// Manages a single agent session: builds request config, runs the tool loop
+// (dispatch tool calls to built-in or custom handlers), and returns
+// structured output.
+
+use crate::nu_session::NuSession;
+use crate::tools::{self, ToolDefinition, ToolExecResult, ToolGrant};
+use anyhow::{Context, bail};
+use flick::result::ResultStatus;
+use serde::de::DeserializeOwned;
+use serde_json::Value as JsonValue;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::time::Duration;
+
+const MAX_TOOL_ROUNDS: u32 = 50;
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// Consumer-implemented trait for custom tools beyond the 6 built-ins.
+///
+/// Each implementation bundles the tool's schema (what the model sees)
+/// with its execution logic (what happens when the model calls it).
+pub trait ToolHandler: Send + Sync {
+    /// Returns the tool definition included in the model's tool list.
+    fn definition(&self) -> ToolDefinition;
+
+    /// Executes the tool call. Called by reel's tool loop when the model
+    /// invokes a tool whose name matches `definition().name`.
+    fn execute<'a>(
+        &'a self,
+        tool_use_id: String,
+        input: &'a JsonValue,
+    ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>>;
+}
+
+/// Shared runtime context that doesn't change between agent calls.
+pub struct AgentEnvironment {
+    pub model_registry: flick::ModelRegistry,
+    pub provider_registry: flick::ProviderRegistry,
+    pub project_root: PathBuf,
+    pub timeout: Duration,
+}
+
+/// Per-call configuration for an agent session. Wraps a flick `RequestConfig`
+/// with reel-specific fields. Reusable across calls — query is passed separately.
+pub struct AgentRequestConfig {
+    /// Request config (model, system_prompt, temperature, reasoning,
+    /// output_schema). Reel injects built-in tool definitions into this
+    /// before passing it to the provider client.
+    pub config: flick::RequestConfig,
+
+    /// Tool grant controlling which built-in tools are available.
+    pub grant: ToolGrant,
+
+    /// Consumer-provided tools beyond the built-ins.
+    pub custom_tools: Vec<Box<dyn ToolHandler>>,
+}
+
+/// Usage statistics from an agent run.
+#[derive(Debug, Clone)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// Result of an agent run.
+#[derive(Debug)]
+pub struct RunResult<T> {
+    pub output: T,
+    pub usage: Option<Usage>,
+    pub tool_calls: u32,
+    pub response_hash: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Injection seams for testability
+// ---------------------------------------------------------------------------
+
+type ClientFactoryFuture<'a> =
+    Pin<Box<dyn std::future::Future<Output = anyhow::Result<flick::FlickClient>> + Send + 'a>>;
+
+trait ClientFactory: Send + Sync {
+    fn build(&self, config: flick::RequestConfig) -> ClientFactoryFuture<'_>;
+}
+
+trait ToolExecutor: Send + Sync {
+    fn execute<'a>(
+        &'a self,
+        tool_use_id: String,
+        name: &'a str,
+        input: &'a JsonValue,
+        project_root: &'a Path,
+        grant: ToolGrant,
+        nu_session: &'a NuSession,
+    ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>>;
+}
+
+struct DefaultClientFactory {
+    model_registry: flick::ModelRegistry,
+    provider_registry: flick::ProviderRegistry,
+}
+
+impl ClientFactory for DefaultClientFactory {
+    fn build(&self, config: flick::RequestConfig) -> ClientFactoryFuture<'_> {
+        Box::pin(async move {
+            flick::FlickClient::new(config, &self.model_registry, &self.provider_registry)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to create client: {e}"))
+        })
+    }
+}
+
+struct DefaultToolExecutor;
+
+impl ToolExecutor for DefaultToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        tool_use_id: String,
+        name: &'a str,
+        input: &'a JsonValue,
+        project_root: &'a Path,
+        grant: ToolGrant,
+        nu_session: &'a NuSession,
+    ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>> {
+        Box::pin(async move {
+            tools::execute_tool(tool_use_id, name, input, project_root, grant, nu_session).await
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent
+// ---------------------------------------------------------------------------
+
+/// Agent session runtime. Owns the tool loop and built-in tool execution.
+pub struct Agent {
+    project_root: PathBuf,
+    timeout: Duration,
+    client_factory: Box<dyn ClientFactory>,
+    tool_executor: Box<dyn ToolExecutor>,
+    /// When true, skip eager `NuSession::spawn()` in `run_with_tools`.
+    /// Used in tests where the mock `ToolExecutor` never touches the nu session.
+    skip_nu_spawn: bool,
+}
+
+impl Agent {
+    /// Create an agent from a shared environment.
+    pub fn new(env: AgentEnvironment) -> Self {
+        Self {
+            project_root: env.project_root,
+            timeout: env.timeout,
+            client_factory: Box::new(DefaultClientFactory {
+                model_registry: env.model_registry,
+                provider_registry: env.provider_registry,
+            }),
+            tool_executor: Box::new(DefaultToolExecutor),
+            skip_nu_spawn: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_injected(
+        project_root: PathBuf,
+        timeout: Duration,
+        client_factory: Box<dyn ClientFactory>,
+        tool_executor: Box<dyn ToolExecutor>,
+    ) -> Self {
+        Self {
+            project_root,
+            timeout,
+            client_factory,
+            tool_executor,
+            skip_nu_spawn: true,
+        }
+    }
+
+    /// Run an agent session. Dispatches to structured (no tools) or
+    /// tool-loop mode based on whether `request.grant` includes `NU`.
+    pub async fn run<T: DeserializeOwned>(
+        &self,
+        request: &AgentRequestConfig,
+        query: &str,
+    ) -> anyhow::Result<RunResult<T>> {
+        if request.grant.contains(ToolGrant::NU) {
+            self.run_with_tools(request, query).await
+        } else {
+            self.run_structured(request, query).await
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Config building
+    // -----------------------------------------------------------------------
+
+    fn build_request_config(
+        request: &AgentRequestConfig,
+    ) -> anyhow::Result<flick::RequestConfig> {
+        let built_in_tools = tools::tool_definitions(request.grant);
+        let custom_tool_defs = request.custom_tools.iter().map(|h| h.definition());
+
+        let all_tools: Vec<flick::ToolConfig> = built_in_tools
+            .into_iter()
+            .chain(custom_tool_defs)
+            .map(|t| flick::ToolConfig::new(t.name, t.description, Some(t.parameters)))
+            .collect();
+
+        // Reconstruct via builder from the caller's config, then inject tools.
+        let mut builder = flick::RequestConfig::builder()
+            .model(request.config.model());
+
+        if let Some(sp) = request.config.system_prompt() {
+            builder = builder.system_prompt(sp);
+        }
+        if let Some(temp) = request.config.temperature() {
+            builder = builder.temperature(temp);
+        }
+        if let Some(reasoning) = request.config.reasoning() {
+            builder = builder.reasoning(reasoning.level);
+        }
+        if let Some(output_schema) = request.config.output_schema() {
+            builder = builder.output_schema(output_schema.schema.clone());
+        }
+
+        let mut config = builder
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to build request config: {e}"))?;
+
+        if !all_tools.is_empty() {
+            config
+                .add_tools(all_tools)
+                .map_err(|e| anyhow::anyhow!("failed to add tools to config: {e}"))?;
+        }
+
+        Ok(config)
+    }
+
+    /// Build the effective request config for inspection without running the model.
+    /// Useful for dry-run / debugging.
+    pub fn build_effective_config(
+        request: &AgentRequestConfig,
+    ) -> anyhow::Result<flick::RequestConfig> {
+        Self::build_request_config(request)
+    }
+
+    // -----------------------------------------------------------------------
+    // run_structured: single call, no tools, parse structured output
+    // -----------------------------------------------------------------------
+
+    async fn run_structured<T: DeserializeOwned>(
+        &self,
+        request: &AgentRequestConfig,
+        query: &str,
+    ) -> anyhow::Result<RunResult<T>> {
+        let config = Self::build_request_config(request)?;
+        let client = self.client_factory.build(config).await?;
+        let mut context = flick::Context::default();
+
+        let result = tokio::time::timeout(self.timeout, client.run(query, &mut context))
+            .await
+            .map_err(|_| anyhow::anyhow!("agent call timed out after {:?}", self.timeout))?
+            .map_err(|e| anyhow::anyhow!("agent call failed: {e}"))?;
+
+        check_error(&result)?;
+
+        if matches!(result.status, ResultStatus::ToolCallsPending) {
+            bail!("model requested tool calls in structured-only (no-tool) context");
+        }
+
+        finalize_result(&result, 0)
+    }
+
+    // -----------------------------------------------------------------------
+    // run_with_tools: tool loop until complete
+    // -----------------------------------------------------------------------
+
+    async fn run_with_tools<T: DeserializeOwned>(
+        &self,
+        request: &AgentRequestConfig,
+        query: &str,
+    ) -> anyhow::Result<RunResult<T>> {
+        let config = Self::build_request_config(request)?;
+        let client = self.client_factory.build(config).await?;
+        let mut context = flick::Context::default();
+
+        let nu_session = NuSession::new();
+        if !self.skip_nu_spawn {
+            nu_session
+                .spawn(&self.project_root, request.grant)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to spawn nu session: {e}"))?;
+        }
+
+        let mut result = tokio::time::timeout(self.timeout, client.run(query, &mut context))
+            .await
+            .map_err(|_| anyhow::anyhow!("agent call timed out after {:?}", self.timeout))?
+            .map_err(|e| anyhow::anyhow!("agent call failed: {e}"))?;
+
+        let mut total_tool_calls: u32 = 0;
+
+        for _round in 1..=MAX_TOOL_ROUNDS {
+            if !matches!(result.status, ResultStatus::ToolCallsPending) {
+                break;
+            }
+
+            let tool_calls = extract_tool_calls(&result)?;
+            total_tool_calls += tool_calls.len() as u32;
+            let mut tool_results = Vec::with_capacity(tool_calls.len());
+
+            for (id, name, input) in &tool_calls {
+                let r = self
+                    .dispatch_tool(
+                        id.clone(),
+                        name,
+                        input,
+                        request.grant,
+                        &nu_session,
+                        &request.custom_tools,
+                    )
+                    .await;
+                tool_results.push(flick::ContentBlock::ToolResult {
+                    tool_use_id: r.tool_use_id,
+                    content: r.content,
+                    is_error: r.is_error,
+                });
+            }
+
+            result = tokio::time::timeout(
+                self.timeout,
+                client.resume(&mut context, tool_results),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("agent call timed out after {:?}", self.timeout))?
+            .map_err(|e| anyhow::anyhow!("agent resume failed: {e}"))?;
+        }
+
+        if matches!(result.status, ResultStatus::ToolCallsPending) {
+            nu_session.kill().await;
+            bail!("agent tool loop exceeded {MAX_TOOL_ROUNDS} rounds");
+        }
+
+        nu_session.kill().await;
+
+        check_error(&result)?;
+
+        finalize_result(&result, total_tool_calls)
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool dispatch
+    // -----------------------------------------------------------------------
+
+    async fn dispatch_tool(
+        &self,
+        tool_use_id: String,
+        name: &str,
+        input: &JsonValue,
+        grant: ToolGrant,
+        nu_session: &NuSession,
+        custom_tools: &[Box<dyn ToolHandler>],
+    ) -> ToolExecResult {
+        // Custom tools first — allows consumers to override built-in tools if needed.
+        for handler in custom_tools {
+            if handler.definition().name == name {
+                return handler.execute(tool_use_id, input).await;
+            }
+        }
+
+        // Built-in tools via nu session.
+        self.tool_executor
+            .execute(
+                tool_use_id,
+                name,
+                input,
+                &self.project_root,
+                grant,
+                nu_session,
+            )
+            .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn finalize_result<T: DeserializeOwned>(
+    result: &flick::FlickResult,
+    tool_calls: u32,
+) -> anyhow::Result<RunResult<T>> {
+    let text = extract_text(result)?;
+    // Try JSON parse first. If the text isn't valid JSON (e.g. free-form
+    // model output when no output_schema is set), wrap it as a JSON string
+    // and try again — this succeeds when T is serde_json::Value or String.
+    let output: T = serde_json::from_str(&text).or_else(|orig_err| {
+        let quoted = serde_json::to_string(&text)
+            .with_context(|| "string serialization failed")?;
+        serde_json::from_str(&quoted)
+            .with_context(|| format!("failed to parse model output ({orig_err}): {text}"))
+    })?;
+
+    let usage = result.usage.as_ref().map(|u| Usage {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        cost_usd: u.cost_usd,
+    });
+
+    Ok(RunResult {
+        output,
+        usage,
+        tool_calls,
+        response_hash: result.context_hash.clone(),
+    })
+}
+
+fn check_error(result: &flick::FlickResult) -> anyhow::Result<()> {
+    if matches!(result.status, ResultStatus::Error) {
+        let msg = result
+            .error
+            .as_ref()
+            .map_or("unknown error", |e| &e.message);
+        bail!("agent returned error: {msg}");
+    }
+    Ok(())
+}
+
+fn extract_text(result: &flick::FlickResult) -> anyhow::Result<String> {
+    let mut last_text: Option<&str> = None;
+    for block in &result.content {
+        if let flick::ContentBlock::Text { text } = block {
+            last_text = Some(text.as_str());
+        }
+    }
+
+    last_text
+        .map(ToOwned::to_owned)
+        .context("no text block found in model output")
+}
+
+fn extract_tool_calls(
+    result: &flick::FlickResult,
+) -> anyhow::Result<Vec<(String, String, JsonValue)>> {
+    let calls: Vec<_> = result
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            flick::ContentBlock::ToolUse { id, name, input } => {
+                Some((id.clone(), name.clone(), input.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    if calls.is_empty() {
+        bail!("tool_calls_pending but no tool_use blocks found");
+    }
+
+    Ok(calls)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_text_from_result() {
+        let result = flick::FlickResult {
+            status: ResultStatus::Complete,
+            content: vec![
+                flick::ContentBlock::Thinking {
+                    text: "hmm".into(),
+                    signature: String::new(),
+                },
+                flick::ContentBlock::Text {
+                    text: "Here is my analysis of the task.".into(),
+                },
+                flick::ContentBlock::Text {
+                    text: r#"{"path":"leaf","model":"haiku","rationale":"simple"}"#.into(),
+                },
+            ],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        let text = extract_text(&result).unwrap_or_default();
+        assert!(text.contains("leaf"));
+        assert!(!text.contains("analysis"));
+    }
+
+    #[test]
+    fn extract_text_missing() {
+        let result = flick::FlickResult {
+            status: ResultStatus::Complete,
+            content: vec![flick::ContentBlock::Thinking {
+                text: "hmm".into(),
+                signature: String::new(),
+            }],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        assert!(extract_text(&result).is_err());
+    }
+
+    #[test]
+    fn extract_tool_calls_from_result() {
+        let result = flick::FlickResult {
+            status: ResultStatus::ToolCallsPending,
+            content: vec![
+                flick::ContentBlock::Text {
+                    text: "let me check".into(),
+                },
+                flick::ContentBlock::ToolUse {
+                    id: "tu_1".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({"file_path": "src/main.rs"}),
+                },
+            ],
+            usage: None,
+            context_hash: Some("abc123".into()),
+            error: None,
+        };
+        let calls = extract_tool_calls(&result).unwrap_or_default();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "tu_1");
+        assert_eq!(calls[0].1, "Read");
+    }
+
+    #[test]
+    fn check_error_on_error_status() {
+        let result = flick::FlickResult {
+            status: ResultStatus::Error,
+            content: vec![],
+            usage: None,
+            context_hash: None,
+            error: Some(flick::result::ResultError {
+                message: "rate limited".into(),
+                code: "429".into(),
+            }),
+        };
+        let err = check_error(&result).unwrap_err();
+        assert!(
+            err.to_string().contains("rate limited"),
+            "expected 'rate limited' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_error_on_complete() {
+        let result = flick::FlickResult {
+            status: ResultStatus::Complete,
+            content: vec![],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        assert!(check_error(&result).is_ok());
+    }
+
+    #[test]
+    fn check_error_unknown_when_no_error_field() {
+        let result = flick::FlickResult {
+            status: ResultStatus::Error,
+            content: vec![],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        let err = check_error(&result).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown error"),
+            "expected 'unknown error' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_error_passes_tool_calls_pending() {
+        let result = flick::FlickResult {
+            status: ResultStatus::ToolCallsPending,
+            content: vec![],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        assert!(check_error(&result).is_ok());
+    }
+
+    #[test]
+    fn extract_tool_calls_empty_bails() {
+        let result = flick::FlickResult {
+            status: ResultStatus::ToolCallsPending,
+            content: vec![flick::ContentBlock::Text {
+                text: "thinking...".into(),
+            }],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        assert!(extract_tool_calls(&result).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Injection seam tests
+    // -----------------------------------------------------------------------
+
+    use flick::test_support::{MultiShotProvider, SingleShotProvider};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn test_model_info() -> flick::ModelInfo {
+        flick::ModelInfo {
+            provider: "test".into(),
+            name: "test-model".into(),
+            max_tokens: Some(1024),
+            input_per_million: None,
+            output_per_million: None,
+        }
+    }
+
+    /// Client factory that wraps any `Fn() -> Box<dyn DynProvider>` factory.
+    struct FnClientFactory<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync>(F);
+
+    impl<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync> ClientFactory
+        for FnClientFactory<F>
+    {
+        fn build(&self, config: flick::RequestConfig) -> ClientFactoryFuture<'_> {
+            let provider = (self.0)();
+            Box::pin(async move {
+                Ok(flick::FlickClient::new_with_provider(
+                    config,
+                    test_model_info(),
+                    flick::ApiKind::Messages,
+                    provider,
+                ))
+            })
+        }
+    }
+
+    fn mock_client_factory<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync + 'static>(
+        factory: F,
+    ) -> Box<dyn ClientFactory> {
+        Box::new(FnClientFactory(factory))
+    }
+
+    fn test_agent(
+        client_factory: Box<dyn ClientFactory>,
+        executor: Box<dyn ToolExecutor>,
+    ) -> Agent {
+        Agent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_secs(30),
+            client_factory,
+            executor,
+        )
+    }
+
+    struct CountingToolExecutor {
+        call_count: Arc<AtomicU32>,
+    }
+
+    impl ToolExecutor for CountingToolExecutor {
+        fn execute<'a>(
+            &'a self,
+            tool_use_id: String,
+            _name: &'a str,
+            _input: &'a JsonValue,
+            _project_root: &'a Path,
+            _grant: ToolGrant,
+            _nu_session: &'a NuSession,
+        ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>> {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                ToolExecResult {
+                    tool_use_id,
+                    content: "mock result".into(),
+                    is_error: false,
+                }
+            })
+        }
+    }
+
+    fn test_request() -> AgentRequestConfig {
+        AgentRequestConfig {
+            config: flick::RequestConfig::builder()
+                .model("test")
+                .build()
+                .expect("test config"),
+            grant: ToolGrant::empty(),
+            custom_tools: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_structured_with_mock_provider() {
+        let agent = test_agent(
+            mock_client_factory(|| SingleShotProvider::with_text(r#"{"status":"success"}"#)),
+            Box::new(DefaultToolExecutor),
+        );
+        let request = test_request();
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or_else(|e| panic!("{e}")).output["status"], "success");
+    }
+
+    fn tool_then_complete_factory() -> Box<dyn ClientFactory> {
+        mock_client_factory(|| {
+            MultiShotProvider::new(vec![
+                flick::provider::ModelResponse {
+                    text: None,
+                    thinking: Vec::new(),
+                    tool_calls: vec![flick::provider::ToolCallResponse {
+                        call_id: "tc_1".into(),
+                        tool_name: "Read".into(),
+                        arguments: r#"{"file_path":"/tmp/test"}"#.into(),
+                    }],
+                    usage: flick::provider::UsageResponse::default(),
+                },
+                flick::provider::ModelResponse {
+                    text: Some(r#"{"done":true}"#.into()),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: flick::provider::UsageResponse::default(),
+                },
+            ])
+        })
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_calls_injected_executor() {
+        let tool_calls = Arc::new(AtomicU32::new(0));
+        let agent = test_agent(
+            tool_then_complete_factory(),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&tool_calls),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::NU;
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        assert!(result.is_ok());
+        let r = result.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(r.output["done"], true);
+        assert_eq!(tool_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(r.tool_calls, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // MAX_TOOL_ROUNDS exceeded
+    // -----------------------------------------------------------------------
+
+    struct AlwaysToolCallProvider;
+
+    impl flick::DynProvider for AlwaysToolCallProvider {
+        fn call_boxed<'a>(
+            &'a self,
+            _params: flick::provider::RequestParams<'a>,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            flick::provider::ModelResponse,
+                            flick::error::ProviderError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Ok(flick::provider::ModelResponse {
+                    text: None,
+                    thinking: Vec::new(),
+                    tool_calls: vec![flick::provider::ToolCallResponse {
+                        call_id: "tc_loop".into(),
+                        tool_name: "Read".into(),
+                        arguments: r#"{"file_path":"/tmp/x"}"#.into(),
+                    }],
+                    usage: flick::provider::UsageResponse::default(),
+                })
+            })
+        }
+
+        fn build_request(
+            &self,
+            _params: flick::provider::RequestParams<'_>,
+        ) -> Result<serde_json::Value, flick::error::ProviderError> {
+            Ok(serde_json::json!({"model": "test"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_exceeds_max_rounds() {
+        let agent = Agent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_secs(60),
+            mock_client_factory(|| {
+                Box::new(AlwaysToolCallProvider) as Box<dyn flick::DynProvider>
+            }),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::new(AtomicU32::new(0)),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::NU;
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("exceeded"),
+            "expected 'exceeded' in error, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeout path
+    // -----------------------------------------------------------------------
+
+    struct SlowProvider;
+
+    impl flick::DynProvider for SlowProvider {
+        fn call_boxed<'a>(
+            &'a self,
+            _params: flick::provider::RequestParams<'a>,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            flick::provider::ModelResponse,
+                            flick::error::ProviderError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok(flick::provider::ModelResponse {
+                    text: Some("never reached".into()),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: flick::provider::UsageResponse::default(),
+                })
+            })
+        }
+
+        fn build_request(
+            &self,
+            _params: flick::provider::RequestParams<'_>,
+        ) -> Result<serde_json::Value, flick::error::ProviderError> {
+            Ok(serde_json::json!({"model": "test"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_structured_times_out() {
+        let agent = Agent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_millis(10),
+            mock_client_factory(|| Box::new(SlowProvider) as Box<dyn flick::DynProvider>),
+            Box::new(DefaultToolExecutor),
+        );
+        let request = test_request();
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected 'timed out' in error, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ClientFactory failure
+    // -----------------------------------------------------------------------
+
+    struct FailingClientFactory;
+
+    impl ClientFactory for FailingClientFactory {
+        fn build(&self, _config: flick::RequestConfig) -> ClientFactoryFuture<'_> {
+            Box::pin(async { Err(anyhow::anyhow!("factory broke")) })
+        }
+    }
+
+    #[tokio::test]
+    async fn build_client_propagates_factory_error() {
+        let agent = test_agent(Box::new(FailingClientFactory), Box::new(DefaultToolExecutor));
+        let request = test_request();
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("factory broke"),
+            "expected 'factory broke' in error, got: {err}"
+        );
+    }
+}
