@@ -46,9 +46,9 @@ Falls back to `NuSession::new()` when `tmp_sandbox_cache()` returns `None`. Shou
 
 Nothing prevents tests from using `NuSession::new()` directly instead of `isolated_session()`. **Category: Testing.**
 
-### 4. `lot` dependency uses local path override
+### ~~4. `lot` dependency uses local path override~~ (FIXED)
 
-`Cargo.toml` — `lot = { path = "../../lot" }` is a local dev override. Must revert to a pinned git rev before merge. Applies to both epic and reel. **Category: Build.**
+Fixed: replaced with `git = "https://github.com/bitmonk8/lot", rev = "8b468d7"`. **Category: Build.**
 
 ### 5. `Agent::run()` dispatch heuristic uses `ToolGrant::NU` instead of tool availability
 
@@ -66,9 +66,39 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/lib.rs` — `pub use nu_session::NuSession` is part of the public API but no consumer uses it directly. Consider removing after API stabilization. **Category: Placement.**
 
-### 9. Three pre-existing custom command test failures
+### 9. Ten pre-existing test failures (two root causes)
 
-`reel/src/nu_session.rs` — `integration_custom_command_reel_read`, `_write`, `_edit` fail due to AppContainer ACE issues on test temp dir ancestors. Not caused by extraction; likely needs sandbox test infrastructure fixes. **Category: Testing.**
+`reel/src/nu_session.rs` — 10 tests fail on all platforms (Windows, Linux, macOS), both locally and in CI. Two distinct root causes:
+
+#### 9a. Sandbox policy path overlap (5 tests)
+
+`build_nu_sandbox_policy()` places the session temp dir inside the project root (`project_root/.reel/tmp/`). When the project root has read-only access (no WRITE grant), lot's `SandboxPolicy` rejects the policy because a read-path parent contains a write-path child. The unit tests reproduce this by creating `sess_tmp = TempDir::new_in(tmp.path())`, making the session temp a child of the read-only project root.
+
+Error: `InvalidPolicy("parent/child overlap between read_paths and write_paths: <parent> contains <child>")`
+
+Fix: session temp dir must be created outside the project root (e.g., system temp dir) when the project root is read-only.
+
+Failing tests:
+- `test_build_nu_sandbox_policy_allows_network`
+- `test_build_nu_sandbox_policy_no_exec_paths_without_cache`
+- `test_build_nu_sandbox_policy_no_write_grant`
+- `test_build_nu_sandbox_policy_includes_cache_dir_exec`
+- `integration_sandbox_temp_dir_no_pivot_to_project`
+
+#### 9b. Nu custom commands not loaded (5 tests)
+
+`reel read`, `reel write`, `reel edit`, `reel glob`, `reel grep` are defined in `reel_config.nu` and loaded via `nu --config`. The tests use `isolated_session()` which copies config files from `NU_CACHE_DIR` into a temp dir, but nu reports `reel` as "not a known command". The config file is not reaching the nu process — likely `resolve_config_files()` returns `None` because the cache dir path does not propagate correctly through the test session lifecycle.
+
+Error: `External command failed: "reel" is neither a Nushell built-in or a known external command`
+
+Failing tests:
+- `integration_custom_command_reel_read`
+- `integration_custom_command_reel_write`
+- `integration_custom_command_reel_glob`
+- `integration_custom_command_reel_edit`
+- `integration_custom_command_reel_grep`
+
+**Category: Testing / Correctness.**
 
 ### 10. `extract_text` uses mutable loop instead of iterator
 
