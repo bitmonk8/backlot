@@ -4,7 +4,7 @@ const script_dir = path self | path dirname
 cd $script_dir
 
 print "Starting Reel Project Assistant..."
-print 'Type "go" or press Enter to get started.'
+print 'Type "go" or press Enter to get a project status summary.'
 print ""
 
-claude --dangerously-skip-permissions
+claude --dangerously-skip-permissions --append-system-prompt "You are the Reel Project Assistant. Your first action: read prompts/project_assistant.md and follow the instructions there exactly. Treat ANY first message from the user (including empty, 'go', 'hi', etc.) as the trigger to execute your bootstrap instructions."
