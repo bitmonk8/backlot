@@ -2,84 +2,40 @@
 
 ## Failing tests
 
-- `integration_custom_command_reel_read` — "No matches found" from `nu_glob`
-- `integration_custom_command_reel_write` — "Already exists" from `save`
-- `integration_custom_command_reel_edit` — "Input type not supported: nothing" from `open`
+- `integration_custom_command_reel_read` — `ls $full` returns "No matches found"
+- `integration_custom_command_reel_write` — `mkdir $parent` returns "Already exists"
+- `integration_custom_command_reel_edit` — `open $full --raw` returns `nothing`, `split row` fails on type mismatch
 
-## Passing tests
+## Passing tests (same sandbox setup)
 
-- `integration_custom_command_reel_glob` — passes
-- `integration_custom_command_reel_grep` — passes
+- `integration_custom_command_reel_glob` — uses `cd` + `glob` built-in
+- `integration_custom_command_reel_grep` — shells out to `rg` via `REEL_RG_PATH`
 
-## Root cause
+## What has been ruled out
 
-All three failures trace to missing Windows AppContainer prerequisites — specifically the NUL device ACL and ancestor traverse ACEs.
+**Missing ACEs / ancestor traversal is not the cause.** Verified by:
 
-### What the prerequisites are
+1. Moving the test sandbox directory from a project sibling (`../reel-sandbox-test/`) to inside the project (`reel/target/sandbox-test/`) — same failures.
+2. The sandbox spawns successfully and nu executes commands. 19 other sandbox tests pass in the same environment, including `reel glob` and `reel grep` which use the identical `sandbox_env()` setup.
+3. `appcontainer_prerequisites_met` checks for ALL APPLICATION PACKAGES traverse ACEs, but AppContainer processes can traverse directories via other ACEs (per-user, Everyone). Tests under `%TEMP%` work without ALL APPLICATION PACKAGES ACEs on ancestors.
 
-`lot::grant_appcontainer_prerequisites(&[project_root])` does two things:
+## What is known
 
-1. **NUL device ACL**: Grants `ALL APPLICATION PACKAGES` (S-1-15-2-1) read/write access to `\\.\NUL`. Without this, nu's internal operations that open NUL (stderr redirection for child processes, internal pipeline operations) fail inside AppContainer.
-2. **Ancestor traverse ACEs**: Grants `FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE` on every ancestor directory from the project root up to the volume root. Without this, nu's `open`/`save` built-ins fail because `nu_glob` calls `fs::metadata()` on each ancestor.
+The failures are specific to nu's `ls`, `open`, and `save` built-in commands when invoked on absolute paths from within the custom commands defined in `build.rs` (`REEL_CONFIG_NU`). Other nu operations in the same sandbox work.
 
-### How epic's tests worked
+The passing commands differ in approach:
+- `reel glob` uses `cd $dir` then `glob $pattern` (relative path, directory enumeration)
+- `reel grep` uses `^$env.REEL_RG_PATH` (external binary, not nu built-in)
 
-Epic's custom command integration tests (in `src/agent/nu_session.rs`, now deleted) did **not** invoke the `epic` CLI binary. They called `NuSession::evaluate()` directly — the same API-level approach reel's tests use now. Reel's tests are a mechanical rename of epic's tests (command prefix `epic` → `reel`, sandbox base dir `epic-sandbox-test` → `reel-sandbox-test`, identical test infrastructure and skip logic).
+The failing commands use:
+- `reel read`: `ls $full | first` then `open $full --raw`
+- `reel write`: `mkdir $parent` then `$content | save --force $full`
+- `reel edit`: `open $full --raw` then `| save --force $full`
 
-The tests relied on a prior `epic setup` run having granted the global NUL device ACL and ancestor traverse ACEs. The skip-on-failure mechanism (`try_spawn`/`try_eval` returning `None` when the error contains `"sandbox setup failed"`) only catches sandbox policy build failures — it does not catch the runtime failures caused by missing AppContainer ACLs. So the tests assume prerequisites are met; they do not skip gracefully when they're not.
+## Next steps
 
-This means reel's tests should ultimately work the same way: call `NuSession::evaluate()` directly (as they already do), but with a proper prerequisite check so they skip when ACLs are not configured rather than failing with opaque errors.
+Investigate how nu's `ls`, `open`, and `save` resolve paths inside AppContainer. The difference between the passing and failing commands suggests the issue is in how nu built-in file commands handle absolute paths vs directory-relative operations within the sandbox.
 
-### Why reel's tests fail
+## Re-export lot prerequisite functions (separate issue)
 
-`reel setup` now exists in `reel-cli` with `--check` and `--verbose` flags, calling `lot::grant_appcontainer_prerequisites()` directly. However, reel does not yet re-export lot's prerequisite functions via a `reel::sandbox` module (item 1 below), and there is no prerequisite check in the test infrastructure (item 3 below). The tests proceed, the sandbox spawn succeeds (the `"sandbox setup failed"` check only catches policy build failures, not missing ACLs), and then nu commands fail at runtime with opaque errors.
-
-### Why glob and grep pass
-
-- **`reel glob`**: Uses nu's `glob` built-in — purely directory enumeration within nu's process, using the read path ACL that the sandbox policy sets up dynamically per-spawn. No child process spawning, no NUL device access.
-- **`reel grep`**: Spawns `rg` via `| complete` which captures all streams. Either `rg` handles missing NUL gracefully, or `| complete` avoids the NUL stdin path that normal external command invocation uses.
-
-### Why read/write/edit fail
-
-All three use nu's `open` and/or `save` built-ins, which route through `nu_glob` for path resolution. `nu_glob` calls `fs::metadata()` on each ancestor directory. Without the traverse ACEs, these calls return `ACCESS_DENIED`. The resulting errors vary by command:
-
-- `reel read`: `open` triggers `nu_glob` → ancestor traversal fails → "No matches found"
-- `reel write`: `save` may partially succeed or encounter stale state → "Already exists"
-- `reel edit`: `open` fails silently returning nothing → `str replace` receives `nothing` instead of string → "Input type not supported"
-
-## Fix
-
-Three things needed:
-
-### 1. Reel should re-export lot's prerequisite functions
-
-Epic currently calls `lot::appcontainer_prerequisites_met()`, `lot::is_elevated()`, and `lot::grant_appcontainer_prerequisites()` directly. These exist because reel's sandbox needs them — lot is an implementation detail of reel. Epic (and any other reel consumer) should not depend on lot directly for this.
-
-Reel should re-export these functions from `lib.rs` (behind a `#[cfg(windows)]` gate):
-
-```rust
-// Re-export sandbox prerequisite functions for consumers.
-// Consumers need these for CLI setup commands and pre-flight checks,
-// but should not depend on lot directly — lot is reel's implementation detail.
-#[cfg(windows)]
-pub mod sandbox {
-    pub use lot::{appcontainer_prerequisites_met, grant_appcontainer_prerequisites, is_elevated};
-}
-```
-
-Then epic replaces `lot::appcontainer_prerequisites_met(...)` with `reel::sandbox::appcontainer_prerequisites_met(...)` etc., and removes its direct `lot` dependency from `Cargo.toml`.
-
-### 2. Add `reel setup` to `reel-cli`
-
-Mirror epic's `run_setup()` — call `reel::sandbox::grant_appcontainer_prerequisites(&[project_root])` from an elevated prompt.
-
-### 3. Add a prerequisite check to the test infrastructure
-
-Skip sandbox tests when prerequisites are not met. Options:
-- Add a `skip_no_acl!()` macro that checks `reel::sandbox::appcontainer_prerequisites_met(&[sandbox_test_base()])`
-- Add the check to `sandbox_env()` and return `None` from `try_spawn`/`try_eval`
-- Either way, the tests should skip gracefully rather than fail with opaque errors
-
-### Workaround
-
-Running `epic setup` from `C:\UnitySrc\epic` grants the global NUL device ACL and ancestor traverse ACEs for `C:\UnitySrc` and `C:\`, which also covers reel's test paths. This works but creates a hidden dependency on epic.
+Tracked in ISSUES.md #19. reel-cli depends on lot directly for `appcontainer_prerequisites_met` / `grant_appcontainer_prerequisites`. These should be re-exported via a `reel::sandbox` module.

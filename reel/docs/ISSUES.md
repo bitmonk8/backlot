@@ -66,39 +66,33 @@ Fixed: replaced with `git = "https://github.com/bitmonk8/lot", rev = "8b468d7"`.
 
 `reel/src/lib.rs` — `pub use nu_session::NuSession` is part of the public API but no consumer uses it directly. Consider removing after API stabilization. **Category: Placement.**
 
-### 9. Ten pre-existing test failures (two root causes)
+### ~~9. Pre-existing test failures~~ (PARTIALLY FIXED)
 
-`reel/src/nu_session.rs` — 10 tests fail on all platforms (Windows, Linux, macOS), both locally and in CI. Two distinct root causes:
+#### ~~9a. Sandbox policy path overlap (5 tests)~~ (FIXED)
 
-#### 9a. Sandbox policy path overlap (5 tests)
+Fixed by lot rev `f131ad9` which allows write-path children under read-path parents.
 
-`build_nu_sandbox_policy()` places the session temp dir inside the project root (`project_root/.reel/tmp/`). When the project root has read-only access (no WRITE grant), lot's `SandboxPolicy` rejects the policy because a read-path parent contains a write-path child. The unit tests reproduce this by creating `sess_tmp = TempDir::new_in(tmp.path())`, making the session temp a child of the read-only project root.
+#### ~~9b. Nu custom commands not loaded~~ (FIXED)
 
-Error: `InvalidPolicy("parent/child overlap between read_paths and write_paths: <parent> contains <child>")`
+Fixed: removed obsolete `--string` flag from `reel_config.nu` for nu 0.111.0.
 
-Fix: session temp dir must be created outside the project root (e.g., system temp dir) when the project root is read-only.
+#### 9c. Nu custom commands reel read/write/edit fail inside AppContainer (3 tests)
 
-Failing tests:
-- `test_build_nu_sandbox_policy_allows_network`
-- `test_build_nu_sandbox_policy_no_exec_paths_without_cache`
-- `test_build_nu_sandbox_policy_no_write_grant`
-- `test_build_nu_sandbox_policy_includes_cache_dir_exec`
-- `integration_sandbox_temp_dir_no_pivot_to_project`
+`reel read`, `reel write`, `reel edit` fail when executed inside the AppContainer sandbox. The sandbox itself sets up correctly — 19 other sandbox tests pass, including `reel glob` and `reel grep` which use the same `sandbox_env()` setup.
 
-#### ~~9b. Nu custom commands not loaded (5 tests)~~ (FIXED)
+The root cause is **not** missing ACEs or ancestor traversal. This was verified by:
+- Moving the test sandbox dir from a project sibling (`reel-sandbox-test/`) to inside the project (`reel/target/sandbox-test/`) — same failures.
+- Confirming that `lot::spawn` succeeds and nu starts and executes commands — simpler nu operations work fine in the same sandbox.
+- Noting that `reel glob` (which uses `cd` + `glob`) and `reel grep` (which shells out to `rg`) pass in the same sandbox environment.
 
-Fixed: `reel_config.nu` used `str replace --string` which was removed in nu 0.111.0 (literal replace is now the default). The config file failed to parse at startup, so custom commands were never defined. Removed the `--string` flag. Two tests (glob, grep) now pass; the remaining three (read, write, edit) fail due to AppContainer sandbox access issues (see 9c).
+The failures are in nu's built-in file commands (`ls`, `open`, `save`) when invoked from within the custom commands. The exact errors:
+- `integration_custom_command_reel_read` — `ls $full` fails: "Pattern, file or folder not found"
+- `integration_custom_command_reel_write` — `mkdir $parent` fails: "Already exists"
+- `integration_custom_command_reel_edit` — `open $full --raw` returns `nothing` instead of file contents, causing downstream `split row` to fail on type mismatch
 
-#### 9c. AppContainer sandbox blocks file access in custom command tests (3 tests)
+Root cause not yet identified. Investigation should focus on how nu's `ls`, `open`, and `save` resolve paths inside AppContainer vs how `glob` and external commands do it.
 
-`reel read`, `reel write`, `reel edit` commands fail inside the AppContainer sandbox because nu's `open`, `ls`, and `save` commands cannot access files in the test project directory. The sandbox grants write access to the project root, but nu's internal operations (which use `nu_glob` and `fs::metadata`) need ancestor traversal ACEs on intermediate directories.
-
-Failing tests:
-- `integration_custom_command_reel_read` — `ls` fails: "Pattern, file or folder not found"
-- `integration_custom_command_reel_write` — `save` fails: "Already exists"
-- `integration_custom_command_reel_edit` — `open --raw` returns nothing, `split row` fails on `nothing` input
-
-**Category: Testing / Sandbox.**
+**Category: Nu commands / Sandbox.**
 
 ### 10. `extract_text` uses mutable loop instead of iterator
 

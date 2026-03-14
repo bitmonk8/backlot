@@ -937,17 +937,10 @@ mod tests {
     }
 
     /// Base directory for sandbox test temp dirs.
-    ///
-    /// Uses a sibling of the project root so that all ancestors (`C:\UnitySrc`,
-    /// `C:\`) already have `ALL APPLICATION PACKAGES` traverse ACEs from
-    /// the consumer's setup command. Cannot be inside the project root because intermediate
-    /// directories (e.g. `target/`) lack those ACEs, causing `nu_glob`
-    /// ancestor traversal to fail inside AppContainer.
     fn sandbox_test_base() -> PathBuf {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("project root has parent")
-            .join("reel-sandbox-test");
+            .join("target")
+            .join("sandbox-test");
         std::fs::create_dir_all(&base).expect("create sandbox test base dir");
         base
     }
@@ -1012,35 +1005,29 @@ mod tests {
         p.to_str().unwrap().replace('\\', "/")
     }
 
-    /// Try to spawn a session, returning None if sandbox setup fails
-    /// (e.g. Windows ACL errors when not running elevated).
-    async fn try_spawn(session: &NuSession, root: &Path, grant: ToolGrant) -> Option<()> {
-        match session.spawn(root, grant).await {
-            Ok(()) => Some(()),
-            Err(e) if e.contains("sandbox setup failed") => {
-                eprintln!("SKIP: sandbox requires elevation: {e}");
-                None
-            }
-            Err(e) => panic!("unexpected spawn error: {e}"),
-        }
+    /// Spawn a session, panicking if sandbox setup fails.
+    async fn try_spawn(session: &NuSession, root: &Path, grant: ToolGrant) {
+        session
+            .spawn(root, grant)
+            .await
+            .expect("spawn should succeed (sandbox setup failure is fatal)")
     }
 
-    /// Try to evaluate a command, returning None if sandbox setup fails.
+    /// Evaluate a command, panicking if sandbox setup fails.
     async fn try_eval(
         session: &NuSession,
         cmd: &str,
         timeout: u64,
         root: &Path,
         grant: ToolGrant,
-    ) -> Option<Result<NuOutput, String>> {
+    ) -> Result<NuOutput, String> {
         let result = session.evaluate(cmd, timeout, root, grant).await;
-        match &result {
-            Err(e) if e.contains("sandbox setup failed") => {
-                eprintln!("SKIP: sandbox requires elevation: {e}");
-                None
+        if let Err(e) = &result {
+            if e.contains("sandbox setup failed") {
+                panic!("sandbox setup failed (this is fatal): {e}");
             }
-            _ => Some(result),
         }
+        result
     }
 
     #[tokio::test]
@@ -1048,12 +1035,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        if try_spawn(&session, tmp.path(), ToolGrant::NU)
-            .await
-            .is_none()
-        {
-            return;
-        }
+        try_spawn(&session, tmp.path(), ToolGrant::NU).await;
     }
 
     #[tokio::test]
@@ -1061,12 +1043,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        if try_spawn(&session, tmp.path(), ToolGrant::NU)
-            .await
-            .is_none()
-        {
-            return;
-        }
+        try_spawn(&session, tmp.path(), ToolGrant::NU).await;
         // Second spawn with same params is a no-op.
         session.spawn(tmp.path(), ToolGrant::NU).await.unwrap();
     }
@@ -1077,12 +1054,7 @@ mod tests {
         let tmp = tmp_project();
         {
             let (session, _cache) = isolated_session();
-            if try_spawn(&session, tmp.path(), ToolGrant::NU)
-                .await
-                .is_none()
-            {
-                return;
-            }
+            try_spawn(&session, tmp.path(), ToolGrant::NU).await;
         }
         // No panic or zombie = pass.
     }
@@ -1092,17 +1064,9 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        if try_spawn(&session, tmp.path(), ToolGrant::NU)
-            .await
-            .is_none()
-        {
-            return;
-        }
+        try_spawn(&session, tmp.path(), ToolGrant::NU).await;
         session.kill().await;
-        let Some(result) = try_eval(&session, "echo 'alive'", 30, tmp.path(), ToolGrant::NU).await
-        else {
-            return;
-        };
+        let result = try_eval(&session, "echo 'alive'", 30, tmp.path(), ToolGrant::NU).await;
         let out = result.unwrap();
         assert!(!out.is_error);
     }
@@ -1112,17 +1076,14 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        let Some(result) = try_eval(
+        let result = try_eval(
             &session,
             "echo 'hello world'",
             30,
             tmp.path(),
             ToolGrant::NU,
         )
-        .await
-        else {
-            return;
-        };
+        .await;
         let out = result.unwrap();
         assert!(!out.is_error);
         assert!(out.content.contains("hello world"));
@@ -1133,17 +1094,14 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        let Some(result) = try_eval(
+        let result = try_eval(
             &session,
             "error make { msg: 'test error' }",
             30,
             tmp.path(),
             ToolGrant::NU,
         )
-        .await
-        else {
-            return;
-        };
+        .await;
         let out = result.unwrap();
         assert!(out.is_error);
         assert!(out.content.contains("test error"));
@@ -1154,9 +1112,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        let Some(result) = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::NU).await else {
-            return;
-        };
+        let result = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::NU).await;
         let out1 = result.unwrap();
         assert!(!out1.is_error);
         assert!(out1.content.contains('3'));
@@ -1178,9 +1134,7 @@ mod tests {
         std::fs::write(&test_file, "line one\nline two\n").unwrap();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         let cmd = format!("reel read '{}'", nu_path(&test_file));
-        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
         assert!(!out.is_error, "reel read failed: {}", out.content);
         assert!(out.content.contains("line one"));
@@ -1195,9 +1149,7 @@ mod tests {
         let test_file = tmp.path().join("written.txt");
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         let cmd = format!("reel write '{}' 'hello from test'", nu_path(&test_file));
-        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
         assert!(!out.is_error, "reel write failed: {}", out.content);
         let content = std::fs::read_to_string(&test_file).unwrap();
@@ -1214,9 +1166,7 @@ mod tests {
         std::fs::write(tmp.path().join("b.txt"), "").unwrap();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         let cmd = format!("reel glob '*.txt' --path '{}'", nu_path(tmp.path()));
-        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
         assert!(!out.is_error, "reel glob failed: {}", out.content);
         assert!(out.content.contains("a.txt"));
@@ -1236,9 +1186,7 @@ mod tests {
             "reel edit '{}' 'old value' 'new value'",
             nu_path(&test_file)
         );
-        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
         assert!(!out.is_error, "reel edit failed: {}", out.content);
         let content = std::fs::read_to_string(&test_file).unwrap();
@@ -1254,9 +1202,7 @@ mod tests {
         std::fs::write(tmp.path().join("searchable.txt"), "findme in this file\n").unwrap();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
         let cmd = format!("reel grep 'findme' --path '{}'", nu_path(tmp.path()));
-        let Some(result) = try_eval(session, &cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
         assert!(!out.is_error, "reel grep failed: {}", out.content);
         assert!(out.content.contains("searchable.txt"));
@@ -1267,19 +1213,13 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        let Some(result) = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::NU).await
-        else {
-            return;
-        };
+        let result = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::NU).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("timed out"), "error: {err}");
         // Session recovers after timeout.
-        let Some(result2) =
-            try_eval(&session, "echo 'recovered'", 30, tmp.path(), ToolGrant::NU).await
-        else {
-            return;
-        };
+        let result2 =
+            try_eval(&session, "echo 'recovered'", 30, tmp.path(), ToolGrant::NU).await;
         let out = result2.unwrap();
         assert!(!out.is_error);
         assert!(out.content.contains("recovered"));
@@ -1290,24 +1230,18 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        let Some(result) = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::NU).await
-        else {
-            return;
-        };
+        let result = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::NU).await;
         let out1 = result.unwrap();
         assert!(!out1.is_error);
         // Switch to write grant — triggers respawn.
-        let Some(result2) = try_eval(
+        let result2 = try_eval(
             &session,
             "echo 'rw'",
             30,
             tmp.path(),
             ToolGrant::NU | ToolGrant::WRITE,
         )
-        .await
-        else {
-            return;
-        };
+        .await;
         let out2 = result2.unwrap();
         assert!(!out2.is_error);
     }
@@ -1317,12 +1251,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_project();
         let (session, _cache) = isolated_session();
-        if try_spawn(&session, tmp.path(), ToolGrant::NU)
-            .await
-            .is_none()
-        {
-            return;
-        }
+        try_spawn(&session, tmp.path(), ToolGrant::NU).await;
         let gen_before = {
             let st = session.state.lock().await;
             st.generation
@@ -1350,9 +1279,7 @@ mod tests {
             "^$env.REEL_RG_PATH --color=never haystack '{}'",
             nu_path(tmp.path())
         );
-        let Some(result) = try_eval(&session, &cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
         assert!(
             !out.is_error,
@@ -1387,9 +1314,7 @@ mod tests {
             "'blocked' | save '{}'",
             nu_path(&tmp.path().join("new_file.txt"))
         );
-        let Some(result) = try_eval(session, &write_cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let result = try_eval(session, &write_cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
         assert!(
             out.is_error,
@@ -1653,9 +1578,7 @@ mod tests {
         };
 
         // Trigger session spawn (applies sandbox ACLs via lot).
-        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await else {
-            return;
-        };
+        let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
         let _ = init.unwrap();
 
         // Verify rg.exe has the AppContainer ACL (RX) via inheritance.
@@ -1678,9 +1601,7 @@ mod tests {
 
         // rg execution inside AppContainer: succeeds only if NUL device is accessible.
         let rg_full = format!("^'{}' --version", nu_path(&rg_exe));
-        let Some(result) = try_eval(session, &rg_full, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let result = try_eval(session, &rg_full, 30, tmp.path(), grant).await;
         let out = result.unwrap();
         assert!(
             !out.is_error,
@@ -1716,18 +1637,14 @@ mod tests {
         };
 
         // Trigger session spawn.
-        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await else {
-            return;
-        };
+        let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
         let _ = init.unwrap();
 
         let rg_exe = cache_path.join("rg.exe");
 
         // Test 1: Can nu stat rg.exe? Use ls on the cache directory.
         let read_cmd = format!("ls '{}' | length", nu_path(&cache_path));
-        let Some(read_result) = try_eval(session, &read_cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let read_result = try_eval(session, &read_cmd, 30, tmp.path(), grant).await;
         let read_out = read_result.unwrap();
         eprintln!(
             "File read rg.exe: is_error={}, content={}",
@@ -1736,9 +1653,7 @@ mod tests {
 
         // Test 2: Can nu READ a System32 DLL? (proves System32 access from inside AppContainer)
         let sys32_cmd = "open --raw 'C:/Windows/System32/kernel32.dll' | bytes length";
-        let Some(sys32_result) = try_eval(session, sys32_cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let sys32_result = try_eval(session, sys32_cmd, 30, tmp.path(), grant).await;
         let sys32_out = sys32_result.unwrap();
         eprintln!(
             "File read kernel32.dll: is_error={}, content={}",
@@ -1747,9 +1662,7 @@ mod tests {
 
         // Test 3: Can nu execute cmd.exe from System32? (^cmd /C echo hi)
         let cmd_exec = "^'C:/Windows/System32/cmd.exe' /C echo hi";
-        let Some(cmd_result) = try_eval(session, cmd_exec, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let cmd_result = try_eval(session, cmd_exec, 30, tmp.path(), grant).await;
         let cmd_out = cmd_result.unwrap();
         eprintln!(
             "Execute cmd.exe: is_error={}, content={}",
@@ -1758,9 +1671,7 @@ mod tests {
 
         // Test 4: Execute rg.exe with full path (expected to fail).
         let rg_exec = format!("^'{}' --version", nu_path(&rg_exe));
-        let Some(rg_result) = try_eval(session, &rg_exec, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let rg_result = try_eval(session, &rg_exec, 30, tmp.path(), grant).await;
         let rg_out = rg_result.unwrap();
         eprintln!(
             "Execute rg.exe: is_error={}, content={}",
@@ -1769,9 +1680,7 @@ mod tests {
 
         // Test 5: What does `which rg` say?
         let which_cmd = "which rg";
-        let Some(which_result) = try_eval(session, which_cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let which_result = try_eval(session, which_cmd, 30, tmp.path(), grant).await;
         let which_out = which_result.unwrap();
         eprintln!(
             "which rg: is_error={}, content={}",
@@ -1780,10 +1689,7 @@ mod tests {
 
         // Test 6: Exact error for hostname.
         let hostname_cmd = "^'C:/Windows/System32/hostname.exe'";
-        let Some(hostname_result) = try_eval(session, hostname_cmd, 30, tmp.path(), grant).await
-        else {
-            return;
-        };
+        let hostname_result = try_eval(session, hostname_cmd, 30, tmp.path(), grant).await;
         let hostname_out = hostname_result.unwrap();
         eprintln!(
             "Execute hostname.exe: is_error={}, content={}",
@@ -1792,9 +1698,7 @@ mod tests {
 
         // Test 7: Can nu list System32 directory? (proves directory traverse works)
         let ls_sys32 = "ls C:/Windows/System32/cmd.exe | get name.0";
-        let Some(ls_result) = try_eval(session, ls_sys32, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let ls_result = try_eval(session, ls_sys32, 30, tmp.path(), grant).await;
         let ls_out = ls_result.unwrap();
         eprintln!(
             "ls cmd.exe: is_error={}, content={}",
@@ -1803,9 +1707,7 @@ mod tests {
 
         // Test 8: Use sys/exec (Rust std::process::Command) to check OS error code
         let exec_cmd = format!("do {{ ^'{}' --version }} | complete", nu_path(&rg_exe));
-        let Some(exec_result) = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let exec_result = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await;
         let exec_out = exec_result.unwrap();
         eprintln!(
             "complete rg exec: is_error={}, content={}",
@@ -1833,18 +1735,14 @@ mod tests {
         };
 
         // Trigger session spawn (applies sandbox ACLs via lot).
-        let Some(init) = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await else {
-            return;
-        };
+        let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
         let _ = init.unwrap();
 
         let rg_exe = cache_path.join("rg.exe");
 
         // Test 1: Can nu LIST the cache directory (proves directory traversal)?
         let ls_cmd = format!("ls '{}' | length", nu_path(&cache_path));
-        let Some(ls_result) = try_eval(session, &ls_cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let ls_result = try_eval(session, &ls_cmd, 30, tmp.path(), grant).await;
         let ls_out = ls_result.unwrap();
         eprintln!(
             "ls cache dir: is_error={}, content={}",
@@ -1853,9 +1751,7 @@ mod tests {
 
         // Test 2: Can nu READ rg.exe as raw bytes (proves file read access)?
         let read_cmd = format!("open --raw '{}' | length", nu_path(&rg_exe));
-        let Some(read_result) = try_eval(session, &read_cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let read_result = try_eval(session, &read_cmd, 30, tmp.path(), grant).await;
         let read_out = read_result.unwrap();
         eprintln!(
             "read rg.exe bytes: is_error={}, content={}",
@@ -1864,9 +1760,7 @@ mod tests {
 
         // Test 3: Can nu EXECUTE rg.exe (expected to fail)?
         let exec_cmd = format!("^'{}' --version", nu_path(&rg_exe));
-        let Some(exec_result) = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await else {
-            return;
-        };
+        let exec_result = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await;
         let exec_out = exec_result.unwrap();
         eprintln!(
             "exec rg.exe: is_error={}, content={}",
