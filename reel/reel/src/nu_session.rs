@@ -2318,6 +2318,256 @@ mod tests {
         }
     }
 
+    /// Narrow down the exact divergence between `path exists` (works) and
+    /// `ls <file>` (fails) inside AppContainer.
+    ///
+    /// `path exists` → expand_path_with → Path::exists (fs::metadata)
+    /// `ls <file>`   → glob_from → absolute_with → std::path::absolute → p.exists()
+    ///                 also: nu_glob fill_todo → fs::metadata(path.join(s))
+    ///
+    /// The hypothesis: std::path::absolute produces a \\?\ prefixed path on
+    /// Windows, and GetFileAttributesW on that form fails inside AppContainer
+    /// even though the non-prefixed form succeeds.
+    #[tokio::test]
+    async fn diag_metadata_divergence() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("probe.txt"), "probe data").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        let file_path = nu_path(&tmp.path().join("probe.txt"));
+        let dir_path = nu_path(tmp.path());
+
+        // Each test maps to a specific Rust/Win32 codepath:
+        let tests = vec![
+            // 1. path exists — expand_path_with then Path::exists (GetFileAttributesW)
+            ("path-exists", format!("'{}' | path exists", file_path)),
+
+            // 2. ls dir — read_dir (FindFirstFileW/FindNextFileW on dir\\*)
+            ("ls-dir", format!("ls '{}' | where name ends-with 'probe.txt' | length", dir_path)),
+
+            // 3. ls file — goes through glob_from → absolute_with → exists check
+            ("ls-file", format!("ls '{}'", file_path)),
+
+            // 4. glob exact file — wax crate, different from nu_glob
+            ("glob-exact", format!("glob '{}'", file_path)),
+
+            // 5. path expand then ls — does path expand produce \\?\ prefix?
+            ("path-expand", format!("'{}' | path expand", file_path)),
+
+            // 6. ls on path-expand result — test if expanded path form breaks ls
+            ("ls-expanded", format!("ls ('{}' | path expand)", file_path)),
+
+            // 7. Relative path ls — nu_glob fill_todo with relative join
+            ("ls-relative", "ls probe.txt".to_string()),
+
+            // 8. symlink_metadata equivalent — path type uses this
+            ("path-type", format!("'{}' | path type", file_path)),
+
+            // 9. open — CreateFileW
+            ("open", format!("open '{}' --raw | str length", file_path)),
+
+            // 10. Test if the issue is \\?\ prefix specifically
+            // Construct a \\?\ path manually and test exists
+            ("exists-unc", format!(
+                r"'\\?\{}' | path exists",
+                tmp.path().join("probe.txt").display()
+            )),
+
+            // 11. Same with ls
+            ("ls-unc", format!(
+                r"ls '\\?\{}'",
+                tmp.path().join("probe.txt").display()
+            )),
+
+            // 12. std::path::absolute equivalent: path expand --no-symlink (closest nu equivalent)
+            ("path-expand-nosym", format!("'{}' | path expand --no-symlink", file_path)),
+
+            // 13. Check what `which ls` says — confirm it's builtin
+            ("which-ls", "which ls | get path.0".to_string()),
+        ];
+
+        for (label, cmd) in tests {
+            let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+            match result {
+                Ok(out) => {
+                    let status = if out.is_error { "FAIL" } else { "OK" };
+                    let content = if out.content.len() > 300 {
+                        format!("{}...", &out.content[..300])
+                    } else {
+                        out.content.clone()
+                    };
+                    eprintln!("DIAG-META {}: {}: {}", label, status, content);
+                }
+                Err(e) => eprintln!("DIAG-META {}: ERR: {}", label, e),
+            }
+        }
+    }
+
+    /// Probe whether glob_from's `absolute_with` path differs from
+    /// `expand_path_with` inside AppContainer. The hypothesis is that
+    /// `std::path::absolute` (GetFullPathNameW) produces a path that
+    /// then fails `exists()` inside the sandbox.
+    ///
+    /// We test this by using nu to replicate what glob_from does:
+    /// 1. expand_path_with → join cwd + relative, expand tilde/dots
+    /// 2. std::path::absolute → GetFullPathNameW
+    /// 3. Path::exists on the result
+    #[tokio::test]
+    async fn diag_glob_from_path_flow() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("probe.txt"), "probe data").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        let file_path = nu_path(&tmp.path().join("probe.txt"));
+        let dir_path = nu_path(tmp.path());
+
+        // Replicate what glob_from does step by step inside nu.
+        // glob_from calls: let path = expand_path_with(path, cwd, is_expand)
+        //                  fs::symlink_metadata(&path)
+        //                  absolute_with(path, cwd) → std::path::absolute(joined)
+        //                  p.exists()
+        //
+        // In nu we can approximate these with:
+        // - `path expand` for expand_path_with
+        // - `path exists` for Path::exists
+        // - For std::path::absolute we have no direct equivalent, but we can
+        //   check if the EXPANDED path works with exists vs if ls sees it.
+
+        let tests = vec![
+            // Check symlink_metadata equivalent
+            ("symlink-meta-dir", format!(
+                "'{}' | path type",
+                dir_path
+            )),
+            ("symlink-meta-file", format!(
+                "'{}' | path type",
+                file_path
+            )),
+
+            // Check if ls . works (read_dir path, not glob_from)
+            ("ls-dot", "ls . | length".to_string()),
+
+            // Check ls * (glob path in glob_from)
+            ("ls-star", "ls * | length".to_string()),
+
+            // Check if ls *.txt works (glob metachar present → different branch)
+            ("ls-glob-star-txt", "ls *.txt | length".to_string()),
+
+            // This is interesting: ls with a glob pattern that matches exactly
+            // one file goes through the GLOB branch (nu_glob::glob_with),
+            // not the non-glob branch (absolute_with). Does it work?
+            ("ls-glob-q", "ls prob?.txt | length".to_string()),
+
+            // ls with explicit glob wrapper
+            ("ls-glob-exact", "ls (glob 'probe.txt' | first)".to_string()),
+
+            // Test: does `path exists` on the absolute path work?
+            ("exists-abs", format!(
+                "('{}' | path expand) | path exists",
+                file_path
+            )),
+
+            // Confirm file shows up in directory listing
+            ("ls-dir-filter", format!(
+                "ls '{}' | where name ends-with probe.txt | get name",
+                dir_path
+            )),
+
+            // Try do/catch to get the actual error from ls
+            ("ls-file-error", format!(
+                "try {{ ls '{}' }} catch {{ |e| $e | to json }}",
+                file_path
+            )),
+
+            // Check: does `ls` with `--all` flag change anything?
+            ("ls-file-all", format!("ls -a '{}'", file_path)),
+        ];
+
+        for (label, cmd) in tests {
+            let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+            match result {
+                Ok(out) => {
+                    let status = if out.is_error { "FAIL" } else { "OK" };
+                    let content = if out.content.len() > 400 {
+                        format!("{}...", &out.content[..400])
+                    } else {
+                        out.content.clone()
+                    };
+                    eprintln!("DIAG-GFROM {}: {}: {}", label, status, content);
+                }
+                Err(e) => eprintln!("DIAG-GFROM {}: ERR: {}", label, e),
+            }
+        }
+    }
+
+    /// PROOF: nu_glob traverses from root one component at a time, calling
+    /// fs::metadata on each intermediate directory. AppContainer blocks
+    /// metadata on intermediate dirs outside the grant.
+    ///
+    /// Verify by testing `path exists` on intermediate path components.
+    #[tokio::test]
+    async fn diag_intermediate_dir_metadata() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("probe.txt"), "probe data").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // Build list of all intermediate paths from root to the test file.
+        // E.g., for C:\UnitySrc\reel\reel\target\sandbox-test\.tmpXXX\probe.txt:
+        //   C:\
+        //   C:\UnitySrc
+        //   C:\UnitySrc\reel
+        //   ... etc ...
+        //   C:\UnitySrc\reel\reel\target\sandbox-test\.tmpXXX
+        //   C:\UnitySrc\reel\reel\target\sandbox-test\.tmpXXX\probe.txt
+        let full_path = tmp.path().join("probe.txt");
+        let mut ancestors: Vec<_> = full_path.ancestors().collect();
+        ancestors.reverse(); // root first
+
+        let mut tests = Vec::new();
+        for ancestor in &ancestors {
+            let p = nu_path(ancestor);
+            if p.is_empty() {
+                continue;
+            }
+            tests.push((
+                format!("exists:{}", ancestor.display()),
+                format!("'{}' | path exists", p),
+            ));
+        }
+
+        // Also test path type on each (uses symlink_metadata)
+        for ancestor in &ancestors {
+            let p = nu_path(ancestor);
+            if p.is_empty() {
+                continue;
+            }
+            tests.push((
+                format!("type:{}", ancestor.display()),
+                format!("'{}' | path type", p),
+            ));
+        }
+
+        for (label, cmd) in tests {
+            let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+            match result {
+                Ok(out) => {
+                    let status = if out.is_error { "FAIL" } else { "OK" };
+                    eprintln!("DIAG-INTER {}: {}: {}", label, status, out.content);
+                }
+                Err(e) => eprintln!("DIAG-INTER {}: ERR: {}", label, e),
+            }
+        }
+    }
+
     // === END DIAGNOSTIC TESTS ===
 
     #[tokio::test]

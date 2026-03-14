@@ -78,86 +78,110 @@ Fixed: removed obsolete `--string` flag from `reel_config.nu` for nu 0.111.0.
 
 #### 9c. Nu built-in file commands fail inside AppContainer sandbox (3 tests)
 
-**Root cause identified: nu 0.111.0 built-in commands `ls`, `open`, and `mkdir` fail when the nu process is spawned inside a Windows AppContainer via `lot::spawn`. The same commands work when nu is spawned directly via `std::process::Command` (no AppContainer). Nu's `ls` uses the `nu_glob` crate for file matching; nu's `glob` command uses the `wax` crate. Under AppContainer, `nu_glob` fails while `wax` succeeds for identical patterns. The `open` command silently returns `nothing` instead of file content. The exact Win32 API calls that AppContainer restricts have not been identified.**
+**Root cause: missing ALL APPLICATION PACKAGES traverse ACEs on intermediate directories between the volume root and the sandbox policy paths.** nu_glob walks path components from root to leaf, calling `fs::metadata()` at each level. When an intermediate directory lacks the traverse ACE, `fs::metadata()` returns "Permission denied" and nu_glob produces zero matches.
 
-This is NOT an issue in nu's MCP mode itself. When nu `--mcp` is spawned directly via `std::process::Command` (no AppContainer), all commands work correctly.
+##### Root cause mechanism
+
+nu 0.111.0's `ls` and `open` commands resolve file paths through `glob_from()` → `nu_glob::glob_with()`. The nu_glob crate's `fill_todo` function (`crates/nu-glob/src/lib.rs:977-996`) walks path components **one at a time from the filesystem root**. For non-glob patterns (literal filenames), it calls `fs::metadata(&next_path)` at each intermediate directory to verify it exists before descending.
+
+Inside a Windows AppContainer, `fs::metadata()` requires `FILE_READ_ATTRIBUTES` permission on the target path. Directories that lack an ALL APPLICATION PACKAGES (`S-1-15-2-1`) traverse ACE (which includes `FILE_READ_ATTRIBUTES`) return "Permission denied". nu_glob treats this as "path doesn't exist" and produces an empty iterator.
+
+In contrast, nu's `glob` command uses the `wax` crate → `walkdir` → `std::fs::read_dir()`, which enumerates the parent directory via `FindFirstFileW`/`FindNextFileW`. This works because the AppContainer has access to the granted leaf directory directly, without needing to traverse intermediates one at a time.
+
+Similarly, `path exists` calls `fs::metadata()` on the **full final path** in a single call. The AppContainer allows this for paths within the grant because the per-profile ACE on the policy path (with `SUB_CONTAINERS_AND_OBJECTS_INHERIT`) covers the full path. Only the component-by-component walk triggers the intermediate directory check.
+
+##### How lot's ACL system works (two tiers)
+
+1. **Per-spawn** (`grant_acls` in `appcontainer.rs:1385`): Grants the ephemeral per-profile AppContainer SID on the exact policy paths (read/write/exec). Runs at normal privilege. Does NOT grant on ancestors.
+
+2. **Prerequisites** (`grant_appcontainer_prerequisites` in `nul_device.rs:617`): Grants ALL APPLICATION PACKAGES traverse ACEs (`FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE`) on every ancestor directory of the input paths, plus NUL device access. Requires elevation. Designed as one-time machine setup.
+
+`compute_ancestors` (`nul_device.rs:352-377`) walks `parent()` up to the volume root. It excludes the input paths themselves — only ancestors.
+
+##### The gap
+
+`reel setup` (`reel-cli/src/main.rs:276`) passes only `cwd` to `grant_appcontainer_prerequisites`. This grants traverse ACEs on ancestors of cwd. But the test sandbox paths are **children** of cwd (e.g., `<cwd>/reel/target/sandbox-test/.tmpXXX`). The intermediate directories between cwd and the sandbox path (`reel/`, `reel/target/`, `reel/target/sandbox-test/`) receive NO traverse ACEs because they are descendants of cwd, not ancestors.
+
+##### Evidence: intermediate directory metadata failure
+
+Diagnostic test `diag_intermediate_dir_metadata` probes `path exists` and `path type` (which calls `fs::symlink_metadata`) on every path component from root to the test file inside the AppContainer:
+
+| Path component | `path exists` | `path type` |
+|---|---|---|
+| `C:\` | true | dir |
+| `C:\UnitySrc` | true | dir |
+| `C:\UnitySrc\reel` | true | dir |
+| `C:\UnitySrc\reel\reel` | **false** | **Permission denied** |
+| `C:\UnitySrc\reel\reel\target` | **false** | **Permission denied** |
+| `C:\UnitySrc\reel\reel\target\sandbox-test` | **false** | **Permission denied** |
+| `...\sandbox-test\.tmpXXX` (granted dir) | true | dir |
+| `...\sandbox-test\.tmpXXX\probe.txt` | true | file |
+
+`C:\` and `C:\UnitySrc` have ALL APPLICATION PACKAGES traverse ACEs (from a prior `reel setup` run). `C:\UnitySrc\reel` has inherited `BUILTIN\Users:(RX)` which provides sufficient access. `C:\UnitySrc\reel\reel` through `sandbox-test` have neither — the AppContainer cannot read their attributes.
+
+##### Confirmed fix
+
+Manually granting ALL APPLICATION PACKAGES traverse ACEs on the intermediate directories (`C:\UnitySrc\reel\reel`, `reel\target`, `reel\target\sandbox-test`) causes all 3 tests to pass. This was verified by running `grant_appcontainer_prerequisites` with paths deep enough to cover the test sandbox directory.
+
+##### How `open` fails silently
+
+`open` uses the same `glob_from()` → `nu_glob` path as `ls` (`crates/nu-command/src/filesystem/open.rs:110-126`). When nu_glob returns zero matches (due to the intermediate directory permission failure), the `output` vec is empty. At line 258-259, `open` returns `PipelineData::empty()` — no error, no data, just nothing.
+
+##### Affected nu commands and code paths
+
+| Command | Crate | Function | Fails because |
+|---|---|---|---|
+| `ls <file>` | nu_glob | `fill_todo` (lib.rs:992) | `fs::metadata()` on intermediate dir |
+| `ls <glob>` | nu_glob | `fill_todo` (lib.rs:999) | `fs::read_dir()` on intermediate dir |
+| `open <file>` | nu_glob (via glob_from) | same as ls | same; then silently returns empty |
+| `glob <pattern>` | wax/walkdir | `read_dir` on leaf dir | **works** — no intermediate walk |
+| `path exists` | std | `fs::metadata` on full path | **works** — single call to leaf |
 
 ##### Verified behavior inside AppContainer (lot::spawn)
 
-**Commands that FAIL:**
-- `ls` (no args) — fails: "No matches found for Expand(`*`)"
-- `ls <file-path>` (absolute or relative) — fails: "No matches found for DoNotExpand(`...`)"
-- `ls *.txt`, `ls **/*.txt` — fails: "No matches found"
-- `open <file> --raw` — returns `nothing` (null). No error. `describe` reports type `nothing`.
-- `open <file>` (no --raw, any extension: .txt, .json, .csv) — returns `null` or `[]`
-- `open <file> --raw | decode utf-8` — fails: "Pipeline empty" (nothing to decode)
-- `open <file> --raw | bytes length` — fails: "Pipeline empty"
-- `mkdir <existing-dir>` — fails: "Already exists"
+**Commands that FAIL (all due to nu_glob intermediate directory walk):**
+- `ls` (no args) — "No matches found for Expand(`*`)"
+- `ls <file-path>` — "No matches found for DoNotExpand(`...`)"
+- `ls *.txt`, `ls **/*.txt` — "No matches found"
+- `open <file>` (any variant) — silently returns `nothing`
 
-**Commands that WORK inside AppContainer:**
-- `ls <dir-path>` — lists directory contents
-- `ls .` — lists cwd contents
-- `glob '*'`, `glob <exact-path>` — finds files (uses `wax` crate, not `nu_glob`)
-- `path exists` — returns `true` for existing files
-- `path type` — returns `"file"` correctly
-- `path expand` — returns correct path
-- `save --force <file>` — writes file content successfully
-- `pwd`, `cd` — work correctly
-- External commands via `^` — work (e.g., `rg` via `REEL_RG_PATH`)
+**Commands that WORK (bypass nu_glob or use direct path access):**
+- `ls <dir-path>`, `ls .` — uses `read_dir` on the granted directory directly
+- `glob '*'`, `glob <exact-path>` — uses wax crate, not nu_glob
+- `path exists`, `path type`, `path expand` — single `fs::metadata` on full path
+- `save --force <file>` — direct file write, no glob resolution
+- `pwd`, `cd` — no file lookup
+- External commands via `^` — work (e.g., `rg`)
 
-**All of the above work correctly when nu is spawned without AppContainer** (tested via `std::process::Command` with identical MCP protocol).
+##### Fix options
 
-##### Two distinct failure modes
+**A. Fix reel's `cmd_setup`**: Pass the actual sandbox working directories (not just cwd) to `grant_appcontainer_prerequisites`, so all intermediates between root and the sandbox path get traverse ACEs.
 
-1. **`ls` glob resolution fails (`nu_glob` crate)**: Nu's `ls` command uses the `nu_glob` crate for pattern matching (even for literal filenames). The `glob` command uses the `wax` crate. Under AppContainer, `nu_glob`'s file enumeration fails while `wax`'s succeeds for the same patterns. The exact Win32 API difference is not yet identified. `ls <dir>` and `ls .` work — they use a different code path than `ls <file>` or `ls <glob-pattern>`.
+**B. Make lot's `grant_acls` also grant ancestor traverse ACEs**: Would make every spawn self-contained but requires elevation at spawn time, breaking lot's two-tier design.
 
-2. **`open` returns `nothing`**: The `open` command finds the file (no "not found" error) but produces no value into the pipeline. `save` (file write) works, and `path exists` confirms the file exists — so ACLs allow the file to be found, but `open` fails silently. The exact mechanism is not yet identified — no errors appear on stderr.
+**C. Rewrite reel's nu custom commands**: Avoid `ls <file>` and `open <file>` entirely. Use `glob` + `ls <dir> | where` for metadata, and an alternative read mechanism (e.g., external command) for file content. Workaround — does not fix the ACL gap.
 
-##### Evidence
+##### Nushell source references (tag 0.111.0)
 
-- **Without AppContainer** (nu spawned via `std::process::Command`): `open --raw | describe` returns `"byte stream"`, `ls file.txt` shows metadata, `mkdir existing` succeeds silently, `let x = (open file --raw); $x == null` returns `false`. All commands work.
-- **With AppContainer** (nu spawned via `lot::spawn`): Same commands fail as described above. `open` on nonexistent file errors with "File not found"; `open` on existing file returns `nothing`. `let x = (open file --raw); $x == null` returns `true`. Files created by `save` in the same session are also unreadable by `open`.
-- **`ls <dir> | where name ends-with 'test.txt'`** works in AppContainer — the file IS visible in directory listings, just not through `nu_glob` pattern matching.
-- No errors on nu's stderr for the `open` case — it silently returns nothing.
-- The env var `$env.TEMP` inside AppContainer shows `C:\Users\...\Packages\lot-...\AC\Temp` — Windows redirects TEMP for AppContainer processes at the OS level, regardless of explicit env var overrides.
-
-##### Why the earlier diagnosis was wrong
-
-Early investigation used `isolated_session()` / `tmp_project()` as a "no sandbox" control, but `NuSession` always spawns via `lot::spawn` with a `SandboxPolicy`. There is no unsandboxed mode in `NuSession`. The correct control test was spawning nu directly via `std::process::Command` without lot.
-
-##### These tests did not exist in epic
-
-The 3 failing tests (`integration_custom_command_reel_read/write/edit`) were created during the reel extraction. Epic has no equivalent tests. Epic's STATUS.md references reel's failures.
-
-##### No known upstream issue
-
-Searched nushell GitHub issues (2026-03-14) — no reports of `nu_glob` failing inside AppContainer or `open` returning nothing under sandboxed processes.
-
-##### Affected custom commands
-
-- `reel read` — uses `ls $full` (fails via `nu_glob`) and `open $full --raw` (returns nothing)
-- `reel write` — uses `mkdir $parent` (fails on existing dir)
-- `reel edit` — uses `open $full --raw` (returns nothing), causing downstream `split row` type error
-
-##### Unaffected custom commands
-
-- `reel glob` — uses `cd $dir; glob $pattern` (`wax` crate works in AppContainer)
-- `reel grep` — shells out to external `rg` via `^$rg_cmd` (external commands work)
+- `crates/nu-glob/src/lib.rs:977-996` — `fill_todo`: component-by-component walk with `fs::metadata()`
+- `crates/nu-engine/src/glob_from.rs:32-105` — `glob_from`: constructs absolute glob pattern, calls `nu_glob::glob_with()`
+- `crates/nu-command/src/filesystem/ls.rs:441-468` — `ls` calls `glob_from`, checks `peek().is_none()` for empty iterator
+- `crates/nu-command/src/filesystem/open.rs:110-126,258-259` — `open` calls `glob_from`, returns empty on zero matches
+- `crates/nu-command/src/filesystem/glob.rs:197-251` — `glob` uses wax crate, walks via `walkdir::read_dir`
 
 ##### Diagnostic tests
 
-Diagnostic tests are in `reel/src/nu_session.rs`, prefixed with `diag_`. Run with:
-```
-cargo test -p reel diag_ -- --nocapture
-```
+In `reel/src/nu_session.rs`, prefixed with `diag_`. Run with `cargo test -p reel diag_ -- --nocapture`.
 
-Key tests:
+- `diag_intermediate_dir_metadata` — probes `path exists`/`path type` on every component from root to test file
+- `diag_metadata_divergence` — shows `path exists` works but `ls <file>` fails for same path
+- `diag_glob_from_path_flow` — shows `glob` works but `ls` fails for same pattern
 - `diag_nu_mcp_without_lot` — proves all commands work without AppContainer
-- `diag_raw_ls_in_sandbox` — shows `ls <file>` fails but `ls <dir>` works in AppContainer
+- `diag_raw_ls_in_sandbox` — shows `ls <file>` fails but `ls <dir>` works
 - `diag_glob_vs_ls_appcontainer` — shows `glob '*'` works but `ls` (same pattern) fails
-- `diag_bytestream_vs_string` — shows `open` returns `nothing` in AppContainer
+- `diag_bytestream_vs_string` — shows `open` returns `nothing`
 
-**Category: AppContainer / nu_glob interaction.**
+**Category: Missing ancestor traverse ACEs on intermediate directories between volume root and sandbox policy paths.**
 
 ### 10. `extract_text` uses mutable loop instead of iterator
 

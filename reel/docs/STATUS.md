@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. 3 test failures diagnosed as AppContainer / nu_glob interaction (ISSUES.md #9c).**
+**Core agent runtime and tooling implemented. 3 test failures root-caused: missing ALL APPLICATION PACKAGES traverse ACEs on intermediate directories (ISSUES.md #9c). Fix confirmed — tests pass when ACEs are granted.**
 
 ## What Is Implemented
 
@@ -12,7 +12,7 @@
 - **CLI binary** (`reel-cli`) — `reel run` (execute agent query with YAML config, stdin, dry-run) and `reel setup` (Windows AppContainer ACL prerequisites). Two-pass YAML config parsing: extract reel `grant` field, pass remainder to flick.
 - **Build infrastructure** (`build.rs`) — Downloads prebuilt NuShell 0.111.0 and ripgrep 14.1.1 binaries for target platform, verifies SHA-256, caches in `target/nu-cache/`. Generates `reel_config.nu` and `reel_env.nu` for nu custom commands.
 - **CI pipeline** — GitHub Actions: fmt, clippy, test, build on Ubuntu, macOS, Windows. Rust 1.93.1 toolchain. Dependencies use pinned git revs (lot, flick).
-- **Test counts** — 145 tests total: 142 pass, 3 fail (AppContainer breaks `nu_glob`-based `ls` and `open` — see ISSUES.md #9c).
+- **Test counts** — 145 tests total: 142 pass, 3 fail (missing ancestor traverse ACEs cause nu_glob to fail inside AppContainer — see ISSUES.md #9c). All 3 pass when ACEs are correctly provisioned.
 
 ## What Is NOT Implemented
 
@@ -66,6 +66,6 @@ Updated lot dependency to rev with directional policy overlap support, fixing 5 
 
 ## Work Candidates
 
-### Fix issue #9c: AppContainer breaks nu_glob and open
+### Fix issue #9c: Missing ancestor traverse ACEs
 
-Root cause identified: AppContainer breaks `ls` (which uses `nu_glob` crate) and `open` (silently returns nothing). The `wax`-based `glob` command and `path exists` work in AppContainer. Options: rewrite `reel read`/`write`/`edit` custom commands to avoid `ls <file>` (use `glob` + `ls <dir> | where`), avoid `open` (use alternative read mechanism), and use `mkdir` with error suppression or pre-check.
+Root cause confirmed: nu_glob walks path components from root, calling `fs::metadata()` at each level. Intermediate directories between the volume root and sandbox policy paths lack ALL APPLICATION PACKAGES traverse ACEs. `reel setup` only passes `cwd` to `grant_appcontainer_prerequisites`, so ancestors of cwd get ACEs but descendants (where the sandbox actually operates) do not. Fix options: (A) pass actual sandbox paths to `grant_appcontainer_prerequisites` in `cmd_setup`, (B) make lot's `grant_acls` also handle ancestors, (C) rewrite nu custom commands to avoid nu_glob.
