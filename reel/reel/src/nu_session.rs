@@ -984,10 +984,13 @@ mod tests {
     }
 
     /// Sandbox test environment with isolated project and cache directories.
+    /// Field order matters: Rust drops fields in declaration order.
+    /// `session` must drop first so the nu process is killed before
+    /// the TempDirs try to delete nu.exe / rg.exe on Windows.
     struct SandboxTestEnv {
+        session: NuSession,
         project: tempfile::TempDir,
         _cache: Option<tempfile::TempDir>,
-        session: NuSession,
     }
 
     fn sandbox_env() -> SandboxTestEnv {
