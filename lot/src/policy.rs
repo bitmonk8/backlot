@@ -126,6 +126,16 @@ fn check_intra_overlap(paths: &[PathBuf], name: &str) -> Result<(), SandboxError
 }
 
 impl SandboxPolicy {
+    /// Returns the union of `read_paths`, `write_paths`, and `exec_paths`.
+    pub fn all_paths(&self) -> Vec<&std::path::Path> {
+        self.read_paths
+            .iter()
+            .chain(self.write_paths.iter())
+            .chain(self.exec_paths.iter())
+            .map(PathBuf::as_path)
+            .collect()
+    }
+
     /// Validate the policy before applying it.
     ///
     /// Returns [`SandboxError::InvalidPolicy`] if any path does not exist, if

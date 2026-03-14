@@ -6,7 +6,7 @@
 
 ## What Exists
 
-- Full public API: `spawn()`, `probe()`, `cleanup_stale()`, `SandboxedChild`, `SandboxPolicy`, `SandboxPolicyBuilder`, `SandboxCommand`, `SandboxStdio`, `PlatformCapabilities`, `SandboxError`, `ResourceLimits`, `grant_appcontainer_prerequisites()`, `appcontainer_prerequisites_met()`, `is_elevated()`
+- Full public API: `spawn()`, `probe()`, `cleanup_stale()`, `SandboxedChild`, `SandboxPolicy`, `SandboxPolicyBuilder`, `SandboxCommand`, `SandboxStdio`, `PlatformCapabilities`, `SandboxError`, `ResourceLimits`, `grant_appcontainer_prerequisites()`, `appcontainer_prerequisites_met()`, `grant_appcontainer_prerequisites_for_policy()`, `appcontainer_prerequisites_met_for_policy()`, `is_elevated()`
 - Policy validation with path canonicalization, overlap detection, resource limit checks
 - `SandboxPolicyBuilder`: auto-canonicalization, overlap deduction, platform default paths (exec, lib, temp)
 - `SandboxCommand::forward_common_env()`: forwards 17 standard env vars from parent
@@ -45,6 +45,8 @@ See `docs/PLAN.md` for the full phased plan with CI testing strategy.
 | `SandboxPolicyBuilder` with auto-canonicalization | Complete |
 | `forward_common_env()` on `SandboxCommand` | Complete |
 | `wait_with_output_timeout()` (tokio feature) | Complete |
+| Policy-based prerequisites API (`grant_appcontainer_prerequisites_for_policy`, `appcontainer_prerequisites_met_for_policy`) | Complete |
+| Spawn-time prerequisite check (`SandboxError::PrerequisitesNotMet`) | Reverted — `has_traverse_ace` false negatives |
 
 ### AppContainer Ancestor Traverse ACEs (Windows)
 
@@ -67,4 +69,4 @@ AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor direct
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (narrowing breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
 - Linux cgroup tests require a delegated subtree writable by the test user.
-- Windows: AppContainer processes need a one-time elevated setup for NUL device access and ancestor directory traverse ACEs (see `grant_appcontainer_prerequisites()` API).
+- Windows: AppContainer processes need a one-time elevated setup for NUL device access and ancestor directory traverse ACEs (see `grant_appcontainer_prerequisites()` or `grant_appcontainer_prerequisites_for_policy()` API). Callers should check prerequisites before spawning; `spawn()` does not auto-check because `has_traverse_ace` produces false negatives on paths accessible via per-user/Everyone ACEs.

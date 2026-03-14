@@ -636,6 +636,26 @@ pub fn appcontainer_prerequisites_met(paths: &[&Path]) -> bool {
     ancestors.iter().all(|a| has_traverse_ace(a))
 }
 
+/// Checks prerequisites for all paths referenced by a [`SandboxPolicy`].
+/// Delegates to [`appcontainer_prerequisites_met`] with the union of
+/// `read_paths`, `write_paths`, and `exec_paths`.
+pub fn appcontainer_prerequisites_met_for_policy(
+    policy: &crate::policy::SandboxPolicy,
+) -> bool {
+    let paths = policy.all_paths();
+    appcontainer_prerequisites_met(&paths)
+}
+
+/// Grants AppContainer prerequisites for all paths referenced by a
+/// [`SandboxPolicy`]. Delegates to [`grant_appcontainer_prerequisites`]
+/// with the union of `read_paths`, `write_paths`, and `exec_paths`.
+pub fn grant_appcontainer_prerequisites_for_policy(
+    policy: &crate::policy::SandboxPolicy,
+) -> crate::Result<()> {
+    let paths = policy.all_paths();
+    grant_appcontainer_prerequisites(&paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

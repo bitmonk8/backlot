@@ -69,3 +69,45 @@ Multiple functions manage `HANDLE`, `PSID`, and `PSECURITY_DESCRIPTOR` with manu
 
 **Category:** Simplification
 **Files:** `src/windows/nul_device.rs`, `src/windows/appcontainer.rs`
+
+## `SandboxPolicy::all_paths()` has no unit test
+
+Trivial method but untested directly. Tested transitively through prerequisite functions.
+
+**Category:** Testing
+**File:** `src/policy.rs`
+
+## No test positively asserts `PrerequisitesNotMet` is produced
+
+The `PrerequisitesNotMet` variant exists in the public API but `spawn()` no longer produces it (reverted due to `has_traverse_ace` false negatives). No test constructs or matches it. If the spawn-time check is re-enabled with a corrected ACE check, a test should assert the error is returned.
+
+**Category:** Testing
+**Files:** `src/error.rs`
+
+## `SandboxPolicy::all_paths()` naming
+
+`all_paths()` could become incomplete if new path categories are added. `allowed_paths()` would be more precise.
+
+**Category:** Naming
+**File:** `src/policy.rs`
+
+## Non-Windows prerequisite stubs inline in `lib.rs`
+
+`grant_appcontainer_prerequisites_for_policy` and `appcontainer_prerequisites_met_for_policy` stubs are inline in `lib.rs` rather than following the delegation pattern used by `probe()`, `spawn()`, `cleanup_stale()`.
+
+**Category:** Placement
+**File:** `src/lib.rs`
+
+## `_for_policy` wrappers placement in `nul_device.rs`
+
+`appcontainer_prerequisites_met_for_policy` and `grant_appcontainer_prerequisites_for_policy` couple `nul_device.rs` to `SandboxPolicy`. These orchestration wrappers belong in `appcontainer.rs` which owns the AppContainer lifecycle.
+
+**Category:** Placement
+**File:** `src/windows/nul_device.rs`
+
+## `PrerequisitesNotMet` payload could be simplified
+
+The structured fields `missing_paths` and `nul_device_missing` are never inspected by any match arm. A simpler `PrerequisitesNotMet(String)` with a pre-formatted message would reduce complexity.
+
+**Category:** Simplification
+**File:** `src/error.rs`

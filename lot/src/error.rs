@@ -23,6 +23,16 @@ pub enum SandboxError {
     #[error("child process timed out after {0:?}")]
     Timeout(std::time::Duration),
 
+    /// AppContainer prerequisites (ancestor traverse ACEs and/or NUL device
+    /// ACE) are not in place for the paths referenced by the policy.
+    #[error("AppContainer prerequisites not met: {missing_paths:?}, nul_device_missing={nul_device_missing}")]
+    PrerequisitesNotMet {
+        /// Ancestor directories missing traverse ACEs.
+        missing_paths: Vec<std::path::PathBuf>,
+        /// Whether the NUL device ACE is missing.
+        nul_device_missing: bool,
+    },
+
     /// An underlying I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),

@@ -118,8 +118,24 @@ pub fn cleanup_stale() -> Result<()> {
 
 #[cfg(target_os = "windows")]
 pub use windows::nul_device::{
-    appcontainer_prerequisites_met, grant_appcontainer_prerequisites, is_elevated,
+    appcontainer_prerequisites_met, appcontainer_prerequisites_met_for_policy,
+    grant_appcontainer_prerequisites, grant_appcontainer_prerequisites_for_policy, is_elevated,
 };
+
+/// Grants AppContainer prerequisites for all paths in the policy.
+/// No-op on non-Windows platforms.
+#[cfg(not(target_os = "windows"))]
+pub fn grant_appcontainer_prerequisites_for_policy(_policy: &SandboxPolicy) -> Result<()> {
+    Ok(())
+}
+
+/// Checks whether prerequisites are met for all paths in the policy.
+/// Always returns `true` on non-Windows platforms.
+#[cfg(not(target_os = "windows"))]
+#[allow(clippy::missing_const_for_fn)]
+pub fn appcontainer_prerequisites_met_for_policy(_policy: &SandboxPolicy) -> bool {
+    true
+}
 
 /// A running sandboxed process.
 ///
