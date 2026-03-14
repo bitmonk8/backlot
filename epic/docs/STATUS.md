@@ -21,9 +21,9 @@
 - Verification & fix loops — leaf fix loop with model escalation (Haiku→Sonnet→Opus, 3 retries per tier), branch fix loop (3 Sonnet rounds + 1 Opus round for root), scope circuit breaker (3x magnitude estimate via `git diff --numstat`).
 - Recovery — Opus recovery assessment, incremental vs full re-decomposition, recovery round budgets inherited to prevent exponential growth.
 - Event system — 19 event variants driving TUI and JSONL logging.
-- CI pipeline — GitHub Actions (fmt, clippy, test, build), Rust 1.93.1 toolchain
+- CI pipeline — GitHub Actions (fmt, clippy, test, build) on ubuntu, macOS, Windows. Rust 1.93.1 toolchain. All epic jobs green on all platforms. Dependencies use pinned git revs (lot, reel, flick).
 - Testability infrastructure — `ClientFactory`/`ToolExecutor` traits (reel, internal), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
-- Reel test suite — 142 tests: agent tool loop tests (mock providers, timeout, max rounds), 19 nu session unit tests (protocol parsing, session state, generation invalidation, config resolution), 23 nu session integration tests (spawn lifecycle, custom command availability, timeout handling, grant change respawn, env filtering, error handling, sandbox policy verification). Epic retains 215 tests (orchestrator, state, TUI, config, prompts, init).
+- **Test counts** — Epic: 223 tests (all pass). Reel: 142 pass, 3 fail (AppContainer sandbox access issues in `reel read`/`write`/`edit` custom command tests — see `reel/docs/ISSUES.md` #9c).
 
 ## What Is NOT Implemented
 
@@ -55,6 +55,10 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 ### Reel Extraction
 
 Agent session layer extracted into standalone `reel` workspace at `../reel/` (library crate at `../reel/reel`). Epic is now a thin consumer. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the original spec.
+
+### CI Pipeline Fix
+
+Replaced local path dependencies (`../lot`, `../reel/reel`) with pinned git rev dependencies so CI builds work in isolation on all platforms. Added `.gitattributes` with `eol=lf` to eliminate cross-platform `rustfmt` divergence. Fixed clippy lints for newer toolchain. Fixed `reel_config.nu` compatibility with nu 0.111.0 (`str replace --string` flag removed). Fixed lot sandbox policy to allow write-path children under read-path parents (needed for session temp dirs inside read-only project roots).
 
 ## Work Candidates
 
