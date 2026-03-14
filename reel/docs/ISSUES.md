@@ -76,23 +76,88 @@ Fixed by lot rev `f131ad9` which allows write-path children under read-path pare
 
 Fixed: removed obsolete `--string` flag from `reel_config.nu` for nu 0.111.0.
 
-#### 9c. Nu custom commands reel read/write/edit fail inside AppContainer (3 tests)
+#### 9c. Nu built-in file commands fail inside AppContainer sandbox (3 tests)
 
-`reel read`, `reel write`, `reel edit` fail when executed inside the AppContainer sandbox. The sandbox itself sets up correctly — 19 other sandbox tests pass, including `reel glob` and `reel grep` which use the same `sandbox_env()` setup.
+**Root cause identified: nu 0.111.0 built-in commands `ls`, `open`, and `mkdir` fail when the nu process is spawned inside a Windows AppContainer via `lot::spawn`. The same commands work when nu is spawned directly via `std::process::Command` (no AppContainer). Nu's `ls` uses the `nu_glob` crate for file matching; nu's `glob` command uses the `wax` crate. Under AppContainer, `nu_glob` fails while `wax` succeeds for identical patterns. The `open` command silently returns `nothing` instead of file content. The exact Win32 API calls that AppContainer restricts have not been identified.**
 
-The root cause is **not** missing ACEs or ancestor traversal. This was verified by:
-- Moving the test sandbox dir from a project sibling (`reel-sandbox-test/`) to inside the project (`reel/target/sandbox-test/`) — same failures.
-- Confirming that `lot::spawn` succeeds and nu starts and executes commands — simpler nu operations work fine in the same sandbox.
-- Noting that `reel glob` (which uses `cd` + `glob`) and `reel grep` (which shells out to `rg`) pass in the same sandbox environment.
+This is NOT an issue in nu's MCP mode itself. When nu `--mcp` is spawned directly via `std::process::Command` (no AppContainer), all commands work correctly.
 
-The failures are in nu's built-in file commands (`ls`, `open`, `save`) when invoked from within the custom commands. The exact errors:
-- `integration_custom_command_reel_read` — `ls $full` fails: "Pattern, file or folder not found"
-- `integration_custom_command_reel_write` — `mkdir $parent` fails: "Already exists"
-- `integration_custom_command_reel_edit` — `open $full --raw` returns `nothing` instead of file contents, causing downstream `split row` to fail on type mismatch
+##### Verified behavior inside AppContainer (lot::spawn)
 
-Root cause not yet identified. Investigation should focus on how nu's `ls`, `open`, and `save` resolve paths inside AppContainer vs how `glob` and external commands do it.
+**Commands that FAIL:**
+- `ls` (no args) — fails: "No matches found for Expand(`*`)"
+- `ls <file-path>` (absolute or relative) — fails: "No matches found for DoNotExpand(`...`)"
+- `ls *.txt`, `ls **/*.txt` — fails: "No matches found"
+- `open <file> --raw` — returns `nothing` (null). No error. `describe` reports type `nothing`.
+- `open <file>` (no --raw, any extension: .txt, .json, .csv) — returns `null` or `[]`
+- `open <file> --raw | decode utf-8` — fails: "Pipeline empty" (nothing to decode)
+- `open <file> --raw | bytes length` — fails: "Pipeline empty"
+- `mkdir <existing-dir>` — fails: "Already exists"
 
-**Category: Nu commands / Sandbox.**
+**Commands that WORK inside AppContainer:**
+- `ls <dir-path>` — lists directory contents
+- `ls .` — lists cwd contents
+- `glob '*'`, `glob <exact-path>` — finds files (uses `wax` crate, not `nu_glob`)
+- `path exists` — returns `true` for existing files
+- `path type` — returns `"file"` correctly
+- `path expand` — returns correct path
+- `save --force <file>` — writes file content successfully
+- `pwd`, `cd` — work correctly
+- External commands via `^` — work (e.g., `rg` via `REEL_RG_PATH`)
+
+**All of the above work correctly when nu is spawned without AppContainer** (tested via `std::process::Command` with identical MCP protocol).
+
+##### Two distinct failure modes
+
+1. **`ls` glob resolution fails (`nu_glob` crate)**: Nu's `ls` command uses the `nu_glob` crate for pattern matching (even for literal filenames). The `glob` command uses the `wax` crate. Under AppContainer, `nu_glob`'s file enumeration fails while `wax`'s succeeds for the same patterns. The exact Win32 API difference is not yet identified. `ls <dir>` and `ls .` work — they use a different code path than `ls <file>` or `ls <glob-pattern>`.
+
+2. **`open` returns `nothing`**: The `open` command finds the file (no "not found" error) but produces no value into the pipeline. `save` (file write) works, and `path exists` confirms the file exists — so ACLs allow the file to be found, but `open` fails silently. The exact mechanism is not yet identified — no errors appear on stderr.
+
+##### Evidence
+
+- **Without AppContainer** (nu spawned via `std::process::Command`): `open --raw | describe` returns `"byte stream"`, `ls file.txt` shows metadata, `mkdir existing` succeeds silently, `let x = (open file --raw); $x == null` returns `false`. All commands work.
+- **With AppContainer** (nu spawned via `lot::spawn`): Same commands fail as described above. `open` on nonexistent file errors with "File not found"; `open` on existing file returns `nothing`. `let x = (open file --raw); $x == null` returns `true`. Files created by `save` in the same session are also unreadable by `open`.
+- **`ls <dir> | where name ends-with 'test.txt'`** works in AppContainer — the file IS visible in directory listings, just not through `nu_glob` pattern matching.
+- No errors on nu's stderr for the `open` case — it silently returns nothing.
+- The env var `$env.TEMP` inside AppContainer shows `C:\Users\...\Packages\lot-...\AC\Temp` — Windows redirects TEMP for AppContainer processes at the OS level, regardless of explicit env var overrides.
+
+##### Why the earlier diagnosis was wrong
+
+Early investigation used `isolated_session()` / `tmp_project()` as a "no sandbox" control, but `NuSession` always spawns via `lot::spawn` with a `SandboxPolicy`. There is no unsandboxed mode in `NuSession`. The correct control test was spawning nu directly via `std::process::Command` without lot.
+
+##### These tests did not exist in epic
+
+The 3 failing tests (`integration_custom_command_reel_read/write/edit`) were created during the reel extraction. Epic has no equivalent tests. Epic's STATUS.md references reel's failures.
+
+##### No known upstream issue
+
+Searched nushell GitHub issues (2026-03-14) — no reports of `nu_glob` failing inside AppContainer or `open` returning nothing under sandboxed processes.
+
+##### Affected custom commands
+
+- `reel read` — uses `ls $full` (fails via `nu_glob`) and `open $full --raw` (returns nothing)
+- `reel write` — uses `mkdir $parent` (fails on existing dir)
+- `reel edit` — uses `open $full --raw` (returns nothing), causing downstream `split row` type error
+
+##### Unaffected custom commands
+
+- `reel glob` — uses `cd $dir; glob $pattern` (`wax` crate works in AppContainer)
+- `reel grep` — shells out to external `rg` via `^$rg_cmd` (external commands work)
+
+##### Diagnostic tests
+
+Diagnostic tests are in `reel/src/nu_session.rs`, prefixed with `diag_`. Run with:
+```
+cargo test -p reel diag_ -- --nocapture
+```
+
+Key tests:
+- `diag_nu_mcp_without_lot` — proves all commands work without AppContainer
+- `diag_raw_ls_in_sandbox` — shows `ls <file>` fails but `ls <dir>` works in AppContainer
+- `diag_glob_vs_ls_appcontainer` — shows `glob '*'` works but `ls` (same pattern) fails
+- `diag_bytestream_vs_string` — shows `open` returns `nothing` in AppContainer
+
+**Category: AppContainer / nu_glob interaction.**
 
 ### 10. `extract_text` uses mutable loop instead of iterator
 

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. Diagnosing 3 failing nu custom command tests (ISSUES.md #9c).**
+**Core agent runtime and tooling implemented. 3 test failures diagnosed as AppContainer / nu_glob interaction (ISSUES.md #9c).**
 
 ## What Is Implemented
 
@@ -12,7 +12,7 @@
 - **CLI binary** (`reel-cli`) — `reel run` (execute agent query with YAML config, stdin, dry-run) and `reel setup` (Windows AppContainer ACL prerequisites). Two-pass YAML config parsing: extract reel `grant` field, pass remainder to flick.
 - **Build infrastructure** (`build.rs`) — Downloads prebuilt NuShell 0.111.0 and ripgrep 14.1.1 binaries for target platform, verifies SHA-256, caches in `target/nu-cache/`. Generates `reel_config.nu` and `reel_env.nu` for nu custom commands.
 - **CI pipeline** — GitHub Actions: fmt, clippy, test, build on Ubuntu, macOS, Windows. Rust 1.93.1 toolchain. Dependencies use pinned git revs (lot, flick).
-- **Test counts** — 145 tests total: 142 pass, 3 fail (AppContainer sandbox access issues in `reel read`/`write`/`edit` custom command tests — see ISSUES.md #9c).
+- **Test counts** — 145 tests total: 142 pass, 3 fail (AppContainer breaks `nu_glob`-based `ls` and `open` — see ISSUES.md #9c).
 
 ## What Is NOT Implemented
 
@@ -66,6 +66,6 @@ Updated lot dependency to rev with directional policy overlap support, fixing 5 
 
 ## Work Candidates
 
-### Diagnose issue #9c: reel read/write/edit fail inside AppContainer
+### Fix issue #9c: AppContainer breaks nu_glob and open
 
-`reel read`, `reel write`, `reel edit` nu custom commands fail when executed inside the AppContainer sandbox. `reel glob` and `reel grep` pass in the same environment. The failures are in nu's built-in file commands (`ls`, `open`, `save`) resolving paths inside AppContainer. Root cause not yet identified. See ISSUES.md #9c for details and eliminated hypotheses.
+Root cause identified: AppContainer breaks `ls` (which uses `nu_glob` crate) and `open` (silently returns nothing). The `wax`-based `glob` command and `path exists` work in AppContainer. Options: rewrite `reel read`/`write`/`edit` custom commands to avoid `ls <file>` (use `glob` + `ls <dir> | where`), avoid `open` (use alternative read mechanism), and use `mkdir` with error suppression or pre-check.

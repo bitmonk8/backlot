@@ -1193,6 +1193,1133 @@ mod tests {
         assert_eq!(content, "new value here");
     }
 
+    // === DIAGNOSTIC TESTS: probing raw nu commands inside AppContainer ===
+
+    /// Test raw `ls` on a file inside sandbox — does it fail like `reel read`?
+    #[tokio::test]
+    async fn diag_raw_ls_in_sandbox() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let test_file = tmp.path().join("test.txt");
+        std::fs::write(&test_file, "hello").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // Test 1: raw ls with path
+        let cmd = format!("ls '{}' | to json", nu_path(&test_file));
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG raw ls result: {:?}", result);
+
+        // Test 2: ls via path expand (same as reel read does)
+        let cmd2 = format!(
+            "let full = ('{}' | path expand); ls $full | to json",
+            nu_path(&test_file)
+        );
+        let result2 = try_eval(session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-via-path-expand result: {:?}", result2);
+
+        // Test 3: just path expand alone — what does it return?
+        let cmd3 = format!("'{}' | path expand", nu_path(&test_file));
+        let result3 = try_eval(session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG path-expand result: {:?}", result3);
+
+        // Test 4: ls the directory instead of the file
+        let cmd4 = format!("ls '{}' | to json", nu_path(tmp.path()));
+        let result4 = try_eval(session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-dir result: {:?}", result4);
+
+        // Test 5: open raw (same as reel edit does)
+        let cmd5 = format!("open '{}' --raw", nu_path(&test_file));
+        let result5 = try_eval(session, &cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-raw result: {:?}", result5);
+
+        // Test 6: open with path expand (what reel edit actually does)
+        let cmd6 = format!(
+            "let full = ('{}' | path expand); open $full --raw",
+            nu_path(&test_file)
+        );
+        let result6 = try_eval(session, &cmd6, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-via-path-expand result: {:?}", result6);
+    }
+
+    /// Test what path expand actually produces inside the sandbox
+    #[tokio::test]
+    async fn diag_path_expand_in_sandbox() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let test_file = tmp.path().join("test.txt");
+        std::fs::write(&test_file, "hello").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // What does nu see as the path?
+        let cmd = format!("'{}' | path expand | to json", nu_path(&test_file));
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG path-expand-json: {:?}", result);
+
+        // What is pwd inside the sandbox?
+        let cmd2 = "pwd";
+        let result2 = try_eval(session, cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG pwd: {:?}", result2);
+
+        // Does `ls` work at all with a simple relative file?
+        let cmd3 = "ls test.txt | to json";
+        let result3 = try_eval(session, cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-relative: {:?}", result3);
+
+        // Does `open` work with a relative file?
+        let cmd4 = "open test.txt --raw";
+        let result4 = try_eval(session, cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-relative: {:?}", result4);
+    }
+
+    /// Test mkdir behavior (for reel write failure: "Already exists")
+    #[tokio::test]
+    async fn diag_mkdir_in_sandbox() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let test_file = tmp.path().join("written.txt");
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // What does path dirname return?
+        let cmd = format!(
+            "let full = ('{}' | path expand); $full | path dirname",
+            nu_path(&test_file)
+        );
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG path-dirname: {:?}", result);
+
+        // Does mkdir fail on an existing dir?
+        let cmd2 = format!("mkdir '{}'", nu_path(tmp.path()));
+        let result2 = try_eval(session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG mkdir-existing: {:?}", result2);
+
+        // Does mkdir via path expand fail?
+        let cmd3 = format!(
+            "let full = ('{}' | path expand); let parent = ($full | path dirname); mkdir $parent",
+            nu_path(&test_file)
+        );
+        let result3 = try_eval(session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG mkdir-via-expand: {:?}", result3);
+
+        // What about save directly without mkdir?
+        let cmd4 = format!("'hello' | save --force '{}'", nu_path(&test_file));
+        let result4 = try_eval(session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG save-direct: {:?}", result4);
+    }
+
+    /// Same commands as diag_raw_ls_in_sandbox but WITHOUT AppContainer.
+    /// Uses tmp_project() instead of sandbox_env() to get a non-sandboxed session.
+    #[tokio::test]
+    async fn diag_raw_ls_no_sandbox() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        let test_file = tmp.path().join("test.txt");
+        std::fs::write(&test_file, "hello").unwrap();
+        let grant = ToolGrant::NU;  // no WRITE, but doesn't matter for ls/open
+
+        // ls file
+        let cmd = format!("ls '{}' | to json", nu_path(&test_file));
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG-NOSANDBOX ls-file: {:?}", result);
+
+        // ls dir
+        let cmd2 = format!("ls '{}' | to json", nu_path(tmp.path()));
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG-NOSANDBOX ls-dir: {:?}", result2);
+
+        // open raw
+        let cmd3 = format!("open '{}' --raw", nu_path(&test_file));
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG-NOSANDBOX open-raw: {:?}", result3);
+
+        // mkdir existing dir
+        let cmd4 = format!("mkdir '{}'", nu_path(tmp.path()));
+        let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG-NOSANDBOX mkdir-existing: {:?}", result4);
+
+        // ls relative
+        let cmd5 = "ls test.txt | to json";
+        let result5 = try_eval(&session, cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG-NOSANDBOX ls-relative: {:?}", result5);
+    }
+
+    /// Test using a file in a KNOWN NON-TEMP directory (the project root itself)
+    /// to determine if the issue is temp-dir-path related.
+    #[tokio::test]
+    async fn diag_ls_on_known_file() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        // Use a file in the cargo manifest dir (known to exist, not temp-based)
+        let known_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let grant = ToolGrant::NU;
+
+        let cmd = format!("ls '{}' | to json", nu_path(&known_file));
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-known-file: {:?}", result);
+
+        let cmd2 = format!("open '{}' --raw | str substring 0..50", nu_path(&known_file));
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-known-file: {:?}", result2);
+    }
+
+    /// Test the same file created BEFORE nu starts vs AFTER (via nu itself).
+    /// This checks if the issue is about file visibility at nu startup time.
+    #[tokio::test]
+    async fn diag_file_created_by_nu() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // First, create a file VIA nu
+        let test_file = tmp.path().join("nu_created.txt");
+        let cmd = format!("'hello nu' | save '{}' --force", nu_path(&test_file));
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG save-by-nu: {:?}", result);
+
+        // Now try to ls and open the file nu just created
+        let cmd2 = format!("ls '{}' | to json", nu_path(&test_file));
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-nu-created: {:?}", result2);
+
+        let cmd3 = format!("open '{}' --raw", nu_path(&test_file));
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-nu-created: {:?}", result3);
+    }
+
+    /// Probe MCP-specific behavior: is the issue in how nu MCP processes
+    /// file operations vs. how non-MCP nu does?
+    #[tokio::test]
+    async fn diag_mcp_file_ops() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        let test_file = tmp.path().join("probe.txt");
+        std::fs::write(&test_file, "probe content").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // Does glob find the file?
+        let cmd = format!("glob '{}' | to json", nu_path(&test_file));
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG glob-exact-file: {:?}", result);
+
+        // Does ls with glob pattern work? (*.txt instead of exact filename)
+        let cmd2 = format!("ls (glob '{}' | first)", nu_path(&test_file));
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-via-glob: {:?}", result2);
+
+        // ls *.txt in the directory
+        let cmd3 = format!("cd '{}'; ls *.txt | to json", nu_path(tmp.path()));
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-glob-pattern: {:?}", result3);
+
+        // Does `^ls` (external ls) work?
+        // Note: on Windows this would be `cmd /c dir` — skip if not available
+        // Try powershell Test-Path
+        let cmd4 = format!(
+            "^powershell -c \"Test-Path '{}'\"",
+            test_file.display()
+        );
+        let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG powershell-test-path: {:?}", result4);
+
+        // Does `path exists` work?
+        let cmd5 = format!("'{}' | path exists", nu_path(&test_file));
+        let result5 = try_eval(&session, &cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG path-exists: {:?}", result5);
+
+        // Does `^cat` (external) work?
+        let cmd6 = format!("^cmd /c type '{}'", test_file.display());
+        let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
+        eprintln!("DIAG external-cat: {:?}", result6);
+    }
+
+    /// Probe whether the issue is in MCP response serialization vs command execution
+    #[tokio::test]
+    async fn diag_mcp_serialization() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        let test_file = tmp.path().join("probe.txt");
+        std::fs::write(&test_file, "probe content 123").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // Read file using alternative methods that don't use `open`:
+        // 1. Using `cat` — does nu have this?
+        // 2. Using sys commands
+        // 3. Try `open` and pipe through type inspection
+
+        // What type does `open --raw` return?
+        let cmd = format!("open '{}' --raw | describe", nu_path(&test_file));
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-describe: {:?}", result);
+
+        // Try piping through `to text`
+        let cmd2 = format!("open '{}' --raw | to text", nu_path(&test_file));
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-to-text: {:?}", result2);
+
+        // Try `open` without --raw
+        let cmd3 = format!("open '{}'", nu_path(&test_file));
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-no-raw: {:?}", result3);
+
+        // Alternative file read: use `^powershell Get-Content` or just test what `open` really returns
+        // Actually: can we read the file line by line?
+        let cmd4 = format!("open '{}' --raw | lines | length", nu_path(&test_file));
+        let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-lines-length: {:?}", result4);
+
+        // Use `open --raw | bytes length` to see if binary data is there
+        let cmd5 = format!("open '{}' --raw | bytes length", nu_path(&test_file));
+        let result5 = try_eval(&session, &cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-bytes-length: {:?}", result5);
+
+        // Check if `open` produces binary that MCP can't serialize
+        let cmd6 = format!("open '{}' --raw | encode utf-8 | decode utf-8", nu_path(&test_file));
+        let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-encode-decode: {:?}", result6);
+    }
+
+    /// Check what MCP tools nu exposes and probe filesystem access patterns
+    #[tokio::test]
+    async fn diag_mcp_tools_list() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        let test_file = tmp.path().join("probe.txt");
+        std::fs::write(&test_file, "hello mcp").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // First, spawn the session to get the nu process running
+        try_spawn(&session, tmp.path(), grant).await;
+
+        // Send a tools/list request to see what tools nu MCP exposes
+        // We need to use the raw RPC — let me use evaluate to test instead.
+
+        // Let's try: does `do { open $file }` work differently?
+        let cmd = format!("do {{ open '{}' --raw }}", nu_path(&test_file));
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG do-block-open: {:?}", result);
+
+        // Let's test: what does `open` see when we give it the canonical path?
+        let cmd2 = format!(
+            "let p = ('{}' | path expand); $p | path exists",
+            nu_path(&test_file)
+        );
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG expand-then-exists: {:?}", result2);
+
+        // Check if the issue is `open` treating the result as a URL or something
+        // Does `open --raw` on a directory path work?
+        let cmd3 = format!("open '{}' --raw", nu_path(tmp.path()));
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-dir: {:?}", result3);
+
+        // Try reading with `bytes` and `encode` — maybe `open` returns binary
+        // that MCP drops silently
+        // Actually, let's try to use a different approach entirely:
+        // Read the file using sys/process commands
+        let cmd4 = "sys host | to json";
+        let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG sys-host: {:?}", result4);
+
+        // Most importantly: can we verify if open even TRIES to access the file?
+        // Let's try to `open` a definitely-nonexistent file and compare the error
+        let cmd5 = "open '/definitely/nonexistent/file.txt' --raw";
+        let result5 = try_eval(&session, &cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-nonexistent: {:?}", result5);
+
+        // Now compare: open an existing file (should return content, but returns nothing)
+        let cmd6 = format!("open '{}' --raw", nu_path(&test_file));
+        let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-existing: {:?}", result6);
+    }
+
+    /// Test if the issue is byte-stream vs string serialization in MCP
+    #[tokio::test]
+    async fn diag_bytestream_vs_string() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        let test_file = tmp.path().join("probe.txt");
+        std::fs::write(&test_file, "hello mcp content").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // What does nu return for inline string vs open?
+        // 1. Inline string (should work)
+        let cmd = "'inline string test'";
+        let result = try_eval(&session, cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG inline-string: {:?}", result);
+
+        // 2. Byte literal
+        let cmd2 = "0x[68 65 6c 6c 6f]";  // "hello" in hex
+        let result2 = try_eval(&session, cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG byte-literal: {:?}", result2);
+
+        // 3. open --raw returns byte stream; can we convert to string first?
+        let cmd3 = format!(
+            "open '{}' --raw | into string",
+            nu_path(&test_file)
+        );
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-into-string: {:?}", result3);
+
+        // 4. What about reading file content as lines (not raw)?
+        let cmd4 = format!("open '{}' | to text", nu_path(&test_file));
+        let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-text-mode: {:?}", result4);
+
+        // 5. Create a .json file — open without --raw should parse it
+        let json_file = tmp.path().join("data.json");
+        std::fs::write(&json_file, r#"{"key": "value"}"#).unwrap();
+        let cmd5 = format!("open '{}' | to json", nu_path(&json_file));
+        let result5 = try_eval(&session, &cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-json: {:?}", result5);
+
+        // 6. Create a .csv file
+        let csv_file = tmp.path().join("data.csv");
+        std::fs::write(&csv_file, "name,age\nalice,30\nbob,25\n").unwrap();
+        let cmd6 = format!("open '{}' | to json", nu_path(&csv_file));
+        let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-csv: {:?}", result6);
+
+        // 7. What about a .nu file? (text extension that nu should handle)
+        let nu_file = tmp.path().join("test.nu");
+        std::fs::write(&nu_file, "echo hello").unwrap();
+        let cmd7 = format!("open '{}' --raw | into string", nu_path(&nu_file));
+        let result7 = try_eval(&session, &cmd7, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-nu-file: {:?}", result7);
+    }
+
+    /// Deep probe: is open truly broken or is something about MCP evaluate
+    /// causing the command to not actually run?
+    #[tokio::test]
+    async fn diag_open_vs_alternatives() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        let test_file = tmp.path().join("probe.txt");
+        std::fs::write(&test_file, "hello mcp 12345").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // Alternative 1: use `from raw` or read via glob + open
+        // Actually, use the `http` command... no. Let's try:
+
+        // Does `open` work if we force the type?
+        let cmd = format!("open '{}' --raw | collect", nu_path(&test_file));
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-collect: {:?}", result);
+
+        // Try `cat` alias — does nu have it?
+        // Actually, try: print the file content
+        let cmd2 = format!("let content = (open '{}' --raw); print $content; 'done'", nu_path(&test_file));
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-print: {:?}", result2);
+
+        // Try a completely different approach: read bytes directly
+        let cmd3 = format!("open '{}' --raw | bytes length", nu_path(&test_file));
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-raw-bytes-len: {:?}", result3);
+
+        // Does `stor` or `stor open` exist? Let's try something else:
+        // Read via shell expansion
+        let cmd4 = format!("let p = '{}'; ^type $p", nu_path(&test_file).replace('/', "\\"));
+        let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG type-command: {:?}", result4);
+
+        // Try: echo the result of open to see if MCP is eating it
+        let cmd5 = format!("let x = (open '{}' --raw); $x == null", nu_path(&test_file));
+        let result5 = try_eval(&session, &cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-eq-null: {:?}", result5);
+
+        // Is the byte stream being consumed by MCP before the pipeline?
+        // Test: store in variable, then check type
+        let cmd6 = format!("let x = (open '{}' --raw); $x | describe", nu_path(&test_file));
+        let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-var-describe: {:?}", result6);
+    }
+
+    /// Probe ls behavior more carefully
+    #[tokio::test]
+    async fn diag_ls_behavior() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        std::fs::write(tmp.path().join("a.txt"), "aaa").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "bbb").unwrap();
+        std::fs::create_dir_all(tmp.path().join("subdir")).unwrap();
+        std::fs::write(tmp.path().join("subdir").join("c.txt"), "ccc").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // ls with no args (list cwd)
+        let cmd = "ls | to json";
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-no-args: {:?}", result);
+
+        // ls *.txt (glob pattern)
+        let cmd2 = "ls *.txt | to json";
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-glob-star: {:?}", result2);
+
+        // ls with ** recursive
+        let cmd3 = "ls **/*.txt | to json";
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-glob-recursive: {:?}", result3);
+
+        // ls on subdir
+        let cmd4 = "ls subdir/ | to json";
+        let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-subdir: {:?}", result4);
+
+        // ls on specific file via relative path
+        let cmd5 = "ls a.txt | to json";
+        let result5 = try_eval(&session, &cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-specific-file: {:?}", result5);
+    }
+
+    /// Test if the issue is MCP-specific or also happens with `nu -c` via pipe
+    /// Also test the `ls` quirk: why can it list dir contents but not glob?
+    #[tokio::test]
+    async fn diag_ls_dir_vs_glob() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        std::fs::write(tmp.path().join("test.txt"), "content").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // ls with absolute dir path (should work)
+        let cmd = format!("ls '{}' | length", nu_path(tmp.path()));
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-absdir-length: {:?}", result);
+
+        // What about `ls .` ?
+        let cmd2 = "ls . | length";
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-dot-length: {:?}", result2);
+
+        // What about `ls ./` ?
+        let cmd3 = "ls ./ | length";
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-dotslash-length: {:?}", result3);
+
+        // Dir listing works — can we use it to find files?
+        let cmd4 = format!("ls '{}' | where name ends-with 'test.txt' | to json", nu_path(tmp.path()));
+        let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-dir-where: {:?}", result4);
+
+        // Check: does `ls` list the .reel directory? Is the .reel directory the ONLY thing
+        // it sees, or does it also see test.txt?
+        let cmd5 = format!("ls '{}' | get name | to json", nu_path(tmp.path()));
+        let result5 = try_eval(&session, &cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-dir-names: {:?}", result5);
+
+        // Test: ls on dir WITHOUT .reel subdir
+        let sub = tmp.path().join("clean");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("x.txt"), "xxx").unwrap();
+        let cmd6 = format!("ls '{}' | get name | to json", nu_path(&sub));
+        let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-clean-dir: {:?}", result6);
+    }
+
+    /// Final probe: why does `ls` (no args) fail but `ls .` works?
+    /// And why does `open` return nothing?
+    #[tokio::test]
+    async fn diag_final_probe() {
+        skip_no_nu!();
+        let tmp = tmp_project();
+        let (session, _cache) = isolated_session();
+        std::fs::write(tmp.path().join("test.txt"), "final probe content").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // Verify: ls (no args) fails
+        let cmd = "ls | length";
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-noargs: {:?}", result);
+
+        // ls . works
+        let cmd2 = "ls . | length";
+        let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
+        eprintln!("DIAG ls-dot: {:?}", result2);
+
+        // Nu glob (the command) works for finding files
+        let cmd3 = "glob '*' | length";
+        let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
+        eprintln!("DIAG glob-star: {:?}", result3);
+
+        // The critical question for `open`: can we read file content AT ALL in MCP?
+        // Try: read file as bytes, then convert
+        // Actually: let's try the `^type` windows command (it's `type` in cmd.exe)
+        // Or better: just verify that `open` is the problem, not MCP serialization
+        // by trying a different read approach
+
+        // Approach: write content, glob the file, then try `open`
+        let cmd4 = "'new content' | save 'written_in_mcp.txt' --force; glob 'written_in_mcp.txt'";
+        let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
+        eprintln!("DIAG write-then-glob: {:?}", result4);
+
+        let cmd5 = "open 'written_in_mcp.txt' --raw | describe";
+        let result5 = try_eval(&session, &cmd5, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-written-describe: {:?}", result5);
+
+        // Try: does `scope modules` or any nu introspection work?
+        // Actually, the most useful test: use nu's built-in `http get` on a file:// URL
+        // Or: try `source` command
+        // Actually: is the issue in how nu MCP handles byte streams?
+        // The MCP evaluate tool likely uses `Value::to_string()` or similar.
+        // Let me check if nu has a `str` command that can read files
+
+        // Try: use `lines` command directly (it should work differently from `open`)
+        // Actually `lines` needs input. Let's try:
+        let cmd6 = format!("'{}' | path expand | open $in --raw | describe", nu_path(&tmp.path().join("test.txt")));
+        let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
+        eprintln!("DIAG pipe-open: {:?}", result6);
+
+        // Test: what if we use `open` with explicit type parsing?
+        let cmd7 = "open 'test.txt' --raw | decode utf-8";
+        let result7 = try_eval(&session, &cmd7, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-decode: {:?}", result7);
+
+        // Hypothesis: MCP evaluate converts ByteStream to nothing during serialization.
+        // If true, `open` works but the result gets lost at the MCP boundary.
+        // Test: convert to string inside nu before MCP sees it
+        let cmd8 = "(open 'test.txt' --raw | decode utf-8)";
+        let result8 = try_eval(&session, &cmd8, 30, tmp.path(), grant).await;
+        eprintln!("DIAG open-decode-parens: {:?}", result8);
+    }
+
+    /// Test nu --mcp WITHOUT lot sandbox — spawn nu directly via std::process::Command.
+    /// This determines whether the failures are caused by lot/AppContainer or by nu --mcp itself.
+    #[tokio::test]
+    async fn diag_nu_mcp_without_lot() {
+        skip_no_nu!();
+        let cache = tmp_sandbox_cache();
+        let cache_dir = cache.as_ref().map(|c| c.path());
+        let nu_binary = resolve_nu_binary(cache_dir);
+        let config_files = resolve_config_files(cache_dir);
+
+        let tmp = tmp_project();
+        let test_file = tmp.path().join("test.txt");
+        std::fs::write(&test_file, "hello no-lot test").unwrap();
+
+        // Spawn nu --mcp directly via std::process::Command (NO lot)
+        let mut cmd = std::process::Command::new(&nu_binary);
+        cmd.arg("--mcp");
+        if let Some((ref config_path, ref env_path)) = config_files {
+            cmd.arg("--config").arg(config_path);
+            cmd.arg("--env-config").arg(env_path);
+        }
+        cmd.current_dir(tmp.path());
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::null());
+
+        let mut child = cmd.spawn().expect("spawn nu --mcp without lot");
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+        // Helper: send JSON-RPC and read response
+        fn send_recv(
+            stdin: &mut std::process::ChildStdin,
+            stdout: &mut BufReader<std::process::ChildStdout>,
+            id: u64,
+            method: &str,
+            params: serde_json::Value,
+        ) -> String {
+            use std::io::Write;
+            let req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            });
+            let bytes = serde_json::to_vec(&req).unwrap();
+            stdin.write_all(&bytes).unwrap();
+            stdin.write_all(b"\n").unwrap();
+            stdin.flush().unwrap();
+
+            // Read lines until we find our response
+            loop {
+                let mut line = String::new();
+                stdout.read_line(&mut line).unwrap();
+                if line.is_empty() {
+                    return "EOF".to_string();
+                }
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                    if parsed.get("id").and_then(|v| v.as_u64()) == Some(id) {
+                        return line.to_string();
+                    }
+                    // Skip notifications (no id or different id)
+                }
+            }
+        }
+
+        // MCP initialize
+        let _init = send_recv(
+            &mut stdin,
+            &mut stdout,
+            0,
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "diag", "version": "0.1" }
+            }),
+        );
+        // Send initialized notification (required by MCP protocol)
+        {
+            use std::io::Write;
+            let notif = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            });
+            let bytes = serde_json::to_vec(&notif).unwrap();
+            stdin.write_all(&bytes).unwrap();
+            stdin.write_all(b"\n").unwrap();
+            stdin.flush().unwrap();
+        }
+        eprintln!("DIAG-NOLOT: MCP init done (with initialized notification)");
+
+        let file_path = nu_path(&test_file);
+        let dir_path = nu_path(tmp.path());
+
+        let tests = vec![
+            ("open --raw | describe", format!("open '{}' --raw | describe", file_path)),
+            ("ls file", format!("ls '{}'", file_path)),
+            ("path exists", format!("'{}' | path exists", file_path)),
+            ("ls dir | length", format!("ls '{}' | length", dir_path)),
+            ("mkdir existing", format!("mkdir '{}'", dir_path)),
+            ("glob file", format!("glob '{}'", file_path)),
+            ("ls (no args)", "ls".to_string()),
+            ("ls .", "ls . | length".to_string()),
+            ("open raw null", format!("let x = (open '{}' --raw); $x == null", file_path)),
+        ];
+
+        for (i, (label, cmd_str)) in tests.iter().enumerate() {
+            let resp = send_recv(
+                &mut stdin,
+                &mut stdout,
+                (i + 1) as u64,
+                "tools/call",
+                serde_json::json!({
+                    "name": "evaluate",
+                    "arguments": { "input": cmd_str }
+                }),
+            );
+            // Extract just the relevant part
+            let truncated = if resp.len() > 300 {
+                format!("{}...", &resp[..300])
+            } else {
+                resp
+            };
+            eprintln!("DIAG-NOLOT {}: {}", label, truncated);
+        }
+
+        let _ = child.kill();
+    }
+
+    /// Compare lot-spawned vs direct-spawned behavior for the same commands.
+    /// This isolates what lot/AppContainer does differently.
+    #[tokio::test]
+    async fn diag_lot_vs_direct_comparison() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let test_file = tmp.path().join("compare.txt");
+        std::fs::write(&test_file, "compare content").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        let file_path = nu_path(&test_file);
+        let dir_path = nu_path(tmp.path());
+
+        // Test detailed filesystem access patterns inside AppContainer
+        let tests = vec![
+            // Does nu see file metadata at all?
+            ("path type", format!("'{}' | path type", file_path)),
+            // Does stat work? (if it exists)
+            ("describe ls-dir entry", format!("ls '{}' | first | describe", dir_path)),
+            // Can nu read file attributes?
+            ("path parse", format!("'{}' | path parse | to json", file_path)),
+            // Can nu use `do -i` to suppress errors?
+            ("do -i ls file", format!("do -i {{ ls '{}' }} | describe", file_path)),
+            // What error type does ls produce?
+            ("try ls file", format!("try {{ ls '{}' | to json }} catch {{ |e| $e | to json }}", file_path)),
+            // What about `ls -l`?
+            ("ls -la dir", format!("ls -la '{}' | to json", dir_path)),
+            // Does `ls` work with a full-form flag?
+            ("ls --full-paths file", format!("ls --full-paths '{}'", file_path)),
+            // Does `ls -D` (no symlinks) help?
+            ("ls -D file", format!("ls -D '{}'", file_path)),
+        ];
+
+        for (label, cmd) in tests {
+            let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+            match result {
+                Ok(out) => {
+                    let status = if out.is_error { "FAIL" } else { "OK" };
+                    let content = if out.content.len() > 300 {
+                        format!("{}...", &out.content[..300])
+                    } else {
+                        out.content.clone()
+                    };
+                    eprintln!("DIAG-LOT {}: {}: {}", label, status, content);
+                }
+                Err(e) => eprintln!("DIAG-LOT {}: ERR: {}", label, e),
+            }
+        }
+    }
+
+    /// Probe what nu_glob sees: compare glob patterns vs ls patterns in AppContainer
+    #[tokio::test]
+    async fn diag_glob_vs_ls_appcontainer() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("a.txt"), "aaa").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "bbb").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        let tests = vec![
+            // glob works for these patterns
+            ("glob *", "glob '*'".to_string()),
+            ("glob *.txt", "glob '*.txt'".to_string()),
+            ("glob a.txt", "glob 'a.txt'".to_string()),
+            // ls fails for the same patterns
+            ("ls (no args)", "ls".to_string()),
+            ("ls *.txt", "ls *.txt".to_string()),
+            ("ls a.txt", "ls a.txt".to_string()),
+            // But ls dir works — what if we ls . ?
+            ("ls .", "ls . | length".to_string()),
+            // nu_glob uses different crate from nu's built-in ls glob
+            // Let's try to find the actual filesystem error by checking Win32 APIs
+            // Does std::fs::metadata work? (via nu)
+            // Actually just check if `ls` is using a different CWD
+            ("pwd", "pwd".to_string()),
+            // Check if ls uses an internal CWD different from shell CWD
+            ("$env.PWD", "$env.PWD".to_string()),
+            // Check all env vars related to paths
+            ("env TEMP", "$env.TEMP".to_string()),
+            ("env TMP", "$env.TMP".to_string()),
+        ];
+
+        for (label, cmd) in tests {
+            let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+            match result {
+                Ok(out) => {
+                    let status = if out.is_error { "FAIL" } else { "OK" };
+                    let content = if out.content.len() > 200 {
+                        format!("{}...", &out.content[..200])
+                    } else {
+                        out.content.clone()
+                    };
+                    eprintln!("DIAG-GLOB {}: {}: {}", label, status, content);
+                }
+                Err(e) => eprintln!("DIAG-GLOB {}: ERR: {}", label, e),
+            }
+        }
+    }
+
+    /// Test std::fs APIs directly inside AppContainer to see which ones fail.
+    /// Run filesystem operations from the test process on files inside AppContainer.
+    /// Actually — we need to test from INSIDE the sandboxed nu process.
+    /// Use nu commands that map to specific std::fs calls.
+    #[tokio::test]
+    async fn diag_fs_apis_in_appcontainer() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("test.txt"), "test content").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        let file_path = nu_path(&tmp.path().join("test.txt"));
+
+        // These test different underlying Win32/Rust APIs:
+        let tests = vec![
+            // path exists → std::path::Path::exists → GetFileAttributesW
+            ("path exists", format!("'{}' | path exists", file_path)),
+            // path type → same as exists basically
+            ("path type", format!("'{}' | path type", file_path)),
+            // glob → wax crate → FindFirstFileW/FindNextFileW
+            ("glob exact", format!("glob '{}'", file_path)),
+            // ls file → nu_glob → likely GetFileAttributesW + FindFirstFileW
+            ("ls file", format!("ls '{}'", file_path)),
+            // open → std::fs::File::open → CreateFileW
+            ("open", format!("open '{}' --raw | describe", file_path)),
+            // ls dir → std::fs::read_dir → FindFirstFileW on dir\*
+            ("ls dir", format!("ls '{}' | length", nu_path(tmp.path()))),
+            // What about using `ls` on a globbed result piped in?
+            // Actually let's try to find what specific Win32 call fails.
+            // Run dir from cmd.exe as external command (this uses FindFirstFileW)
+            ("dir via cmd", format!("^cmd.exe /c dir \"{}\"", tmp.path().display())),
+            // Try creating a symlink and ls-ing that
+            // Actually, let's try something simpler: does `ls -s` (short) work?
+            ("ls -s file", format!("ls -s '{}'", file_path)),
+            // What about ls with the directory and file combined?
+            ("ls dir/file", format!("ls '{}/test.txt'", nu_path(tmp.path()))),
+        ];
+
+        for (label, cmd) in tests {
+            let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+            match result {
+                Ok(out) => {
+                    let status = if out.is_error { "FAIL" } else { "OK" };
+                    let content = if out.content.len() > 200 {
+                        format!("{}...", &out.content[..200])
+                    } else {
+                        out.content.clone()
+                    };
+                    eprintln!("DIAG-FS {}: {}: {}", label, status, content);
+                }
+                Err(e) => eprintln!("DIAG-FS {}: ERR: {}", label, e),
+            }
+        }
+    }
+
+    /// Check path canonicalization inside AppContainer
+    #[tokio::test]
+    async fn diag_path_canonicalization() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("test.txt"), "content").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        // What does nu see as PWD? Is it canonical?
+        let tests = vec![
+            ("pwd", "pwd".to_string()),
+            ("env PWD", "$env.PWD".to_string()),
+            // What does the Rust canonicalize() return inside the sandbox?
+            ("path expand cwd", "'.' | path expand".to_string()),
+            ("path expand file", "'test.txt' | path expand".to_string()),
+            // What does glob return as paths? (wax-based)
+            ("glob test.txt", "glob 'test.txt'".to_string()),
+            // Check if there's a UNC/extended path difference
+            ("path expand abs", format!("'{}' | path expand", nu_path(tmp.path()))),
+            // Does ls work with path from glob?
+            ("ls glob-result", "let p = (glob 'test.txt' | first); ls $p".to_string()),
+            // Does ls work on parent from path dirname?
+            ("ls parent", "'test.txt' | path expand | path dirname | ls $in | length".to_string()),
+            // What about `ls (path expand)`?
+            ("ls expanded", "ls ('test.txt' | path expand)".to_string()),
+        ];
+
+        for (label, cmd) in tests {
+            let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+            match result {
+                Ok(out) => {
+                    let status = if out.is_error { "FAIL" } else { "OK" };
+                    let content = if out.content.len() > 200 {
+                        format!("{}...", &out.content[..200])
+                    } else {
+                        out.content.clone()
+                    };
+                    eprintln!("DIAG-PATH {}: {}: {}", label, status, content);
+                }
+                Err(e) => eprintln!("DIAG-PATH {}: ERR: {}", label, e),
+            }
+        }
+    }
+
+    /// Investigate why `open` returns nothing in AppContainer
+    #[tokio::test]
+    async fn diag_open_in_appcontainer() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("test.txt"), "hello world").unwrap();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        let tests = vec![
+            // save works, so write is fine
+            ("save + glob", "'written' | save 'w.txt' --force; glob 'w.txt'".to_string()),
+            // Can we read back what we just wrote?
+            ("open saved", "open 'w.txt' --raw | describe".to_string()),
+            // Use `cat` alias?
+            // Actually try: read file via std::io::BufReader equivalent
+            // In nu, `open --raw` returns a byte stream from File::open
+            // Under AppContainer, the File::open might succeed but the byte stream
+            // might get closed/redirected
+            // Let's check if `open` on a file that nu itself created works
+            ("save+open", "'test data' | save 'x.txt' --force; open 'x.txt' --raw | describe".to_string()),
+            // What about `open` on stdin piped from save?
+            // Actually, let's test: does `open` fail because the byte stream is
+            // immediately consumed/dropped by MCP serialization?
+            // No — we already proved this works WITHOUT AppContainer.
+            // So AppContainer specifically breaks `open` byte streams.
+            // Let's try binary approach:
+            ("open binary", "open 'test.txt' | describe".to_string()),
+            // Try http get on file:// URL?
+            // Try: scope commands to see if open is overridden
+            ("which open", "which open | to json".to_string()),
+            // Check: is stderr being swallowed? Maybe open prints errors to stderr
+            // Let's try a command that explicitly reads the file differently
+            // In nushell, can we use `from` commands?
+            // Actually: does `stor` exist?
+            // Let's just try to read bytes using alternative methods
+            ("bytes length via save+open", "'hello' | save 'b.txt' --force; open 'b.txt' --raw | bytes length".to_string()),
+        ];
+
+        for (label, cmd) in tests {
+            let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+            match result {
+                Ok(out) => {
+                    let status = if out.is_error { "FAIL" } else { "OK" };
+                    let content = if out.content.len() > 300 {
+                        format!("{}...", &out.content[..300])
+                    } else {
+                        out.content.clone()
+                    };
+                    eprintln!("DIAG-OPEN {}: {}: {}", label, status, content);
+                }
+                Err(e) => eprintln!("DIAG-OPEN {}: ERR: {}", label, e),
+            }
+        }
+    }
+
+    /// Test with stderr captured to see if open prints errors there
+    #[tokio::test]
+    async fn diag_open_with_stderr() {
+        skip_no_nu!();
+        let cache = tmp_sandbox_cache();
+        let cache_dir = cache.as_ref().map(|c| c.path());
+        let nu_binary = resolve_nu_binary(cache_dir);
+        let config_files = resolve_config_files(cache_dir);
+
+        let project = tmp_sandbox_project();
+        let test_file = project.path().join("test.txt");
+        std::fs::write(&test_file, "stderr test").unwrap();
+
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let session_temp_base = project.path().join(".reel").join("tmp");
+        std::fs::create_dir_all(&session_temp_base).unwrap_or(());
+        let session_temp_dir = tempfile::TempDir::new_in(&session_temp_base).unwrap();
+
+        let policy = build_nu_sandbox_policy(
+            project.path(), grant, cache_dir, session_temp_dir.path()
+        ).unwrap();
+
+        // Spawn with stderr PIPED instead of null
+        let mut cmd = SandboxCommand::new(&nu_binary);
+        cmd.arg("--mcp");
+        if let Some((ref config_path, ref env_path)) = config_files {
+            cmd.arg("--config").arg(config_path);
+            cmd.arg("--env-config").arg(env_path);
+        }
+        cmd.cwd(project.path());
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);  // Capture stderr!
+        cmd.stdin(SandboxStdio::Piped);
+        cmd.env("TEMP", session_temp_dir.path());
+        cmd.env("TMP", session_temp_dir.path());
+        cmd.forward_common_env();
+
+        let mut child = lot::spawn(&policy, &cmd).unwrap();
+        let stdin = child.take_stdin().unwrap();
+        let stdout = child.take_stdout().unwrap();
+        let stderr = child.take_stderr().unwrap();
+
+        let child_handle: ChildHandle = Arc::new(std::sync::Mutex::new(Some(child)));
+
+        let mut proc = NuProcess {
+            stdin,
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+            grant,
+            project_root: project.path().to_path_buf(),
+            child_handle,
+            _session_temp_dir: session_temp_dir,
+        };
+
+        // MCP initialize
+        let init_request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 0,
+            method: "initialize",
+            params: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "diag", "version": "0.1" }
+            })),
+        };
+        let init_bytes = serde_json::to_vec(&init_request).unwrap();
+        send_line(&mut proc.stdin, &init_bytes).unwrap();
+        let _init_resp = read_response(&mut proc.stdout, 0).unwrap();
+
+        // Send initialized notification
+        let notif = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+        let notif_bytes = serde_json::to_vec(&notif).unwrap();
+        send_line(&mut proc.stdin, &notif_bytes).unwrap();
+
+        // Run open command
+        let file_path = nu_path(&test_file);
+        let open_cmd = format!("open '{}' --raw | describe", file_path);
+        let result = rpc_call(&mut proc, &open_cmd);
+        eprintln!("DIAG-STDERR open result: {:?}", result);
+
+        // Also try ls
+        let ls_cmd = format!("ls '{}'", file_path);
+        let result2 = rpc_call(&mut proc, &ls_cmd);
+        eprintln!("DIAG-STDERR ls result: {:?}", result2);
+
+        // Now read stderr
+        let mut stderr_buf = BufReader::new(stderr);
+        use std::io::Read;
+        let stderr_handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut output = String::new();
+            loop {
+                match stderr_buf.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    Err(_) => break,
+                }
+                if output.len() > 8192 { break; }
+            }
+            output
+        });
+
+        // Kill the process to unblock stderr read
+        {
+            let mut guard = proc.child_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(ref mut child) = *guard {
+                let _ = child.kill();
+            }
+        }
+
+        match stderr_handle.join() {
+            Ok(stderr_text) => {
+                if stderr_text.is_empty() {
+                    eprintln!("DIAG-STDERR: stderr is empty");
+                } else {
+                    eprintln!("DIAG-STDERR: stderr content: {}", &stderr_text[..stderr_text.len().min(2000)]);
+                }
+            }
+            Err(_) => eprintln!("DIAG-STDERR: stderr thread panicked"),
+        }
+    }
+
+    // === END DIAGNOSTIC TESTS ===
+
     #[tokio::test]
     async fn integration_custom_command_reel_grep() {
         skip_no_nu!();
