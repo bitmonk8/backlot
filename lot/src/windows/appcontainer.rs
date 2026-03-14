@@ -950,6 +950,24 @@ impl Drop for WindowsSandboxedChild {
 /// Spawn a sandboxed process using Windows `AppContainer`.
 #[allow(clippy::too_many_lines)]
 pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<crate::SandboxedChild> {
+    // Verify ancestor traverse ACEs before spawning. Without these, the
+    // sandboxed process cannot resolve absolute paths to policy directories.
+    let all_policy_paths: Vec<PathBuf> = policy
+        .read_paths
+        .iter()
+        .chain(policy.write_paths.iter())
+        .chain(policy.exec_paths.iter())
+        .cloned()
+        .collect();
+    let path_refs: Vec<&Path> = all_policy_paths.iter().map(|p| p.as_path()).collect();
+    if !super::nul_device::appcontainer_prerequisites_met(&path_refs) {
+        return Err(SandboxError::Setup(
+            "AppContainer prerequisites not met: NUL device or ancestor traverse ACEs missing. \
+             Run grant_appcontainer_prerequisites() first."
+                .into(),
+        ));
+    }
+
     let (profile_name, ac_sid) = create_profile()
         .map_err(|e| SandboxError::Setup(format!("CreateAppContainerProfile: {e}")))?;
 
