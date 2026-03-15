@@ -47,6 +47,7 @@ See `docs/PLAN.md` for the full phased plan with CI testing strategy.
 | `wait_with_output_timeout()` (tokio feature) | Complete |
 | Policy-based prerequisites API (`grant_appcontainer_prerequisites_for_policy`, `appcontainer_prerequisites_met_for_policy`) | Complete |
 | Spawn-time prerequisite check (`SandboxError::PrerequisitesNotMet`) | Reverted — `has_traverse_ace` false negatives |
+| Best-effort spawn-time traverse ACE grant | Next — see below |
 
 ### AppContainer Ancestor Traverse ACEs (Windows)
 
@@ -63,10 +64,23 @@ AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor direct
 | `grant_traverse(path)` / `has_traverse_ace(path)` internals | Complete |
 | Remove `grant_nul_device_access()`, `nul_device_accessible()`, `can_modify_nul_device()` | Complete |
 
+### Best-Effort Spawn-Time Traverse ACE Grant (Windows) — Next
+
+Feature request: `docs/FEATURE_REQUEST_SPAWN_TRAVERSE_ACES.md`
+
+Automatically grant ancestor traverse ACEs inside `spawn_inner()` before creating the sentinel. Avoids the false-negative problem from the reverted check-only approach by granting the ACE unconditionally (idempotent, harmless on directories already traversable via other ACEs). Only fails for system directories the current user cannot modify, returning `SandboxError::PrerequisitesNotMet`.
+
+| Task | Status |
+|---|---|
+| `compute_ancestors_from_paths(&[PathBuf])` — variant of `compute_ancestors` accepting owned paths | Not started |
+| Insert best-effort grant loop in `spawn_inner()` (after `all_paths`, before `write_sentinel`) | Not started |
+| Return `SandboxError::PrerequisitesNotMet` on grant failure or missing NUL device | Not started |
+| Integration tests | Not started |
+
 ## Known Limitations
 
 - `max_cpu_seconds` is not enforced via cgroups on Linux (cgroupv2 `cpu.max` controls bandwidth, not total time). Enforced on Windows (Job Objects) and macOS (`RLIMIT_CPU`).
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (narrowing breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
 - Linux cgroup tests require a delegated subtree writable by the test user.
-- Windows: AppContainer processes need a one-time elevated setup for NUL device access and ancestor directory traverse ACEs (see `grant_appcontainer_prerequisites()` or `grant_appcontainer_prerequisites_for_policy()` API). Callers should check prerequisites before spawning; `spawn()` does not auto-check because `has_traverse_ace` produces false negatives on paths accessible via per-user/Everyone ACEs.
+- Windows: AppContainer processes need a one-time elevated setup for NUL device access and system directory traverse ACEs (see `grant_appcontainer_prerequisites()`). For user-owned directories, `spawn()` will grant traverse ACEs automatically once the best-effort spawn-time grant is implemented.
