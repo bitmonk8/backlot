@@ -25,20 +25,40 @@ fn is_writable(path: &Path) -> bool {
     unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
 }
 
-/// Check whether the user can write to their own cgroup subtree.
-/// Finds the current process's cgroup and checks for write access.
+/// Check whether the user can create cgroups with resource controllers.
+///
+/// The process must be in a cgroup whose parent has `subtree_control` set
+/// with at least one controller. cgroupv2's "no internal processes" rule
+/// means the process's own cgroup cannot have subtree_control with
+/// controllers AND contain processes — so we check the parent.
 fn has_writable_subtree() -> bool {
     let Some(cgroup_path) = current_cgroup_path() else {
         return false;
     };
 
-    // Heuristic: if cgroup.subtree_control is writable, delegation is set up.
+    // Check if the parent cgroup has subtree_control with controllers.
+    // CgroupGuard creates sibling cgroups under this parent.
+    if let Some(parent) = cgroup_path.parent() {
+        if parent.starts_with("/sys/fs/cgroup") {
+            let subtree_control = parent.join("cgroup.subtree_control");
+            if subtree_control.exists() && is_writable(&subtree_control) {
+                // Check that at least one controller is enabled.
+                if let Ok(contents) = fs::read_to_string(&subtree_control) {
+                    if !contents.trim().is_empty() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: check current cgroup's subtree_control (works if the process
+    // was placed here by systemd before we check).
     let subtree_control = cgroup_path.join("cgroup.subtree_control");
     if subtree_control.exists() {
         return is_writable(&subtree_control);
     }
 
-    // No subtree_control file — check if the cgroup dir itself is writable.
     is_writable(&cgroup_path)
 }
 
@@ -67,11 +87,24 @@ pub struct CgroupGuard {
 
 impl CgroupGuard {
     /// Create a new cgroup for a sandbox invocation and write resource limits.
+    ///
+    /// Creates a sibling cgroup under the parent of the current cgroup.
+    /// The parent must have controllers enabled in `subtree_control`.
+    /// This avoids the cgroupv2 "no internal processes" constraint — the
+    /// calling process stays in its leaf cgroup while sandbox children go
+    /// into the newly created sibling.
     pub fn new(limits: &ResourceLimits) -> io::Result<Self> {
-        let parent = current_cgroup_path().ok_or_else(|| {
+        let current = current_cgroup_path().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "cannot determine current cgroup path",
+            )
+        })?;
+
+        let parent = current.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "current cgroup has no parent",
             )
         })?;
 

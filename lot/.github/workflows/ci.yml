@@ -94,19 +94,19 @@ jobs:
               echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" 2>/dev/null || true
           done
 
-          # Create a delegated cgroup for tests and enable controllers.
-          # subtree_control must be written while the cgroup is empty.
+          # Create a delegated cgroup with a leaf for the test runner.
+          # Layout:
+          #   lot-test/              subtree_control: +memory +pids
+          #     runner/              test process (leaf)
+          #     lot-sandbox-*/       CgroupGuard creates these as siblings of runner/
           cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/lot-test"
-          sudo mkdir -p "$cg"
+          sudo mkdir -p "$cg/runner"
           sudo chown -R "$(id -u):$(id -g)" "$cg"
           echo '+memory +pids' > "$cg/cgroup.subtree_control"
       - name: Run tests in delegated cgroup
         run: |
-          # Move into the delegated cgroup then run tests. CgroupGuard::new
-          # creates child cgroups here; memory.max and pids.max exist because
-          # subtree_control was set above.
           cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/lot-test"
-          echo $$ > "$cg/cgroup.procs"
+          echo $$ > "$cg/runner/cgroup.procs"
           cargo test -p lot -- --test-threads=1
 
   test-macos:
