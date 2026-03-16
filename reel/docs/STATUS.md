@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 169 tests pass locally.** Lot dependency updated to rev `c1c4724` which includes Linux namespace fixes (mount_proc, pivot_root, cwd ordering) and cgroup delegation improvements. CI pipeline updated with proper Linux cgroup delegation matching lot's working setup. Windows CI green. Linux and macOS CI pending validation after lot cwd fix.
+**Core agent runtime and tooling implemented. All 169 tests pass locally.** Lot dependency updated to rev `a17cedf` which includes Linux namespace fixes (mount_proc, pivot_root, cwd ordering) and cgroup delegation improvements. CI pipeline updated with proper Linux cgroup delegation matching lot's working setup. Windows CI green. Linux and macOS CI pending validation after lot cwd fix.
 
 ## What Is Implemented
 
@@ -66,8 +66,8 @@ Updated lot dependency to rev with directional policy overlap support, fixing 5 
 
 ### Lot Update to rev c1c4724
 
-Updated lot from `4e478de` to `c1c4724` (43 commits). Key changes consumed by reel:
-- **Linux seccomp fix**: `chdir`/`fchdir` syscalls were missing from the seccomp allowlist. Nu panicked on startup with `set_current_dir() PermissionDenied` (EPERM from seccomp). The mount namespace already constrains visible paths, so chdir within it is safe.
+Updated lot from `4e478de` to `a17cedf` (45 commits). Key changes consumed by reel:
+- **Linux seccomp fixes**: `chdir`/`fchdir` and `socketpair` syscalls were missing from the seccomp allowlist. Nu panicked on startup with `set_current_dir() PermissionDenied` (chdir blocked) and tokio's signal handler failed with `failed to create UnixStream` (socketpair blocked). The mount namespace constrains visible paths, so chdir is safe; socketpair is local IPC only.
 - **Linux cwd ordering fix**: lot's `chdir(cwd)` was called before `finish_mount_namespace()`, but `pivot_root` inside that function does `chdir("/")` which overwrote the cwd. Fixed by moving `chdir(cwd)` to after `finish_mount_namespace()`.
 - **Linux namespace fixes**: mount_proc moved to inner child (PID namespace member), stale procfs mounts cleared before fresh /proc mount, pivot_root ordering corrected.
 - **Cgroup delegation**: Dynamic cgroup discovery via `/proc/self/cgroup`, hierarchical controller enablement, sibling cgroup model respecting cgroupv2 no-internal-processes constraint.
@@ -92,4 +92,4 @@ Same nu_glob ancestor traversal issue as issue #9c. `reel read`, `reel write`, `
 
 ### Re-export lot's sandbox prerequisite APIs (issue #19)
 
-Lot rev `c1c4724` grants traverse ACEs on user-owned ancestor directories automatically at spawn time. System directories (e.g., `C:\Users`) still require a one-time elevated setup via `grant_appcontainer_prerequisites`. Reel does not re-export these APIs, so library consumers cannot implement their own elevated setup command without a direct lot dependency. Add a `reel::sandbox` module re-exporting the prerequisite APIs, `is_elevated()`, and the `PrerequisitesNotMet` error variant. Update `reel-cli` to use the re-exports.
+Lot rev `a17cedf` grants traverse ACEs on user-owned ancestor directories automatically at spawn time. System directories (e.g., `C:\Users`) still require a one-time elevated setup via `grant_appcontainer_prerequisites`. Reel does not re-export these APIs, so library consumers cannot implement their own elevated setup command without a direct lot dependency. Add a `reel::sandbox` module re-exporting the prerequisite APIs, `is_elevated()`, and the `PrerequisitesNotMet` error variant. Update `reel-cli` to use the re-exports.
