@@ -252,16 +252,6 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 unsafe { unix::close_if_not_std(child_stderr) };
             }
 
-            // Change working directory if specified
-            if let Some(ref cwd) = prefork.base.cwd {
-                // SAFETY: valid CString pointer
-                if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
-                    helper_bail!(err_pipe_wr, STEP_CHDIR, unsafe {
-                        *libc::__errno_location()
-                    });
-                }
-            }
-
             // Mount /proc and pivot_root. Must happen in the inner child:
             // - mount("proc") requires the caller to be inside the new PID
             //   namespace, which only takes effect after fork().
@@ -274,6 +264,20 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                     STEP_MOUNT_PROC,
                     e.raw_os_error().unwrap_or(libc::EPERM)
                 );
+            }
+
+            // Change working directory if specified. Must happen AFTER
+            // finish_mount_namespace() because pivot_root does chdir("/")
+            // which would overwrite any earlier chdir. After pivot_root,
+            // bind-mounted policy paths are at their original absolute
+            // locations in the new filesystem.
+            if let Some(ref cwd) = prefork.base.cwd {
+                // SAFETY: valid CString pointer
+                if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
+                    helper_bail!(err_pipe_wr, STEP_CHDIR, unsafe {
+                        *libc::__errno_location()
+                    });
+                }
             }
 
             // Apply seccomp filter (last step before exec — seccomp must be
