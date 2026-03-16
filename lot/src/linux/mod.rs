@@ -472,7 +472,7 @@ impl Drop for LinuxSandboxedChild {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::manual_let_else, clippy::single_match)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::ResourceLimits;
@@ -497,21 +497,11 @@ mod tests {
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
-        let child = spawn(&policy, &cmd);
-        // On systems without namespace support, this may fail — that's acceptable
-        let child = match child {
-            Ok(c) => c,
-            Err(_) => return, // skip on systems without namespace support
-        };
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
 
-        let output = child.inner.wait_with_output();
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                assert_eq!(stdout.trim(), "hello");
-            }
-            Err(_) => {} // may fail depending on environment
-        }
+        let out = child.inner.wait_with_output().expect("wait_with_output must succeed");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout.trim(), "hello");
     }
 
     #[test]
@@ -522,18 +512,12 @@ mod tests {
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
-        let child = match spawn(&policy, &cmd) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let output = match child.inner.wait_with_output() {
-            Ok(out) => out,
-            Err(_) => return,
-        };
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
+        let output = child.inner.wait_with_output().expect("wait_with_output must succeed");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         // The PID namespace child should see itself as PID 1
+        let mut found_pid = false;
         for line in stdout.lines() {
             if let Some(rest) = line.strip_prefix("Pid:") {
                 let pid_str = rest.trim();
@@ -541,9 +525,11 @@ mod tests {
                     pid_str, "1",
                     "expected PID 1 inside namespace, got {pid_str}"
                 );
-                return;
+                found_pid = true;
+                break;
             }
         }
+        assert!(found_pid, "expected to find Pid: line in /proc/self/status output");
     }
 
     #[test]
@@ -554,15 +540,8 @@ mod tests {
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
-        let child = match spawn(&policy, &cmd) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let output = match child.inner.wait_with_output() {
-            Ok(out) => out,
-            Err(_) => return,
-        };
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
+        let output = child.inner.wait_with_output().expect("wait_with_output must succeed");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         // /proc should contain "self" entry
@@ -577,15 +556,8 @@ mod tests {
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
-        let child = match spawn(&policy, &cmd) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let output = match child.inner.wait_with_output() {
-            Ok(out) => out,
-            Err(_) => return,
-        };
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
+        let output = child.inner.wait_with_output().expect("wait_with_output must succeed");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         // In a network namespace, only lo should exist (and it may not even be UP)
@@ -604,15 +576,8 @@ mod tests {
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
-        let child = match spawn(&policy, &cmd) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        let output = match child.inner.wait_with_output() {
-            Ok(out) => out,
-            Err(_) => return,
-        };
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
+        let output = child.inner.wait_with_output().expect("wait_with_output must succeed");
 
         // /home should not be accessible — ls should fail
         assert!(

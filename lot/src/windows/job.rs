@@ -233,13 +233,10 @@ mod tests {
         // Wait up to 30 seconds for the memory limit to kill the process.
         let wait_result = unsafe { WaitForSingleObject(proc_handle, 30_000) };
 
-        if wait_result != WAIT_OBJECT_0 {
-            // Timeout — environment may not enforce memory limits reliably.
-            // Kill the child and skip the assertion.
-            let _ = child.kill();
-            let _ = child.wait();
-            return;
-        }
+        assert_eq!(
+            wait_result, WAIT_OBJECT_0,
+            "memory limit must kill child within 30s timeout"
+        );
 
         // Process was terminated by the memory limit.
         let _ = child.wait();

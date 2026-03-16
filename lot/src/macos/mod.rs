@@ -422,9 +422,7 @@ mod tests {
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
-        let Ok(child) = spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
 
         let out = child.inner.wait_with_output().expect("wait_with_output");
         assert!(
@@ -454,9 +452,7 @@ mod tests {
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
-        let Ok(child) = spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
 
         let out = child.inner.wait_with_output().expect("wait_with_output");
         assert!(out.status.success(), "cat should succeed: {:?}", out.status);
@@ -476,9 +472,7 @@ mod tests {
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
-        let Ok(child) = spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
 
         let out = child.inner.wait_with_output().expect("wait_with_output");
         // cat should fail because /etc is not in read_paths

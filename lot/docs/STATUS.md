@@ -77,6 +77,15 @@ Automatically grant ancestor traverse ACEs inside `spawn_inner()` before creatin
 | Return `SandboxError::PrerequisitesNotMet` on grant failure or missing NUL device | Complete |
 | Integration tests | Complete |
 
+## Next Work
+
+1. **CI prerequisite setup.** Tests no longer silently skip when prerequisites are missing — they fail. GitHub Actions CI must be configured to grant the required prerequisites on each platform before running tests:
+   - **Windows**: Run `grant_appcontainer_prerequisites()` from an elevated context (the GHA runner is elevated by default) to grant NUL device and ancestor traverse ACEs.
+   - **Linux**: Ensure user namespaces are permitted (`kernel.apparmor_restrict_unprivileged_userns=0`) and cgroups v2 delegation is available.
+   - **macOS**: No special setup needed (Seatbelt is always available).
+
+2. **Fix test bugs exposed by silent-skip removal.** Some tests have pre-existing bugs that were hidden by silent skips (e.g., overlapping `read_paths`/`exec_paths` in tokio timeout tests — now fixed locally but may have equivalents elsewhere). Run full CI on all platforms and fix any test failures that occur even when prerequisites are met.
+
 ## Known Limitations
 
 - `max_cpu_seconds` is not enforced via cgroups on Linux (cgroupv2 `cpu.max` controls bandwidth, not total time). Enforced on Windows (Job Objects) and macOS (`RLIMIT_CPU`).

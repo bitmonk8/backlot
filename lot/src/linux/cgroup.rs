@@ -208,17 +208,13 @@ mod tests {
 
     #[test]
     fn cgroup_guard_creates_and_cleans_up() {
-        if !available() {
-            return;
-        }
+        assert!(available(), "cgroups v2 must be available for this test");
         let limits = ResourceLimits {
             max_memory_bytes: Some(64 * 1024 * 1024),
             max_processes: Some(10),
             max_cpu_seconds: None,
         };
-        let Ok(guard) = CgroupGuard::new(&limits) else {
-            return;
-        };
+        let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
         let path = guard.path().to_path_buf();
         assert!(path.exists(), "cgroup directory should exist");
 
@@ -241,13 +237,9 @@ mod tests {
 
     #[test]
     fn cgroup_guard_add_process() {
-        if !available() {
-            return;
-        }
+        assert!(available(), "cgroups v2 must be available for this test");
         let limits = ResourceLimits::default();
-        let Ok(guard) = CgroupGuard::new(&limits) else {
-            return;
-        };
+        let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
 
         // Add our own process to the cgroup
         // SAFETY: getpid has no preconditions
@@ -259,13 +251,9 @@ mod tests {
 
     #[test]
     fn cgroup_guard_no_limits_creates_empty() {
-        if !available() {
-            return;
-        }
+        assert!(available(), "cgroups v2 must be available for this test");
         let limits = ResourceLimits::default();
-        let Ok(guard) = CgroupGuard::new(&limits) else {
-            return;
-        };
+        let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
         let path = guard.path().to_path_buf();
         assert!(path.exists());
         drop(guard);

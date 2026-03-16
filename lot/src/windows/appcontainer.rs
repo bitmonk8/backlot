@@ -1424,12 +1424,8 @@ mod tests {
     }
 
     /// Spawn, returning None if prerequisites aren't met (non-elevated env).
-    fn try_spawn(policy: &SandboxPolicy, cmd: &SandboxCommand) -> Option<crate::SandboxedChild> {
-        match crate::spawn(policy, cmd) {
-            Ok(child) => Some(child),
-            Err(SandboxError::PrerequisitesNotMet { .. }) => None,
-            Err(e) => panic!("unexpected spawn error: {e}"),
-        }
+    fn must_spawn(policy: &SandboxPolicy, cmd: &SandboxCommand) -> crate::SandboxedChild {
+        crate::spawn(policy, cmd).expect("spawn must succeed")
     }
 
     /// Strip DACL control flags (like AI, P) from SDDL for comparison.
@@ -1472,9 +1468,7 @@ mod tests {
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return; // prerequisites not met (non-elevated)
-        };
+        let child = must_spawn(&policy, &cmd);
         let output = child.wait_with_output().expect("wait_with_output");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -1502,9 +1496,7 @@ mod tests {
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return; // prerequisites not met (non-elevated)
-        };
+        let child = must_spawn(&policy, &cmd);
         let output = child.wait_with_output().expect("wait");
 
         assert!(
@@ -1534,9 +1526,7 @@ mod tests {
         let target_str = target.to_string_lossy();
         cmd.args(["/C", &format!("echo overwritten > {target_str}")]);
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return; // prerequisites not met (non-elevated)
-        };
+        let child = must_spawn(&policy, &cmd);
         let output = child.wait_with_output().expect("wait");
 
         let content = fs::read_to_string(&target).expect("read back");
@@ -1565,9 +1555,7 @@ mod tests {
         cmd.args(["/C", "echo done"]);
 
         {
-            let Some(child) = try_spawn(&policy, &cmd) else {
-                return; // prerequisites not met (non-elevated)
-            };
+            let child = must_spawn(&policy, &cmd);
             let _ = child.wait_with_output();
         }
 

@@ -14,47 +14,11 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-/// Returns true if the current platform has any sandbox mechanism available.
-fn has_sandbox_support() -> bool {
-    let caps = lot::probe();
-    eprintln!(
-        "[diag] probe() = appcontainer={}, namespaces={}, seccomp={}, cgroups_v2={}, seatbelt={}, job_objects={}",
-        caps.appcontainer,
-        caps.namespaces,
-        caps.seccomp,
-        caps.cgroups_v2,
-        caps.seatbelt,
-        caps.job_objects
-    );
-    caps.appcontainer || caps.namespaces || caps.seatbelt
-}
-
-/// Try to spawn; if the sandbox mechanism isn't available at runtime
-/// (e.g. user namespaces denied by AppArmor on Linux CI), skip the test.
-fn try_spawn(
-    policy: &lot::SandboxPolicy,
-    cmd: &lot::SandboxCommand,
-) -> Option<lot::SandboxedChild> {
-    match lot::spawn(policy, cmd) {
-        Ok(child) => {
-            eprintln!("[diag] spawn succeeded, pid={}", child.id());
-            Some(child)
-        }
-        Err(lot::SandboxError::Setup(ref msg)) => {
-            eprintln!("[diag] spawn skipped (Setup error): {msg}");
-            None
-        }
-        Err(lot::SandboxError::PrerequisitesNotMet {
-            ref missing_paths,
-            nul_device_missing,
-        }) => {
-            eprintln!(
-                "[diag] spawn skipped (prerequisites not met): missing_paths={missing_paths:?}, nul_device_missing={nul_device_missing}"
-            );
-            None
-        }
-        Err(e) => panic!("unexpected spawn error: {e:?}"),
-    }
+/// Spawn a sandboxed child, panicking on any error.
+fn must_spawn(policy: &lot::SandboxPolicy, cmd: &lot::SandboxCommand) -> lot::SandboxedChild {
+    let child = lot::spawn(policy, cmd).expect("spawn must succeed");
+    eprintln!("[diag] spawn succeeded, pid={}", child.id());
+    child
 }
 
 /// Platform-appropriate echo command: `cmd /C echo hello` on Windows,
@@ -223,10 +187,6 @@ fn test_probe_returns_platform_capabilities() {
 #[test]
 fn test_spawn_echo() {
     eprintln!("[diag] === test_spawn_echo ===");
-    if !has_sandbox_support() {
-        eprintln!("[diag] SKIPPED: no sandbox support");
-        return;
-    }
 
     let tmp = TempDir::new().expect("create temp dir");
     let (program, args) = echo_command();
@@ -237,9 +197,7 @@ fn test_spawn_echo() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
@@ -268,10 +226,6 @@ fn test_spawn_echo() {
 #[test]
 fn test_spawn_read_allowed_path() {
     eprintln!("[diag] === test_spawn_read_allowed_path ===");
-    if !has_sandbox_support() {
-        eprintln!("[diag] SKIPPED: no sandbox support");
-        return;
-    }
 
     let tmp = TempDir::new().expect("create temp dir");
     let file_path = tmp.path().join("readable.txt");
@@ -285,9 +239,7 @@ fn test_spawn_read_allowed_path() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
@@ -316,10 +268,6 @@ fn test_spawn_read_allowed_path() {
 #[test]
 fn test_spawn_disallowed_path_blocked() {
     eprintln!("[diag] === test_spawn_disallowed_path_blocked ===");
-    if !has_sandbox_support() {
-        eprintln!("[diag] SKIPPED: no sandbox support");
-        return;
-    }
 
     // Two separate temp dirs: one allowed, one forbidden.
     let allowed = TempDir::new().expect("create allowed dir");
@@ -335,9 +283,7 @@ fn test_spawn_disallowed_path_blocked() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
@@ -380,10 +326,6 @@ fn test_spawn_disallowed_path_blocked() {
 #[test]
 fn test_spawn_write_to_readonly_blocked() {
     eprintln!("[diag] === test_spawn_write_to_readonly_blocked ===");
-    if !has_sandbox_support() {
-        eprintln!("[diag] SKIPPED: no sandbox support");
-        return;
-    }
 
     let tmp = TempDir::new().expect("create temp dir");
     let target = tmp.path().join("blocked_write.txt");
@@ -397,9 +339,7 @@ fn test_spawn_write_to_readonly_blocked() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
@@ -439,10 +379,6 @@ fn test_spawn_write_to_readonly_blocked() {
 #[test]
 fn test_cleanup_after_drop() {
     eprintln!("[diag] === test_cleanup_after_drop ===");
-    if !has_sandbox_support() {
-        eprintln!("[diag] SKIPPED: no sandbox support");
-        return;
-    }
 
     let tmp = TempDir::new().expect("create temp dir");
     let (program, args) = echo_command();
@@ -453,9 +389,7 @@ fn test_cleanup_after_drop() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let pid = child.id();
     assert!(pid > 0, "pid should be non-zero");
     eprintln!("[diag] child pid={pid}, dropping now");
@@ -497,10 +431,6 @@ fn test_cleanup_after_drop() {
 #[test]
 fn test_spawn_with_piped_stdin() {
     eprintln!("[diag] === test_spawn_with_piped_stdin ===");
-    if !has_sandbox_support() {
-        eprintln!("[diag] SKIPPED: no sandbox support");
-        return;
-    }
 
     let tmp = TempDir::new().expect("create temp dir");
     let (program, args) = stdin_echo_command();
@@ -512,9 +442,7 @@ fn test_spawn_with_piped_stdin() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(mut child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let mut child = must_spawn(&policy, &cmd);
 
     // Write to stdin, then close it so the child sees EOF.
     {
@@ -550,10 +478,6 @@ fn test_spawn_with_piped_stdin() {
 #[test]
 fn test_wait_returns_exit_status() {
     eprintln!("[diag] === test_wait_returns_exit_status ===");
-    if !has_sandbox_support() {
-        eprintln!("[diag] SKIPPED: no sandbox support");
-        return;
-    }
 
     let tmp = TempDir::new().expect("create temp dir");
 
@@ -567,9 +491,7 @@ fn test_wait_returns_exit_status() {
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = must_spawn(&policy, &cmd);
         let status = child.wait().expect("wait");
         eprintln!(
             "[diag] exit status: {:?}, code: {:?}",
@@ -593,9 +515,7 @@ fn test_wait_returns_exit_status() {
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = must_spawn(&policy, &cmd);
         let status = child.wait().expect("wait");
         eprintln!(
             "[diag] exit status: {:?}, code: {:?}",

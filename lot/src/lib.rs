@@ -391,13 +391,12 @@ mod tests {
 
 #[cfg(test)]
 #[cfg(feature = "tokio")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tokio_tests {
     use super::*;
 
     /// Helper: build a minimal policy and command for timeout tests.
-    /// Returns None if the platform sandbox cannot be set up (e.g. missing
-    /// namespace support on Linux).
-    fn spawn_sleep(seconds: u32) -> Option<SandboxedChild> {
+    fn spawn_sleep(seconds: u32) -> SandboxedChild {
         #[cfg(unix)]
         {
             let policy = SandboxPolicy {
@@ -411,7 +410,7 @@ mod tokio_tests {
             cmd.arg(seconds.to_string());
             cmd.stdout(SandboxStdio::Piped);
             cmd.stderr(SandboxStdio::Piped);
-            spawn(&policy, &cmd).ok()
+            spawn(&policy, &cmd).expect("spawn_sleep must succeed")
         }
 
         #[cfg(windows)]
@@ -422,7 +421,7 @@ mod tokio_tests {
                 std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
             let system32 = std::path::PathBuf::from(format!("{system_root}\\System32"));
             let policy = SandboxPolicy {
-                read_paths: vec![system32.clone()],
+                read_paths: vec![],
                 write_paths: vec![],
                 exec_paths: vec![system32],
                 allow_network: true,
@@ -432,15 +431,13 @@ mod tokio_tests {
             cmd.args(["-n", &(seconds + 1).to_string(), "127.0.0.1"]);
             cmd.stdout(SandboxStdio::Piped);
             cmd.stderr(SandboxStdio::Piped);
-            spawn(&policy, &cmd).ok()
+            spawn(&policy, &cmd).expect("spawn_sleep must succeed")
         }
     }
 
     #[tokio::test]
     async fn timeout_fires_on_long_running_child() {
-        let Some(child) = spawn_sleep(60) else {
-            return; // sandbox unavailable
-        };
+        let child = spawn_sleep(60);
 
         let result = child
             .wait_with_output_timeout(std::time::Duration::from_millis(200))
@@ -473,9 +470,7 @@ mod tokio_tests {
             cmd.stdout(SandboxStdio::Piped);
             cmd.stderr(SandboxStdio::Piped);
 
-            let Ok(child) = spawn(&policy, &cmd) else {
-                return;
-            };
+            let child = spawn(&policy, &cmd).expect("spawn must succeed");
 
             let result = child
                 .wait_with_output_timeout(std::time::Duration::from_secs(10))
@@ -496,7 +491,7 @@ mod tokio_tests {
                 std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
             let system32 = std::path::PathBuf::from(format!("{system_root}\\System32"));
             let policy = SandboxPolicy {
-                read_paths: vec![system32.clone()],
+                read_paths: vec![],
                 write_paths: vec![],
                 exec_paths: vec![system32],
                 allow_network: false,
@@ -507,9 +502,7 @@ mod tokio_tests {
             cmd.stdout(SandboxStdio::Piped);
             cmd.stderr(SandboxStdio::Piped);
 
-            let Ok(child) = spawn(&policy, &cmd) else {
-                return;
-            };
+            let child = spawn(&policy, &cmd).expect("spawn must succeed");
 
             let result = child
                 .wait_with_output_timeout(std::time::Duration::from_secs(10))
