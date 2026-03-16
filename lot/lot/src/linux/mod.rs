@@ -152,8 +152,9 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         const STEP_FORK_INNER: i32 = 4;
         const STEP_DUP2: i32 = 5;
         const STEP_CHDIR: i32 = 6;
-        const STEP_SECCOMP: i32 = 7;
-        const STEP_EXEC: i32 = 8;
+        const STEP_MOUNT_PROC: i32 = 7;
+        const STEP_SECCOMP: i32 = 8;
+        const STEP_EXEC: i32 = 9;
 
         // Unshare namespaces. Skip CLONE_NEWNET when network access is allowed
         // so the child inherits the parent's network namespace.
@@ -263,6 +264,17 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 }
             }
 
+            // Mount /proc — must happen here (not in setup_mount_namespace)
+            // because the kernel requires the caller to be inside the PID
+            // namespace, which only takes effect after fork().
+            if let Err(e) = namespace::mount_proc("/proc") {
+                helper_bail!(
+                    err_pipe_wr,
+                    STEP_MOUNT_PROC,
+                    e.raw_os_error().unwrap_or(libc::EPERM)
+                );
+            }
+
             // Apply seccomp filter (last step before exec — seccomp must be
             // applied after all setup syscalls are complete)
             #[cfg(target_arch = "x86_64")]
@@ -342,8 +354,9 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             4 => "inner fork",
             5 => "dup2 (stdio)",
             6 => "chdir",
-            7 => "seccomp",
-            8 => "execve",
+            7 => "mount /proc",
+            8 => "seccomp",
+            9 => "execve",
             _ => "unknown",
         };
         // Reap the helper so we don't leak a zombie

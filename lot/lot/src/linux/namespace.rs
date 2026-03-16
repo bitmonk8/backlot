@@ -230,17 +230,10 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<()> {
         }
     }
 
-    // Mount /proc inside the new root
-    mount_proc(&format!("{new_root}/proc")).map_err(|e| {
-        #[cfg(test)]
-        {
-            let msg = format!("[mount-ns] FAIL mount_proc: {e}");
-            diag(&msg);
-        }
-        e
-    })?;
-    #[cfg(test)]
-    diag("[mount-ns] /proc mount OK");
+    // NOTE: /proc is NOT mounted here. Mounting procfs requires the caller
+    // to be inside the new PID namespace, which only takes effect after
+    // fork(). The inner child (PID 1 in the namespace) calls mount_proc()
+    // after pivot_root completes.
 
     // Create /dev/null, /dev/zero, and /dev/urandom via bind mount
     for dev in &["/dev/null", "/dev/zero", "/dev/urandom"] {
@@ -455,7 +448,11 @@ fn bind_mount_exec(src: &str, dst: &str) -> io::Result<()> {
 }
 
 /// Mount proc filesystem at the given path.
-fn mount_proc(target: &str) -> io::Result<()> {
+///
+/// Must be called from a process inside the target PID namespace (i.e., after
+/// fork() following unshare(CLONE_NEWPID)). The kernel rejects this with EPERM
+/// if the caller is not a member of the PID namespace.
+pub(crate) fn mount_proc(target: &str) -> io::Result<()> {
     let c_target = to_cstring(target)?;
     let c_fstype = to_cstring("proc")?;
     let c_source = to_cstring("proc")?;
