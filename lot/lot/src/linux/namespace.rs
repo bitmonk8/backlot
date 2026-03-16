@@ -79,14 +79,26 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<()> {
     let new_root = format!("/tmp/lot-newroot-{pid}");
 
     // Ensure the mount point exists
-    mkdir_p(&new_root)?;
+    mkdir_p(&new_root).map_err(|e| {
+        eprintln!("[mount-ns] mkdir_p({new_root}) failed: {e}");
+        e
+    })?;
 
     // Mount tmpfs as the new root
-    mount_tmpfs(&new_root)?;
+    mount_tmpfs(&new_root).map_err(|e| {
+        eprintln!("[mount-ns] mount_tmpfs({new_root}) failed: {e}");
+        e
+    })?;
 
     // Ensure we have a private mount propagation so pivot_root works
-    make_mount_private("/")?;
-    make_mount_private(&new_root)?;
+    make_mount_private("/").map_err(|e| {
+        eprintln!("[mount-ns] make_mount_private(/) failed: {e}");
+        e
+    })?;
+    make_mount_private(&new_root).map_err(|e| {
+        eprintln!("[mount-ns] make_mount_private({new_root}) failed: {e}");
+        e
+    })?;
 
     // Create essential directories in the new root
     mkdir_p(&format!("{new_root}/proc"))?;
