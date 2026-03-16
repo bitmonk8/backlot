@@ -131,15 +131,29 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // Close parent's stdio pipe ends (not the child's — those are needed for inner child)
         unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
 
-        // Macro to report error and exit from helper
+        // Macro to report error and exit from helper.
+        // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
+        // which step failed.
         macro_rules! helper_bail {
-            ($err_fd:expr, $errno:expr) => {{
-                let e = ($errno as i32).to_ne_bytes();
-                // SAFETY: err_fd is valid, e is stack-allocated
-                let _ = unsafe { libc::write($err_fd, e.as_ptr().cast(), 4) };
+            ($err_fd:expr, $step:expr, $errno:expr) => {{
+                let mut buf = [0u8; 8];
+                buf[..4].copy_from_slice(&($step as i32).to_ne_bytes());
+                buf[4..].copy_from_slice(&($errno as i32).to_ne_bytes());
+                // SAFETY: err_fd is valid, buf is stack-allocated
+                let _ = unsafe { libc::write($err_fd, buf.as_ptr().cast(), 8) };
                 unsafe { libc::_exit(1) };
             }};
         }
+
+        // Step constants for error reporting
+        const STEP_UNSHARE: i32 = 1;
+        const STEP_USER_NS: i32 = 2;
+        const STEP_MOUNT_NS: i32 = 3;
+        const STEP_FORK_INNER: i32 = 4;
+        const STEP_DUP2: i32 = 5;
+        const STEP_CHDIR: i32 = 6;
+        const STEP_SECCOMP: i32 = 7;
+        const STEP_EXEC: i32 = 8;
 
         // Unshare namespaces. Skip CLONE_NEWNET when network access is allowed
         // so the child inherits the parent's network namespace.
@@ -152,7 +166,9 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // single-threaded so CLONE_NEWUSER is permitted.
         let rc = unsafe { libc::unshare(clone_flags) };
         if rc != 0 {
-            helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
+            helper_bail!(err_pipe_wr, STEP_UNSHARE, unsafe {
+                *libc::__errno_location()
+            });
         }
 
         // Set up UID/GID mapping — must happen before mount namespace setup.
@@ -160,12 +176,20 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // hasn't exec'd yet. The allocator is safe in a single-threaded forked
         // process that doesn't use the Rust async runtime.
         if let Err(e) = namespace::setup_user_namespace(prefork.uid, prefork.gid) {
-            helper_bail!(err_pipe_wr, e.raw_os_error().unwrap_or(libc::EPERM));
+            helper_bail!(
+                err_pipe_wr,
+                STEP_USER_NS,
+                e.raw_os_error().unwrap_or(libc::EPERM)
+            );
         }
 
         // Set up mount namespace
         if let Err(e) = namespace::setup_mount_namespace(policy) {
-            helper_bail!(err_pipe_wr, e.raw_os_error().unwrap_or(libc::EPERM));
+            helper_bail!(
+                err_pipe_wr,
+                STEP_MOUNT_NS,
+                e.raw_os_error().unwrap_or(libc::EPERM)
+            );
         }
 
         // Move helper into the cgroup so both helper and inner child inherit
@@ -192,7 +216,9 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // SAFETY: standard fork, helper is single-threaded
         let inner_pid = unsafe { libc::fork() };
         if inner_pid < 0 {
-            helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
+            helper_bail!(err_pipe_wr, STEP_FORK_INNER, unsafe {
+                *libc::__errno_location()
+            });
         }
 
         if inner_pid == 0 {
@@ -202,21 +228,27 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             if child_stdin != 0 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stdin, 0) } < 0 {
-                    helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
+                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe {
+                        *libc::__errno_location()
+                    });
                 }
                 unsafe { unix::close_if_not_std(child_stdin) };
             }
             if child_stdout != 1 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stdout, 1) } < 0 {
-                    helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
+                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe {
+                        *libc::__errno_location()
+                    });
                 }
                 unsafe { unix::close_if_not_std(child_stdout) };
             }
             if child_stderr != 2 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stderr, 2) } < 0 {
-                    helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
+                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe {
+                        *libc::__errno_location()
+                    });
                 }
                 unsafe { unix::close_if_not_std(child_stderr) };
             }
@@ -225,7 +257,9 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             if let Some(ref cwd) = prefork.base.cwd {
                 // SAFETY: valid CString pointer
                 if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
-                    helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
+                    helper_bail!(err_pipe_wr, STEP_CHDIR, unsafe {
+                        *libc::__errno_location()
+                    });
                 }
             }
 
@@ -234,7 +268,11 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             #[cfg(target_arch = "x86_64")]
             {
                 if let Err(e) = seccomp::apply_filter(&bpf_filter) {
-                    helper_bail!(err_pipe_wr, e.raw_os_error().unwrap_or(libc::EPERM));
+                    helper_bail!(
+                        err_pipe_wr,
+                        STEP_SECCOMP,
+                        e.raw_os_error().unwrap_or(libc::EPERM)
+                    );
                 }
             }
 
@@ -253,7 +291,9 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             }
 
             // exec failed — report errno via error pipe, then exit
-            helper_bail!(err_pipe_wr, unsafe { *libc::__errno_location() });
+            helper_bail!(err_pipe_wr, STEP_EXEC, unsafe {
+                *libc::__errno_location()
+            });
         }
 
         // === HELPER continues (inner_pid > 0) ===
@@ -285,21 +325,34 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         unix::close_if_not_std(child_stderr);
     }
 
-    // Check error pipe: if child wrote an errno, setup failed
-    let mut err_buf = [0u8; 4];
+    // Check error pipe: if child wrote [step:i32, errno:i32], setup failed
+    let mut err_buf = [0u8; 8];
     // SAFETY: err_pipe_rd is valid, err_buf is stack-allocated
-    let n = unsafe { libc::read(err_pipe_rd, err_buf.as_mut_ptr().cast(), 4) };
+    let n = unsafe { libc::read(err_pipe_rd, err_buf.as_mut_ptr().cast(), 8) };
     // SAFETY: valid fd
     unsafe { libc::close(err_pipe_rd) };
 
-    if n == 4 {
-        let errno = i32::from_ne_bytes(err_buf);
+    if n == 8 {
+        let step = i32::from_ne_bytes(err_buf[..4].try_into().unwrap());
+        let errno = i32::from_ne_bytes(err_buf[4..].try_into().unwrap());
+        let step_name = match step {
+            1 => "unshare",
+            2 => "user namespace (uid/gid map)",
+            3 => "mount namespace",
+            4 => "inner fork",
+            5 => "dup2 (stdio)",
+            6 => "chdir",
+            7 => "seccomp",
+            8 => "execve",
+            _ => "unknown",
+        };
         // Reap the helper so we don't leak a zombie
         // SAFETY: valid pid, null pointer (don't need status)
         unsafe { libc::waitpid(helper_pid, std::ptr::null_mut(), 0) };
         unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
         return Err(SandboxError::Setup(format!(
-            "child namespace setup failed: {}",
+            "child setup failed at step '{}': {}",
+            step_name,
             io::Error::from_raw_os_error(errno)
         )));
     }
