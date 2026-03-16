@@ -56,29 +56,11 @@ Design docs: `docs/DESIGN_WORKSPACE_CLI.md`, `docs/DESIGN_SPAWN_TRAVERSE_ACES.md
 
 ## Next Work
 
-1. **Fix Linux CI environment.** 8 test failures: 3 cgroup (delegation mismatch) + 5 namespace (`EPERM`). Requires fixing GHA runner setup for user namespaces and cgroup delegation.
+1. **Fix Linux CI namespace tests.** 5 namespace test failures (`EPERM` on `unshare()`). The GHA runner is in `system.slice/hosted-compute-agent.service` and likely has an AppArmor profile or seccomp filter blocking `CLONE_NEWUSER`. Needs diagnostic step to determine root cause.
 
 2. **First real-world usage / `lot run` testing.** The CLI and library are complete but haven't been exercised end-to-end outside unit/integration tests.
 
-## CI Failure Overview (as of 2026-03-16, run 23150329216)
-
-### macOS — All green
-
-No failures. Tests, clippy, and format all pass.
-
-### Linux — 8 test failures + 1 build error
-
-| Category | Tests | Error | Root Cause |
-|---|---|---|---|
-| `unexpected_cfgs` (1) | Build + Clippy | `#[cfg(feature = "tracing")]` in `cgroup.rs` references undeclared feature | Dead code referencing nonexistent `tracing` feature. **Fixed**: removed dead tracing block. |
-| cgroup tests (3) | `cgroup_guard_creates_and_cleans_up`, `cgroup_guard_add_process`, `cgroup_guard_no_limits_creates_empty` | `cgroups v2 must be available for this test` | CI creates `/sys/fs/cgroup/lot-test` but the test process runs in its own cgroup outside that subtree. The delegated subtree is not the process's current cgroup, so `available()` returns false. |
-| namespace spawn tests (5) | `spawn_echo_hello`, `spawn_pid1_in_namespace`, `spawn_proc_mounted`, `spawn_network_isolated`, `spawn_cannot_see_host_paths` | `Setup("child namespace setup failed: Operation not permitted (os error 1)")` | `unshare()` returns `EPERM`. CI runs `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` but the GHA runner may have additional restrictions (AppArmor profile or seccomp filter on the runner process itself) that block namespace creation. |
-
-### Windows — All green
-
-`lot setup` in CI resolved the 5 AppContainer test failures (NUL device ACE). Verified in run 23150329216.
-
-### All jobs
+## CI Status (as of 2026-03-16, run 23154377931)
 
 | Job | Status |
 |---|---|
@@ -88,13 +70,25 @@ No failures. Tests, clippy, and format all pass.
 | Clippy (Linux) | Pass |
 | Clippy (Windows) | Pass |
 | Test (macOS) | Pass |
-| Test (Linux) | Fail (8 tests — namespace/cgroup CI setup issues) |
+| Test (Linux) | 5 namespace failures (EPERM); cgroup tests all pass |
 | Test (Windows) | Pass |
+
+### Linux namespace failures (5)
+
+| Test | Error |
+|---|---|
+| `spawn_echo_hello` | `unshare()` returns EPERM |
+| `spawn_pid1_in_namespace` | `unshare()` returns EPERM |
+| `spawn_proc_mounted` | `unshare()` returns EPERM |
+| `spawn_network_isolated` | `unshare()` returns EPERM |
+| `spawn_cannot_see_host_paths` | `unshare()` returns EPERM |
+
+Root cause: GHA runner runs in `system.slice/hosted-compute-agent.service`. Despite `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, the runner process likely has an AppArmor profile or seccomp filter blocking `CLONE_NEWUSER`. Needs a diagnostic CI step (`cat /proc/self/attr/current`, seccomp status) to determine exact blocker.
 
 ## Known Limitations
 
 - `max_cpu_seconds` is not enforced via cgroups on Linux (cgroupv2 `cpu.max` controls bandwidth, not total time). Enforced on Windows (Job Objects) and macOS (`RLIMIT_CPU`).
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (narrowing breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
-- Linux cgroup tests require a delegated subtree writable by the test user.
+- Linux cgroup tests require a delegated subtree with `+memory +pids` in `subtree_control`. CI creates this under the runner's cgroup parent.
 - Windows: AppContainer processes need a one-time elevated setup for NUL device access and system directory traverse ACEs (see `grant_appcontainer_prerequisites()`). For user-owned directories, `spawn()` grants traverse ACEs automatically at spawn time.
