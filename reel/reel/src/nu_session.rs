@@ -2312,6 +2312,61 @@ mod tests {
             out.contains("hello"),
             "nu should output 'hello', got stdout={out:?} stderr={err:?}"
         );
+
+        // Now test MCP mode with config files
+        let config_files = resolve_config_files(cache_dir);
+        let mut cmd2 = SandboxCommand::new(&nu_binary);
+        cmd2.arg("--mcp");
+        if let Some((ref config_path, ref env_path)) = config_files {
+            cmd2.arg("--config").arg(config_path);
+            cmd2.arg("--env-config").arg(env_path);
+            eprintln!("DIAG-MCP config={config_path:?} env={env_path:?}");
+        } else {
+            eprintln!("DIAG-MCP no config files found!");
+        }
+        cmd2.cwd(project.path());
+        cmd2.stdout(SandboxStdio::Piped);
+        cmd2.stderr(SandboxStdio::Piped);
+        cmd2.stdin(SandboxStdio::Piped);
+        cmd2.env("TEMP", session_temp_dir.path());
+        cmd2.env("TMP", session_temp_dir.path());
+        cmd2.forward_common_env();
+        let rg_binary = resolve_rg_binary(cache_dir);
+        if let Some(ref path) = rg_binary {
+            cmd2.env("REEL_RG_PATH", path);
+        }
+
+        let mut child2 = lot::spawn(&policy, &cmd2).expect("spawn mcp");
+        let stdin2 = child2.take_stdin().unwrap();
+        let stdout2 = child2.take_stdout().unwrap();
+        let stderr2 = child2.take_stderr().unwrap();
+
+        // Send MCP initialize
+        let init = serde_json::json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "diag", "version": "0.1"}}
+        });
+        let init_bytes = serde_json::to_vec(&init).unwrap();
+        {
+            use std::io::Write as _;
+            let mut stdin_w = stdin2;
+            stdin_w.write_all(&init_bytes).ok();
+            stdin_w.write_all(b"\n").ok();
+            stdin_w.flush().ok();
+        }
+
+        // Read with timeout
+        let mut stdout_buf2 = String::new();
+        let mut stderr_buf2 = String::new();
+        std::io::BufReader::new(stdout2)
+            .read_to_string(&mut stdout_buf2)
+            .ok();
+        std::io::BufReader::new(stderr2)
+            .read_to_string(&mut stderr_buf2)
+            .ok();
+        let status2 = child2.wait();
+        eprintln!("DIAG-MCP stdout={stdout_buf2:?} stderr={stderr_buf2:?} status={status2:?}");
     }
 
     /// Test with stderr captured to see if open prints errors there
