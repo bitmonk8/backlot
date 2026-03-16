@@ -2270,6 +2270,88 @@ mod tests {
         }
     }
 
+    /// Diagnostic: spawn nu -c 'echo hello' in sandbox with sandbox_test_base
+    /// project root and capture stdout+stderr to see why nu crashes.
+    #[tokio::test]
+    async fn diag_nu_crash_in_sandbox_project() {
+        skip_no_nu!();
+        let cache = tmp_sandbox_cache();
+        let cache_dir = cache.as_ref().map(|c| c.path());
+        let nu_binary = resolve_nu_binary(cache_dir);
+
+        let project = tmp_sandbox_project();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let session_temp_base = project.path().join(".reel").join("tmp");
+        std::fs::create_dir_all(&session_temp_base).unwrap_or(());
+        let session_temp_dir = tempfile::TempDir::new_in(&session_temp_base).unwrap();
+
+        let policy =
+            build_nu_sandbox_policy(project.path(), grant, cache_dir, session_temp_dir.path())
+                .unwrap();
+
+        eprintln!("DIAG-CRASH nu_binary: {:?}", nu_binary);
+        eprintln!("DIAG-CRASH project: {:?}", project.path());
+        eprintln!("DIAG-CRASH cache_dir: {:?}", cache_dir);
+        eprintln!("DIAG-CRASH session_temp: {:?}", session_temp_dir.path());
+
+        // Spawn nu with a simple command, not MCP mode
+        let mut cmd = SandboxCommand::new(&nu_binary);
+        cmd.arg("-c");
+        cmd.arg("echo hello");
+        cmd.cwd(project.path());
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+        cmd.stdin(SandboxStdio::Piped);
+        cmd.env("TEMP", session_temp_dir.path());
+        cmd.env("TMP", session_temp_dir.path());
+        cmd.forward_common_env();
+
+        eprintln!("DIAG-CRASH spawning...");
+        let mut child = lot::spawn(&policy, &cmd)
+            .expect("lot::spawn should succeed");
+
+        let stdout = child.take_stdout().unwrap();
+        let stderr = child.take_stderr().unwrap();
+
+        use std::io::Read as _;
+        let mut stdout_buf = String::new();
+        let mut stderr_buf = String::new();
+        std::io::BufReader::new(stdout).read_to_string(&mut stdout_buf).ok();
+        std::io::BufReader::new(stderr).read_to_string(&mut stderr_buf).ok();
+
+        eprintln!("DIAG-CRASH stdout: {:?}", stdout_buf);
+        eprintln!("DIAG-CRASH stderr: {:?}", stderr_buf);
+
+        let status = child.wait();
+        eprintln!("DIAG-CRASH wait result: {:?}", status);
+
+        // Also try with MCP mode
+        let mut cmd2 = SandboxCommand::new(&nu_binary);
+        cmd2.arg("--mcp");
+        cmd2.cwd(project.path());
+        cmd2.stdout(SandboxStdio::Piped);
+        cmd2.stderr(SandboxStdio::Piped);
+        cmd2.stdin(SandboxStdio::Piped);
+        cmd2.env("TEMP", session_temp_dir.path());
+        cmd2.env("TMP", session_temp_dir.path());
+        cmd2.forward_common_env();
+
+        eprintln!("DIAG-CRASH spawning MCP mode...");
+        let mut child2 = lot::spawn(&policy, &cmd2)
+            .expect("lot::spawn MCP should succeed");
+
+        let stderr2 = child2.take_stderr().unwrap();
+        let mut stderr2_buf = String::new();
+        {
+            use std::io::Read as _;
+            std::io::BufReader::new(stderr2).read_to_string(&mut stderr2_buf).ok();
+        }
+        eprintln!("DIAG-CRASH MCP stderr: {:?}", stderr2_buf);
+
+        let status2 = child2.wait();
+        eprintln!("DIAG-CRASH MCP wait result: {:?}", status2);
+    }
+
     /// Test with stderr captured to see if open prints errors there
     #[tokio::test]
     async fn diag_open_with_stderr() {
