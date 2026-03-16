@@ -84,27 +84,30 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-      - name: Run tests with delegated cgroup
+      - name: Delegate cgroup subtree for tests
         run: |
-          # Enable memory+pids controllers at every level from root down to
-          # the user slice so systemd can delegate them into our scope.
+          # Enable memory+pids controllers down through the cgroup hierarchy.
           for p in /sys/fs/cgroup \
                    /sys/fs/cgroup/user.slice \
-                   "/sys/fs/cgroup/user.slice/user-$(id -u).slice" \
-                   "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service"; do
+                   "/sys/fs/cgroup/user.slice/user-$(id -u).slice"; do
             [ -f "$p/cgroup.subtree_control" ] && \
               echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" 2>/dev/null || true
           done
 
-          # Run tests inside a delegated systemd scope. The scope gets its own
-          # cgroup with controllers inherited from above. Inside the scope, we
-          # enable subtree_control so CgroupGuard::new can create child cgroups
-          # with memory.max and pids.max.
-          systemd-run --user --scope -p Delegate=yes -- bash -c '
-            cg="/sys/fs/cgroup$(cat /proc/self/cgroup | grep "^0::" | cut -d: -f3)"
-            echo "+memory +pids" > "$cg/cgroup.subtree_control" 2>/dev/null || true
-            exec cargo test -p lot -- --test-threads=1
-          '
+          # Create a delegated cgroup for tests and enable controllers.
+          # subtree_control must be written while the cgroup is empty.
+          cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/lot-test"
+          sudo mkdir -p "$cg"
+          sudo chown -R "$(id -u):$(id -g)" "$cg"
+          echo '+memory +pids' > "$cg/cgroup.subtree_control"
+      - name: Run tests in delegated cgroup
+        run: |
+          # Move into the delegated cgroup then run tests. CgroupGuard::new
+          # creates child cgroups here; memory.max and pids.max exist because
+          # subtree_control was set above.
+          cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/lot-test"
+          echo $$ > "$cg/cgroup.procs"
+          cargo test -p lot -- --test-threads=1
 
   test-macos:
     name: Test (macOS)
