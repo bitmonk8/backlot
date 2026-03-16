@@ -93,7 +93,13 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     }
 
     // Directory
-    for &nr in &[libc::SYS_getdents, libc::SYS_getdents64, libc::SYS_getcwd] {
+    for &nr in &[
+        libc::SYS_getdents,
+        libc::SYS_getdents64,
+        libc::SYS_getcwd,
+        libc::SYS_chdir,
+        libc::SYS_fchdir,
+    ] {
         rules.insert(nr, allow.clone());
     }
 
