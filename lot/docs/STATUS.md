@@ -15,7 +15,7 @@
 - `SandboxedChild::kill_and_cleanup()`: explicit kill + synchronous platform cleanup
 - `SandboxedChild::wait_with_output_timeout()`: async timeout with kill+cleanup (behind `tokio` feature)
 - Windows backend: AppContainer (filesystem/network isolation) + Job Objects (resource limits) + sentinel file ACL recovery
-- Linux backend: user/mount/pid/net/ipc namespaces + seccomp-BPF syscall filtering + cgroups v2 resource limits
+- Linux backend: user/mount/pid/net/ipc namespaces + seccomp-BPF syscall filtering + cgroups v2 resource limits (sibling cgroup model to respect cgroupv2 "no internal processes" constraint)
 - macOS backend: Seatbelt (sandbox_init SBPL profiles) + setrlimit resource limits + process group kill (setsid/killpg)
 - CI pipeline: clippy + test on Linux/macOS/Windows with namespace and cgroup setup, `lot setup` in Windows CI
 - Rustdoc on all public API items
@@ -60,7 +60,7 @@ Design docs: `docs/DESIGN_WORKSPACE_CLI.md`, `docs/DESIGN_SPAWN_TRAVERSE_ACES.md
 
 2. **First real-world usage / `lot run` testing.** The CLI and library are complete but haven't been exercised end-to-end outside unit/integration tests.
 
-## CI Status (as of 2026-03-16, run 23154377931)
+## CI Status (as of 2026-03-16, run 23155063612)
 
 | Job | Status |
 |---|---|
