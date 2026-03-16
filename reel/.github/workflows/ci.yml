@@ -56,6 +56,11 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
+      - name: Delegate cgroup subtree for sandbox tests
+        run: |
+          sudo mkdir -p /sys/fs/cgroup/lot-test
+          sudo chown -R runner:runner /sys/fs/cgroup/lot-test
+          echo $$ | sudo tee /sys/fs/cgroup/lot-test/cgroup.procs
       - run: cargo test -- --test-threads=1
 
   test-macos:
