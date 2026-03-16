@@ -79,13 +79,11 @@ Automatically grant ancestor traverse ACEs inside `spawn_inner()` before creatin
 
 ## Next Work
 
-1. **Fix Clippy (Linux) `expect_used` lint.** Rust 1.93 clippy now fires `expect_used` on test code under `clippy::nursery`. 13 errors in `src/linux/mod.rs` test functions. Fix: add `#[allow(clippy::expect_used)]` on the test module or switch to `.unwrap()`.
+1. **Fix Linux CI environment.** 8 test failures: 3 cgroup (delegation mismatch) + 5 namespace (`EPERM`). Requires fixing GHA runner setup for user namespaces and cgroup delegation.
 
-2. **Fix Linux CI environment.** 8 test failures: 3 cgroup (delegation mismatch) + 5 namespace (`EPERM`). Requires fixing GHA runner setup for user namespaces and cgroup delegation.
+2. **Fix Windows CI prerequisite setup.** 5 test failures. GHA runner is elevated — add a pre-test step calling `grant_appcontainer_prerequisites()` to grant NUL device ACE and ancestor traverse ACEs.
 
-3. **Fix Windows CI prerequisite setup.** 5 test failures. GHA runner is elevated — add a pre-test step calling `grant_appcontainer_prerequisites()` to grant NUL device ACE and ancestor traverse ACEs.
-
-## CI Failure Overview (as of 2026-03-16, commit 3f4d4d8)
+## CI Failure Overview (as of 2026-03-16, commit b78a0aa)
 
 Tests previously silently skipped on failure; now they fail loudly. This exposed missing CI setup and pre-existing bugs.
 
@@ -93,11 +91,10 @@ Tests previously silently skipped on failure; now they fail loudly. This exposed
 
 No failures. Tests, clippy, and format all pass.
 
-### Linux — Clippy failure + 8 test failures
+### Linux — 8 test failures (clippy now passes)
 
 | Category | Tests | Error | Root Cause |
 |---|---|---|---|
-| Clippy (13 errors) | All in `src/linux/mod.rs` test functions | `clippy::expect_used` — "used `expect()` on a `Result` value" | Rust 1.93 clippy fires this lint under the enabled `nursery` group. Test code uses `.expect()` extensively. |
 | cgroup tests (3) | `cgroup_guard_creates_and_cleans_up`, `cgroup_guard_add_process`, `cgroup_guard_no_limits_creates_empty` | `cgroups v2 must be available for this test` | CI creates `/sys/fs/cgroup/lot-test` but the test process runs in its own cgroup outside that subtree. The delegated subtree is not the process's current cgroup, so `available()` returns false. |
 | namespace spawn tests (5) | `spawn_echo_hello`, `spawn_pid1_in_namespace`, `spawn_proc_mounted`, `spawn_network_isolated`, `spawn_cannot_see_host_paths` | `Setup("child namespace setup failed: Operation not permitted (os error 1)")` | `unshare()` returns `EPERM`. CI runs `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` but the GHA runner may have additional restrictions (AppArmor profile or seccomp filter on the runner process itself) that block namespace creation. |
 
@@ -111,6 +108,7 @@ No failures. Tests, clippy, and format all pass.
 
 | Job | Status |
 |---|---|
+| Clippy (Linux) | Pass |
 | Format | Pass |
 | Build | Pass |
 | Clippy (macOS) | Pass |
