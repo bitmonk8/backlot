@@ -242,15 +242,13 @@ mod tests {
         let path = guard.path().to_path_buf();
         assert!(path.exists(), "cgroup directory should exist");
 
-        // Verify memory.max was written
-        let mem_max = fs::read_to_string(path.join("memory.max"));
-        assert!(mem_max.is_ok());
-        assert_eq!(mem_max.ok().as_deref(), Some("67108864"));
+        // Verify memory.max was written (kernel may append newline)
+        let mem_max = fs::read_to_string(path.join("memory.max")).expect("read memory.max");
+        assert_eq!(mem_max.trim(), "67108864");
 
         // Verify pids.max was written
-        let pids_max = fs::read_to_string(path.join("pids.max"));
-        assert!(pids_max.is_ok());
-        assert_eq!(pids_max.ok().as_deref(), Some("10"));
+        let pids_max = fs::read_to_string(path.join("pids.max")).expect("read pids.max");
+        assert_eq!(pids_max.trim(), "10");
 
         drop(guard);
         assert!(
