@@ -1035,7 +1035,10 @@ mod tests {
     ) -> Result<NuOutput, String> {
         let result = session.evaluate(cmd, timeout, root, grant).await;
         if let Err(e) = &result {
-            assert!(!e.contains("sandbox setup failed"), "sandbox setup failed (this is fatal): {e}");
+            assert!(
+                !e.contains("sandbox setup failed"),
+                "sandbox setup failed (this is fatal): {e}"
+            );
         }
         result
     }
@@ -1331,7 +1334,7 @@ mod tests {
         let (session, _cache) = isolated_session();
         let test_file = tmp.path().join("test.txt");
         std::fs::write(&test_file, "hello").unwrap();
-        let grant = ToolGrant::NU;  // no WRITE, but doesn't matter for ls/open
+        let grant = ToolGrant::NU; // no WRITE, but doesn't matter for ls/open
 
         // ls file
         let cmd = format!("ls '{}' | to json", nu_path(&test_file));
@@ -1374,7 +1377,10 @@ mod tests {
         let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
         eprintln!("DIAG ls-known-file: {:?}", result);
 
-        let cmd2 = format!("open '{}' --raw | str substring 0..50", nu_path(&known_file));
+        let cmd2 = format!(
+            "open '{}' --raw | str substring 0..50",
+            nu_path(&known_file)
+        );
         let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
         eprintln!("DIAG open-known-file: {:?}", result2);
     }
@@ -1433,10 +1439,7 @@ mod tests {
         // Does `^ls` (external ls) work?
         // Note: on Windows this would be `cmd /c dir` — skip if not available
         // Try powershell Test-Path
-        let cmd4 = format!(
-            "^powershell -c \"Test-Path '{}'\"",
-            test_file.display()
-        );
+        let cmd4 = format!("^powershell -c \"Test-Path '{}'\"", test_file.display());
         let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
         eprintln!("DIAG powershell-test-path: {:?}", result4);
 
@@ -1493,7 +1496,10 @@ mod tests {
         eprintln!("DIAG open-bytes-length: {:?}", result5);
 
         // Check if `open` produces binary that MCP can't serialize
-        let cmd6 = format!("open '{}' --raw | encode utf-8 | decode utf-8", nu_path(&test_file));
+        let cmd6 = format!(
+            "open '{}' --raw | encode utf-8 | decode utf-8",
+            nu_path(&test_file)
+        );
         let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
         eprintln!("DIAG open-encode-decode: {:?}", result6);
     }
@@ -1570,15 +1576,12 @@ mod tests {
         eprintln!("DIAG inline-string: {:?}", result);
 
         // 2. Byte literal
-        let cmd2 = "0x[68 65 6c 6c 6f]";  // "hello" in hex
+        let cmd2 = "0x[68 65 6c 6c 6f]"; // "hello" in hex
         let result2 = try_eval(&session, cmd2, 30, tmp.path(), grant).await;
         eprintln!("DIAG byte-literal: {:?}", result2);
 
         // 3. open --raw returns byte stream; can we convert to string first?
-        let cmd3 = format!(
-            "open '{}' --raw | into string",
-            nu_path(&test_file)
-        );
+        let cmd3 = format!("open '{}' --raw | into string", nu_path(&test_file));
         let result3 = try_eval(&session, &cmd3, 30, tmp.path(), grant).await;
         eprintln!("DIAG open-into-string: {:?}", result3);
 
@@ -1630,7 +1633,10 @@ mod tests {
 
         // Try `cat` alias — does nu have it?
         // Actually, try: print the file content
-        let cmd2 = format!("let content = (open '{}' --raw); print $content; 'done'", nu_path(&test_file));
+        let cmd2 = format!(
+            "let content = (open '{}' --raw); print $content; 'done'",
+            nu_path(&test_file)
+        );
         let result2 = try_eval(&session, &cmd2, 30, tmp.path(), grant).await;
         eprintln!("DIAG open-print: {:?}", result2);
 
@@ -1641,7 +1647,10 @@ mod tests {
 
         // Does `stor` or `stor open` exist? Let's try something else:
         // Read via shell expansion
-        let cmd4 = format!("let p = '{}'; ^type $p", nu_path(&test_file).replace('/', "\\"));
+        let cmd4 = format!(
+            "let p = '{}'; ^type $p",
+            nu_path(&test_file).replace('/', "\\")
+        );
         let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
         eprintln!("DIAG type-command: {:?}", result4);
 
@@ -1652,7 +1661,10 @@ mod tests {
 
         // Is the byte stream being consumed by MCP before the pipeline?
         // Test: store in variable, then check type
-        let cmd6 = format!("let x = (open '{}' --raw); $x | describe", nu_path(&test_file));
+        let cmd6 = format!(
+            "let x = (open '{}' --raw); $x | describe",
+            nu_path(&test_file)
+        );
         let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
         eprintln!("DIAG open-var-describe: {:?}", result6);
     }
@@ -1721,7 +1733,10 @@ mod tests {
         eprintln!("DIAG ls-dotslash-length: {:?}", result3);
 
         // Dir listing works — can we use it to find files?
-        let cmd4 = format!("ls '{}' | where name ends-with 'test.txt' | to json", nu_path(tmp.path()));
+        let cmd4 = format!(
+            "ls '{}' | where name ends-with 'test.txt' | to json",
+            nu_path(tmp.path())
+        );
         let result4 = try_eval(&session, &cmd4, 30, tmp.path(), grant).await;
         eprintln!("DIAG ls-dir-where: {:?}", result4);
 
@@ -1789,7 +1804,10 @@ mod tests {
 
         // Try: use `lines` command directly (it should work differently from `open`)
         // Actually `lines` needs input. Let's try:
-        let cmd6 = format!("'{}' | path expand | open $in --raw | describe", nu_path(&tmp.path().join("test.txt")));
+        let cmd6 = format!(
+            "'{}' | path expand | open $in --raw | describe",
+            nu_path(&tmp.path().join("test.txt"))
+        );
         let result6 = try_eval(&session, &cmd6, 30, tmp.path(), grant).await;
         eprintln!("DIAG pipe-open: {:?}", result6);
 
@@ -1906,7 +1924,10 @@ mod tests {
         let dir_path = nu_path(tmp.path());
 
         let tests = vec![
-            ("open --raw | describe", format!("open '{}' --raw | describe", file_path)),
+            (
+                "open --raw | describe",
+                format!("open '{}' --raw | describe", file_path),
+            ),
             ("ls file", format!("ls '{}'", file_path)),
             ("path exists", format!("'{}' | path exists", file_path)),
             ("ls dir | length", format!("ls '{}' | length", dir_path)),
@@ -1914,7 +1935,10 @@ mod tests {
             ("glob file", format!("glob '{}'", file_path)),
             ("ls (no args)", "ls".to_string()),
             ("ls .", "ls . | length".to_string()),
-            ("open raw null", format!("let x = (open '{}' --raw); $x == null", file_path)),
+            (
+                "open raw null",
+                format!("let x = (open '{}' --raw); $x == null", file_path),
+            ),
         ];
 
         for (i, (label, cmd_str)) in tests.iter().enumerate() {
@@ -1961,17 +1985,35 @@ mod tests {
             // Does nu see file metadata at all?
             ("path type", format!("'{}' | path type", file_path)),
             // Does stat work? (if it exists)
-            ("describe ls-dir entry", format!("ls '{}' | first | describe", dir_path)),
+            (
+                "describe ls-dir entry",
+                format!("ls '{}' | first | describe", dir_path),
+            ),
             // Can nu read file attributes?
-            ("path parse", format!("'{}' | path parse | to json", file_path)),
+            (
+                "path parse",
+                format!("'{}' | path parse | to json", file_path),
+            ),
             // Can nu use `do -i` to suppress errors?
-            ("do -i ls file", format!("do -i {{ ls '{}' }} | describe", file_path)),
+            (
+                "do -i ls file",
+                format!("do -i {{ ls '{}' }} | describe", file_path),
+            ),
             // What error type does ls produce?
-            ("try ls file", format!("try {{ ls '{}' | to json }} catch {{ |e| $e | to json }}", file_path)),
+            (
+                "try ls file",
+                format!(
+                    "try {{ ls '{}' | to json }} catch {{ |e| $e | to json }}",
+                    file_path
+                ),
+            ),
             // What about `ls -l`?
             ("ls -la dir", format!("ls -la '{}' | to json", dir_path)),
             // Does `ls` work with a full-form flag?
-            ("ls --full-paths file", format!("ls --full-paths '{}'", file_path)),
+            (
+                "ls --full-paths file",
+                format!("ls --full-paths '{}'", file_path),
+            ),
             // Does `ls -D` (no symlinks) help?
             ("ls -D file", format!("ls -D '{}'", file_path)),
         ];
@@ -2076,12 +2118,18 @@ mod tests {
             // What about using `ls` on a globbed result piped in?
             // Actually let's try to find what specific Win32 call fails.
             // Run dir from cmd.exe as external command (this uses FindFirstFileW)
-            ("dir via cmd", format!("^cmd.exe /c dir \"{}\"", tmp.path().display())),
+            (
+                "dir via cmd",
+                format!("^cmd.exe /c dir \"{}\"", tmp.path().display()),
+            ),
             // Try creating a symlink and ls-ing that
             // Actually, let's try something simpler: does `ls -s` (short) work?
             ("ls -s file", format!("ls -s '{}'", file_path)),
             // What about ls with the directory and file combined?
-            ("ls dir/file", format!("ls '{}/test.txt'", nu_path(tmp.path()))),
+            (
+                "ls dir/file",
+                format!("ls '{}/test.txt'", nu_path(tmp.path())),
+            ),
         ];
 
         for (label, cmd) in tests {
@@ -2121,11 +2169,20 @@ mod tests {
             // What does glob return as paths? (wax-based)
             ("glob test.txt", "glob 'test.txt'".to_string()),
             // Check if there's a UNC/extended path difference
-            ("path expand abs", format!("'{}' | path expand", nu_path(tmp.path()))),
+            (
+                "path expand abs",
+                format!("'{}' | path expand", nu_path(tmp.path())),
+            ),
             // Does ls work with path from glob?
-            ("ls glob-result", "let p = (glob 'test.txt' | first); ls $p".to_string()),
+            (
+                "ls glob-result",
+                "let p = (glob 'test.txt' | first); ls $p".to_string(),
+            ),
             // Does ls work on parent from path dirname?
-            ("ls parent", "'test.txt' | path expand | path dirname | ls $in | length".to_string()),
+            (
+                "ls parent",
+                "'test.txt' | path expand | path dirname | ls $in | length".to_string(),
+            ),
             // What about `ls (path expand)`?
             ("ls expanded", "ls ('test.txt' | path expand)".to_string()),
         ];
@@ -2159,7 +2216,10 @@ mod tests {
 
         let tests = vec![
             // save works, so write is fine
-            ("save + glob", "'written' | save 'w.txt' --force; glob 'w.txt'".to_string()),
+            (
+                "save + glob",
+                "'written' | save 'w.txt' --force; glob 'w.txt'".to_string(),
+            ),
             // Can we read back what we just wrote?
             ("open saved", "open 'w.txt' --raw | describe".to_string()),
             // Use `cat` alias?
@@ -2168,7 +2228,10 @@ mod tests {
             // Under AppContainer, the File::open might succeed but the byte stream
             // might get closed/redirected
             // Let's check if `open` on a file that nu itself created works
-            ("save+open", "'test data' | save 'x.txt' --force; open 'x.txt' --raw | describe".to_string()),
+            (
+                "save+open",
+                "'test data' | save 'x.txt' --force; open 'x.txt' --raw | describe".to_string(),
+            ),
             // What about `open` on stdin piped from save?
             // Actually, let's test: does `open` fail because the byte stream is
             // immediately consumed/dropped by MCP serialization?
@@ -2184,7 +2247,10 @@ mod tests {
             // In nushell, can we use `from` commands?
             // Actually: does `stor` exist?
             // Let's just try to read bytes using alternative methods
-            ("bytes length via save+open", "'hello' | save 'b.txt' --force; open 'b.txt' --raw | bytes length".to_string()),
+            (
+                "bytes length via save+open",
+                "'hello' | save 'b.txt' --force; open 'b.txt' --raw | bytes length".to_string(),
+            ),
         ];
 
         for (label, cmd) in tests {
@@ -2222,9 +2288,9 @@ mod tests {
         std::fs::create_dir_all(&session_temp_base).unwrap_or(());
         let session_temp_dir = tempfile::TempDir::new_in(&session_temp_base).unwrap();
 
-        let policy = build_nu_sandbox_policy(
-            project.path(), grant, cache_dir, session_temp_dir.path()
-        ).unwrap();
+        let policy =
+            build_nu_sandbox_policy(project.path(), grant, cache_dir, session_temp_dir.path())
+                .unwrap();
 
         // Spawn with stderr PIPED instead of null
         let mut cmd = SandboxCommand::new(&nu_binary);
@@ -2235,7 +2301,7 @@ mod tests {
         }
         cmd.cwd(project.path());
         cmd.stdout(SandboxStdio::Piped);
-        cmd.stderr(SandboxStdio::Piped);  // Capture stderr!
+        cmd.stderr(SandboxStdio::Piped); // Capture stderr!
         cmd.stdin(SandboxStdio::Piped);
         cmd.env("TEMP", session_temp_dir.path());
         cmd.env("TMP", session_temp_dir.path());
@@ -2304,14 +2370,19 @@ mod tests {
                     Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
                     Err(_) => break,
                 }
-                if output.len() > 8192 { break; }
+                if output.len() > 8192 {
+                    break;
+                }
             }
             output
         });
 
         // Kill the process to unblock stderr read
         {
-            let mut guard = proc.child_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = proc
+                .child_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref mut child) = *guard {
                 let _ = child.kill();
             }
@@ -2322,7 +2393,10 @@ mod tests {
                 if stderr_text.is_empty() {
                     eprintln!("DIAG-STDERR: stderr is empty");
                 } else {
-                    eprintln!("DIAG-STDERR: stderr content: {}", &stderr_text[..stderr_text.len().min(2000)]);
+                    eprintln!(
+                        "DIAG-STDERR: stderr content: {}",
+                        &stderr_text[..stderr_text.len().min(2000)]
+                    );
                 }
             }
             Err(_) => eprintln!("DIAG-STDERR: stderr thread panicked"),
@@ -2355,47 +2429,47 @@ mod tests {
         let tests = vec![
             // 1. path exists — expand_path_with then Path::exists (GetFileAttributesW)
             ("path-exists", format!("'{}' | path exists", file_path)),
-
             // 2. ls dir — read_dir (FindFirstFileW/FindNextFileW on dir\\*)
-            ("ls-dir", format!("ls '{}' | where name ends-with 'probe.txt' | length", dir_path)),
-
+            (
+                "ls-dir",
+                format!(
+                    "ls '{}' | where name ends-with 'probe.txt' | length",
+                    dir_path
+                ),
+            ),
             // 3. ls file — goes through glob_from → absolute_with → exists check
             ("ls-file", format!("ls '{}'", file_path)),
-
             // 4. glob exact file — wax crate, different from nu_glob
             ("glob-exact", format!("glob '{}'", file_path)),
-
             // 5. path expand then ls — does path expand produce \\?\ prefix?
             ("path-expand", format!("'{}' | path expand", file_path)),
-
             // 6. ls on path-expand result — test if expanded path form breaks ls
             ("ls-expanded", format!("ls ('{}' | path expand)", file_path)),
-
             // 7. Relative path ls — nu_glob fill_todo with relative join
             ("ls-relative", "ls probe.txt".to_string()),
-
             // 8. symlink_metadata equivalent — path type uses this
             ("path-type", format!("'{}' | path type", file_path)),
-
             // 9. open — CreateFileW
             ("open", format!("open '{}' --raw | str length", file_path)),
-
             // 10. Test if the issue is \\?\ prefix specifically
             // Construct a \\?\ path manually and test exists
-            ("exists-unc", format!(
-                r"'\\?\{}' | path exists",
-                tmp.path().join("probe.txt").display()
-            )),
-
+            (
+                "exists-unc",
+                format!(
+                    r"'\\?\{}' | path exists",
+                    tmp.path().join("probe.txt").display()
+                ),
+            ),
             // 11. Same with ls
-            ("ls-unc", format!(
-                r"ls '\\?\{}'",
-                tmp.path().join("probe.txt").display()
-            )),
-
+            (
+                "ls-unc",
+                format!(r"ls '\\?\{}'", tmp.path().join("probe.txt").display()),
+            ),
             // 12. std::path::absolute equivalent: path expand --no-symlink (closest nu equivalent)
-            ("path-expand-nosym", format!("'{}' | path expand --no-symlink", file_path)),
-
+            (
+                "path-expand-nosym",
+                format!("'{}' | path expand --no-symlink", file_path),
+            ),
             // 13. Check what `which ls` says — confirm it's builtin
             ("which-ls", "which ls | get path.0".to_string()),
         ];
@@ -2452,50 +2526,38 @@ mod tests {
 
         let tests = vec![
             // Check symlink_metadata equivalent
-            ("symlink-meta-dir", format!(
-                "'{}' | path type",
-                dir_path
-            )),
-            ("symlink-meta-file", format!(
-                "'{}' | path type",
-                file_path
-            )),
-
+            ("symlink-meta-dir", format!("'{}' | path type", dir_path)),
+            ("symlink-meta-file", format!("'{}' | path type", file_path)),
             // Check if ls . works (read_dir path, not glob_from)
             ("ls-dot", "ls . | length".to_string()),
-
             // Check ls * (glob path in glob_from)
             ("ls-star", "ls * | length".to_string()),
-
             // Check if ls *.txt works (glob metachar present → different branch)
             ("ls-glob-star-txt", "ls *.txt | length".to_string()),
-
             // This is interesting: ls with a glob pattern that matches exactly
             // one file goes through the GLOB branch (nu_glob::glob_with),
             // not the non-glob branch (absolute_with). Does it work?
             ("ls-glob-q", "ls prob?.txt | length".to_string()),
-
             // ls with explicit glob wrapper
             ("ls-glob-exact", "ls (glob 'probe.txt' | first)".to_string()),
-
             // Test: does `path exists` on the absolute path work?
-            ("exists-abs", format!(
-                "('{}' | path expand) | path exists",
-                file_path
-            )),
-
+            (
+                "exists-abs",
+                format!("('{}' | path expand) | path exists", file_path),
+            ),
             // Confirm file shows up in directory listing
-            ("ls-dir-filter", format!(
-                "ls '{}' | where name ends-with probe.txt | get name",
-                dir_path
-            )),
-
+            (
+                "ls-dir-filter",
+                format!(
+                    "ls '{}' | where name ends-with probe.txt | get name",
+                    dir_path
+                ),
+            ),
             // Try do/catch to get the actual error from ls
-            ("ls-file-error", format!(
-                "try {{ ls '{}' }} catch {{ |e| $e | to json }}",
-                file_path
-            )),
-
+            (
+                "ls-file-error",
+                format!("try {{ ls '{}' }} catch {{ |e| $e | to json }}", file_path),
+            ),
             // Check: does `ls` with `--all` flag change anything?
             ("ls-file-all", format!("ls -a '{}'", file_path)),
         ];
@@ -2606,8 +2668,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("timed out"), "error: {err}");
         // Session recovers after timeout.
-        let result2 =
-            try_eval(&session, "echo 'recovered'", 30, tmp.path(), ToolGrant::NU).await;
+        let result2 = try_eval(&session, "echo 'recovered'", 30, tmp.path(), ToolGrant::NU).await;
         let out = result2.unwrap();
         assert!(!out.is_error);
         assert!(out.content.contains("recovered"));
