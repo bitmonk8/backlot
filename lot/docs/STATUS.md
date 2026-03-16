@@ -79,12 +79,38 @@ Automatically grant ancestor traverse ACEs inside `spawn_inner()` before creatin
 
 ## Next Work
 
-1. **CI prerequisite setup.** Tests no longer silently skip when prerequisites are missing — they fail. GitHub Actions CI must be configured to grant the required prerequisites on each platform before running tests:
-   - **Windows**: Run `grant_appcontainer_prerequisites()` from an elevated context (the GHA runner is elevated by default) to grant NUL device and ancestor traverse ACEs.
-   - **Linux**: Ensure user namespaces are permitted (`kernel.apparmor_restrict_unprivileged_userns=0`) and cgroups v2 delegation is available.
-   - **macOS**: No special setup needed (Seatbelt is always available).
+1. **Fix CI prerequisite setup.** Tests no longer silently skip when prerequisites are missing — they fail. CI must be configured to provide the required environment on each platform before running tests.
 
-2. **Fix test bugs exposed by silent-skip removal.** Some tests have pre-existing bugs that were hidden by silent skips (e.g., overlapping `read_paths`/`exec_paths` in tokio timeout tests — now fixed locally but may have equivalents elsewhere). Run full CI on all platforms and fix any test failures that occur even when prerequisites are met.
+2. **Fix test bugs exposed by silent-skip removal.** Fix any test failures that occur even when prerequisites are met.
+
+## CI Failure Overview (as of 2026-03-16)
+
+Tests previously silently skipped on failure; now they fail loudly. This exposed missing CI setup and pre-existing bugs.
+
+### macOS — All green
+
+No failures. Seatbelt works without special setup.
+
+### Linux — 8 test failures
+
+| Category | Tests | Error | Root Cause |
+|---|---|---|---|
+| cgroup tests (3) | `cgroup_guard_creates_and_cleans_up`, `cgroup_guard_add_process`, `cgroup_guard_no_limits_creates_empty` | `cgroups v2 must be available for this test` | CI creates `/sys/fs/cgroup/lot-test` but the test process runs in its own cgroup outside that subtree. The delegated subtree is not the process's current cgroup, so `available()` returns false. |
+| namespace spawn tests (5) | `spawn_echo_hello`, `spawn_pid1_in_namespace`, `spawn_proc_mounted`, `spawn_network_isolated`, `spawn_cannot_see_host_paths` | `Setup("child namespace setup failed: Operation not permitted (os error 1)")` | `unshare()` returns `EPERM`. CI runs `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` but the GHA runner may have additional restrictions (AppArmor profile or seccomp filter on the runner process itself) that block namespace creation. |
+| integration tests (7) | All integration tests | Same namespace `EPERM` | Same root cause as namespace spawn tests above. |
+
+### Windows — 5 unit test failures + 7 integration test failures
+
+| Category | Tests | Error | Root Cause |
+|---|---|---|---|
+| appcontainer unit tests (5) | `spawn_and_read_allowed_path`, `disallowed_path_unreadable`, `read_only_path_not_writable`, `cleanup_restores_acls`, `sentinel_recovery` | `PrerequisitesNotMet { nul_device_missing: true }` (first test), then cascading `PoisonError` | NUL device lacks `ALL APPLICATION PACKAGES` ACE. CI has no setup step to call `grant_appcontainer_prerequisites()`. The GHA Windows runner is elevated, so adding a setup step that calls this function should fix it. The cascading `PoisonError` is because the tests share a `Mutex` and the first panic poisons it. |
+| integration tests (7) | All integration tests | `PrerequisitesNotMet { missing_paths: ["\\\\?\\C:\\Users"] }` | Same missing prerequisites. Ancestor traverse ACEs not granted for temp dir paths under `C:\Users`. |
+
+### All platforms — format failure
+
+| Category | Error | Root Cause |
+|---|---|---|
+| `cargo fmt --check` | Diff in `src/linux/mod.rs` | Long `.expect()` chains need line-wrapping per `rustfmt` rules. |
 
 ## Known Limitations
 
