@@ -479,6 +479,114 @@ mod tests {
     use crate::command::SandboxStdio;
     use std::path::PathBuf;
 
+    /// Diagnostic test: fork a child, try unshare + uid_map step by step,
+    /// report which step fails via exit code.
+    /// Exit codes: 0=success, 1=fork failed, 2=unshare failed,
+    ///             3=setgroups write failed, 4=uid_map write failed,
+    ///             5=gid_map write failed
+    #[test]
+    fn diagnose_namespace_steps() {
+        // Print thread count for the test process
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        for line in status.lines() {
+            if line.starts_with("Threads:") || line.starts_with("Seccomp")
+                || line.starts_with("NoNewPrivs") || line.starts_with("Cap")
+            {
+                eprintln!("[diag] {line}");
+            }
+        }
+        if let Ok(aa) = std::fs::read_to_string("/proc/self/attr/current") {
+            eprintln!("[diag] AppArmor: {}", aa.trim());
+        }
+
+        // SAFETY: fork + async-signal-safe functions only in child
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+
+        if pid == 0 {
+            // Child — try each step
+            // Print child's thread count and security state
+            if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+                for line in s.lines() {
+                    if line.starts_with("Threads:") || line.starts_with("Seccomp")
+                        || line.starts_with("NoNewPrivs")
+                    {
+                        eprintln!("[diag-child] {line}");
+                    }
+                }
+            }
+            if let Ok(aa) = std::fs::read_to_string("/proc/self/attr/current") {
+                eprintln!("[diag-child] AppArmor: {}", aa.trim());
+            }
+
+            // Step 1: unshare(CLONE_NEWUSER)
+            let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER) };
+            if rc != 0 {
+                let e = std::io::Error::last_os_error();
+                eprintln!("[diag-child] unshare(CLONE_NEWUSER) FAILED: {e}");
+                // Check dmesg-visible denial reason
+                if let Ok(aa) = std::fs::read_to_string("/proc/self/attr/current") {
+                    eprintln!("[diag-child] AppArmor after unshare attempt: {}", aa.trim());
+                }
+                unsafe { libc::_exit(2) };
+            }
+            eprintln!("[diag-child] unshare(CLONE_NEWUSER) OK");
+
+            // Check AppArmor profile after unshare
+            if let Ok(aa) = std::fs::read_to_string("/proc/self/attr/current") {
+                eprintln!("[diag-child] AppArmor after unshare: {}", aa.trim());
+            }
+
+            let uid = unsafe { libc::getuid() };
+            let gid = unsafe { libc::getgid() };
+            eprintln!("[diag-child] uid={uid} gid={gid}");
+
+            // Step 2: write setgroups deny
+            if std::fs::write("/proc/self/setgroups", "deny").is_err() {
+                let e = std::io::Error::last_os_error();
+                eprintln!("[diag-child] write /proc/self/setgroups FAILED: {e}");
+                unsafe { libc::_exit(3) };
+            }
+            eprintln!("[diag-child] setgroups deny OK");
+
+            // Step 3: write uid_map
+            let uid_map = format!("0 {uid} 1");
+            if std::fs::write("/proc/self/uid_map", &uid_map).is_err() {
+                let e = std::io::Error::last_os_error();
+                eprintln!("[diag-child] write /proc/self/uid_map ({uid_map:?}) FAILED: {e}");
+                unsafe { libc::_exit(4) };
+            }
+            eprintln!("[diag-child] uid_map OK");
+
+            // Step 4: write gid_map
+            let gid_map = format!("0 {gid} 1");
+            if std::fs::write("/proc/self/gid_map", &gid_map).is_err() {
+                let e = std::io::Error::last_os_error();
+                eprintln!("[diag-child] write /proc/self/gid_map ({gid_map:?}) FAILED: {e}");
+                unsafe { libc::_exit(5) };
+            }
+            eprintln!("[diag-child] gid_map OK — full namespace setup succeeded");
+
+            unsafe { libc::_exit(0) };
+        }
+
+        // Parent: wait for child
+        let mut status_code: libc::c_int = 0;
+        // SAFETY: valid pid
+        unsafe { libc::waitpid(pid, &raw mut status_code, 0) };
+        let exit = libc::WEXITSTATUS(status_code);
+        let step_name = match exit {
+            0 => "all steps succeeded",
+            2 => "unshare(CLONE_NEWUSER) failed",
+            3 => "setgroups write failed",
+            4 => "uid_map write failed",
+            5 => "gid_map write failed",
+            _ => "unknown failure",
+        };
+        eprintln!("[diag] child exited with code {exit}: {step_name}");
+        assert_eq!(exit, 0, "namespace setup diagnostic failed at: {step_name}");
+    }
+
     fn test_policy(read_paths: Vec<PathBuf>) -> SandboxPolicy {
         SandboxPolicy {
             read_paths,
