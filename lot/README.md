@@ -184,6 +184,98 @@ pub enum SandboxError {
 }
 ```
 
+## CLI
+
+Install:
+
+```bash
+cargo install --path lot-cli
+```
+
+### `lot run`
+
+Run a program inside a sandbox defined by a YAML config file.
+
+```bash
+lot run --config sandbox.yaml -- ./my-program arg1 arg2
+lot run -c sandbox.yaml -t 30 -- ./long-task          # 30s timeout
+lot run -c sandbox.yaml --dry-run                      # validate only
+lot run -c sandbox.yaml --verbose -- ./my-program      # verbose output
+```
+
+Exit code: forwards the child's exit code. Timeout exits 124 (GNU `timeout` convention). Setup failure exits 1.
+
+Stdio is inherited by default — the sandboxed process reads/writes the terminal directly.
+
+#### Config file format
+
+```yaml
+# Filesystem access — all paths are auto-canonicalized.
+# Non-existent paths are skipped with a warning (--verbose).
+filesystem:
+  read:
+    - /usr/lib
+    - /project/data
+  write:
+    - /tmp/output
+  exec:
+    - /usr/bin
+    - /project/bin
+  include_platform_exec: true    # /usr/bin, /bin, System32, etc.
+  include_platform_lib: true     # /usr/lib, /usr/include, Framework dirs, etc.
+  include_temp: true             # Platform temp directory → write_paths
+
+# Network access. Default: false (denied).
+network:
+  allow: false
+
+# Resource limits. All optional — omitted = no limit.
+limits:
+  max_memory_bytes: 536870912    # 512 MB
+  max_processes: 10
+  max_cpu_seconds: 60
+
+# Environment variables for the child process.
+environment:
+  forward_common: true           # Forward PATH, HOME, USER, LANG, etc.
+  vars:
+    RUST_LOG: debug
+    MY_VAR: value
+
+# Working directory for the child. Optional — defaults to "/".
+process:
+  cwd: /project
+```
+
+All sections are optional. An empty config file means deny-all (valid but most programs will fail immediately).
+
+### `lot setup`
+
+Configure platform prerequisites. Windows only (no-op on other platforms).
+
+```bash
+lot setup --verbose       # grant prerequisites (requires elevation)
+lot setup --check         # check without modifying
+```
+
+### `lot probe`
+
+Print platform sandboxing capabilities.
+
+```bash
+lot probe
+```
+
+Output:
+```
+appcontainer=true
+job_objects=true
+namespaces=false
+seccomp=false
+cgroups_v2=false
+seatbelt=false
+```
+
 ## Graceful Degradation
 
 Lot does not silently degrade. If a required mechanism is unavailable, `spawn()` returns `SandboxError::Setup` with a diagnostic message. Use `probe()` to check capabilities before spawning.

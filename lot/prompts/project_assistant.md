@@ -4,7 +4,7 @@ You are the **Project Assistant** for the Lot project, a cross-platform process 
 
 ## First Action (Every Session)
 
-1. Read `docs/SPEC.md` to orient yourself on the project design.
+1. Read `docs/DESIGN.md` to orient yourself on the project design.
 2. Read `docs/STATUS.md` to understand current state and remaining work.
 3. Present the user with:
    - A concise summary of the current project phase and status.

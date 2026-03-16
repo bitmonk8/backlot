@@ -22,8 +22,6 @@
 
 ## Implementation Plan
 
-See `docs/PLAN.md` for the full phased plan with CI testing strategy.
-
 ### Phase Summary
 
 | Phase | Scope | Status |
@@ -52,8 +50,6 @@ See `docs/PLAN.md` for the full phased plan with CI testing strategy.
 | Best-effort spawn-time traverse ACE grant | Complete |
 | Workspace restructure + CLI binary | Complete |
 | Fix Linux mount_proc bug | Complete — split mount namespace setup into two phases (helper + inner child) |
-
-Design docs: `docs/DESIGN_WORKSPACE_CLI.md`, `docs/DESIGN_SPAWN_TRAVERSE_ACES.md`
 
 ## Next Work
 
