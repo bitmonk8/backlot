@@ -235,12 +235,24 @@ mod tests {
         let limits = ResourceLimits::default();
         let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
 
-        // Add our own process to the cgroup
-        // SAFETY: getpid has no preconditions
-        let pid = unsafe { libc::getpid() };
-        // Writing self to cgroup.procs may fail depending on cgroup configuration,
+        // Fork a child that sleeps, add it to the cgroup, then let the guard
+        // kill it on drop. We must not add the test process itself — the
+        // guard's drop would SIGKILL the test runner.
+        // SAFETY: fork() is safe in a single-threaded context; the child
+        // immediately sleeps and is killed by the guard.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // Child: sleep until killed.
+            unsafe { libc::pause() };
+            std::process::exit(0);
+        }
+        // Parent: add the child to the cgroup.
+        let result = guard.add_process(pid);
+        // Writing to cgroup.procs may fail depending on cgroup configuration,
         // so we just verify the call doesn't panic.
-        let _result = guard.add_process(pid);
+        let _result = result;
+        // Guard drop will kill the child and remove the cgroup.
     }
 
     #[test]
