@@ -102,10 +102,7 @@ impl CgroupGuard {
         })?;
 
         let parent = current.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "current cgroup has no parent",
-            )
+            io::Error::new(io::ErrorKind::InvalidInput, "current cgroup has no parent")
         })?;
 
         // Use monotonic clock nanoseconds as a unique suffix instead of a static counter.

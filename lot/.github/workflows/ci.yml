@@ -84,7 +84,7 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-      - name: Delegate cgroup subtree for tests
+      - name: Run tests with delegated cgroup
         run: |
           # Enable memory+pids controllers down through the cgroup hierarchy.
           for p in /sys/fs/cgroup \
@@ -103,9 +103,16 @@ jobs:
           sudo mkdir -p "$cg/runner"
           sudo chown -R "$(id -u):$(id -g)" "$cg"
           echo '+memory +pids' > "$cg/cgroup.subtree_control"
-      - name: Run tests in delegated cgroup
-        run: |
-          cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/lot-test"
+
+          # Debug: show cgroup state
+          echo "=== cgroup debug ==="
+          ls -la "$cg/"
+          ls -la "$cg/runner/"
+          cat "$cg/cgroup.subtree_control"
+          cat /proc/self/cgroup
+          echo "=== end debug ==="
+
+          # Move into the leaf cgroup then run tests.
           echo $$ > "$cg/runner/cgroup.procs"
           cargo test -p lot -- --test-threads=1
 
