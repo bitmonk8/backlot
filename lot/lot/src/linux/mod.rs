@@ -264,9 +264,17 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 }
             }
 
-            // Mount /proc — must happen here (not in setup_mount_namespace)
-            // because the kernel requires the caller to be inside the PID
-            // namespace, which only takes effect after fork().
+            // Mount /proc — must happen in the inner child for two reasons:
+            // 1. The kernel requires the caller to be inside the new PID
+            //    namespace, which only takes effect after fork().
+            // 2. After pivot_root, the lazy-unmounted old root may leave
+            //    stale procfs mounts in the namespace's mount list. The
+            //    kernel's mnt_already_visible() check rejects mounting
+            //    proc when existing proc mounts with submounts are visible.
+            //    A non-lazy umount clears them.
+            // SAFETY: "/proc\0" is a valid C string literal
+            unsafe { libc::umount2(c"/proc".as_ptr(), 0) };
+            // Ignore errors — mount point may have no stale mount.
             if let Err(e) = namespace::mount_proc("/proc") {
                 helper_bail!(
                     err_pipe_wr,
