@@ -623,7 +623,16 @@ async fn spawn_nu_process(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::needless_borrow,
+    clippy::redundant_closure_for_method_calls,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines,
+    clippy::match_same_arms
+)]
 mod tests {
     use super::*;
 
@@ -1013,7 +1022,7 @@ mod tests {
         session
             .spawn(root, grant)
             .await
-            .expect("spawn should succeed (sandbox setup failure is fatal)")
+            .expect("spawn should succeed (sandbox setup failure is fatal)");
     }
 
     /// Evaluate a command, panicking if sandbox setup fails.
@@ -1026,9 +1035,7 @@ mod tests {
     ) -> Result<NuOutput, String> {
         let result = session.evaluate(cmd, timeout, root, grant).await;
         if let Err(e) = &result {
-            if e.contains("sandbox setup failed") {
-                panic!("sandbox setup failed (this is fatal): {e}");
-            }
+            assert!(!e.contains("sandbox setup failed"), "sandbox setup failed (this is fatal): {e}");
         }
         result
     }
@@ -1931,6 +1938,7 @@ mod tests {
         }
 
         let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// Compare lot-spawned vs direct-spawned behavior for the same commands.
