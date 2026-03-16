@@ -82,139 +82,51 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     let pid = unsafe { libc::getpid() };
     let new_root = format!("/tmp/lot-newroot-{pid}");
 
-    // Helper to write diagnostic directly to fd 2 (raw, no buffering)
-    #[cfg(test)]
-    fn diag(msg: &str) {
-        let bytes = msg.as_bytes();
-        // SAFETY: fd 2 is stderr, bytes is valid
-        unsafe { libc::write(2, bytes.as_ptr().cast(), bytes.len()) };
-        unsafe { libc::write(2, b"\n".as_ptr().cast(), 1) };
-    }
+    mkdir_p(&new_root)?;
+    mount_tmpfs(&new_root)?;
 
-    // Ensure the mount point exists
-    mkdir_p(&new_root).map_err(|e| {
-        #[cfg(test)]
-        {
-            let msg = format!("[mount-ns] FAIL mkdir_p({new_root}): {e}");
-            diag(&msg);
-        }
-        e
-    })?;
-    #[cfg(test)]
-    diag("[mount-ns] mkdir_p OK");
+    // Private mount propagation so pivot_root works
+    make_mount_private("/")?;
+    make_mount_private(&new_root)?;
 
-    // Mount tmpfs as the new root
-    mount_tmpfs(&new_root).map_err(|e| {
-        #[cfg(test)]
-        {
-            let msg = format!("[mount-ns] FAIL mount_tmpfs({new_root}): {e}");
-            diag(&msg);
-        }
-        e
-    })?;
-    #[cfg(test)]
-    diag("[mount-ns] mount_tmpfs OK");
-
-    // Ensure we have a private mount propagation so pivot_root works
-    make_mount_private("/").map_err(|e| {
-        #[cfg(test)]
-        {
-            let msg = format!("[mount-ns] FAIL make_mount_private(/): {e}");
-            diag(&msg);
-        }
-        e
-    })?;
-    #[cfg(test)]
-    diag("[mount-ns] make_mount_private(/) OK");
-
-    make_mount_private(&new_root).map_err(|e| {
-        #[cfg(test)]
-        {
-            let msg = format!("[mount-ns] FAIL make_mount_private({new_root}): {e}");
-            diag(&msg);
-        }
-        e
-    })?;
-    #[cfg(test)]
-    diag("[mount-ns] make_mount_private(new_root) OK");
-
-    // Create essential directories in the new root
+    // Essential directories in the new root
     mkdir_p(&format!("{new_root}/proc"))?;
     mkdir_p(&format!("{new_root}/dev"))?;
     mkdir_p(&format!("{new_root}/tmp"))?;
-    #[cfg(test)]
-    diag("[mount-ns] essential dirs OK");
 
-    // Bind-mount essential system directories (dynamic linker, libraries).
-    // These need execute permission so shared libraries can be loaded.
+    // System library directories (dynamic linker, shared libraries)
     for sys_path in &["/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/lib32"] {
         if Path::new(sys_path).exists() {
             let dest = format!("{new_root}{sys_path}");
             mkdir_p(&dest)?;
-            bind_mount_exec(sys_path, &dest).map_err(|e| {
-                #[cfg(test)]
-                {
-                    let msg = format!("[mount-ns] FAIL bind_mount_exec({sys_path}): {e}");
-                    diag(&msg);
-                }
-                e
-            })?;
+            bind_mount_exec(sys_path, &dest)?;
         }
     }
-    #[cfg(test)]
-    diag("[mount-ns] lib bind-mounts OK");
 
-    // Bind-mount bin directories — executables need execute permission.
+    // Bin directories
     for bin_path in &["/bin", "/usr/bin", "/sbin", "/usr/sbin"] {
         if Path::new(bin_path).exists() {
             let dest = format!("{new_root}{bin_path}");
             mkdir_p(&dest)?;
-            bind_mount_exec(bin_path, &dest).map_err(|e| {
-                #[cfg(test)]
-                {
-                    let msg = format!("[mount-ns] FAIL bind_mount_exec({bin_path}): {e}");
-                    diag(&msg);
-                }
-                e
-            })?;
+            bind_mount_exec(bin_path, &dest)?;
         }
     }
-    #[cfg(test)]
-    diag("[mount-ns] bin bind-mounts OK");
 
-    // Bind-mount /etc read-only (needed for ld.so.cache, nsswitch, etc.)
+    // /etc read-only (needed for ld.so.cache, nsswitch, etc.)
     if Path::new("/etc").exists() {
         let dest = format!("{new_root}/etc");
         mkdir_p(&dest)?;
-        bind_mount_readonly("/etc", &dest).map_err(|e| {
-            #[cfg(test)]
-            {
-                let msg = format!("[mount-ns] FAIL bind_mount_readonly(/etc): {e}");
-                diag(&msg);
-            }
-            e
-        })?;
+        bind_mount_readonly("/etc", &dest)?;
     }
-    #[cfg(test)]
-    diag("[mount-ns] /etc bind-mount OK");
 
     // Policy-specified read-only paths
     for path in &policy.read_paths {
         if let Some(s) = path.to_str() {
             let dest = format!("{new_root}{s}");
             mkdir_p(&dest)?;
-            bind_mount_readonly(s, &dest).map_err(|e| {
-                #[cfg(test)]
-                {
-                    let msg = format!("[mount-ns] FAIL bind_mount_readonly({s}): {e}");
-                    diag(&msg);
-                }
-                e
-            })?;
+            bind_mount_readonly(s, &dest)?;
         }
     }
-    #[cfg(test)]
-    diag("[mount-ns] policy read paths OK");
 
     // Policy-specified read-write paths
     for path in &policy.write_paths {
@@ -234,26 +146,16 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
         }
     }
 
-    // NOTE: /proc mount and pivot_root are NOT done here. They happen in
-    // the inner child via finish_mount_namespace(). Mounting procfs requires
-    // the caller to be inside the new PID namespace (only children after
-    // fork() are), and it must happen BEFORE pivot_root — otherwise
-    // mnt_already_visible() rejects the mount because the lazy-unmounted
-    // old root leaves stale procfs entries in the mount namespace.
-
-    // Create /dev/null, /dev/zero, and /dev/urandom via bind mount
+    // /dev/null, /dev/zero, /dev/urandom via bind mount from host
     for dev in &["/dev/null", "/dev/zero", "/dev/urandom"] {
-        create_dev_node(&new_root, dev).map_err(|e| {
-            #[cfg(test)]
-            {
-                let msg = format!("[mount-ns] FAIL create_dev_node({dev}): {e}");
-                diag(&msg);
-            }
-            e
-        })?;
+        create_dev_node(&new_root, dev)?;
     }
-    #[cfg(test)]
-    diag("[mount-ns] dev nodes OK");
+
+    // NOTE: /proc mount and pivot_root happen in the inner child via
+    // finish_mount_namespace(). Mounting procfs requires the caller to be
+    // inside the new PID namespace (only children after fork() are), and
+    // must happen BEFORE pivot_root to avoid mnt_already_visible() rejecting
+    // the mount due to stale procfs entries from the lazy-unmounted old root.
 
     Ok(new_root)
 }
@@ -458,7 +360,7 @@ fn bind_mount_exec(src: &str, dst: &str) -> io::Result<()> {
 /// Must be called from a process inside the target PID namespace (i.e., after
 /// fork() following unshare(CLONE_NEWPID)). The kernel rejects this with EPERM
 /// if the caller is not a member of the PID namespace.
-pub(crate) fn mount_proc(target: &str) -> io::Result<()> {
+fn mount_proc(target: &str) -> io::Result<()> {
     let c_target = to_cstring(target)?;
     let c_fstype = to_cstring("proc")?;
     let c_source = to_cstring("proc")?;
