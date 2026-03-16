@@ -232,7 +232,7 @@ let policy = SandboxPolicyBuilder::new()
 ///
 /// The caller is never sandboxed. The child process inherits
 /// the sandbox restrictions and cannot escape them.
-pub fn spawn(policy: &SandboxPolicy, command: SandboxCommand) -> Result<SandboxedChild>;
+pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<SandboxedChild>;
 ```
 
 ### Error types
@@ -301,25 +301,40 @@ pub fn cleanup_stale() -> Result<()>;
 ## Internal Architecture
 
 ```
-lot/
-  src/
-    lib.rs            — Public API: spawn(), probe(), types
-    policy.rs         — SandboxPolicy, ResourceLimits, validation
-    policy_builder.rs — SandboxPolicyBuilder (auto-canonicalization, platform defaults)
-    command.rs        — SandboxCommand builder
-    error.rs          — SandboxError
-    linux/
-      mod.rs        — LinuxSandbox: orchestrates namespace + seccomp + cgroup
-      namespace.rs  — clone(), pivot_root, bind mounts, uid/gid mapping
-      seccomp.rs    — BPF filter construction and application
-      cgroup.rs     — cgroup v2 creation, limit writes, cleanup
-    macos/
-      mod.rs        — MacSandbox: fork + seatbelt + rlimit
-      seatbelt.rs   — SBPL profile generation, sandbox_init FFI
-    windows/
-      mod.rs        — WindowsSandbox: AppContainer + job object
-      appcontainer.rs — Profile lifecycle, capability assembly, ACL management
-      job.rs        — Job object creation, resource limits
+lot/                           (workspace root)
+├── Cargo.toml                 (workspace config, shared lints/versions/profile)
+├── lot/                       (library crate)
+│   ├── Cargo.toml
+│   ├── src/
+│   │   ├── lib.rs             — Public API: spawn(), probe(), types
+│   │   ├── policy.rs          — SandboxPolicy, ResourceLimits, validation
+│   │   ├── policy_builder.rs  — SandboxPolicyBuilder (auto-canonicalization, platform defaults)
+│   │   ├── command.rs         — SandboxCommand builder
+│   │   ├── error.rs           — SandboxError
+│   │   ├── unix.rs            — Shared Unix helpers
+│   │   ├── linux/
+│   │   │   ├── mod.rs         — LinuxSandbox: orchestrates namespace + seccomp + cgroup
+│   │   │   ├── namespace.rs   — clone(), pivot_root, bind mounts, uid/gid mapping
+│   │   │   ├── seccomp.rs     — BPF filter construction and application
+│   │   │   └── cgroup.rs      — cgroup v2 creation, limit writes, cleanup
+│   │   ├── macos/
+│   │   │   ├── mod.rs         — MacSandbox: fork + seatbelt + rlimit
+│   │   │   └── seatbelt.rs    — SBPL profile generation, sandbox_init FFI
+│   │   └── windows/
+│   │       ├── mod.rs         — WindowsSandbox: AppContainer + job object
+│   │       ├── appcontainer.rs — Profile lifecycle, capability assembly, ACL management
+│   │       ├── job.rs         — Job object creation, resource limits
+│   │       ├── nul_device.rs  — NUL device ACE, prerequisites API
+│   │       └── traverse_acl.rs — Ancestor traverse ACE management
+│   └── tests/
+│       └── integration.rs
+├── lot-cli/                   (CLI binary crate)
+│   ├── Cargo.toml
+│   └── src/
+│       └── main.rs            — lot run, lot setup, lot probe
+├── docs/
+├── prompts/
+└── .github/
 ```
 
 ---
@@ -332,7 +347,6 @@ lot/
 | `seccompiler` | Linux | seccomp-BPF filter construction |
 | `windows-sys` | Windows | Win32 API bindings (AppContainer, Job Objects, ACL) |
 | `thiserror` | All | Error derive |
-| `tracing` | All | Structured logging (optional feature) |
 | `tokio` | All | Async runtime for `wait_with_output_timeout` (optional `tokio` feature) |
 
 No dependency on `rappct`, `birdcage`, or `yule-sandbox`. All platform code is written from scratch.
@@ -341,50 +355,31 @@ No dependency on `rappct`, `birdcage`, or `yule-sandbox`. All platform code is w
 
 ## Project Setup
 
+The project is a Cargo workspace with two members:
+
+- `lot/` — library crate (`lot`)
+- `lot-cli/` — CLI binary crate (`lot-cli`, binary name `lot`)
+
+Shared metadata and lints are defined in the workspace root `Cargo.toml` and inherited by members via `workspace = true`.
+
 ```toml
-[package]
-name = "lot"
+# Workspace root Cargo.toml
+[workspace]
+members = ["lot", "lot-cli"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
 license = "MIT"
+rust-version = "1.85"
 
-[dependencies]
-thiserror = "2"
+[workspace.lints.rust]
+unsafe_code = "warn"
+warnings = "deny"
+missing_docs = "warn"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
-seccompiler = "0.5"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = [
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_System_JobObjects",
-    "Win32_System_Threading",
-    "Win32_Foundation",
-] }
-
-[features]
-tokio = ["dep:tokio"]
-tracing = ["dep:tracing"]
-
-[dependencies.tokio]
-version = "1"
-optional = true
-features = ["rt", "time", "sync", "macros"]
-
-[dependencies.tracing]
-version = "0.1"
-optional = true
-
-[lints.rust]
-unsafe_code = "warn"  # Required for syscalls, but flagged for review
-
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
@@ -393,6 +388,14 @@ missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 ```
+
+The library crate (`lot/Cargo.toml`) declares platform-specific dependencies and optional features:
+
+- `thiserror` (all platforms)
+- `libc`, `seccompiler` (Linux)
+- `libc` (macOS)
+- `windows-sys` (Windows)
+- `tokio` (optional feature for `wait_with_output_timeout`)
 
 Note: `unsafe_code = "warn"` rather than `"deny"` — this crate necessarily uses unsafe for syscalls, namespace setup, and FFI. Each `unsafe` block must have a `// SAFETY:` comment.
 

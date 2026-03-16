@@ -197,33 +197,48 @@ Lot does not silently degrade. If a required mechanism is unavailable, `spawn()`
 | Windows: AppContainer creation fails | `SandboxError::Setup` |
 | Windows: ACL cleanup fails on drop | Logged, recoverable via `cleanup_stale()` |
 
-## Windows: NUL Device Access
+## Windows: AppContainer Prerequisites
 
-AppContainer-sandboxed processes cannot open the Windows NUL device (`\\.\NUL`) by default. All path variants return `ERROR_ACCESS_DENIED`. This breaks any child process that uses `Stdio::null()` — Rust's standard library opens `\\.\NUL` internally, and tools like Nushell set `stdin(Stdio::null())` for external commands.
+AppContainer-sandboxed processes cannot open the Windows NUL device (`\\.\NUL`) by default, and cannot traverse ancestor directories of policy paths without explicit ACEs. This requires a one-time setup step.
 
 This is a [known Windows limitation](https://github.com/microsoft/win32-app-isolation/issues/73) with no built-in fix from Microsoft.
 
-### Fix
+### Setup
 
-A one-time DACL modification grants `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) read/write access to the NUL device. This requires elevation (run as administrator) and persists across reboots. It does not weaken AppContainer isolation — NUL is a data sink, not a privilege escalation vector.
+Use the CLI or the library API to grant prerequisites. Requires elevation (run as administrator). The changes persist across reboots and do not weaken AppContainer isolation.
 
-Three Windows-only functions:
+**CLI:**
 
-- `nul_device_accessible() -> bool` — checks if AppContainer processes can access `\\.\NUL`
-- `can_modify_nul_device() -> bool` — checks if the current process is elevated (can modify the DACL)
-- `grant_nul_device_access() -> Result<()>` — grants access (idempotent)
+```bash
+lot setup --verbose       # grant prerequisites
+lot setup --check         # check without modifying
+```
+
+**Library API (Windows-only):**
+
+- `is_elevated() -> bool` — checks if the current process has administrator privileges
+- `grant_appcontainer_prerequisites_for_policy(policy) -> Result<()>` — grants NUL device access and ancestor traverse ACEs for all policy paths
+- `appcontainer_prerequisites_met_for_policy(policy) -> bool` — checks if prerequisites are already in place
 
 ```rust
-use lot::{nul_device_accessible, can_modify_nul_device, grant_nul_device_access};
+use lot::{SandboxPolicyBuilder, is_elevated,
+          grant_appcontainer_prerequisites_for_policy,
+          appcontainer_prerequisites_met_for_policy};
 
-if !nul_device_accessible() {
-    if can_modify_nul_device() {
-        grant_nul_device_access().expect("failed to grant NUL device access");
+let policy = SandboxPolicyBuilder::new()
+    .write_path("/tmp/output")
+    .build()?;
+
+if !appcontainer_prerequisites_met_for_policy(&policy) {
+    if is_elevated() {
+        grant_appcontainer_prerequisites_for_policy(&policy)?;
     } else {
-        eprintln!("Run as administrator to fix NUL device access for AppContainer sandboxes");
+        eprintln!("Run as administrator to grant AppContainer prerequisites");
     }
 }
 ```
+
+For user-owned directories, `spawn()` grants ancestor traverse ACEs automatically at spawn time. The setup step is only needed for the NUL device and system directories.
 
 ## Known Limitations
 

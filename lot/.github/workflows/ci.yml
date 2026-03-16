@@ -32,7 +32,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   clippy-macos:
     name: Clippy (macOS)
@@ -48,7 +48,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   clippy-windows:
     name: Clippy (Windows)
@@ -64,7 +64,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test-linux:
     name: Test (Linux)
@@ -89,7 +89,7 @@ jobs:
           sudo mkdir -p /sys/fs/cgroup/lot-test
           sudo chown -R runner:runner /sys/fs/cgroup/lot-test
           echo $$ | sudo tee /sys/fs/cgroup/lot-test/cgroup.procs
-      - run: cargo test -- --test-threads=1
+      - run: cargo test -p lot -- --test-threads=1
 
   test-macos:
     name: Test (macOS)
@@ -105,7 +105,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - run: cargo test -- --test-threads=1 --nocapture
+      - run: cargo test -p lot -- --test-threads=1 --nocapture
 
   test-windows:
     name: Test (Windows)
@@ -121,7 +121,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - run: cargo test -- --test-threads=1
+      - name: Setup AppContainer prerequisites
+        run: cargo run -p lot-cli -- setup --verbose
+      - run: cargo test -p lot -- --test-threads=1
 
   build:
     name: Build
@@ -137,4 +139,4 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-build-
-      - run: cargo build
+      - run: cargo build --workspace
