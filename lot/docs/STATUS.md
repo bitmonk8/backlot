@@ -46,12 +46,12 @@ See `docs/PLAN.md` for the full phased plan with CI testing strategy.
 | `forward_common_env()` on `SandboxCommand` | Complete |
 | `wait_with_output_timeout()` (tokio feature) | Complete |
 | Policy-based prerequisites API (`grant_appcontainer_prerequisites_for_policy`, `appcontainer_prerequisites_met_for_policy`) | Complete |
-| Spawn-time prerequisite check (`SandboxError::PrerequisitesNotMet`) | Reverted — `has_traverse_ace` false negatives |
-| Best-effort spawn-time traverse ACE grant | Next — see below |
+| Spawn-time prerequisite check (`SandboxError::PrerequisitesNotMet`) | Complete — replaced check-only approach with grant-then-check |
+| Best-effort spawn-time traverse ACE grant | Complete |
 
 ### AppContainer Ancestor Traverse ACEs (Windows)
 
-Change request: `docs/CHANGE_REQUEST_FOR_EPIC.md`
+Design: `docs/DESIGN_SPAWN_TRAVERSE_ACES.md`
 
 AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor directories of policy paths because those directories lack an ACE for `ALL APPLICATION PACKAGES`. This breaks NuShell glob traversal, `create_dir_all`, and similar patterns.
 
@@ -62,20 +62,20 @@ AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor direct
 | `is_elevated()` — replaces `can_modify_nul_device()` | Complete |
 | `compute_ancestors(paths)` internal helper | Complete |
 | `grant_traverse(path)` / `has_traverse_ace(path)` internals | Complete |
-| Remove `grant_nul_device_access()`, `nul_device_accessible()`, `can_modify_nul_device()` | Complete |
+| Remove `grant_nul_device_access()`, `can_modify_nul_device()` | Complete |
 
-### Best-Effort Spawn-Time Traverse ACE Grant (Windows) — Next
+### Best-Effort Spawn-Time Traverse ACE Grant (Windows)
 
-Feature request: `docs/FEATURE_REQUEST_SPAWN_TRAVERSE_ACES.md`
+Design: `docs/DESIGN_SPAWN_TRAVERSE_ACES.md`
 
-Automatically grant ancestor traverse ACEs inside `spawn_inner()` before creating the sentinel. Avoids the false-negative problem from the reverted check-only approach by granting the ACE unconditionally (idempotent, harmless on directories already traversable via other ACEs). Only fails for system directories the current user cannot modify, returning `SandboxError::PrerequisitesNotMet`.
+Automatically grant ancestor traverse ACEs inside `spawn_inner()` before creating the sentinel. Grants the ACE unconditionally (idempotent, harmless on directories already traversable via other ACEs). Only fails for system directories the current user cannot modify, returning `SandboxError::PrerequisitesNotMet`.
 
 | Task | Status |
 |---|---|
-| `compute_ancestors_from_paths(&[PathBuf])` — variant of `compute_ancestors` accepting owned paths | Not started |
-| Insert best-effort grant loop in `spawn_inner()` (after `all_paths`, before `write_sentinel`) | Not started |
-| Return `SandboxError::PrerequisitesNotMet` on grant failure or missing NUL device | Not started |
-| Integration tests | Not started |
+| `compute_ancestors` generic over `AsRef<Path>` — accepts both `&Path` and `PathBuf` slices | Complete |
+| Insert best-effort grant loop in `spawn_inner()` (after `all_paths`, before `write_sentinel`) | Complete |
+| Return `SandboxError::PrerequisitesNotMet` on grant failure or missing NUL device | Complete |
+| Integration tests | Complete |
 
 ## Known Limitations
 
@@ -83,4 +83,4 @@ Automatically grant ancestor traverse ACEs inside `spawn_inner()` before creatin
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (narrowing breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
 - Linux cgroup tests require a delegated subtree writable by the test user.
-- Windows: AppContainer processes need a one-time elevated setup for NUL device access and system directory traverse ACEs (see `grant_appcontainer_prerequisites()`). For user-owned directories, `spawn()` will grant traverse ACEs automatically once the best-effort spawn-time grant is implemented.
+- Windows: AppContainer processes need a one-time elevated setup for NUL device access and system directory traverse ACEs (see `grant_appcontainer_prerequisites()`). For user-owned directories, `spawn()` grants traverse ACEs automatically at spawn time.

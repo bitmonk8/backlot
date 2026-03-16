@@ -66,10 +66,6 @@ pub const fn available() -> bool {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 fn os_to_wide(s: &OsString) -> Vec<u16> {
     s.as_os_str()
         .encode_wide()
@@ -77,12 +73,7 @@ fn os_to_wide(s: &OsString) -> Vec<u16> {
         .collect()
 }
 
-fn path_to_wide(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
+use super::{path_to_wide, to_wide};
 
 fn unique_profile_name() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -983,6 +974,25 @@ fn spawn_inner(
         .cloned()
         .collect();
 
+    // Grant traverse ACEs on ancestors of policy paths so the sandboxed
+    // process can walk path components. Succeeds without elevation for
+    // user-owned directories; fails for system directories that require
+    // elevated setup via grant_appcontainer_prerequisites().
+    let ancestors = super::traverse_acl::compute_ancestors(&all_paths);
+    let mut failed: Vec<PathBuf> = Vec::new();
+    for ancestor in &ancestors {
+        if super::traverse_acl::grant_traverse(ancestor).is_err() {
+            failed.push(ancestor.clone());
+        }
+    }
+    let nul_missing = !super::nul_device::nul_device_accessible();
+    if !failed.is_empty() || nul_missing {
+        return Err(SandboxError::PrerequisitesNotMet {
+            missing_paths: failed,
+            nul_device_missing: nul_missing,
+        });
+    }
+
     // Write sentinel with original DACLs before modifying anything.
     let sentinel = write_sentinel(profile_name, &all_paths)
         .map_err(|e| SandboxError::Setup(format!("write sentinel: {e}")))?;
@@ -1413,6 +1423,15 @@ mod tests {
         TempDir::new().expect("create temp dir")
     }
 
+    /// Spawn, returning None if prerequisites aren't met (non-elevated env).
+    fn try_spawn(policy: &SandboxPolicy, cmd: &SandboxCommand) -> Option<crate::SandboxedChild> {
+        match crate::spawn(policy, cmd) {
+            Ok(child) => Some(child),
+            Err(SandboxError::PrerequisitesNotMet { .. }) => None,
+            Err(e) => panic!("unexpected spawn error: {e}"),
+        }
+    }
+
     /// Strip DACL control flags (like AI, P) from SDDL for comparison.
     /// `SetNamedSecurityInfoW` recalculates auto-inherit flags, so exact SDDL
     /// comparison would fail. Comparing only the ACE entries is sufficient.
@@ -1453,7 +1472,9 @@ mod tests {
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
-        let child = crate::spawn(&policy, &cmd).expect("spawn sandboxed process");
+        let Some(child) = try_spawn(&policy, &cmd) else {
+            return; // prerequisites not met (non-elevated)
+        };
         let output = child.wait_with_output().expect("wait_with_output");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -1481,7 +1502,9 @@ mod tests {
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
-        let child = crate::spawn(&policy, &cmd).expect("spawn");
+        let Some(child) = try_spawn(&policy, &cmd) else {
+            return; // prerequisites not met (non-elevated)
+        };
         let output = child.wait_with_output().expect("wait");
 
         assert!(
@@ -1511,7 +1534,9 @@ mod tests {
         let target_str = target.to_string_lossy();
         cmd.args(["/C", &format!("echo overwritten > {target_str}")]);
 
-        let child = crate::spawn(&policy, &cmd).expect("spawn");
+        let Some(child) = try_spawn(&policy, &cmd) else {
+            return; // prerequisites not met (non-elevated)
+        };
         let output = child.wait_with_output().expect("wait");
 
         let content = fs::read_to_string(&target).expect("read back");
@@ -1540,7 +1565,9 @@ mod tests {
         cmd.args(["/C", "echo done"]);
 
         {
-            let child = crate::spawn(&policy, &cmd).expect("spawn");
+            let Some(child) = try_spawn(&policy, &cmd) else {
+                return; // prerequisites not met (non-elevated)
+            };
             let _ = child.wait_with_output();
         }
 

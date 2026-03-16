@@ -25,7 +25,9 @@ pub enum SandboxError {
 
     /// AppContainer prerequisites (ancestor traverse ACEs and/or NUL device
     /// ACE) are not in place for the paths referenced by the policy.
-    #[error("AppContainer prerequisites not met: {missing_paths:?}, nul_device_missing={nul_device_missing}")]
+    #[error(
+        "AppContainer prerequisites not met: {missing_paths:?}, nul_device_missing={nul_device_missing}"
+    )]
     PrerequisitesNotMet {
         /// Ancestor directories missing traverse ACEs.
         missing_paths: Vec<std::path::PathBuf>,

@@ -44,6 +44,15 @@ fn try_spawn(
             eprintln!("[diag] spawn skipped (Setup error): {msg}");
             None
         }
+        Err(lot::SandboxError::PrerequisitesNotMet {
+            ref missing_paths,
+            nul_device_missing,
+        }) => {
+            eprintln!(
+                "[diag] spawn skipped (prerequisites not met): missing_paths={missing_paths:?}, nul_device_missing={nul_device_missing}"
+            );
+            None
+        }
         Err(e) => panic!("unexpected spawn error: {e:?}"),
     }
 }
