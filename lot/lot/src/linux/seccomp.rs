@@ -162,6 +162,7 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
         libc::SYS_getrandom,
         libc::SYS_pipe,
         libc::SYS_pipe2,
+        libc::SYS_socketpair, // local IPC only (e.g., tokio signal handler)
         libc::SYS_poll,
         libc::SYS_ppoll,
         libc::SYS_select,
