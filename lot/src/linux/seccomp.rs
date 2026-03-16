@@ -296,7 +296,7 @@ pub fn apply_filter(program: &BpfProgram) -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::cast_possible_wrap)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_possible_wrap)]
 mod tests {
     use super::*;
 
