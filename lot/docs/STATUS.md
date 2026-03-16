@@ -58,39 +58,38 @@ Design docs: `docs/DESIGN_WORKSPACE_CLI.md`, `docs/DESIGN_SPAWN_TRAVERSE_ACES.md
 
 1. **Fix Linux CI environment.** 8 test failures: 3 cgroup (delegation mismatch) + 5 namespace (`EPERM`). Requires fixing GHA runner setup for user namespaces and cgroup delegation.
 
-2. **Verify Windows CI with `lot setup`.** The CI workflow now runs `cargo run -p lot-cli -- setup --verbose` before tests. Needs a CI run to confirm the 5 AppContainer test failures are resolved.
+2. **First real-world usage / `lot run` testing.** The CLI and library are complete but haven't been exercised end-to-end outside unit/integration tests.
 
-## CI Failure Overview (as of 2026-03-16, commit b78a0aa)
-
-Tests previously silently skipped on failure; now they fail loudly. This exposed missing CI setup and pre-existing bugs.
+## CI Failure Overview (as of 2026-03-16, run 23150329216)
 
 ### macOS — All green
 
 No failures. Tests, clippy, and format all pass.
 
-### Linux — 8 test failures (clippy now passes)
+### Linux — 8 test failures + 1 build error
 
 | Category | Tests | Error | Root Cause |
 |---|---|---|---|
+| `unexpected_cfgs` (1) | Build + Clippy | `#[cfg(feature = "tracing")]` in `cgroup.rs` references undeclared feature | Dead code referencing nonexistent `tracing` feature. **Fixed**: removed dead tracing block. |
 | cgroup tests (3) | `cgroup_guard_creates_and_cleans_up`, `cgroup_guard_add_process`, `cgroup_guard_no_limits_creates_empty` | `cgroups v2 must be available for this test` | CI creates `/sys/fs/cgroup/lot-test` but the test process runs in its own cgroup outside that subtree. The delegated subtree is not the process's current cgroup, so `available()` returns false. |
 | namespace spawn tests (5) | `spawn_echo_hello`, `spawn_pid1_in_namespace`, `spawn_proc_mounted`, `spawn_network_isolated`, `spawn_cannot_see_host_paths` | `Setup("child namespace setup failed: Operation not permitted (os error 1)")` | `unshare()` returns `EPERM`. CI runs `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` but the GHA runner may have additional restrictions (AppArmor profile or seccomp filter on the runner process itself) that block namespace creation. |
 
-### Windows — 5 unit test failures (fix deployed, pending verification)
+### Windows — All green
 
-| Category | Tests | Error | Root Cause |
-|---|---|---|---|
-| appcontainer unit tests (5) | `spawn_and_read_allowed_path`, `disallowed_path_unreadable`, `read_only_path_not_writable`, `cleanup_restores_acls`, `sentinel_recovery` | `PrerequisitesNotMet { nul_device_missing: true }` (first test), then cascading `PoisonError` | NUL device lacks `ALL APPLICATION PACKAGES` ACE. Fix: CI now runs `cargo run -p lot-cli -- setup --verbose` before tests. Pending CI run to verify. |
+`lot setup` in CI resolved the 5 AppContainer test failures (NUL device ACE). Verified in run 23150329216.
 
-### Passing jobs
+### All jobs
 
 | Job | Status |
 |---|---|
-| Clippy (Linux) | Pass |
 | Format | Pass |
-| Build | Pass |
+| Build | Fail (`unexpected_cfgs` — fixed locally, pending push) |
 | Clippy (macOS) | Pass |
+| Clippy (Linux) | Fail (`unexpected_cfgs` — fixed locally, pending push) |
 | Clippy (Windows) | Pass |
 | Test (macOS) | Pass |
+| Test (Linux) | Fail (8 tests — namespace/cgroup CI setup issues) |
+| Test (Windows) | Pass |
 
 ## Known Limitations
 

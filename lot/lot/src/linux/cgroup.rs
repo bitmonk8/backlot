@@ -185,14 +185,8 @@ impl Drop for CgroupGuard {
         // Attempt to remove the cgroup directory. It must be empty (no
         // processes) for rmdir to succeed. If it fails, we log and move on
         // rather than panicking.
-        if let Err(_e) = fs::remove_dir(&self.path) {
-            #[cfg(feature = "tracing")]
-            tracing::warn!(
-                path = %self.path.display(),
-                error = %_e,
-                "failed to remove cgroup directory"
-            );
-        }
+        // Best-effort removal; cgroup dir must be empty (no processes).
+        let _ = fs::remove_dir(&self.path);
     }
 }
 
