@@ -15,41 +15,10 @@
 - `SandboxedChild::kill_and_cleanup()`: explicit kill + synchronous platform cleanup
 - `SandboxedChild::wait_with_output_timeout()`: async timeout with kill+cleanup (behind `tokio` feature)
 - Windows backend: AppContainer (filesystem/network isolation) + Job Objects (resource limits) + sentinel file ACL recovery
-- Linux backend: user/mount/pid/net/ipc namespaces + seccomp-BPF syscall filtering + cgroups v2 resource limits (sibling cgroup model to respect cgroupv2 "no internal processes" constraint)
+- Linux backend: user/mount/pid/net/ipc namespaces + seccomp-BPF syscall filtering + cgroups v2 resource limits (sibling cgroup model)
 - macOS backend: Seatbelt (sandbox_init SBPL profiles) + setrlimit resource limits + process group kill (setsid/killpg)
 - CI pipeline: clippy + test on Linux/macOS/Windows with namespace and cgroup setup, `lot setup` in Windows CI
 - Rustdoc on all public API items
-
-## Implementation Plan
-
-### Phase Summary
-
-| Phase | Scope | Status |
-|---|---|---|
-| 0 | Policy validation + test infrastructure | Complete |
-| 1 | `probe()` implementations (all platforms) | Complete |
-| 2 | Windows Job Objects | Complete |
-| 3 | Windows AppContainer | Complete |
-| 4 | Linux seccomp-BPF | Complete |
-| 5 | Linux namespaces + filesystem | Complete |
-| 6 | Linux cgroups v2 | Complete |
-| 7 | macOS Seatbelt | Complete |
-| 8 | Integration + hardening | Complete |
-
-### Post-v1 Features
-
-| Feature | Status |
-|---|---|
-| macOS descendant kill via setsid/killpg | Complete |
-| `kill_and_cleanup()` method | Complete |
-| `SandboxPolicyBuilder` with auto-canonicalization | Complete |
-| `forward_common_env()` on `SandboxCommand` | Complete |
-| `wait_with_output_timeout()` (tokio feature) | Complete |
-| Policy-based prerequisites API (`grant_appcontainer_prerequisites_for_policy`, `appcontainer_prerequisites_met_for_policy`) | Complete |
-| Spawn-time prerequisite check (`SandboxError::PrerequisitesNotMet`) | Complete — replaced check-only approach with grant-then-check |
-| Best-effort spawn-time traverse ACE grant | Complete |
-| Workspace restructure + CLI binary | Complete |
-| Fix Linux mount_proc bug | Complete — split mount namespace setup into two phases (helper + inner child) |
 
 ## Next Work
 
