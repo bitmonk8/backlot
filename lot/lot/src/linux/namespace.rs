@@ -138,6 +138,8 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<()> {
     mkdir_p(&format!("{new_root}/proc"))?;
     mkdir_p(&format!("{new_root}/dev"))?;
     mkdir_p(&format!("{new_root}/tmp"))?;
+    #[cfg(test)]
+    diag("[mount-ns] essential dirs OK");
 
     // Bind-mount essential system directories (dynamic linker, libraries).
     // These need execute permission so shared libraries can be loaded.
@@ -145,34 +147,70 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<()> {
         if Path::new(sys_path).exists() {
             let dest = format!("{new_root}{sys_path}");
             mkdir_p(&dest)?;
-            bind_mount_exec(sys_path, &dest)?;
+            bind_mount_exec(sys_path, &dest).map_err(|e| {
+                #[cfg(test)]
+                {
+                    let msg = format!("[mount-ns] FAIL bind_mount_exec({sys_path}): {e}");
+                    diag(&msg);
+                }
+                e
+            })?;
         }
     }
+    #[cfg(test)]
+    diag("[mount-ns] lib bind-mounts OK");
 
     // Bind-mount bin directories — executables need execute permission.
     for bin_path in &["/bin", "/usr/bin", "/sbin", "/usr/sbin"] {
         if Path::new(bin_path).exists() {
             let dest = format!("{new_root}{bin_path}");
             mkdir_p(&dest)?;
-            bind_mount_exec(bin_path, &dest)?;
+            bind_mount_exec(bin_path, &dest).map_err(|e| {
+                #[cfg(test)]
+                {
+                    let msg = format!("[mount-ns] FAIL bind_mount_exec({bin_path}): {e}");
+                    diag(&msg);
+                }
+                e
+            })?;
         }
     }
+    #[cfg(test)]
+    diag("[mount-ns] bin bind-mounts OK");
 
     // Bind-mount /etc read-only (needed for ld.so.cache, nsswitch, etc.)
     if Path::new("/etc").exists() {
         let dest = format!("{new_root}/etc");
         mkdir_p(&dest)?;
-        bind_mount_readonly("/etc", &dest)?;
+        bind_mount_readonly("/etc", &dest).map_err(|e| {
+            #[cfg(test)]
+            {
+                let msg = format!("[mount-ns] FAIL bind_mount_readonly(/etc): {e}");
+                diag(&msg);
+            }
+            e
+        })?;
     }
+    #[cfg(test)]
+    diag("[mount-ns] /etc bind-mount OK");
 
     // Policy-specified read-only paths
     for path in &policy.read_paths {
         if let Some(s) = path.to_str() {
             let dest = format!("{new_root}{s}");
             mkdir_p(&dest)?;
-            bind_mount_readonly(s, &dest)?;
+            bind_mount_readonly(s, &dest).map_err(|e| {
+                #[cfg(test)]
+                {
+                    let msg = format!("[mount-ns] FAIL bind_mount_readonly({s}): {e}");
+                    diag(&msg);
+                }
+                e
+            })?;
         }
     }
+    #[cfg(test)]
+    diag("[mount-ns] policy read paths OK");
 
     // Policy-specified read-write paths
     for path in &policy.write_paths {
@@ -193,15 +231,42 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<()> {
     }
 
     // Mount /proc inside the new root
-    mount_proc(&format!("{new_root}/proc"))?;
+    mount_proc(&format!("{new_root}/proc")).map_err(|e| {
+        #[cfg(test)]
+        {
+            let msg = format!("[mount-ns] FAIL mount_proc: {e}");
+            diag(&msg);
+        }
+        e
+    })?;
+    #[cfg(test)]
+    diag("[mount-ns] /proc mount OK");
 
     // Create /dev/null, /dev/zero, and /dev/urandom via bind mount
-    create_dev_node(&new_root, "/dev/null")?;
-    create_dev_node(&new_root, "/dev/zero")?;
-    create_dev_node(&new_root, "/dev/urandom")?;
+    for dev in &["/dev/null", "/dev/zero", "/dev/urandom"] {
+        create_dev_node(&new_root, dev).map_err(|e| {
+            #[cfg(test)]
+            {
+                let msg = format!("[mount-ns] FAIL create_dev_node({dev}): {e}");
+                diag(&msg);
+            }
+            e
+        })?;
+    }
+    #[cfg(test)]
+    diag("[mount-ns] dev nodes OK");
 
     // pivot_root into the new root
-    do_pivot_root(&new_root)?;
+    do_pivot_root(&new_root).map_err(|e| {
+        #[cfg(test)]
+        {
+            let msg = format!("[mount-ns] FAIL do_pivot_root: {e}");
+            diag(&msg);
+        }
+        e
+    })?;
+    #[cfg(test)]
+    diag("[mount-ns] pivot_root OK");
 
     Ok(())
 }
