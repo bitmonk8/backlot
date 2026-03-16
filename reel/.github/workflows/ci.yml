@@ -56,12 +56,32 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-      - name: Delegate cgroup subtree for sandbox tests
+      - name: Run tests with delegated cgroup
         run: |
-          sudo mkdir -p /sys/fs/cgroup/lot-test
-          sudo chown -R runner:runner /sys/fs/cgroup/lot-test
-          echo $$ | sudo tee /sys/fs/cgroup/lot-test/cgroup.procs
-      - run: cargo test -- --test-threads=1
+          # Find the current cgroup (e.g., /system.slice/hosted-compute-agent.service)
+          current_cg="/sys/fs/cgroup$(cat /proc/self/cgroup | grep '^0::' | cut -d: -f3)"
+          parent_cg="$(dirname "$current_cg")"
+
+          # Enable memory+pids controllers from root down to the parent.
+          p="/sys/fs/cgroup"
+          while [ "$p" != "$parent_cg" ] && [ "$p" != "/" ]; do
+            [ -f "$p/cgroup.subtree_control" ] && \
+              echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" 2>/dev/null || true
+            next="$(echo "$parent_cg" | sed "s|^$p/||" | cut -d/ -f1)"
+            p="$p/$next"
+          done
+          [ -f "$parent_cg/cgroup.subtree_control" ] && \
+            echo '+memory +pids' | sudo tee "$parent_cg/cgroup.subtree_control" 2>/dev/null || true
+
+          # Create lot-test under the same parent as our current cgroup.
+          cg="$parent_cg/lot-test"
+          sudo mkdir -p "$cg/runner"
+          sudo chown -R "$(id -u):$(id -g)" "$cg"
+          echo '+memory +pids' > "$cg/cgroup.subtree_control"
+
+          # Move ourselves into the runner leaf.
+          echo $$ | sudo tee "$cg/runner/cgroup.procs"
+          cargo test -- --test-threads=1
 
   test-macos:
     name: Test (macOS)
