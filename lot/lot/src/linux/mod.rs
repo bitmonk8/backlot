@@ -344,8 +344,8 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     unsafe { libc::close(err_pipe_rd) };
 
     if n == 8 {
-        let step = i32::from_ne_bytes(err_buf[..4].try_into().unwrap());
-        let errno = i32::from_ne_bytes(err_buf[4..].try_into().unwrap());
+        let step = i32::from_ne_bytes([err_buf[0], err_buf[1], err_buf[2], err_buf[3]]);
+        let errno = i32::from_ne_bytes([err_buf[4], err_buf[5], err_buf[6], err_buf[7]]);
         let step_name = match step {
             1 => "unshare",
             2 => "user namespace (uid/gid map)",
