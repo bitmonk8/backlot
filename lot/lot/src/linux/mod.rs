@@ -505,6 +505,11 @@ mod tests {
 
         if pid == 0 {
             // Child — try each step
+            // Get uid/gid BEFORE unshare (like the real spawn code does in prefork)
+            let uid = unsafe { libc::getuid() };
+            let gid = unsafe { libc::getgid() };
+            eprintln!("[diag-child] pre-unshare uid={uid} gid={gid}");
+
             // Print child's thread count and security state
             if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
                 for line in s.lines() {
@@ -519,15 +524,11 @@ mod tests {
                 eprintln!("[diag-child] AppArmor: {}", aa.trim());
             }
 
-            // Step 1: unshare(CLONE_NEWUSER)
+            // Step 1: unshare(CLONE_NEWUSER) only
             let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER) };
             if rc != 0 {
                 let e = std::io::Error::last_os_error();
                 eprintln!("[diag-child] unshare(CLONE_NEWUSER) FAILED: {e}");
-                // Check dmesg-visible denial reason
-                if let Ok(aa) = std::fs::read_to_string("/proc/self/attr/current") {
-                    eprintln!("[diag-child] AppArmor after unshare attempt: {}", aa.trim());
-                }
                 unsafe { libc::_exit(2) };
             }
             eprintln!("[diag-child] unshare(CLONE_NEWUSER) OK");
@@ -537,9 +538,8 @@ mod tests {
                 eprintln!("[diag-child] AppArmor after unshare: {}", aa.trim());
             }
 
-            let uid = unsafe { libc::getuid() };
-            let gid = unsafe { libc::getgid() };
-            eprintln!("[diag-child] uid={uid} gid={gid}");
+            let post_uid = unsafe { libc::getuid() };
+            eprintln!("[diag-child] post-unshare uid={post_uid} (should be 65534/overflow)");
 
             // Step 2: write setgroups deny
             if std::fs::write("/proc/self/setgroups", "deny").is_err() {
@@ -585,6 +585,68 @@ mod tests {
         };
         eprintln!("[diag] child exited with code {exit}: {step_name}");
         assert_eq!(exit, 0, "namespace setup diagnostic failed at: {step_name}");
+    }
+
+    /// Same diagnostic but with combined flags like spawn() uses:
+    /// CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWNET
+    #[test]
+    fn diagnose_namespace_combined_flags() {
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        eprintln!("[diag-combined] parent uid={uid} gid={gid}");
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+
+        if pid == 0 {
+            let flags = libc::CLONE_NEWUSER
+                | libc::CLONE_NEWNS
+                | libc::CLONE_NEWPID
+                | libc::CLONE_NEWIPC
+                | libc::CLONE_NEWNET;
+
+            let rc = unsafe { libc::unshare(flags) };
+            if rc != 0 {
+                let e = std::io::Error::last_os_error();
+                eprintln!("[diag-combined-child] unshare(all flags) FAILED: {e}");
+                unsafe { libc::_exit(2) };
+            }
+            eprintln!("[diag-combined-child] unshare(all flags) OK");
+
+            // Use pre-fork uid/gid for mapping
+            if std::fs::write("/proc/self/setgroups", "deny").is_err() {
+                eprintln!("[diag-combined-child] setgroups deny FAILED");
+                unsafe { libc::_exit(3) };
+            }
+            let uid_map = format!("0 {uid} 1");
+            if std::fs::write("/proc/self/uid_map", &uid_map).is_err() {
+                let e = std::io::Error::last_os_error();
+                eprintln!("[diag-combined-child] uid_map ({uid_map:?}) FAILED: {e}");
+                unsafe { libc::_exit(4) };
+            }
+            let gid_map = format!("0 {gid} 1");
+            if std::fs::write("/proc/self/gid_map", &gid_map).is_err() {
+                let e = std::io::Error::last_os_error();
+                eprintln!("[diag-combined-child] gid_map ({gid_map:?}) FAILED: {e}");
+                unsafe { libc::_exit(5) };
+            }
+            eprintln!("[diag-combined-child] ALL OK — namespace fully set up");
+            unsafe { libc::_exit(0) };
+        }
+
+        let mut status_code: libc::c_int = 0;
+        unsafe { libc::waitpid(pid, &raw mut status_code, 0) };
+        let exit = libc::WEXITSTATUS(status_code);
+        let step_name = match exit {
+            0 => "all steps succeeded",
+            2 => "unshare(all flags) failed",
+            3 => "setgroups write failed",
+            4 => "uid_map write failed",
+            5 => "gid_map write failed",
+            _ => "unknown failure",
+        };
+        eprintln!("[diag-combined] child exited with code {exit}: {step_name}");
+        assert_eq!(exit, 0, "combined namespace diagnostic failed at: {step_name}");
     }
 
     fn test_policy(read_paths: Vec<PathBuf>) -> SandboxPolicy {
