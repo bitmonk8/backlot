@@ -84,6 +84,19 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
+      - name: Enable cgroup controller delegation
+        run: |
+          # Enable memory and pids controllers in the user's cgroup subtree
+          # so that CgroupGuard can create child cgroups with resource limits.
+          user_slice="/sys/fs/cgroup/user.slice/user-$(id -u).slice"
+          if [ -d "$user_slice" ]; then
+            echo '+memory +pids' | sudo tee "$user_slice/cgroup.subtree_control" || true
+          fi
+          # Also enable in the user session scope if present
+          session_scope="$user_slice/user@$(id -u).service"
+          if [ -d "$session_scope" ]; then
+            echo '+memory +pids' | sudo tee "$session_scope/cgroup.subtree_control" || true
+          fi
       - name: Run tests with delegated cgroup
         run: systemd-run --user --scope -p Delegate=yes -- cargo test -p lot -- --test-threads=1
 

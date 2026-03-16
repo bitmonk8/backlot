@@ -248,10 +248,9 @@ mod tests {
             std::process::exit(0);
         }
         // Parent: add the child to the cgroup.
-        let result = guard.add_process(pid);
         // Writing to cgroup.procs may fail depending on cgroup configuration,
         // so we just verify the call doesn't panic.
-        let _result = result;
+        drop(guard.add_process(pid));
         // Guard drop will kill the child and remove the cgroup.
     }
 
