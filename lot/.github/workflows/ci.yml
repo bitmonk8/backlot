@@ -84,21 +84,27 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-      - name: Enable cgroup controller delegation
-        run: |
-          # Enable memory and pids controllers in the user's cgroup subtree
-          # so that CgroupGuard can create child cgroups with resource limits.
-          user_slice="/sys/fs/cgroup/user.slice/user-$(id -u).slice"
-          if [ -d "$user_slice" ]; then
-            echo '+memory +pids' | sudo tee "$user_slice/cgroup.subtree_control" || true
-          fi
-          # Also enable in the user session scope if present
-          session_scope="$user_slice/user@$(id -u).service"
-          if [ -d "$session_scope" ]; then
-            echo '+memory +pids' | sudo tee "$session_scope/cgroup.subtree_control" || true
-          fi
       - name: Run tests with delegated cgroup
-        run: systemd-run --user --scope -p Delegate=yes -- cargo test -p lot -- --test-threads=1
+        run: |
+          # Enable memory+pids controllers at every level from root down to
+          # the user slice so systemd can delegate them into our scope.
+          for p in /sys/fs/cgroup \
+                   /sys/fs/cgroup/user.slice \
+                   "/sys/fs/cgroup/user.slice/user-$(id -u).slice" \
+                   "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service"; do
+            [ -f "$p/cgroup.subtree_control" ] && \
+              echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" 2>/dev/null || true
+          done
+
+          # Run tests inside a delegated systemd scope. The scope gets its own
+          # cgroup with controllers inherited from above. Inside the scope, we
+          # enable subtree_control so CgroupGuard::new can create child cgroups
+          # with memory.max and pids.max.
+          systemd-run --user --scope -p Delegate=yes -- bash -c '
+            cg="/sys/fs/cgroup$(cat /proc/self/cgroup | grep "^0::" | cut -d: -f3)"
+            echo "+memory +pids" > "$cg/cgroup.subtree_control" 2>/dev/null || true
+            exec cargo test -p lot -- --test-threads=1
+          '
 
   test-macos:
     name: Test (macOS)
