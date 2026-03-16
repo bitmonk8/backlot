@@ -68,11 +68,15 @@ pub fn setup_user_namespace(uid: u32, gid: u32) -> io::Result<()> {
     Ok(())
 }
 
-/// Set up the mount namespace: tmpfs root, bind mounts per policy, pivot_root.
+/// Set up the mount namespace: tmpfs root and bind mounts per policy.
 ///
 /// This must be called after `unshare(CLONE_NEWUSER | CLONE_NEWNS)`.
 /// Uses only paths from `policy` plus essential system directories.
-pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<()> {
+///
+/// Returns the new root path. The caller must pass it to
+/// `finish_mount_namespace()` in the inner child to mount /proc and
+/// pivot_root.
+pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     // Include PID to avoid collisions between concurrent sandboxes
     // SAFETY: getpid has no preconditions
     let pid = unsafe { libc::getpid() };
@@ -230,10 +234,12 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<()> {
         }
     }
 
-    // NOTE: /proc is NOT mounted here. Mounting procfs requires the caller
-    // to be inside the new PID namespace, which only takes effect after
-    // fork(). The inner child (PID 1 in the namespace) calls mount_proc()
-    // after pivot_root completes.
+    // NOTE: /proc mount and pivot_root are NOT done here. They happen in
+    // the inner child via finish_mount_namespace(). Mounting procfs requires
+    // the caller to be inside the new PID namespace (only children after
+    // fork() are), and it must happen BEFORE pivot_root — otherwise
+    // mnt_already_visible() rejects the mount because the lazy-unmounted
+    // old root leaves stale procfs entries in the mount namespace.
 
     // Create /dev/null, /dev/zero, and /dev/urandom via bind mount
     for dev in &["/dev/null", "/dev/zero", "/dev/urandom"] {
@@ -249,18 +255,18 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<()> {
     #[cfg(test)]
     diag("[mount-ns] dev nodes OK");
 
-    // pivot_root into the new root
-    do_pivot_root(&new_root).map_err(|e| {
-        #[cfg(test)]
-        {
-            let msg = format!("[mount-ns] FAIL do_pivot_root: {e}");
-            diag(&msg);
-        }
-        e
-    })?;
-    #[cfg(test)]
-    diag("[mount-ns] pivot_root OK");
+    Ok(new_root)
+}
 
+/// Complete mount namespace setup: mount /proc and pivot_root.
+///
+/// Must be called from the inner child (PID 1 in the new PID namespace)
+/// with the `new_root` path returned by `setup_mount_namespace()`. Proc
+/// must be mounted before pivot_root so the kernel's `mnt_already_visible()`
+/// check doesn't see stale procfs mounts from the lazy-unmounted old root.
+pub(crate) fn finish_mount_namespace(new_root: &str) -> io::Result<()> {
+    mount_proc(&format!("{new_root}/proc"))?;
+    do_pivot_root(new_root)?;
     Ok(())
 }
 

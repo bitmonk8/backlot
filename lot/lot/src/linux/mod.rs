@@ -184,14 +184,17 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             );
         }
 
-        // Set up mount namespace
-        if let Err(e) = namespace::setup_mount_namespace(policy) {
-            helper_bail!(
-                err_pipe_wr,
-                STEP_MOUNT_NS,
-                e.raw_os_error().unwrap_or(libc::EPERM)
-            );
-        }
+        // Set up mount namespace (bind mounts, dev nodes — but NOT /proc or pivot_root)
+        let new_root = match namespace::setup_mount_namespace(policy) {
+            Ok(root) => root,
+            Err(e) => {
+                helper_bail!(
+                    err_pipe_wr,
+                    STEP_MOUNT_NS,
+                    e.raw_os_error().unwrap_or(libc::EPERM)
+                );
+            }
+        };
 
         // Move helper into the cgroup so both helper and inner child inherit
         // the resource limits. Uses pre-built CString path to avoid allocation.
@@ -229,27 +232,21 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             if child_stdin != 0 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stdin, 0) } < 0 {
-                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe {
-                        *libc::__errno_location()
-                    });
+                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
                 }
                 unsafe { unix::close_if_not_std(child_stdin) };
             }
             if child_stdout != 1 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stdout, 1) } < 0 {
-                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe {
-                        *libc::__errno_location()
-                    });
+                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
                 }
                 unsafe { unix::close_if_not_std(child_stdout) };
             }
             if child_stderr != 2 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stderr, 2) } < 0 {
-                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe {
-                        *libc::__errno_location()
-                    });
+                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
                 }
                 unsafe { unix::close_if_not_std(child_stderr) };
             }
@@ -264,18 +261,13 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 }
             }
 
-            // Mount /proc — must happen in the inner child for two reasons:
-            // 1. The kernel requires the caller to be inside the new PID
-            //    namespace, which only takes effect after fork().
-            // 2. After pivot_root, the lazy-unmounted old root may leave
-            //    stale procfs mounts in the namespace's mount list. The
-            //    kernel's mnt_already_visible() check rejects mounting
-            //    proc when existing proc mounts with submounts are visible.
-            //    A non-lazy umount clears them.
-            // SAFETY: "/proc\0" is a valid C string literal
-            unsafe { libc::umount2(c"/proc".as_ptr(), 0) };
-            // Ignore errors — mount point may have no stale mount.
-            if let Err(e) = namespace::mount_proc("/proc") {
+            // Mount /proc and pivot_root. Must happen in the inner child:
+            // - mount("proc") requires the caller to be inside the new PID
+            //   namespace, which only takes effect after fork().
+            // - /proc must be mounted BEFORE pivot_root, otherwise the
+            //   lazy-unmounted old root leaves stale procfs entries that
+            //   cause mnt_already_visible() to reject the mount.
+            if let Err(e) = namespace::finish_mount_namespace(&new_root) {
                 helper_bail!(
                     err_pipe_wr,
                     STEP_MOUNT_PROC,
@@ -311,9 +303,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             }
 
             // exec failed — report errno via error pipe, then exit
-            helper_bail!(err_pipe_wr, STEP_EXEC, unsafe {
-                *libc::__errno_location()
-            });
+            helper_bail!(err_pipe_wr, STEP_EXEC, unsafe { *libc::__errno_location() });
         }
 
         // === HELPER continues (inner_pid > 0) ===
@@ -563,8 +553,10 @@ mod tests {
         // Print thread count for the test process
         let status = std::fs::read_to_string("/proc/self/status").unwrap();
         for line in status.lines() {
-            if line.starts_with("Threads:") || line.starts_with("Seccomp")
-                || line.starts_with("NoNewPrivs") || line.starts_with("Cap")
+            if line.starts_with("Threads:")
+                || line.starts_with("Seccomp")
+                || line.starts_with("NoNewPrivs")
+                || line.starts_with("Cap")
             {
                 eprintln!("[diag] {line}");
             }
@@ -587,7 +579,8 @@ mod tests {
             // Print child's thread count and security state
             if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
                 for line in s.lines() {
-                    if line.starts_with("Threads:") || line.starts_with("Seccomp")
+                    if line.starts_with("Threads:")
+                        || line.starts_with("Seccomp")
                         || line.starts_with("NoNewPrivs")
                     {
                         eprintln!("[diag-child] {line}");
@@ -720,7 +713,10 @@ mod tests {
             _ => "unknown failure",
         };
         eprintln!("[diag-combined] child exited with code {exit}: {step_name}");
-        assert_eq!(exit, 0, "combined namespace diagnostic failed at: {step_name}");
+        assert_eq!(
+            exit, 0,
+            "combined namespace diagnostic failed at: {step_name}"
+        );
     }
 
     fn test_policy(read_paths: Vec<PathBuf>) -> SandboxPolicy {
