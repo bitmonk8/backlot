@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use crate::error::ConfigError;
 use crate::provider_registry::flick_dir;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A single model entry in the model registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,10 +75,7 @@ impl ModelRegistry {
     }
 
     pub fn list(&self) -> Vec<(&str, &ModelInfo)> {
-        self.models
-            .iter()
-            .map(|(k, v)| (k.as_str(), v))
-            .collect()
+        self.models.iter().map(|(k, v)| (k.as_str(), v)).collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -98,11 +95,7 @@ impl ModelRegistry {
     }
 
     /// Remove a model entry.
-    pub async fn remove(
-        &mut self,
-        key: &str,
-        dir: &std::path::Path,
-    ) -> Result<bool, ConfigError> {
+    pub async fn remove(&mut self, key: &str, dir: &std::path::Path) -> Result<bool, ConfigError> {
         let existed = self.models.remove(key).is_some();
         if existed {
             self.write_to_dir(dir).await?;
@@ -118,8 +111,7 @@ impl ModelRegistry {
     }
 
     async fn write_to_dir(&self, dir: &std::path::Path) -> Result<(), ConfigError> {
-        let text = toml::to_string(&self.models)
-            .map_err(|e| ConfigError::Parse(e.to_string()))?;
+        let text = toml::to_string(&self.models).map_err(|e| ConfigError::Parse(e.to_string()))?;
         let path = dir.join("models");
         tokio::fs::write(&path, text).await.map_err(ConfigError::Io)
     }
@@ -228,7 +220,9 @@ provider = ""
 name = "test-model"
 "#;
         let result = ModelRegistry::from_toml(toml);
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("provider")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("provider"))
+        );
     }
 
     #[test]
@@ -240,7 +234,9 @@ name = "test-model"
 max_tokens = 0
 "#;
         let result = ModelRegistry::from_toml(toml);
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("max_tokens")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("max_tokens"))
+        );
     }
 
     #[test]
@@ -252,7 +248,9 @@ name = "test-model"
 input_per_million = -1.0
 "#;
         let result = ModelRegistry::from_toml(toml);
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("input_per_million")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("input_per_million"))
+        );
     }
 
     #[test]

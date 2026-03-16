@@ -27,9 +27,15 @@ async fn end_to_end_text_only() {
     let mut context = Context::default();
     context.push_user_text("Say hello").unwrap();
 
-    let result = runner::run(&config, &model_info, ApiKind::Messages, &provider, &mut context)
-        .await
-        .expect("should succeed");
+    let result = runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider,
+        &mut context,
+    )
+    .await
+    .expect("should succeed");
 
     assert_eq!(result.status, ResultStatus::Complete);
     assert!(
@@ -77,9 +83,15 @@ tools:
     let mut context = Context::default();
     context.push_user_text("read /nonexistent").unwrap();
 
-    let result = runner::run(&config, &model_info, ApiKind::Messages, &provider, &mut context)
-        .await
-        .expect("should succeed");
+    let result = runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider,
+        &mut context,
+    )
+    .await
+    .expect("should succeed");
 
     assert_eq!(result.status, ResultStatus::ToolCallsPending);
     let tool_use_count = result
@@ -110,9 +122,15 @@ async fn end_to_end_thinking_blocks() {
     let mut context = Context::default();
     context.push_user_text("think about this").unwrap();
 
-    let result = runner::run(&config, &model_info, ApiKind::Messages, &provider, &mut context)
-        .await
-        .expect("should succeed");
+    let result = runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider,
+        &mut context,
+    )
+    .await
+    .expect("should succeed");
 
     assert_eq!(result.status, ResultStatus::Complete);
 
@@ -151,9 +169,15 @@ async fn end_to_end_context_persistence() {
     let provider1 = MockProvider::new(vec![text_response("First reply", 0, 0)]);
     let mut context = Context::default();
     context.push_user_text("hello").unwrap();
-    runner::run(&config, &model_info, ApiKind::Messages, &provider1, &mut context)
-        .await
-        .expect("first turn");
+    runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider1,
+        &mut context,
+    )
+    .await
+    .expect("first turn");
 
     let json = serde_json::to_string(&context).expect("serialize context");
     let mut context2: Context = serde_json::from_str(&json).expect("deserialize context");
@@ -161,9 +185,15 @@ async fn end_to_end_context_persistence() {
 
     context2.push_user_text("follow up").unwrap();
     let provider2 = MockProvider::new(vec![text_response("Second reply", 0, 0)]);
-    runner::run(&config, &model_info, ApiKind::Messages, &provider2, &mut context2)
-        .await
-        .expect("second turn");
+    runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider2,
+        &mut context2,
+    )
+    .await
+    .expect("second turn");
 
     assert_eq!(context2.messages.len(), 4);
 }
@@ -197,9 +227,15 @@ async fn end_to_end_context_file_loading() {
     context.push_user_text("follow-up question").unwrap();
     let provider = MockProvider::new(vec![text_response("follow-up answer", 0, 0)]);
 
-    let result = runner::run(&config, &model_info, ApiKind::Messages, &provider, &mut context)
-        .await
-        .expect("should succeed");
+    let result = runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider,
+        &mut context,
+    )
+    .await
+    .expect("should succeed");
 
     assert_eq!(result.status, ResultStatus::Complete);
     assert_eq!(context.messages.len(), 4);
@@ -260,9 +296,15 @@ tools:
     context.push_user_text("follow-up").unwrap();
     let provider = MockProvider::new(vec![text_response("follow-up answer", 0, 0)]);
 
-    let result = runner::run(&config, &model_info, ApiKind::Messages, &provider, &mut context)
-        .await
-        .expect("should succeed");
+    let result = runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider,
+        &mut context,
+    )
+    .await
+    .expect("should succeed");
 
     assert_eq!(result.status, ResultStatus::Complete);
     assert_eq!(context.messages.len(), 6);
@@ -296,7 +338,14 @@ async fn end_to_end_provider_error_propagates() {
     let mut context = Context::default();
     context.push_user_text("test").unwrap();
 
-    let result = runner::run(&config, &model_info, ApiKind::Messages, &provider, &mut context).await;
+    let result = runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider,
+        &mut context,
+    )
+    .await;
     assert!(
         matches!(
             result,
@@ -335,9 +384,15 @@ tools:
     let mut context = Context::default();
     context.push_user_text("read the file").unwrap();
 
-    let result1 = runner::run(&config, &model_info, ApiKind::Messages, &provider1, &mut context)
-        .await
-        .expect("first call");
+    let result1 = runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider1,
+        &mut context,
+    )
+    .await
+    .expect("first call");
     assert_eq!(result1.status, ResultStatus::ToolCallsPending);
 
     context
@@ -349,9 +404,15 @@ tools:
         .unwrap();
 
     let provider2 = MockProvider::new(vec![text_response("The file contains...", 200, 40)]);
-    let result2 = runner::run(&config, &model_info, ApiKind::Messages, &provider2, &mut context)
-        .await
-        .expect("second call");
+    let result2 = runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider2,
+        &mut context,
+    )
+    .await
+    .expect("second call");
     assert_eq!(result2.status, ResultStatus::Complete);
     assert_eq!(context.messages.len(), 4);
 }
@@ -414,9 +475,15 @@ async fn context_hash_deterministic() {
     let mut context = Context::default();
     context.push_user_text("compute hash").unwrap();
 
-    runner::run(&config, &model_info, ApiKind::Messages, &provider, &mut context)
-        .await
-        .expect("should succeed");
+    runner::run(
+        &config,
+        &model_info,
+        ApiKind::Messages,
+        &provider,
+        &mut context,
+    )
+    .await
+    .expect("should succeed");
 
     let context_bytes = serde_json::to_vec(&context).expect("serialize context");
     let hash = xxh3_128(&context_bytes);

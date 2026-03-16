@@ -533,11 +533,23 @@ mod tests {
         let registry = ProviderRegistry::load(dir.path().to_path_buf());
 
         registry
-            .set("zebra", "k", ApiKind::ChatCompletions, "https://z.com", None)
+            .set(
+                "zebra",
+                "k",
+                ApiKind::ChatCompletions,
+                "https://z.com",
+                None,
+            )
             .await
             .expect("set");
         registry
-            .set("alpha", "k", ApiKind::ChatCompletions, "https://a.com", None)
+            .set(
+                "alpha",
+                "k",
+                ApiKind::ChatCompletions,
+                "https://a.com",
+                None,
+            )
             .await
             .expect("set");
 
@@ -560,7 +572,13 @@ mod tests {
         let registry = ProviderRegistry::load(dir.path().to_path_buf());
 
         registry
-            .set("test", "key", ApiKind::Messages, "https://example.com", None)
+            .set(
+                "test",
+                "key",
+                ApiKind::Messages,
+                "https://example.com",
+                None,
+            )
             .await
             .expect("set");
         assert!(registry.remove("test").await.expect("remove"));
@@ -572,7 +590,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let registry = ProviderRegistry::load(dir.path().to_path_buf());
         registry
-            .set("existing", "key", ApiKind::Messages, "https://example.com", None)
+            .set(
+                "existing",
+                "key",
+                ApiKind::Messages,
+                "https://example.com",
+                None,
+            )
             .await
             .expect("set");
         let result = registry.get("nonexistent").await;

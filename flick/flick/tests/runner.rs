@@ -121,7 +121,14 @@ async fn run_provider_error_propagates() {
     let mut context = Context::default();
     context.push_user_text("test").unwrap();
 
-    let result = runner::run(&config, &mi, ApiKind::Messages, &ErrorProvider, &mut context).await;
+    let result = runner::run(
+        &config,
+        &mi,
+        ApiKind::Messages,
+        &ErrorProvider,
+        &mut context,
+    )
+    .await;
     assert!(matches!(
         result,
         Err(FlickError::Provider(ProviderError::Api { status: 500, .. }))
@@ -246,8 +253,14 @@ async fn run_mixed_text_and_tool_calls() {
         .unwrap();
 
     assert_eq!(result.status, ResultStatus::ToolCallsPending);
-    let has_text = result.content.iter().any(|b| matches!(b, ContentBlock::Text { .. }));
-    let has_tool = result.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+    let has_text = result
+        .content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Text { .. }));
+    let has_tool = result
+        .content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
     assert!(has_text);
     assert!(has_tool);
 }
@@ -285,9 +298,15 @@ tools:
     let mut context = Context::default();
     context.push_user_text("test query").unwrap();
 
-    runner::run(&config, &mi, ApiKind::ChatCompletions, &provider, &mut context)
-        .await
-        .unwrap();
+    runner::run(
+        &config,
+        &mi,
+        ApiKind::ChatCompletions,
+        &provider,
+        &mut context,
+    )
+    .await
+    .unwrap();
 
     let captured = provider.captured_params();
     assert_eq!(captured.len(), 1);
@@ -461,9 +480,15 @@ async fn run_two_step_structured_output() {
     let mut context = Context::default();
     context.push_user_text("what is the answer?").unwrap();
 
-    let result = runner::run(&config, &mi, ApiKind::ChatCompletions, &provider, &mut context)
-        .await
-        .unwrap();
+    let result = runner::run(
+        &config,
+        &mi,
+        ApiKind::ChatCompletions,
+        &provider,
+        &mut context,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(result.status, ResultStatus::Complete);
     assert_eq!(result.content.len(), 1);
@@ -493,9 +518,15 @@ async fn run_two_step_skipped_when_tool_calls_pending() {
     let mut context = Context::default();
     context.push_user_text("read a file").unwrap();
 
-    let result = runner::run(&config, &mi, ApiKind::ChatCompletions, &provider, &mut context)
-        .await
-        .unwrap();
+    let result = runner::run(
+        &config,
+        &mi,
+        ApiKind::ChatCompletions,
+        &provider,
+        &mut context,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(result.status, ResultStatus::ToolCallsPending);
     let captured = provider.captured_params();
@@ -544,9 +575,15 @@ output_schema:
     let mut context = Context::default();
     context.push_user_text("test").unwrap();
 
-    let result = runner::run(&config, &mi, ApiKind::ChatCompletions, &provider, &mut context)
-        .await
-        .unwrap();
+    let result = runner::run(
+        &config,
+        &mi,
+        ApiKind::ChatCompletions,
+        &provider,
+        &mut context,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(result.status, ResultStatus::Complete);
     let captured = provider.captured_params();
@@ -566,9 +603,15 @@ async fn run_two_step_cost_summed() {
     let mut context = Context::default();
     context.push_user_text("test").unwrap();
 
-    let result = runner::run(&config, &mi, ApiKind::ChatCompletions, &provider, &mut context)
-        .await
-        .unwrap();
+    let result = runner::run(
+        &config,
+        &mi,
+        ApiKind::ChatCompletions,
+        &provider,
+        &mut context,
+    )
+    .await
+    .unwrap();
 
     let usage = result.usage.unwrap();
     assert_eq!(usage.input_tokens, 3000);

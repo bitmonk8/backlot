@@ -23,9 +23,9 @@ pub use context::{ContentBlock, Context, Message};
 pub use error::FlickError;
 pub use model_registry::{ModelInfo, ModelRegistry};
 pub use provider::DynProvider;
+use provider::create_provider;
 pub use provider_registry::ProviderRegistry;
 pub use result::FlickResult;
-use provider::create_provider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,14 +64,18 @@ impl FlickClient {
         providers: &ProviderRegistry,
     ) -> Result<Self, FlickError> {
         let model_key = request.model();
-        let model_info = models.get(model_key).ok_or_else(|| {
-            FlickError::Config(error::ConfigError::InvalidModelConfig(format!(
-                "unknown model key: '{model_key}'"
-            )))
-        })?.clone();
+        let model_info = models
+            .get(model_key)
+            .ok_or_else(|| {
+                FlickError::Config(error::ConfigError::InvalidModelConfig(format!(
+                    "unknown model key: '{model_key}'"
+                )))
+            })?
+            .clone();
 
         // Resolve provider — returns error if not found.
-        let provider_info = providers.get(&model_info.provider)
+        let provider_info = providers
+            .get(&model_info.provider)
             .await
             .map_err(FlickError::Credential)?;
 
@@ -115,7 +119,14 @@ impl FlickClient {
     /// call, and returns the result. The caller owns and passes the `Context`.
     pub async fn run(&self, query: &str, context: &mut Context) -> Result<FlickResult, FlickError> {
         context.push_user_text(query)?;
-        runner::run(&self.config, &self.model_info, self.api_kind, self.provider.as_ref(), context).await
+        runner::run(
+            &self.config,
+            &self.model_info,
+            self.api_kind,
+            self.provider.as_ref(),
+            context,
+        )
+        .await
     }
 
     /// Resume a session with tool results. Pushes the tool results, makes one
@@ -126,7 +137,14 @@ impl FlickClient {
         tool_results: Vec<ContentBlock>,
     ) -> Result<FlickResult, FlickError> {
         context.push_tool_results(tool_results)?;
-        runner::run(&self.config, &self.model_info, self.api_kind, self.provider.as_ref(), context).await
+        runner::run(
+            &self.config,
+            &self.model_info,
+            self.api_kind,
+            self.provider.as_ref(),
+            context,
+        )
+        .await
     }
 
     /// Build the API request body without sending it (dry-run).
@@ -139,7 +157,12 @@ impl FlickClient {
             .iter()
             .map(config::ToolConfig::to_definition)
             .collect();
-        let params = runner::build_params(&self.config, &self.model_info, &context.messages, &tool_defs);
+        let params = runner::build_params(
+            &self.config,
+            &self.model_info,
+            &context.messages,
+            &tool_defs,
+        );
         self.provider
             .build_request(params)
             .map_err(FlickError::Provider)

@@ -349,9 +349,9 @@ impl RequestConfigBuilder {
 
     pub fn build(self) -> Result<RequestConfig, ConfigError> {
         let config = RequestConfig {
-            model: self.model.ok_or_else(|| {
-                ConfigError::InvalidModelConfig("model is required".into())
-            })?,
+            model: self
+                .model
+                .ok_or_else(|| ConfigError::InvalidModelConfig("model is required".into()))?,
             system_prompt: self.system_prompt,
             temperature: self.temperature,
             reasoning: self.reasoning,
@@ -418,7 +418,9 @@ mod tests {
     async fn load_json_config() {
         let json = r#"{ "model": "balanced" }"#;
         let f = write_temp_config_ext(json, ".json");
-        let config = RequestConfig::load(f.path()).await.expect("should parse JSON");
+        let config = RequestConfig::load(f.path())
+            .await
+            .expect("should parse JSON");
         assert_eq!(config.model(), "balanced");
     }
 
@@ -426,7 +428,9 @@ mod tests {
     async fn load_yml_extension() {
         let yaml = "model: balanced\n";
         let f = write_temp_config_ext(yaml, ".yml");
-        let config = RequestConfig::load(f.path()).await.expect("should parse .yml");
+        let config = RequestConfig::load(f.path())
+            .await
+            .expect("should parse .yml");
         assert_eq!(config.model(), "balanced");
     }
 
@@ -494,14 +498,19 @@ mod tests {
         let yaml = "model: test\nreasoning:\n  level: high\n";
         let config = RequestConfig::parse_yaml(yaml).expect("should parse");
         let reasoning = config.reasoning().expect("reasoning should be Some");
-        assert!(matches!(reasoning.level, crate::model::ReasoningLevel::High));
+        assert!(matches!(
+            reasoning.level,
+            crate::model::ReasoningLevel::High
+        ));
     }
 
     #[test]
     fn deserialize_output_schema() {
         let yaml = "model: test\noutput_schema:\n  schema:\n    type: object\n    properties:\n      answer:\n        type: string\n";
         let config = RequestConfig::parse_yaml(yaml).expect("should parse");
-        let schema = config.output_schema().expect("output_schema should be Some");
+        let schema = config
+            .output_schema()
+            .expect("output_schema should be Some");
         assert_eq!(schema.schema["type"], "object");
     }
 
@@ -598,7 +607,9 @@ tools:
             compat: None,
         };
         let result = config.validate_resolved(&model_info, &provider_info);
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("temperature")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("temperature"))
+        );
     }
 
     #[test]
@@ -621,15 +632,15 @@ tools:
             compat: None,
         };
         let result = config.validate_resolved(&model_info, &provider_info);
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("reasoning") && msg.contains("output_schema")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("reasoning") && msg.contains("output_schema"))
+        );
     }
 
     #[test]
     fn validate_resolved_budget_tokens_exceed_max() {
-        let config = RequestConfig::parse_yaml(
-            "model: test\nreasoning:\n  level: high\n",
-        )
-        .expect("parse");
+        let config =
+            RequestConfig::parse_yaml("model: test\nreasoning:\n  level: high\n").expect("parse");
         let model_info = ModelInfo {
             provider: "p".into(),
             name: "m".into(),
@@ -644,7 +655,9 @@ tools:
             compat: None,
         };
         let result = config.validate_resolved(&model_info, &provider_info);
-        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("budget_tokens")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("budget_tokens"))
+        );
     }
 
     #[test]
@@ -718,7 +731,8 @@ tools:
 
     #[test]
     fn unknown_tool_field_rejected() {
-        let yaml = "model: test\ntools:\n  - name: my_tool\n    description: a tool\n    timeout: 30\n";
+        let yaml =
+            "model: test\ntools:\n  - name: my_tool\n    description: a tool\n    timeout: 30\n";
         let result = RequestConfig::parse_yaml(yaml);
         assert!(matches!(result, Err(ConfigError::Parse(msg)) if msg.contains("timeout")));
     }

@@ -87,18 +87,13 @@ impl DynProvider for ProviderInstance {
 }
 
 /// Construct a provider from resolved registry info.
-pub fn create_provider(
-    provider_info: &ProviderInfo,
-    client: reqwest::Client,
-) -> ProviderInstance {
+pub fn create_provider(provider_info: &ProviderInfo, client: reqwest::Client) -> ProviderInstance {
     match provider_info.api {
-        crate::ApiKind::Messages => {
-            ProviderInstance::Messages(messages::MessagesProvider::new(
-                &provider_info.base_url,
-                provider_info.key.clone(),
-                client,
-            ))
-        }
+        crate::ApiKind::Messages => ProviderInstance::Messages(messages::MessagesProvider::new(
+            &provider_info.base_url,
+            provider_info.key.clone(),
+            client,
+        )),
         crate::ApiKind::ChatCompletions => {
             let compat = provider_info.compat.clone().unwrap_or_default();
             ProviderInstance::ChatCompletions(chat_completions::ChatCompletionsProvider::new(

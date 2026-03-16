@@ -177,8 +177,8 @@ async fn cmd_run(
 
     let client = FlickClient::new(request, &models, &providers).await?;
 
-    let pricing_zero =
-        client.model_info().input_per_million.is_none() && client.model_info().output_per_million.is_none();
+    let pricing_zero = client.model_info().input_per_million.is_none()
+        && client.model_info().output_per_million.is_none();
     if pricing_zero {
         eprintln!(
             "warning: no pricing info for model '{}'; cost will be reported as 0.0",
@@ -446,7 +446,8 @@ async fn cmd_model_add_core(
         )));
     }
 
-    let max_tokens_input = prompter.input("Max output tokens (enter 'none' to omit)", Some("8192"))?;
+    let max_tokens_input =
+        prompter.input("Max output tokens (enter 'none' to omit)", Some("8192"))?;
     let max_tokens = if max_tokens_input.trim().eq_ignore_ascii_case("none") {
         None
     } else {
@@ -456,7 +457,8 @@ async fn cmd_model_add_core(
     let input_price = prompter.input("Input price per million tokens (or 'none')", Some("none"))?;
     let input_per_million = parse_optional_price(&input_price)?;
 
-    let output_price = prompter.input("Output price per million tokens (or 'none')", Some("none"))?;
+    let output_price =
+        prompter.input("Output price per million tokens (or 'none')", Some("none"))?;
     let output_per_million = parse_optional_price(&output_price)?;
 
     let info = ModelInfo {

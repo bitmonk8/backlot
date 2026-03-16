@@ -36,9 +36,7 @@ impl MessagesProvider {
     fn build_body(&self, params: &RequestParams<'_>) -> serde_json::Value {
         // Messages API always requires max_tokens.
         // Resolve: explicit → registry → 8192.
-        let resolved_max = params
-            .max_tokens
-            .unwrap_or(8192);
+        let resolved_max = params.max_tokens.unwrap_or(8192);
         let mut body = serde_json::json!({
             "model": params.model,
             "max_tokens": resolved_max,
