@@ -86,34 +86,36 @@ jobs:
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
       - name: Run tests with delegated cgroup
         run: |
-          # Enable memory+pids controllers down through the cgroup hierarchy.
-          for p in /sys/fs/cgroup \
-                   /sys/fs/cgroup/user.slice \
-                   "/sys/fs/cgroup/user.slice/user-$(id -u).slice"; do
+          # Find the current cgroup (e.g., /system.slice/hosted-compute-agent.service)
+          current_cg="/sys/fs/cgroup$(cat /proc/self/cgroup | grep '^0::' | cut -d: -f3)"
+          parent_cg="$(dirname "$current_cg")"
+
+          # Enable memory+pids controllers from root down to the parent.
+          p="/sys/fs/cgroup"
+          while [ "$p" != "$parent_cg" ] && [ "$p" != "/" ]; do
             [ -f "$p/cgroup.subtree_control" ] && \
               echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" 2>/dev/null || true
+            # Walk toward parent_cg by appending the next path component
+            next="$(echo "$parent_cg" | sed "s|^$p/||" | cut -d/ -f1)"
+            p="$p/$next"
           done
+          [ -f "$parent_cg/cgroup.subtree_control" ] && \
+            echo '+memory +pids' | sudo tee "$parent_cg/cgroup.subtree_control" 2>/dev/null || true
 
-          # Create a delegated cgroup with a leaf for the test runner.
+          # Create lot-test under the same parent as our current cgroup.
           # Layout:
-          #   lot-test/              subtree_control: +memory +pids
-          #     runner/              test process (leaf)
-          #     lot-sandbox-*/       CgroupGuard creates these as siblings of runner/
-          cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/lot-test"
+          #   parent/
+          #     hosted-compute-agent.service/   (current, being vacated)
+          #     lot-test/                        subtree_control: +memory +pids
+          #       runner/                        test process (leaf)
+          #       lot-sandbox-*/                 CgroupGuard creates these
+          cg="$parent_cg/lot-test"
           sudo mkdir -p "$cg/runner"
           sudo chown -R "$(id -u):$(id -g)" "$cg"
           echo '+memory +pids' > "$cg/cgroup.subtree_control"
 
-          # Debug: show cgroup state
-          echo "=== cgroup debug ==="
-          ls -la "$cg/"
-          ls -la "$cg/runner/"
-          cat "$cg/cgroup.subtree_control"
-          cat /proc/self/cgroup
-          echo "=== end debug ==="
-
-          # Move into the leaf cgroup then run tests.
-          echo $$ > "$cg/runner/cgroup.procs"
+          # Move ourselves into the runner leaf.
+          echo $$ | sudo tee "$cg/runner/cgroup.procs"
           cargo test -p lot -- --test-threads=1
 
   test-macos:
