@@ -80,70 +80,10 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - name: Diagnose namespace environment
-        run: |
-          echo "=== OS Release ==="
-          cat /etc/os-release | head -5
-
-          echo "=== Kernel Version ==="
-          uname -r
-
-          echo "=== Current cgroup ==="
-          cat /proc/self/cgroup
-
-          echo "=== Process security status ==="
-          grep -E '^(NoNewPrivs|Seccomp|Cap|NStgid|NSpid)' /proc/self/status
-
-          echo "=== AppArmor profile ==="
-          cat /proc/self/attr/current 2>/dev/null || echo "(not available)"
-
-          echo "=== AppArmor enabled? ==="
-          cat /sys/module/apparmor/parameters/enabled 2>/dev/null || echo "(not available)"
-
-          echo "=== Sysctl: unprivileged_userns_clone ==="
-          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "(not available)"
-
-          echo "=== Sysctl: apparmor_restrict_unprivileged_userns ==="
-          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo "(not available)"
-
-          echo "=== Max user namespaces ==="
-          cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo "(not available)"
-
-          echo "=== id ==="
-          id
-
-          echo "=== Probe unshare directly ==="
-          unshare --user --map-root-user echo "unshare succeeded" 2>&1 || echo "unshare FAILED (exit $?)"
-
-          echo "=== Probe unshare with strace ==="
-          strace -e trace=unshare,clone,clone3 unshare --user --map-root-user echo "ok" 2>&1 || true
-
-          echo "=== dmesg last 30 lines (may show denial) ==="
-          sudo dmesg | tail -30 2>/dev/null || echo "(not available)"
-
-          echo "=== AppArmor denials in audit log ==="
-          sudo grep -i 'apparmor.*DENIED\|userns' /var/log/syslog 2>/dev/null | tail -10 || true
-          sudo grep -i 'apparmor.*DENIED\|userns' /var/log/kern.log 2>/dev/null | tail -10 || true
-          sudo journalctl -k --no-pager -n 20 2>/dev/null | grep -i 'apparmor\|userns\|denied' || true
-
-          echo "=== /proc/self/attr/apparmor/current ==="
-          cat /proc/self/attr/apparmor/current 2>/dev/null || echo "(not available)"
-
-          echo "=== Loaded AppArmor profiles ==="
-          sudo aa-status 2>/dev/null | head -30 || echo "(aa-status not available)"
       - name: Enable unprivileged user namespaces
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-      - name: Post-sysctl namespace probe
-        run: |
-          echo "=== After sysctl changes ==="
-          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo "(not available)"
-          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "(not available)"
-          echo "=== Probe unshare again ==="
-          unshare --user --map-root-user echo "unshare succeeded" 2>&1 || echo "unshare FAILED (exit $?)"
-          echo "=== dmesg after probe ==="
-          sudo dmesg | tail -10 2>/dev/null || true
       - name: Run tests with delegated cgroup
         run: |
           # Find the current cgroup (e.g., /system.slice/hosted-compute-agent.service)
@@ -175,69 +115,6 @@ jobs:
           echo '+memory +pids' > "$cg/cgroup.subtree_control"
 
           # Move ourselves into the runner leaf.
-          echo $$ | sudo tee "$cg/runner/cgroup.procs"
-          cargo test -p lot -- --test-threads=1 --nocapture
-
-  test-linux-22:
-    name: Test (Linux, ubuntu-22.04)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup show
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-22-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-22-cargo-test-
-      - name: Diagnose namespace environment (22.04)
-        run: |
-          echo "=== OS Release ==="
-          cat /etc/os-release | head -5
-
-          echo "=== Kernel Version ==="
-          uname -r
-
-          echo "=== Process security status ==="
-          grep -E '^(NoNewPrivs|Seccomp|Cap)' /proc/self/status
-
-          echo "=== AppArmor profile ==="
-          cat /proc/self/attr/current 2>/dev/null || echo "(not available)"
-
-          echo "=== Sysctl: unprivileged_userns_clone ==="
-          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo "(not available)"
-
-          echo "=== Sysctl: apparmor_restrict_unprivileged_userns ==="
-          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo "(not available)"
-
-          echo "=== Probe unshare ==="
-          unshare --user --map-root-user echo "unshare succeeded" 2>&1 || echo "unshare FAILED (exit $?)"
-      - name: Enable unprivileged user namespaces
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
-          sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-      - name: Run tests with delegated cgroup
-        run: |
-          current_cg="/sys/fs/cgroup$(cat /proc/self/cgroup | grep '^0::' | cut -d: -f3)"
-          parent_cg="$(dirname "$current_cg")"
-
-          p="/sys/fs/cgroup"
-          while [ "$p" != "$parent_cg" ] && [ "$p" != "/" ]; do
-            [ -f "$p/cgroup.subtree_control" ] && \
-              echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" 2>/dev/null || true
-            next="$(echo "$parent_cg" | sed "s|^$p/||" | cut -d/ -f1)"
-            p="$p/$next"
-          done
-          [ -f "$parent_cg/cgroup.subtree_control" ] && \
-            echo '+memory +pids' | sudo tee "$parent_cg/cgroup.subtree_control" 2>/dev/null || true
-
-          cg="$parent_cg/lot-test"
-          sudo mkdir -p "$cg/runner"
-          sudo chown -R "$(id -u):$(id -g)" "$cg"
-          echo '+memory +pids' > "$cg/cgroup.subtree_control"
-
           echo $$ | sudo tee "$cg/runner/cgroup.procs"
           cargo test -p lot -- --test-threads=1 --nocapture
 

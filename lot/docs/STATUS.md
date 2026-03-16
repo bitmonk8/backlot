@@ -57,13 +57,9 @@ Design docs: `docs/DESIGN_WORKSPACE_CLI.md`, `docs/DESIGN_SPAWN_TRAVERSE_ACES.md
 
 ## Next Work
 
-1. **Remove ubuntu-22.04 CI job.** Added only for mount_proc diagnosis; no longer needed.
+1. **First real-world usage / `lot run` testing.** The CLI and library are complete but haven't been exercised end-to-end outside unit/integration tests.
 
-2. **Remove diagnostic CI steps.** The "Diagnose namespace environment" and "Post-sysctl namespace probe" steps in the Linux CI jobs were added for investigation and can be removed.
-
-3. **First real-world usage / `lot run` testing.** The CLI and library are complete but haven't been exercised end-to-end outside unit/integration tests.
-
-## CI Status (as of 2026-03-16, run 23163146969)
+## CI Status
 
 | Job | Status |
 |---|---|
@@ -74,7 +70,6 @@ Design docs: `docs/DESIGN_WORKSPACE_CLI.md`, `docs/DESIGN_SPAWN_TRAVERSE_ACES.md
 | Clippy (Windows) | Pass |
 | Test (macOS) | Pass |
 | Test (Linux) | Pass |
-| Test (Linux, ubuntu-22.04) | Pass |
 | Test (Windows) | Pass |
 
 ### Note: ubuntu-24.04 AppArmor
