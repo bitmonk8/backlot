@@ -166,7 +166,7 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
 /// with the `new_root` path returned by `setup_mount_namespace()`. Proc
 /// must be mounted before pivot_root so the kernel's `mnt_already_visible()`
 /// check doesn't see stale procfs mounts from the lazy-unmounted old root.
-pub(crate) fn finish_mount_namespace(new_root: &str) -> io::Result<()> {
+pub fn finish_mount_namespace(new_root: &str) -> io::Result<()> {
     mount_proc(&format!("{new_root}/proc"))?;
     do_pivot_root(new_root)?;
     Ok(())

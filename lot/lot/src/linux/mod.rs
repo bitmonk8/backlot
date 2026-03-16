@@ -122,14 +122,17 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
     if helper_pid == 0 {
         // === HELPER PROCESS (single-threaded after fork) ===
-        // Close parent's ends of pipes
-        // SAFETY: these fds are valid
-        unsafe {
-            libc::close(err_pipe_rd);
-        }
 
-        // Close parent's stdio pipe ends (not the child's — those are needed for inner child)
-        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
+        // Step constants for error reporting
+        const STEP_UNSHARE: i32 = 1;
+        const STEP_USER_NS: i32 = 2;
+        const STEP_MOUNT_NS: i32 = 3;
+        const STEP_FORK_INNER: i32 = 4;
+        const STEP_DUP2: i32 = 5;
+        const STEP_CHDIR: i32 = 6;
+        const STEP_MOUNT_PROC: i32 = 7;
+        const STEP_SECCOMP: i32 = 8;
+        const STEP_EXEC: i32 = 9;
 
         // Macro to report error and exit from helper.
         // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
@@ -145,16 +148,14 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             }};
         }
 
-        // Step constants for error reporting
-        const STEP_UNSHARE: i32 = 1;
-        const STEP_USER_NS: i32 = 2;
-        const STEP_MOUNT_NS: i32 = 3;
-        const STEP_FORK_INNER: i32 = 4;
-        const STEP_DUP2: i32 = 5;
-        const STEP_CHDIR: i32 = 6;
-        const STEP_MOUNT_PROC: i32 = 7;
-        const STEP_SECCOMP: i32 = 8;
-        const STEP_EXEC: i32 = 9;
+        // Close parent's ends of pipes
+        // SAFETY: these fds are valid
+        unsafe {
+            libc::close(err_pipe_rd);
+        }
+
+        // Close parent's stdio pipe ends (not the child's — those are needed for inner child)
+        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
 
         // Unshare namespaces. Skip CLONE_NEWNET when network access is allowed
         // so the child inherits the parent's network namespace.
