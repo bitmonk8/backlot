@@ -79,38 +79,43 @@ Automatically grant ancestor traverse ACEs inside `spawn_inner()` before creatin
 
 ## Next Work
 
-1. **Fix CI prerequisite setup.** Tests no longer silently skip when prerequisites are missing — they fail. CI must be configured to provide the required environment on each platform before running tests.
+1. **Fix Clippy (Linux) `expect_used` lint.** Rust 1.93 clippy now fires `expect_used` on test code under `clippy::nursery`. 13 errors in `src/linux/mod.rs` test functions. Fix: add `#[allow(clippy::expect_used)]` on the test module or switch to `.unwrap()`.
 
-2. **Fix test bugs exposed by silent-skip removal.** Fix any test failures that occur even when prerequisites are met.
+2. **Fix Linux CI environment.** 8 test failures: 3 cgroup (delegation mismatch) + 5 namespace (`EPERM`). Requires fixing GHA runner setup for user namespaces and cgroup delegation.
 
-## CI Failure Overview (as of 2026-03-16)
+3. **Fix Windows CI prerequisite setup.** 5 test failures. GHA runner is elevated — add a pre-test step calling `grant_appcontainer_prerequisites()` to grant NUL device ACE and ancestor traverse ACEs.
+
+## CI Failure Overview (as of 2026-03-16, commit 3f4d4d8)
 
 Tests previously silently skipped on failure; now they fail loudly. This exposed missing CI setup and pre-existing bugs.
 
 ### macOS — All green
 
-No failures. Seatbelt works without special setup.
+No failures. Tests, clippy, and format all pass.
 
-### Linux — 8 test failures
+### Linux — Clippy failure + 8 test failures
 
 | Category | Tests | Error | Root Cause |
 |---|---|---|---|
+| Clippy (13 errors) | All in `src/linux/mod.rs` test functions | `clippy::expect_used` — "used `expect()` on a `Result` value" | Rust 1.93 clippy fires this lint under the enabled `nursery` group. Test code uses `.expect()` extensively. |
 | cgroup tests (3) | `cgroup_guard_creates_and_cleans_up`, `cgroup_guard_add_process`, `cgroup_guard_no_limits_creates_empty` | `cgroups v2 must be available for this test` | CI creates `/sys/fs/cgroup/lot-test` but the test process runs in its own cgroup outside that subtree. The delegated subtree is not the process's current cgroup, so `available()` returns false. |
 | namespace spawn tests (5) | `spawn_echo_hello`, `spawn_pid1_in_namespace`, `spawn_proc_mounted`, `spawn_network_isolated`, `spawn_cannot_see_host_paths` | `Setup("child namespace setup failed: Operation not permitted (os error 1)")` | `unshare()` returns `EPERM`. CI runs `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` but the GHA runner may have additional restrictions (AppArmor profile or seccomp filter on the runner process itself) that block namespace creation. |
-| integration tests (7) | All integration tests | Same namespace `EPERM` | Same root cause as namespace spawn tests above. |
 
-### Windows — 5 unit test failures + 7 integration test failures
+### Windows — 5 unit test failures
 
 | Category | Tests | Error | Root Cause |
 |---|---|---|---|
 | appcontainer unit tests (5) | `spawn_and_read_allowed_path`, `disallowed_path_unreadable`, `read_only_path_not_writable`, `cleanup_restores_acls`, `sentinel_recovery` | `PrerequisitesNotMet { nul_device_missing: true }` (first test), then cascading `PoisonError` | NUL device lacks `ALL APPLICATION PACKAGES` ACE. CI has no setup step to call `grant_appcontainer_prerequisites()`. The GHA Windows runner is elevated, so adding a setup step that calls this function should fix it. The cascading `PoisonError` is because the tests share a `Mutex` and the first panic poisons it. |
-| integration tests (7) | All integration tests | `PrerequisitesNotMet { missing_paths: ["\\\\?\\C:\\Users"] }` | Same missing prerequisites. Ancestor traverse ACEs not granted for temp dir paths under `C:\Users`. |
 
-### All platforms — format failure
+### Passing jobs
 
-| Category | Error | Root Cause |
-|---|---|---|
-| `cargo fmt --check` | Diff in `src/linux/mod.rs` | Long `.expect()` chains need line-wrapping per `rustfmt` rules. |
+| Job | Status |
+|---|---|
+| Format | Pass |
+| Build | Pass |
+| Clippy (macOS) | Pass |
+| Clippy (Windows) | Pass |
+| Test (macOS) | Pass |
 
 ## Known Limitations
 
