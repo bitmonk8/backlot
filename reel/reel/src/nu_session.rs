@@ -2270,6 +2270,63 @@ mod tests {
         }
     }
 
+    /// Diagnostic: spawn nu in sandbox with stderr captured to identify crash.
+    #[tokio::test]
+    async fn diag_nu_sandbox_stderr() {
+        skip_no_nu!();
+        let cache = tmp_sandbox_cache();
+        let cache_dir = cache.as_ref().map(|c| c.path());
+        let nu_binary = resolve_nu_binary(cache_dir);
+
+        let project = tmp_sandbox_project();
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let session_temp_base = project.path().join(".reel").join("tmp");
+        std::fs::create_dir_all(&session_temp_base).unwrap_or(());
+        let session_temp_dir = tempfile::TempDir::new_in(&session_temp_base).unwrap();
+
+        let policy =
+            build_nu_sandbox_policy(project.path(), grant, cache_dir, session_temp_dir.path())
+                .unwrap();
+
+        eprintln!("DIAG nu_binary: {:?}", nu_binary);
+        eprintln!("DIAG project: {:?}", project.path());
+        eprintln!("DIAG cache_dir: {:?}", cache_dir);
+
+        let mut cmd = SandboxCommand::new(&nu_binary);
+        cmd.arg("-c").arg("echo hello");
+        cmd.cwd(project.path());
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+        cmd.stdin(SandboxStdio::Piped);
+        cmd.env("TEMP", session_temp_dir.path());
+        cmd.env("TMP", session_temp_dir.path());
+        cmd.forward_common_env();
+
+        let mut child = lot::spawn(&policy, &cmd).expect("spawn");
+        let stdout = child.take_stdout().unwrap();
+        let stderr = child.take_stderr().unwrap();
+
+        use std::io::Read as _;
+        let mut out = String::new();
+        let mut err = String::new();
+        std::io::BufReader::new(stdout)
+            .read_to_string(&mut out)
+            .ok();
+        std::io::BufReader::new(stderr)
+            .read_to_string(&mut err)
+            .ok();
+
+        let status = child.wait();
+        eprintln!("DIAG stdout: {:?}", out);
+        eprintln!("DIAG stderr: {:?}", err);
+        eprintln!("DIAG status: {:?}", status);
+
+        assert!(
+            out.contains("hello"),
+            "nu should output 'hello', got stdout={out:?} stderr={err:?}"
+        );
+    }
+
     /// Test with stderr captured to see if open prints errors there
     #[tokio::test]
     async fn diag_open_with_stderr() {
