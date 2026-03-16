@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. 3 test failures root-caused: missing ALL APPLICATION PACKAGES traverse ACEs on intermediate directories (ISSUES.md #9c). Fix confirmed — tests pass when ACEs are granted.**
+**Core agent runtime and tooling implemented. All 169 tests pass.** Issue #9c (missing ancestor traverse ACEs) resolved by lot rev `4e478de` which grants traverse ACEs on user-owned directories automatically at spawn time. System directories require one-time elevated setup via lot's prerequisite APIs, which reel does not yet re-export (issue #19).
 
 ## What Is Implemented
 
@@ -12,7 +12,7 @@
 - **CLI binary** (`reel-cli`) — `reel run` (execute agent query with YAML config, stdin, dry-run) and `reel setup` (Windows AppContainer ACL prerequisites). Two-pass YAML config parsing: extract reel `grant` field, pass remainder to flick.
 - **Build infrastructure** (`build.rs`) — Downloads prebuilt NuShell 0.111.0 and ripgrep 14.1.1 binaries for target platform, verifies SHA-256, caches in `target/nu-cache/`. Generates `reel_config.nu` and `reel_env.nu` for nu custom commands.
 - **CI pipeline** — GitHub Actions: fmt, clippy, test, build on Ubuntu, macOS, Windows. Rust 1.93.1 toolchain. Dependencies use pinned git revs (lot, flick).
-- **Test counts** — 145 tests total: 142 pass, 3 fail (missing ancestor traverse ACEs cause nu_glob to fail inside AppContainer — see ISSUES.md #9c). All 3 pass when ACEs are correctly provisioned.
+- **Test counts** — 169 tests total, all pass. Issue #9c resolved by lot rev `4e478de` (spawn-time traverse ACE grants).
 
 ## What Is NOT Implemented
 
@@ -66,6 +66,6 @@ Updated lot dependency to rev with directional policy overlap support, fixing 5 
 
 ## Work Candidates
 
-### Fix issue #9c: Missing ancestor traverse ACEs
+### Re-export lot's sandbox prerequisite APIs (issue #19)
 
-Root cause confirmed: nu_glob walks path components from root, calling `fs::metadata()` at each level. Intermediate directories between the volume root and sandbox policy paths lack ALL APPLICATION PACKAGES traverse ACEs. `reel setup` only passes `cwd` to `grant_appcontainer_prerequisites`, so ancestors of cwd get ACEs but descendants (where the sandbox actually operates) do not. Fix options: (A) pass actual sandbox paths to `grant_appcontainer_prerequisites` in `cmd_setup`, (B) make lot's `grant_acls` also handle ancestors, (C) rewrite nu custom commands to avoid nu_glob.
+Lot rev `4e478de` grants traverse ACEs on user-owned ancestor directories automatically at spawn time. System directories (e.g., `C:\Users`) still require a one-time elevated setup via `grant_appcontainer_prerequisites`. Reel does not re-export these APIs, so library consumers cannot implement their own elevated setup command without a direct lot dependency. Add a `reel::sandbox` module re-exporting the prerequisite APIs, `is_elevated()`, and the `PrerequisitesNotMet` error variant. Update `reel-cli` to use the re-exports.

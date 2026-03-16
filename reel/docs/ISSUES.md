@@ -219,9 +219,21 @@ In `reel/src/nu_session.rs`, prefixed with `diag_`. Run with `cargo test -p reel
 
 `reel/src/agent.rs` — One-line public method that calls `Self::build_request_config(request)`. The indirection adds no value. **Category: Simplification.**
 
-### 19. reel-cli calls lot directly instead of through reel re-exports
+### 19. reel does not re-export lot's sandbox prerequisite APIs
 
-`reel-cli/Cargo.toml` — `reel-cli` depends on `lot` directly and calls `lot::appcontainer_prerequisites_met` / `lot::grant_appcontainer_prerequisites`. Per `CLI_TOOL_INTEGRATION_TESTS.md`, reel should re-export these via a `reel::sandbox` module so consumers don't depend on lot directly. **Category: Correctness.**
+`reel-cli/Cargo.toml` — `reel-cli` depends on `lot` directly and calls `lot::appcontainer_prerequisites_met` / `lot::grant_appcontainer_prerequisites`. Reel should re-export these via a `reel::sandbox` module so consumers don't depend on lot directly.
+
+This is blocking for any library consumer of reel. Lot's spawn-time traverse ACE grants (rev `4e478de`) handle user-owned directories automatically, but system directories (e.g., `C:\Users`) require a one-time elevated setup via `grant_appcontainer_prerequisites`. Without reel re-exporting these APIs, library consumers cannot implement their own elevated setup command — they must add a direct lot dependency and track its version independently.
+
+**Affected APIs that need re-export:**
+- `grant_appcontainer_prerequisites(paths: &[&Path]) -> Result<()>`
+- `grant_appcontainer_prerequisites_for_policy(policy: &SandboxPolicy) -> Result<()>`
+- `appcontainer_prerequisites_met(paths: &[&Path]) -> bool`
+- `appcontainer_prerequisites_met_for_policy(policy: &SandboxPolicy) -> bool`
+- `is_elevated() -> bool`
+- `SandboxError::PrerequisitesNotMet` variant (for matching spawn failures)
+
+**Category: API completeness.**
 
 ### 20. `evaluate_inner` holds lock during nu process spawn
 

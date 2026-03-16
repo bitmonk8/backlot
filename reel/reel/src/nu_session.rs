@@ -1036,7 +1036,7 @@ mod tests {
     #[tokio::test]
     async fn integration_spawn_creates_session() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::NU).await;
     }
@@ -1044,7 +1044,7 @@ mod tests {
     #[tokio::test]
     async fn integration_spawn_is_idempotent() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::NU).await;
         // Second spawn with same params is a no-op.
@@ -1054,7 +1054,7 @@ mod tests {
     #[tokio::test]
     async fn integration_drop_cleans_up() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         {
             let (session, _cache) = isolated_session();
             try_spawn(&session, tmp.path(), ToolGrant::NU).await;
@@ -1065,7 +1065,7 @@ mod tests {
     #[tokio::test]
     async fn integration_kill_then_evaluate_respawns() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::NU).await;
         session.kill().await;
@@ -1077,7 +1077,7 @@ mod tests {
     #[tokio::test]
     async fn integration_evaluate_simple_echo() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         let result = try_eval(
             &session,
@@ -1095,7 +1095,7 @@ mod tests {
     #[tokio::test]
     async fn integration_evaluate_error_command() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         let result = try_eval(
             &session,
@@ -1113,7 +1113,7 @@ mod tests {
     #[tokio::test]
     async fn integration_evaluate_multiple_sequential() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         let result = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::NU).await;
         let out1 = result.unwrap();
@@ -1495,7 +1495,7 @@ mod tests {
     #[tokio::test]
     async fn diag_mcp_tools_list() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         let test_file = tmp.path().join("probe.txt");
         std::fs::write(&test_file, "hello mcp").unwrap();
@@ -2591,7 +2591,7 @@ mod tests {
     #[tokio::test]
     async fn integration_timeout_kills_process() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         let result = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::NU).await;
         assert!(result.is_err());
@@ -2608,7 +2608,7 @@ mod tests {
     #[tokio::test]
     async fn integration_grant_change_respawns() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         let result = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::NU).await;
         let out1 = result.unwrap();
@@ -2629,7 +2629,7 @@ mod tests {
     #[tokio::test]
     async fn integration_generation_prevents_stale_writeback() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::NU).await;
         let gen_before = {
@@ -2649,7 +2649,7 @@ mod tests {
     #[tokio::test]
     async fn integration_env_filtering_rg_available() {
         skip_no_nu!();
-        let tmp = tmp_project();
+        let tmp = tmp_sandbox_project();
         std::fs::write(tmp.path().join("needle.txt"), "haystack\n").unwrap();
         let (session, _cache) = isolated_session();
         let grant = ToolGrant::NU | ToolGrant::WRITE;
