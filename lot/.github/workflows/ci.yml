@@ -176,7 +176,7 @@ jobs:
 
           # Move ourselves into the runner leaf.
           echo $$ | sudo tee "$cg/runner/cgroup.procs"
-          cargo test -p lot -- --test-threads=1 --nocapture 2>&1 --nocapture 2>&1
+          cargo test -p lot -- --test-threads=1 --nocapture
 
   test-linux-22:
     name: Test (Linux, ubuntu-22.04)
@@ -239,7 +239,7 @@ jobs:
           echo '+memory +pids' > "$cg/cgroup.subtree_control"
 
           echo $$ | sudo tee "$cg/runner/cgroup.procs"
-          cargo test -p lot -- --test-threads=1 --nocapture 2>&1
+          cargo test -p lot -- --test-threads=1 --nocapture
 
   test-macos:
     name: Test (macOS)
