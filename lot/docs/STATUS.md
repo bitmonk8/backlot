@@ -83,9 +83,9 @@ No failures. Tests, clippy, and format all pass.
 | Job | Status |
 |---|---|
 | Format | Pass |
-| Build | Fail (`unexpected_cfgs` — fixed in b36178a) |
+| Build | Pass |
 | Clippy (macOS) | Pass |
-| Clippy (Linux) | Fail (`unexpected_cfgs` — fixed in b36178a) |
+| Clippy (Linux) | Pass |
 | Clippy (Windows) | Pass |
 | Test (macOS) | Pass |
 | Test (Linux) | Fail (8 tests — namespace/cgroup CI setup issues) |
