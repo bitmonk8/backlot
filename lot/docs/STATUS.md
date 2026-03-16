@@ -51,6 +51,7 @@ See `docs/PLAN.md` for the full phased plan with CI testing strategy.
 | Spawn-time prerequisite check (`SandboxError::PrerequisitesNotMet`) | Complete — replaced check-only approach with grant-then-check |
 | Best-effort spawn-time traverse ACE grant | Complete |
 | Workspace restructure + CLI binary | Complete |
+| Fix Linux mount_proc bug | Complete — split mount namespace setup into two phases (helper + inner child) |
 
 Design docs: `docs/DESIGN_WORKSPACE_CLI.md`, `docs/DESIGN_SPAWN_TRAVERSE_ACES.md`
 
@@ -58,7 +59,9 @@ Design docs: `docs/DESIGN_WORKSPACE_CLI.md`, `docs/DESIGN_SPAWN_TRAVERSE_ACES.md
 
 1. **Remove ubuntu-22.04 CI job.** Added only for mount_proc diagnosis; no longer needed.
 
-2. **First real-world usage / `lot run` testing.** The CLI and library are complete but haven't been exercised end-to-end outside unit/integration tests.
+2. **Remove diagnostic CI steps.** The "Diagnose namespace environment" and "Post-sysctl namespace probe" steps in the Linux CI jobs were added for investigation and can be removed.
+
+3. **First real-world usage / `lot run` testing.** The CLI and library are complete but haven't been exercised end-to-end outside unit/integration tests.
 
 ## CI Status (as of 2026-03-16, run 23163146969)
 
