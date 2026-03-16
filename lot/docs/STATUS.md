@@ -79,9 +79,11 @@ Automatically grant ancestor traverse ACEs inside `spawn_inner()` before creatin
 
 ## Next Work
 
-1. **Fix Linux CI environment.** 8 test failures: 3 cgroup (delegation mismatch) + 5 namespace (`EPERM`). Requires fixing GHA runner setup for user namespaces and cgroup delegation.
+1. **Workspace restructure + CLI binary.** Convert the repo to a workspace (`lot/` library + `lot-cli/` binary), matching the reel/flick dual-nature pattern. Adds `lot setup` and `lot probe` commands. Design: `docs/DESIGN_WORKSPACE_CLI.md`.
 
-2. **Fix Windows CI prerequisite setup.** 5 test failures. GHA runner is elevated — add a pre-test step calling `grant_appcontainer_prerequisites()` to grant NUL device ACE and ancestor traverse ACEs.
+2. **Fix Windows CI prerequisite setup.** Blocked on #1. After the CLI exists, add `cargo run -p lot-cli -- setup --verbose` to the Windows CI job. Fixes 5 test failures (NUL device ACE missing).
+
+3. **Fix Linux CI environment.** 8 test failures: 3 cgroup (delegation mismatch) + 5 namespace (`EPERM`). Requires fixing GHA runner setup for user namespaces and cgroup delegation.
 
 ## CI Failure Overview (as of 2026-03-16, commit b78a0aa)
 
