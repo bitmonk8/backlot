@@ -125,6 +125,7 @@ pub use windows::nul_device::{
 /// Grants AppContainer prerequisites for all paths in the policy.
 /// No-op on non-Windows platforms.
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::missing_const_for_fn)]
 pub fn grant_appcontainer_prerequisites_for_policy(_policy: &SandboxPolicy) -> Result<()> {
     Ok(())
 }
