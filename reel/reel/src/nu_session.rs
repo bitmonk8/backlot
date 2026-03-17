@@ -73,8 +73,12 @@ const MAX_SKIPPED_LINES: usize = 64;
 /// the blocking I/O thread.
 type ChildHandle = Arc<std::sync::Mutex<Option<lot::SandboxedChild>>>;
 
+/// Shared handle to stdin, closeable from `kill()` to unblock the inner
+/// child even if the `NuProcess` is trapped in a `spawn_blocking` closure.
+type StdinHandle = Arc<std::sync::Mutex<Option<File>>>;
+
 struct NuProcess {
-    stdin: File,
+    stdin: StdinHandle,
     stdout: BufReader<File>,
     next_id: u64,
     /// The grant under which this process was spawned (determines sandbox policy).
@@ -111,6 +115,10 @@ struct SessionState {
     /// Shared child handle kept here so `kill()` can reach the child even when
     /// the `NuProcess` has been taken out for blocking I/O in `evaluate_inner`.
     inflight_child: Option<ChildHandle>,
+    /// Shared stdin handle kept here so `kill()` can close stdin to trigger
+    /// EOF on the inner child, causing it to exit even if the lot-level kill
+    /// doesn't terminate it. Defense-in-depth for the PID namespace issue.
+    inflight_stdin: Option<StdinHandle>,
 }
 
 /// Manages a persistent `nu --mcp` process.
@@ -126,7 +134,13 @@ pub struct NuSession {
 }
 
 /// Write a JSON-RPC message as a single `\n`-terminated line.
-fn send_line(sink: &mut File, payload: &[u8]) -> Result<(), String> {
+fn send_line(stdin: &StdinHandle, payload: &[u8]) -> Result<(), String> {
+    let mut guard = stdin
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let sink = guard
+        .as_mut()
+        .ok_or_else(|| "stdin closed (session killed)".to_string())?;
     (|| -> io::Result<()> {
         sink.write_all(payload)?;
         sink.write_all(b"\n")?;
@@ -217,6 +231,17 @@ impl NuSession {
         }
         st.inflight_child = None;
 
+        // Close stdin so the inner child gets EOF and exits, even if lot's
+        // kill didn't terminate it. This also unblocks any spawn_blocking
+        // task stuck on read_line (the inner child closes stdout on exit).
+        if let Some(ref handle) = st.inflight_stdin {
+            let mut guard = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take(); // Drop the File, closing the pipe
+        }
+        st.inflight_stdin = None;
+
         // Kill the process if it's parked in state (not currently in-flight).
         if let Some(proc) = st.process.take() {
             let mut child_guard = proc
@@ -259,14 +284,15 @@ impl NuSession {
                 .take()
                 .ok_or("internal: process unavailable after spawn")?;
             st.inflight_child = Some(Arc::clone(&proc.child_handle));
+            st.inflight_stdin = Some(Arc::clone(&proc.stdin));
             let generation = st.generation;
             drop(st);
             (proc, generation)
         };
         // Lock released — blocking I/O below does not hold the async mutex,
         // allowing timeout + kill() to work. kill() can reach the child via
-        // inflight_child, which causes read_line to return EOF and unblocks
-        // the spawn_blocking thread.
+        // inflight_child and close stdin via inflight_stdin to unblock the
+        // spawn_blocking thread.
 
         // Phase 2: Blocking I/O on a dedicated thread.
         let command = command.to_owned();
@@ -283,6 +309,7 @@ impl NuSession {
         // (no kill or respawn happened while we were blocked).
         let mut st = self.state.lock().await;
         st.inflight_child = None;
+        st.inflight_stdin = None;
         if result.is_ok() && st.generation == generation_at_start {
             st.process = Some(proc);
         } else if result.is_err() {
@@ -366,7 +393,7 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
     let request_bytes =
         serde_json::to_vec(&request).map_err(|e| format!("failed to serialize request: {e}"))?;
 
-    send_line(&mut proc.stdin, &request_bytes)?;
+    send_line(&proc.stdin, &request_bytes)?;
 
     let response = read_response(&mut proc.stdout, request_id)?;
 
@@ -567,9 +594,10 @@ async fn spawn_nu_process(
         let stdout = child.take_stdout().ok_or("failed to capture nu stdout")?;
 
         let child_handle: ChildHandle = Arc::new(std::sync::Mutex::new(Some(child)));
+        let stdin_handle: StdinHandle = Arc::new(std::sync::Mutex::new(Some(stdin)));
 
         let mut proc = NuProcess {
-            stdin,
+            stdin: stdin_handle,
             stdout: BufReader::new(stdout),
             next_id: 1,
             grant,
@@ -596,7 +624,7 @@ async fn spawn_nu_process(
         let init_bytes = serde_json::to_vec(&init_request)
             .map_err(|e| format!("failed to serialize init request: {e}"))?;
 
-        send_line(&mut proc.stdin, &init_bytes)?;
+        send_line(&proc.stdin, &init_bytes)?;
 
         // Read initialize response (uses skip loop like rpc_call).
         let init_response = read_response(&mut proc.stdout, 0)?;
@@ -614,7 +642,7 @@ async fn spawn_nu_process(
         let notif_bytes = serde_json::to_vec(&initialized)
             .map_err(|e| format!("failed to serialize notification: {e}"))?;
 
-        send_line(&mut proc.stdin, &notif_bytes)?;
+        send_line(&proc.stdin, &notif_bytes)?;
 
         Ok(proc)
     })
@@ -2443,8 +2471,9 @@ mod tests {
 
         let child_handle: ChildHandle = Arc::new(std::sync::Mutex::new(Some(child)));
 
+        let stdin_handle: StdinHandle = Arc::new(std::sync::Mutex::new(Some(stdin)));
         let mut proc = NuProcess {
-            stdin,
+            stdin: stdin_handle,
             stdout: BufReader::new(stdout),
             next_id: 1,
             grant,
@@ -2465,7 +2494,7 @@ mod tests {
             })),
         };
         let init_bytes = serde_json::to_vec(&init_request).unwrap();
-        send_line(&mut proc.stdin, &init_bytes).unwrap();
+        send_line(&proc.stdin, &init_bytes).unwrap();
         let _init_resp = read_response(&mut proc.stdout, 0).unwrap();
 
         // Send initialized notification
@@ -2474,7 +2503,7 @@ mod tests {
             "method": "notifications/initialized"
         });
         let notif_bytes = serde_json::to_vec(&notif).unwrap();
-        send_line(&mut proc.stdin, &notif_bytes).unwrap();
+        send_line(&proc.stdin, &notif_bytes).unwrap();
 
         // Run open command
         let file_path = nu_path(&test_file);

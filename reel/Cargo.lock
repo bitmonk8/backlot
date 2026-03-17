@@ -901,7 +901,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "lot"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/lot?rev=a17cedf#a17cedf1d529ac82d156da9dcb3acb939d98da25"
+source = "git+https://github.com/bitmonk8/lot?rev=1a6fc30#1a6fc309b0d59e9915f706ee256d91ad31bb23be"
 dependencies = [
  "libc",
  "seccompiler",
