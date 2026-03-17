@@ -68,7 +68,7 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 ### 12. `parse_config` and `emit_error` untested in reel-cli
 
-`reel-cli/src/main.rs` — `parse_config` does a two-pass YAML parse-strip-reparse and has no test coverage — most likely regression point. `emit_error` output shape is part of the CLI's documented interface. **Category: Testing.**
+`reel-cli/src/main.rs` — `parse_config` (single-pass YAML: parse as Value, pop `grant`, re-serialize remainder to flick) has no test coverage. Multiple branches: valid grant sequence, null/absent grant, non-sequence grant error, non-string element error, `from_names` error propagation. `emit_error` output shape is part of the CLI's documented interface. **Category: Testing.**
 
 ### 13. `RunResult` field propagation untested
 
@@ -82,9 +82,9 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/agent.rs` — `total_tool_calls += tool_calls.len() as u32` accumulates across rounds. No test verifies correct counting when a single round returns multiple tool calls. **Category: Testing.**
 
-### 16. reel-cli two-pass YAML config parse over-engineered
+### 16. ~~reel-cli two-pass YAML config parse over-engineered~~ RESOLVED
 
-`reel-cli/src/main.rs` — `parse_config` parses YAML three times (once for `ReelFields`, once as generic map, re-serialized and parsed again by flick). Simplify: parse once as `serde_yml::Value`, pop `grant` key, pass remainder. **Category: Simplification.**
+Resolved: single-pass parse as `serde_yml::Value`, pop `grant`, pass remainder to flick.
 
 ### 17. reel-cli Windows setup functions duplicate cwd setup
 
@@ -118,9 +118,9 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/tools.rs` — Only the NuShell tool respects model-provided timeout. File tools (Read, Write, Edit, Glob, Grep) use 120s. Slow Grep on large codebases cannot be extended. **Category: Feature gap.**
 
-### 27. `build_request_config` reconstructs config via accessors — may lose future fields
+### 27. ~~`build_request_config` reconstructs config via accessors — may lose future fields~~ RESOLVED
 
-`reel/src/agent.rs` — Reads individual fields from `request.config` via getters and rebuilds a new `RequestConfig`. If `flick::RequestConfig` gains fields, they will be silently dropped. A clone-and-mutate approach would be more forward-compatible. **Category: Fragility.**
+Resolved: `RequestConfig` now derives `Clone`; `build_request_config` clones and mutates via `add_tools`.
 
 ### 28. `reel glob` has no depth limit or symlink protection
 

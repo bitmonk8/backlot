@@ -207,25 +207,8 @@ impl Agent {
             .map(|t| flick::ToolConfig::new(t.name, t.description, Some(t.parameters)))
             .collect();
 
-        // Reconstruct via builder from the caller's config, then inject tools.
-        let mut builder = flick::RequestConfig::builder().model(request.config.model());
-
-        if let Some(sp) = request.config.system_prompt() {
-            builder = builder.system_prompt(sp);
-        }
-        if let Some(temp) = request.config.temperature() {
-            builder = builder.temperature(temp);
-        }
-        if let Some(reasoning) = request.config.reasoning() {
-            builder = builder.reasoning(reasoning.level);
-        }
-        if let Some(output_schema) = request.config.output_schema() {
-            builder = builder.output_schema(output_schema.schema.clone());
-        }
-
-        let mut config = builder
-            .build()
-            .map_err(|e| anyhow::anyhow!("failed to build request config: {e}"))?;
+        // Clone so new flick fields are preserved without manual forwarding.
+        let mut config = request.config.clone();
 
         if !all_tools.is_empty() {
             config

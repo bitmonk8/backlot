@@ -66,15 +66,10 @@ grant:
 
 ### How it works
 
-Reel's config is parsed in two passes:
-
-1. **Reel pass**: Extract reel-specific fields (`grant`). These do not exist in flick's config.
-2. **Flick pass**: The remaining fields are parsed as a `RequestConfig` by flick.
-
-Flick's `RequestConfig` uses `serde(deny_unknown_fields)`, which would reject reel's extra
-fields. Reel handles this by stripping its own fields (`grant`) from the parsed YAML before
-passing the remainder to flick's parser. This preserves flick's strict validation for its own
-CLI while letting reel layer on top.
+Reel's config is parsed in a single pass: deserialize YAML as a generic `serde_yml::Value`,
+extract and remove the `grant` key, then re-serialize the remainder and pass it to flick's
+`RequestConfig::from_str`. Flick's `RequestConfig` uses `serde(deny_unknown_fields)`, so
+reel must strip its own fields before forwarding.
 
 ### Mapping to library types
 
@@ -107,42 +102,6 @@ impl Agent {
 `Agent` is a wrapper around an `AgentEnvironment`. It holds the resolved registries, project
 root, and timeout. `run` takes a reference to the request config (reusable across calls) and
 the query string (varies per invocation).
-
-### Required flick changes
-
-1. **`RequestConfig::add_tools(&mut self, tools: Vec<ToolConfig>)`** — Reel needs to inject
-   built-in tool definitions (Read, Write, Edit, Glob, Grep, NuShell) into the config after
-   loading it. Currently there is no way to mutate tools on an existing `RequestConfig`. The
-   builder can set tools at construction time, but reel loads configs from files and needs to
-   add tools post-parse. This replaces the current `build_request_config` hack in `agent.rs`
-   that serializes to JSON and re-parses.
-
-2. **`ToolConfig` constructor or builder** — Reel constructs tool definitions programmatically.
-   `ToolConfig` fields are currently private with no public constructor. Either:
-   - Add `ToolConfig::new(name, description, parameters)`, or
-   - Make `ToolConfig` fields public, or
-   - Add a `ToolConfigBuilder`.
-
-### Required reel library changes
-
-1. **Rename `AgentRequest` → `AgentRequestConfig`** — Aligns naming with its role as reusable
-   request configuration rather than a single-use request.
-
-2. **Restructure to wrap `flick::RequestConfig`** — The current `AgentRequest` duplicates flick
-   config fields (`system_prompt`, `model`, `output_schema`) as flat struct members and manually
-   plumbs them into a `RequestConfig` at call time. The new `AgentRequestConfig` wraps a
-   `RequestConfig` directly (as shown in the struct definition above), which:
-   - Eliminates field duplication between reel and flick.
-   - Automatically gains `temperature` and `reasoning` support — these exist on `RequestConfig`
-     but are not currently plumbed through `AgentRequest`.
-
-3. **Move `query` out of the struct** — Currently `AgentRequest.query` is a struct field. It
-   moves to a parameter on `Agent::run()`, separating per-invocation input from reusable config.
-
-4. **Change `Agent::run` to borrow config** — Current signature takes ownership
-   (`run(request: AgentRequest)`). New signature takes a reference
-   (`run(&self, request: &AgentRequestConfig, query: &str)`), enabling config reuse across
-   multiple calls without cloning.
 
 | Config field     | Library type                            | Notes                          |
 |------------------|-----------------------------------------|--------------------------------|

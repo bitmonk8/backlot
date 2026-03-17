@@ -99,24 +99,26 @@ struct ErrorDetail {
 // Config parsing
 // ---------------------------------------------------------------------------
 
-/// Reel-specific fields extracted before passing to the provider.
-#[derive(serde::Deserialize, Default)]
-struct ReelFields {
-    #[serde(default)]
-    grant: Vec<String>,
-}
-
-/// Two-pass config parse: extract reel fields, then parse remainder as RequestConfig.
+/// Parse once as generic YAML, pop reel-specific `grant` key, pass remainder to flick.
 fn parse_config(text: &str) -> Result<(reel::RequestConfig, reel::ToolGrant), String> {
-    // First pass: extract reel-specific fields.
-    let reel_fields: ReelFields =
-        serde_yml::from_str(text).map_err(|e| format!("config parse: {e}"))?;
-    let grant = reel::ToolGrant::from_names(&reel_fields.grant)?;
-
-    // Second pass: strip reel fields and parse as RequestConfig.
-    // Parse as generic YAML map, remove reel keys, re-serialize.
     let mut map: serde_yml::Value =
         serde_yml::from_str(text).map_err(|e| format!("config parse: {e}"))?;
+
+    let grant = match map.get("grant") {
+        Some(serde_yml::Value::Sequence(names)) => {
+            let strs: Vec<String> = names
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .ok_or_else(|| "grant entries must be strings".to_string())
+                })
+                .collect::<Result<_, _>>()?;
+            reel::ToolGrant::from_names(&strs)?
+        }
+        Some(serde_yml::Value::Null) | None => reel::ToolGrant::empty(),
+        Some(_) => return Err("grant must be a list of strings".into()),
+    };
 
     if let serde_yml::Value::Mapping(ref mut m) = map {
         m.remove(serde_yml::Value::String("grant".into()));
