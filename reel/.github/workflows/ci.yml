@@ -82,7 +82,7 @@ jobs:
 
           # Move ourselves into the runner leaf.
           echo $$ | sudo tee "$cg/runner/cgroup.procs"
-          cargo test
+          cargo test -- --test-threads=1
 
   test-macos:
     name: Test (macOS)
