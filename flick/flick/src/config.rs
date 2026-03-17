@@ -19,7 +19,7 @@ pub enum ConfigFormat {
 ///
 /// The `model` field is a string key into the `ModelRegistry`. Provider and
 /// model identity are resolved at `FlickClient` construction time, not here.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestConfig {
     model: String,
@@ -40,13 +40,13 @@ pub struct RequestConfig {
     tools: Vec<ToolConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningConfig {
     pub level: ReasoningLevel,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSchema {
     pub schema: serde_json::Value,
