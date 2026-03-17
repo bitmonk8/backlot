@@ -317,6 +317,24 @@ fn emit_error(code: &str, message: &str) {
     }
 }
 
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
+    let cli = Cli::parse();
+
+    let result = match cli.command {
+        Commands::Run(args) => cmd_run(args).await,
+        Commands::Setup(args) => cmd_setup(&args),
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            emit_error("cli_error", &msg);
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -476,23 +494,5 @@ grant: []
         assert_eq!(parsed["usage"]["input_tokens"], 100);
         assert_eq!(parsed["tool_calls"], 3);
         assert_eq!(parsed["response_hash"], "abc123");
-    }
-}
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
-    let cli = Cli::parse();
-
-    let result = match cli.command {
-        Commands::Run(args) => cmd_run(args).await,
-        Commands::Setup(args) => cmd_setup(&args),
-    };
-
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(msg) => {
-            emit_error("cli_error", &msg);
-            ExitCode::FAILURE
-        }
     }
 }

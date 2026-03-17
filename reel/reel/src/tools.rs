@@ -1414,9 +1414,7 @@ mod tests {
 
     #[test]
     fn grant_parse_error_is_std_error() {
-        let err = GrantParseError {
-            name: "foo".into(),
-        };
+        let err = GrantParseError { name: "foo".into() };
         let _: &dyn std::error::Error = &err;
     }
 

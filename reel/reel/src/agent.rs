@@ -1004,7 +1004,7 @@ mod tests {
         request.custom_tools = vec![Box::new(handler)];
 
         let config = Agent::build_effective_config(&request).unwrap();
-        let tool_names: Vec<&str> = config.tools().iter().map(|t| t.name()).collect();
+        let tool_names: Vec<&str> = config.tools().iter().map(flick::ToolConfig::name).collect();
         assert!(tool_names.contains(&"SpecialTool"));
         // Built-in tools should also be present.
         assert!(tool_names.contains(&"Read"));
