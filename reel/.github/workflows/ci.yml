@@ -114,6 +114,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
+      - name: Exclude workspace from Windows Defender
+        shell: powershell
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
       - name: Configure AppContainer prerequisites
         run: cargo run -p reel-cli -- setup --verbose
       - run: cargo test -- --test-threads=1
