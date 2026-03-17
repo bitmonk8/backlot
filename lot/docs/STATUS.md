@@ -22,23 +22,9 @@
 
 ## Next Work
 
-Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 32 findings remaining: 0 critical, 9 high, 13 medium, 10 low.
+Full project audit completed (see `docs/AUDIT_FINDINGS.md`). Remaining findings: 13 medium, 10 low.
 
-### 1. ~~Fix critical issues~~ (Done)
-
-- ~~**Silent cgroup failure drops resource limits.**~~ Fixed: `spawn()` now returns `SandboxError::Setup` when cgroup creation or join fails and `ResourceLimits::has_any()` is true. Cgroup join failure in the helper now reports via `helper_bail!`. If no limits are requested, cgroup failure is still silently ignored.
-- ~~**PID recycling race in cgroup `kill_all()` fallback.**~~ Fixed: `kill_all()` fallback now verifies each PID's cgroup membership via `/proc/{pid}/cgroup` before sending SIGKILL. Narrow TOCTOU window remains but the unbounded race is eliminated.
-
-### 2. Fix high issues
-
-- **Non-UTF-8 paths silently skipped in mount namespace.** `namespace.rs:123-147` drops paths that fail `to_str()`. Fix: return an error instead of silently skipping.
-- **`setup_stdio_pipes` leaks fds on partial failure.** `unix.rs:150-188` creates up to 6 fds; if later pipes fail, earlier ones leak. Fix: add cleanup on error paths.
-- **System dirs always mounted regardless of policy.** `namespace.rs:98-120` bind-mounts `/lib`, `/usr/lib`, `/bin`, `/usr/bin`, `/etc` unconditionally, exposing a broad attack surface. Fix: make system dir mounts configurable or restrict `/etc` to specific needed files.
-- **`wait(&self)` race via `Cell<bool>`.** Linux and macOS child types use `Cell<bool>` for `waited` with `wait()` taking `&self`, allowing concurrent waitpid race. Fix: use `&mut self` or atomic flag.
-- **No seccomp on aarch64 Linux.** `seccomp.rs` is gated on `#[cfg(target_arch = "x86_64")]`. Fix: add aarch64 syscall table.
-- **`max_cpu_seconds` silently ignored on Linux.** No API-level documentation warns callers. Fix: document in `ResourceLimits` and consider returning an error or warning when set on Linux.
-
-### 3. Remaining work
+### Remaining work
 
 - Fix medium/low audit findings (see `docs/AUDIT_FINDINGS.md`)
 - First real-world usage / `lot run` testing

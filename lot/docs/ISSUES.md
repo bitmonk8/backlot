@@ -245,3 +245,59 @@ No test creates a symlink pointing into a denied subtree to verify path resoluti
 
 **Category:** Naming
 **File:** `lot/src/windows/appcontainer.rs`
+
+## `try_wait` calls `waitpid` before atomically claiming the reap
+
+In `try_wait`, `waitpid(WNOHANG)` is called before the `compare_exchange` that marks the child as reaped. If concurrent `wait()` and `try_wait()` race, `wait()` could get `ECHILD`. In practice, `SandboxedChild` is not `Sync` and `wait`/`try_wait` take `&self`/`&mut self` making true concurrency unlikely without explicit `Arc<Mutex>` wrapping.
+
+**Category:** Correctness
+**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
+
+## `Drop` for `LinuxSandboxedChild` does not set `waited=true` after reaping
+
+Inconsistency: `Drop` kills and reaps the helper but does not set `waited` to `true`. Benign because `Drop` takes `&mut self` (exclusive access).
+
+**Category:** Correctness
+**File:** `lot/src/linux/mod.rs`
+
+## ~160 lines of duplicated `SandboxedChild` methods across Linux and macOS
+
+`wait`, `try_wait`, `wait_with_output`, `take_stdin/stdout/stderr`, `close_fds`, `kill_and_cleanup`, and `Drop` are near-identical between `LinuxSandboxedChild` and `MacSandboxedChild`. A shared struct or trait in `unix.rs` could consolidate them.
+
+**Category:** Simplification
+**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
+
+## `setup_stdio_pipes` has fragile inline fd-cleanup closures
+
+Four nearly-identical `map_err` closures manually close accumulated fds on failure. A guard-based approach would centralize cleanup and prevent omissions when adding new pipe steps.
+
+**Category:** Simplification
+**File:** `lot/src/unix.rs`
+
+## No test for `path_to_str` non-UTF-8 rejection
+
+`path_to_str` replaced silent-skip with explicit error on non-UTF-8 paths. No unit test verifies this behavior.
+
+**Category:** Testing
+**File:** `lot/src/linux/namespace.rs`
+
+## No test for conditional system library and `/etc` file mounts
+
+Conditional mounts based on `exec_paths.is_empty()` and `allow_network` are untested. Security-relevant behavioral changes.
+
+**Category:** Testing
+**File:** `lot/src/linux/namespace.rs`
+
+## No test for `AtomicBool` double-wait prevention
+
+`wait()` and `try_wait()` gained `compare_exchange`-based guards. No test verifies that calling `wait()` twice returns an error.
+
+**Category:** Testing
+**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
+
+## `bind_mount_file_readonly` and `mount_dev_node` duplicate file-creation-then-bind-mount pattern
+
+Both create an empty file as a mount point using the same `open(O_CREAT | O_WRONLY)` + `close` pattern, then bind-mount. ~10 duplicated lines.
+
+**Category:** Simplification
+**File:** `lot/src/linux/namespace.rs`

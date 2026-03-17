@@ -246,6 +246,12 @@ impl SandboxPolicy {
 
 /// Optional resource constraints (memory, processes, CPU time) for the
 /// sandboxed process. All fields default to `None` (no limit).
+///
+/// Platform enforcement varies:
+/// - **Windows**: all limits enforced via Job Objects.
+/// - **macOS**: memory and process limits via `setrlimit`; CPU time via `RLIMIT_CPU`.
+/// - **Linux**: memory and process limits via cgroupv2; CPU time is **not enforced**
+///   (cgroupv2 `cpu.max` controls bandwidth/rate, not total accumulated time).
 #[derive(Debug, Clone, Default)]
 pub struct ResourceLimits {
     /// Maximum memory in bytes. None = no limit.
@@ -253,6 +259,10 @@ pub struct ResourceLimits {
     /// Maximum number of child processes. None = no limit.
     pub max_processes: Option<u32>,
     /// Maximum CPU time in seconds. None = no limit.
+    ///
+    /// Enforced on Windows (Job Objects) and macOS (`RLIMIT_CPU`).
+    /// **Not enforced on Linux** — cgroupv2 `cpu.max` controls CPU bandwidth
+    /// (rate limiting), not total accumulated CPU time.
     pub max_cpu_seconds: Option<u64>,
 }
 

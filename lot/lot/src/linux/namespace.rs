@@ -7,6 +7,16 @@ use std::path::Path;
 
 use crate::SandboxPolicy;
 
+/// Convert a Path to &str, returning an error with `label` context on non-UTF-8 paths.
+fn path_to_str<'a>(path: &'a Path, label: &str) -> io::Result<&'a str> {
+    path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("non-UTF-8 {label} path: {}", path.display()),
+        )
+    })
+}
+
 /// Check whether unprivileged user namespaces are available.
 pub fn available() -> bool {
     if is_apparmor_restricted() {
@@ -74,8 +84,7 @@ pub fn setup_user_namespace(uid: u32, gid: u32) -> io::Result<()> {
 /// Uses only paths from `policy` plus essential system directories.
 ///
 /// Returns the new root path. The caller must pass it to
-/// `finish_mount_namespace()` in the inner child to mount /proc and
-/// pivot_root.
+/// `mount_proc_in_new_root()` and `pivot_root()` in the inner child.
 pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     // Include PID to avoid collisions between concurrent sandboxes
     // SAFETY: getpid has no preconditions
@@ -94,7 +103,9 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     mkdir_p(&format!("{new_root}/dev"))?;
     mkdir_p(&format!("{new_root}/tmp"))?;
 
-    // System library directories (dynamic linker, shared libraries)
+    // System library and binary directories: always mounted so the dynamic
+    // linker and shared libraries are available for execve (which runs
+    // regardless of whether exec_paths is populated).
     for sys_path in &["/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/lib32"] {
         if Path::new(sys_path).exists() {
             let dest = format!("{new_root}{sys_path}");
@@ -103,7 +114,6 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
         }
     }
 
-    // Bin directories
     for bin_path in &["/bin", "/usr/bin", "/sbin", "/usr/sbin"] {
         if Path::new(bin_path).exists() {
             let dest = format!("{new_root}{bin_path}");
@@ -112,75 +122,89 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
         }
     }
 
-    // /etc read-only (needed for ld.so.cache, nsswitch, etc.)
-    if Path::new("/etc").exists() {
-        let dest = format!("{new_root}/etc");
-        mkdir_p(&dest)?;
-        bind_mount_readonly("/etc", &dest)?;
+    // Mount only specific /etc files needed by the dynamic linker and resolver,
+    // rather than the entire /etc directory which exposes sensitive files.
+    mkdir_p(&format!("{new_root}/etc"))?;
+
+    // Dynamic linker config
+    for etc_file in &["/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/nsswitch.conf"] {
+        if Path::new(etc_file).exists() {
+            let dest = format!("{new_root}{etc_file}");
+            bind_mount_file_readonly(etc_file, &dest)?;
+        }
+    }
+
+    // Network-dependent config files
+    if policy.allow_network {
+        if Path::new("/etc/resolv.conf").exists() {
+            let dest = format!("{new_root}/etc/resolv.conf");
+            bind_mount_file_readonly("/etc/resolv.conf", &dest)?;
+        }
+        // SSL certificate directory
+        if Path::new("/etc/ssl/certs").exists() {
+            let dest = format!("{new_root}/etc/ssl/certs");
+            mkdir_p(&dest)?;
+            bind_mount_readonly("/etc/ssl/certs", &dest)?;
+        }
     }
 
     // Policy-specified read-only paths
     for path in &policy.read_paths {
-        if let Some(s) = path.to_str() {
-            let dest = format!("{new_root}{s}");
-            mkdir_p(&dest)?;
-            bind_mount_readonly(s, &dest)?;
-        }
+        let s = path_to_str(path, "read")?;
+        let dest = format!("{new_root}{s}");
+        mkdir_p(&dest)?;
+        bind_mount_readonly(s, &dest)?;
     }
 
     // Policy-specified read-write paths
     for path in &policy.write_paths {
-        if let Some(s) = path.to_str() {
-            let dest = format!("{new_root}{s}");
-            mkdir_p(&dest)?;
-            bind_mount_readwrite(s, &dest)?;
-        }
+        let s = path_to_str(path, "write")?;
+        let dest = format!("{new_root}{s}");
+        mkdir_p(&dest)?;
+        bind_mount_readwrite(s, &dest)?;
     }
 
     // Policy-specified exec paths (read-only, but allow exec)
     for path in &policy.exec_paths {
-        if let Some(s) = path.to_str() {
-            let dest = format!("{new_root}{s}");
-            mkdir_p(&dest)?;
-            bind_mount_exec(s, &dest)?;
-        }
+        let s = path_to_str(path, "exec")?;
+        let dest = format!("{new_root}{s}");
+        mkdir_p(&dest)?;
+        bind_mount_exec(s, &dest)?;
     }
 
     // Deny paths: overmount with empty read-only tmpfs so the subtree
     // appears as an empty directory. Must happen after the parent grant
     // mounts above.
     for path in &policy.deny_paths {
-        if let Some(s) = path.to_str() {
-            let dest = format!("{new_root}{s}");
-            mkdir_p(&dest)?;
-            mount_empty_tmpfs(&dest)?;
-        }
+        let s = path_to_str(path, "deny")?;
+        let dest = format!("{new_root}{s}");
+        mkdir_p(&dest)?;
+        mount_empty_tmpfs(&dest)?;
     }
 
     // /dev/null, /dev/zero, /dev/urandom via bind mount from host
     for dev in &["/dev/null", "/dev/zero", "/dev/urandom"] {
-        create_dev_node(&new_root, dev)?;
+        mount_dev_node(&new_root, dev)?;
     }
 
     // NOTE: /proc mount and pivot_root happen in the inner child via
-    // finish_mount_namespace(). Mounting procfs requires the caller to be
-    // inside the new PID namespace (only children after fork() are), and
-    // must happen BEFORE pivot_root to avoid mnt_already_visible() rejecting
-    // the mount due to stale procfs entries from the lazy-unmounted old root.
+    // mount_proc_in_new_root() and pivot_root(). Mounting procfs requires
+    // the caller to be inside the new PID namespace (only children after
+    // fork() are), and must happen BEFORE pivot_root to avoid
+    // mnt_already_visible() rejecting the mount.
 
     Ok(new_root)
 }
 
-/// Complete mount namespace setup: mount /proc and pivot_root.
-///
-/// Must be called from the inner child (PID 1 in the new PID namespace)
-/// with the `new_root` path returned by `setup_mount_namespace()`. Proc
-/// must be mounted before pivot_root so the kernel's `mnt_already_visible()`
-/// check doesn't see stale procfs mounts from the lazy-unmounted old root.
-pub fn finish_mount_namespace(new_root: &str) -> io::Result<()> {
-    mount_proc(&format!("{new_root}/proc"))?;
-    do_pivot_root(new_root)?;
-    Ok(())
+/// Mount /proc inside the new root. Must be called from the inner child
+/// (inside the PID namespace, before pivot_root).
+pub fn mount_proc_in_new_root(new_root: &str) -> io::Result<()> {
+    mount_proc(&format!("{new_root}/proc"))
+}
+
+/// Pivot into the new root and unmount the old root.
+pub fn pivot_root(new_root: &str) -> io::Result<()> {
+    do_pivot_root(new_root)
 }
 
 /// Create a directory and all parents (like `mkdir -p`), ignoring EEXIST.
@@ -274,6 +298,21 @@ fn make_mount_private(path: &str) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Bind-mount a single file `src` to `dst` read-only.
+/// Creates an empty file at `dst` as the mount point.
+fn bind_mount_file_readonly(src: &str, dst: &str) -> io::Result<()> {
+    let c_dst = to_cstring(dst)?;
+    // SAFETY: valid CString pointer, creating regular file with 0o644
+    let fd = unsafe { libc::open(c_dst.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o644) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd is valid (checked above)
+    unsafe { libc::close(fd) };
+
+    bind_mount_readonly(src, dst)
 }
 
 /// Bind-mount `src` to `dst` read-only.
@@ -416,8 +455,8 @@ fn mount_proc(target: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Create a device node in the new root by bind-mounting from the host.
-fn create_dev_node(new_root: &str, dev_path: &str) -> io::Result<()> {
+/// Bind-mount a host device node into the new root.
+fn mount_dev_node(new_root: &str, dev_path: &str) -> io::Result<()> {
     let dest = format!("{new_root}{dev_path}");
 
     // Create an empty file to use as a mount point

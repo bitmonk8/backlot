@@ -18,6 +18,14 @@ pub fn available() -> bool {
     rc >= 0
 }
 
+/// Insert all syscall numbers from `nrs` into `rules` with an unconditional allow.
+fn allow_syscalls(rules: &mut BTreeMap<i64, Vec<seccompiler::SeccompRule>>, nrs: &[i64]) {
+    let allow = vec![];
+    for &nr in nrs {
+        rules.insert(nr, allow.clone());
+    }
+}
+
 /// Build a seccomp-BPF filter from the given sandbox policy.
 ///
 /// The filter defaults to `ERRNO(EPERM)` for any syscall not in the allowlist.
@@ -31,30 +39,25 @@ pub fn available() -> bool {
 /// that are orthogonal to path access — primarily network and dangerous
 /// process-creation flags.
 ///
-/// Target: x86_64 only. Other architectures will need their own syscall lists.
-#[cfg(target_arch = "x86_64")]
+/// Supports x86_64 and aarch64. Shared syscalls are listed once; arch-specific
+/// syscalls (legacy x86_64 variants, aarch64 *at-only variants) are added
+/// conditionally via `#[cfg]`.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     let mut rules: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
 
-    // Empty rule vec = allow unconditionally (match on syscall number alone)
-    let allow = vec![];
-
-    // --- Always-allowed syscalls ---
-
-    // Process lifecycle
-    for &nr in &[
+    // --- Process lifecycle ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_exit,
         libc::SYS_exit_group,
         libc::SYS_wait4,
         libc::SYS_waitid,
         libc::SYS_clone,
         libc::SYS_clone3,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
 
-    // Memory management
-    for &nr in &[
+    // --- Memory management ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_brk,
         libc::SYS_mmap,
         libc::SYS_munmap,
@@ -62,12 +65,10 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
         libc::SYS_mremap,
         libc::SYS_madvise,
         libc::SYS_msync,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
 
-    // File I/O on already-open FDs
-    for &nr in &[
+    // --- File I/O on already-open FDs ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_read,
         libc::SYS_write,
         libc::SYS_readv,
@@ -77,34 +78,32 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
         libc::SYS_lseek,
         libc::SYS_close,
         libc::SYS_dup,
-        libc::SYS_dup2,
         libc::SYS_dup3,
         libc::SYS_fcntl,
         libc::SYS_fstat,
         libc::SYS_newfstatat,
         libc::SYS_statx,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[libc::SYS_dup2]);
 
-    // File open/create — needed for dynamic linker, /proc reads
-    for &nr in &[libc::SYS_openat, libc::SYS_open] {
-        rules.insert(nr, allow.clone());
-    }
+    // --- File open/create ---
+    allow_syscalls(&mut rules, &[libc::SYS_openat]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[libc::SYS_open]);
 
-    // Directory
-    for &nr in &[
-        libc::SYS_getdents,
+    // --- Directory ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_getdents64,
         libc::SYS_getcwd,
         libc::SYS_chdir,
         libc::SYS_fchdir,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[libc::SYS_getdents]);
 
-    // Process info
-    for &nr in &[
+    // --- Process info ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_getpid,
         libc::SYS_getppid,
         libc::SYS_gettid,
@@ -114,12 +113,10 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
         libc::SYS_getegid,
         libc::SYS_getresuid,
         libc::SYS_getresgid,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
 
-    // Signals
-    for &nr in &[
+    // --- Signals ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_rt_sigaction,
         libc::SYS_rt_sigprocmask,
         libc::SYS_rt_sigreturn,
@@ -127,49 +124,37 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
         libc::SYS_tgkill,
         libc::SYS_tkill,
         libc::SYS_kill,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
 
-    // Time
-    for &nr in &[
+    // --- Time ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_clock_gettime,
         libc::SYS_clock_getres,
         libc::SYS_clock_nanosleep,
-        libc::SYS_nanosleep,
         libc::SYS_gettimeofday,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[libc::SYS_nanosleep]);
 
-    // Scheduling — needed by glibc/Rust runtime at startup
-    for &nr in &[libc::SYS_sched_yield, libc::SYS_sched_getaffinity] {
-        rules.insert(nr, allow.clone());
-    }
+    // --- Scheduling ---
+    allow_syscalls(&mut rules, &[libc::SYS_sched_yield, libc::SYS_sched_getaffinity]);
 
-    // System info — many programs call uname at startup
-    for &nr in &[libc::SYS_uname, libc::SYS_sysinfo] {
-        rules.insert(nr, allow.clone());
-    }
+    // --- System info ---
+    allow_syscalls(&mut rules, &[libc::SYS_uname, libc::SYS_sysinfo]);
 
-    // Misc
-    for &nr in &[
-        libc::SYS_arch_prctl,
+    // --- Misc ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_set_tid_address,
         libc::SYS_set_robust_list,
         libc::SYS_futex,
         libc::SYS_rseq,
         libc::SYS_getrandom,
-        libc::SYS_pipe,
         libc::SYS_pipe2,
         libc::SYS_socketpair, // local IPC only (e.g., tokio signal handler)
-        libc::SYS_poll,
         libc::SYS_ppoll,
-        libc::SYS_select,
         libc::SYS_pselect6,
         libc::SYS_epoll_create1,
         libc::SYS_epoll_ctl,
-        libc::SYS_epoll_wait,
         libc::SYS_epoll_pwait,
         libc::SYS_eventfd2,
         // prctl is allowed broadly: seccomp filters stack (new filters can
@@ -180,81 +165,81 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
         libc::SYS_ioctl,
         libc::SYS_memfd_create,
         libc::SYS_flock,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
+    // x86_64 has legacy variants absent on aarch64
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[
+        libc::SYS_arch_prctl,
+        libc::SYS_pipe,
+        libc::SYS_poll,
+        libc::SYS_select,
+        libc::SYS_epoll_wait,
+    ]);
 
-    // Exec — needed to exec the target binary
-    for &nr in &[libc::SYS_execve, libc::SYS_execveat] {
-        rules.insert(nr, allow.clone());
-    }
+    // --- Exec ---
+    allow_syscalls(&mut rules, &[libc::SYS_execve, libc::SYS_execveat]);
 
-    // Access checks
-    for &nr in &[libc::SYS_access, libc::SYS_faccessat, libc::SYS_faccessat2] {
-        rules.insert(nr, allow.clone());
-    }
+    // --- Access checks ---
+    allow_syscalls(&mut rules, &[libc::SYS_faccessat, libc::SYS_faccessat2]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[libc::SYS_access]);
 
-    // Stat / readlink
-    for &nr in &[
+    // --- Stat / readlink ---
+    allow_syscalls(&mut rules, &[libc::SYS_readlinkat]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[
         libc::SYS_stat,
         libc::SYS_lstat,
         libc::SYS_readlink,
-        libc::SYS_readlinkat,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
 
-    // Directory ops
-    for &nr in &[
-        libc::SYS_mkdir,
+    // --- Directory ops ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_mkdirat,
-        libc::SYS_rmdir,
-        libc::SYS_unlink,
         libc::SYS_unlinkat,
-        libc::SYS_rename,
         libc::SYS_renameat,
         libc::SYS_renameat2,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[
+        libc::SYS_mkdir,
+        libc::SYS_rmdir,
+        libc::SYS_unlink,
+        libc::SYS_rename,
+    ]);
 
-    // File metadata
-    for &nr in &[
-        libc::SYS_chmod,
+    // --- File metadata ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_fchmod,
         libc::SYS_fchmodat,
-        libc::SYS_chown,
         libc::SYS_fchown,
         libc::SYS_fchownat,
         libc::SYS_utimensat,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[
+        libc::SYS_chmod,
+        libc::SYS_chown,
+    ]);
 
-    // Write ops
-    for &nr in &[
-        libc::SYS_truncate,
+    // --- Write ops ---
+    allow_syscalls(&mut rules, &[
         libc::SYS_ftruncate,
         libc::SYS_fallocate,
         libc::SYS_fsync,
         libc::SYS_fdatasync,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    ]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[libc::SYS_truncate]);
 
-    // Link ops
-    for &nr in &[
-        libc::SYS_link,
-        libc::SYS_linkat,
-        libc::SYS_symlink,
-        libc::SYS_symlinkat,
-    ] {
-        rules.insert(nr, allow.clone());
-    }
+    // --- Link ops ---
+    allow_syscalls(&mut rules, &[libc::SYS_linkat, libc::SYS_symlinkat]);
+    #[cfg(target_arch = "x86_64")]
+    allow_syscalls(&mut rules, &[libc::SYS_link, libc::SYS_symlink]);
 
     // --- Network syscalls (conditional) ---
     if policy.allow_network {
-        for &nr in &[
+        allow_syscalls(&mut rules, &[
             libc::SYS_socket,
             libc::SYS_bind,
             libc::SYS_listen,
@@ -272,18 +257,19 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_getsockopt,
             libc::SYS_sendmmsg,
             libc::SYS_recvmmsg,
-        ] {
-            rules.insert(nr, allow.clone());
-        }
+        ]);
     }
 
-    // mismatch_action = ERRNO(EPERM): denied syscalls return EPERM
-    // match_action = Allow: matched (allowlisted) syscalls proceed
+    #[cfg(target_arch = "x86_64")]
+    let arch = TargetArch::x86_64;
+    #[cfg(target_arch = "aarch64")]
+    let arch = TargetArch::aarch64;
+
     let filter = SeccompFilter::new(
         rules,
         SeccompAction::Errno(libc::EPERM as u32),
         SeccompAction::Allow,
-        TargetArch::x86_64,
+        arch,
     )
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
 
@@ -313,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn build_filter_no_network() {
         let policy = SandboxPolicy {
             read_paths: vec![],
@@ -329,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn build_filter_with_network() {
         let policy = SandboxPolicy {
             read_paths: vec![],
@@ -345,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn build_filter_network_produces_larger_program() {
         let base_policy = SandboxPolicy {
             read_paths: vec![],
@@ -366,7 +352,7 @@ mod tests {
     }
 
     /// Helper: create a pipe using libc, returns (read_fd, write_fd).
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn make_pipe() -> (i32, i32) {
         let mut fds = [0i32; 2];
         // SAFETY: fds is a valid 2-element array
@@ -376,7 +362,7 @@ mod tests {
     }
 
     /// Helper: write bytes to an fd.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn write_fd(fd: i32, data: &[u8]) {
         // SAFETY: fd is valid, data pointer and len are correct
         let n = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
@@ -384,7 +370,7 @@ mod tests {
     }
 
     /// Helper: read all available bytes from an fd into a String.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn read_fd_to_string(fd: i32) -> String {
         let mut buf = [0u8; 256];
         // SAFETY: fd is valid, buf pointer and len are correct
@@ -397,7 +383,7 @@ mod tests {
 
     /// Integration test: fork, apply filter, verify getpid() still works.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn apply_filter_allows_getpid() {
         let policy = SandboxPolicy {
             read_paths: vec![],
@@ -453,7 +439,7 @@ mod tests {
 
     /// Integration test: fork, apply filter with network denied, verify socket() returns EPERM.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn apply_filter_denies_socket_without_network() {
         let policy = SandboxPolicy {
             read_paths: vec![],

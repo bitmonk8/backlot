@@ -2,8 +2,8 @@
 
 pub mod seatbelt;
 
-use std::cell::Cell;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::command::SandboxCommand;
 use crate::policy::SandboxPolicy;
@@ -217,7 +217,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             stdin_fd: parent_stdin,
             stdout_fd: parent_stdout,
             stderr_fd: parent_stderr,
-            waited: Cell::new(false),
+            waited: AtomicBool::new(false),
         },
     })
 }
@@ -230,7 +230,8 @@ pub struct MacSandboxedChild {
     stdin_fd: Option<i32>,
     stdout_fd: Option<i32>,
     stderr_fd: Option<i32>,
-    waited: Cell<bool>,
+    /// AtomicBool prevents concurrent double-wait via compare_exchange.
+    waited: AtomicBool,
 }
 
 impl MacSandboxedChild {
@@ -239,7 +240,7 @@ impl MacSandboxedChild {
     }
 
     pub fn kill(&self) -> io::Result<()> {
-        if self.waited.get() {
+        if self.waited.load(Ordering::Acquire) {
             return Ok(());
         }
         // Kill the entire process group so descendants are also terminated.
@@ -257,6 +258,18 @@ impl MacSandboxedChild {
     }
 
     pub fn wait(&self) -> io::Result<std::process::ExitStatus> {
+        // Prevent concurrent double-wait which would race on the same PID.
+        if self
+            .waited
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process already waited on",
+            ));
+        }
+
         let mut status: libc::c_int = 0;
         loop {
             // SAFETY: valid pid, valid pointer
@@ -270,11 +283,17 @@ impl MacSandboxedChild {
             }
             break;
         }
-        self.waited.set(true);
         Ok(unix::exit_status_from_raw(status))
     }
 
     pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
+        if self.waited.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process already waited on",
+            ));
+        }
+
         let mut status: libc::c_int = 0;
         // SAFETY: valid pid, valid pointer, WNOHANG for non-blocking
         let rc = unsafe { libc::waitpid(self.child_pid, &raw mut status, libc::WNOHANG) };
@@ -284,7 +303,18 @@ impl MacSandboxedChild {
         if rc == 0 {
             return Ok(None);
         }
-        self.waited.set(true);
+        // Child exited — atomically claim the reap so concurrent callers
+        // don't double-wait on a potentially recycled PID.
+        if self
+            .waited
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process already waited on",
+            ));
+        }
         Ok(Some(unix::exit_status_from_raw(status)))
     }
 
@@ -348,7 +378,7 @@ impl MacSandboxedChild {
     pub fn kill_and_cleanup(mut self) -> crate::Result<()> {
         self.close_fds();
 
-        if !self.waited.get() {
+        if !self.waited.load(Ordering::Acquire) {
             self.kill().map_err(crate::SandboxError::Io)?;
             self.wait().map_err(crate::SandboxError::Io)?;
         }
@@ -360,7 +390,7 @@ impl Drop for MacSandboxedChild {
     fn drop(&mut self) {
         self.close_fds();
 
-        if !self.waited.get() {
+        if !self.waited.load(Ordering::Acquire) {
             // Kill the entire process group so descendants don't leak.
             // The child called setsid() so its PGID equals its PID.
             // SAFETY: child_pid is a valid PGID after setsid(); SIGKILL is well-defined.

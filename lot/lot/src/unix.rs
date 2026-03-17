@@ -161,19 +161,41 @@ pub fn setup_stdio_pipes(
 
     let (child_stdout, parent_stdout) = match command.stdout {
         SandboxStdio::Piped => {
-            let (r, w) = make_pipe()?;
+            let (r, w) = make_pipe().map_err(|e| {
+                // Clean up stdin fds before propagating error
+                // SAFETY: fds are valid from the successful stdin step above
+                unsafe { close_if_not_std(child_stdin) };
+                close_parent_pipes(parent_stdin, None, None);
+                e
+            })?;
             (w, Some(r))
         }
-        SandboxStdio::Null => (open_dev_null(libc::O_WRONLY)?, None),
+        SandboxStdio::Null => (open_dev_null(libc::O_WRONLY).map_err(|e| {
+            unsafe { close_if_not_std(child_stdin) };
+            close_parent_pipes(parent_stdin, None, None);
+            e
+        })?, None),
         SandboxStdio::Inherit => (1, None),
     };
 
     let (child_stderr, parent_stderr) = match command.stderr {
         SandboxStdio::Piped => {
-            let (r, w) = make_pipe()?;
+            let (r, w) = make_pipe().map_err(|e| {
+                // Clean up stdin+stdout fds before propagating error
+                // SAFETY: fds are valid from successful steps above
+                unsafe { close_if_not_std(child_stdin) };
+                unsafe { close_if_not_std(child_stdout) };
+                close_parent_pipes(parent_stdin, parent_stdout, None);
+                e
+            })?;
             (w, Some(r))
         }
-        SandboxStdio::Null => (open_dev_null(libc::O_WRONLY)?, None),
+        SandboxStdio::Null => (open_dev_null(libc::O_WRONLY).map_err(|e| {
+            unsafe { close_if_not_std(child_stdin) };
+            unsafe { close_if_not_std(child_stdout) };
+            close_parent_pipes(parent_stdin, parent_stdout, None);
+            e
+        })?, None),
         SandboxStdio::Inherit => (2, None),
     };
 

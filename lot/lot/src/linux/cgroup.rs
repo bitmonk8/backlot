@@ -130,10 +130,9 @@ impl CgroupGuard {
             fs::write(path.join("pids.max"), count.to_string())?;
         }
 
-        // max_cpu_seconds is not enforced via cgroups. cgroupv2 cpu.max controls
-        // bandwidth (rate limiting), not total CPU time. A monitoring thread
-        // reading cpu.stat would be needed for total-time enforcement. The
-        // Windows backend uses job objects which do support this natively.
+        // max_cpu_seconds: intentionally not enforced via cgroups.
+        // cgroupv2 cpu.max controls bandwidth (rate limiting), not total CPU
+        // time. See `ResourceLimits::max_cpu_seconds` doc for platform details.
 
         Ok(Self { path })
     }
@@ -241,10 +240,7 @@ impl Drop for CgroupGuard {
             }
         }
 
-        // Attempt to remove the cgroup directory. It must be empty (no
-        // processes) for rmdir to succeed. If it fails, we log and move on
-        // rather than panicking.
-        // Best-effort removal; cgroup dir must be empty (no processes).
+        // Best-effort removal; ignore failure to avoid panicking in drop.
         let _ = fs::remove_dir(&self.path);
     }
 }

@@ -5,30 +5,24 @@
 | Severity | Count |
 |----------|-------|
 | Critical | 0     |
-| High     | 9     |
+| High     | 0     |
 | Medium   | 13    |
 | Low      | 10    |
-| **Total** | **32** |
+| **Total** | **23** |
 
 | Category | Count |
 |----------|-------|
-| Correctness | 5 |
-| Security | 6 |
+| Correctness | 4 |
+| Security | 4 |
 | Error Handling | 4 |
-| Resource Management | 5 |
+| Resource Management | 2 |
 | API Design | 4 |
-| Testing | 3 |
+| Testing | 2 |
 | Code Organization | 3 |
-| Documentation | 2 |
 
 ---
 
 ## Correctness
-
-### [Correctness] File: lot/src/linux/namespace.rs
-- **Line(s):** 123-129
-- **Description:** Policy `read_paths` that contain non-UTF-8 components are silently skipped by the `path.to_str()` check. The sandbox would run without mounting those paths, silently violating the caller's policy. The same applies to `write_paths` and `exec_paths` (lines 132-147).
-- **Severity:** High
 
 ### [Correctness] File: lot/src/windows/appcontainer.rs
 - **Line(s):** 79-87
@@ -74,16 +68,6 @@
 - **Description:** macOS resource limits use `setrlimit` (RLIMIT_AS, RLIMIT_NPROC, RLIMIT_CPU) which the sandboxed process can lower further but the child process could potentially work around RLIMIT_AS by using `mmap` with `MAP_NORESERVE`. These limits are softer than Linux cgroups or Windows Job Objects.
 - **Severity:** Low
 
-### [Security] File: lot/src/linux/namespace.rs
-- **Line(s):** 98-113
-- **Description:** System library and bin directories (`/lib`, `/usr/lib`, `/bin`, `/usr/bin`, etc.) are always bind-mounted into the sandbox regardless of policy. This provides a large attack surface of available binaries and libraries. A more restrictive approach would only mount directories explicitly referenced in the policy.
-- **Severity:** High
-
-### [Security] File: lot/src/linux/namespace.rs
-- **Line(s):** 116-120
-- **Description:** `/etc` is always bind-mounted read-only into the sandbox. This exposes `/etc/passwd`, `/etc/shadow` (if readable), `/etc/hostname`, and other sensitive system configuration to the sandboxed process. Only specific files like `/etc/ld.so.cache` and `/etc/nsswitch.conf` are needed for the dynamic linker.
-- **Severity:** High
-
 ---
 
 ## Error Handling
@@ -112,11 +96,6 @@
 
 ## Resource Management
 
-### [Resource Management] File: lot/src/unix.rs
-- **Line(s):** 150-188
-- **Description:** `setup_stdio_pipes` does not clean up previously created pipes if a later pipe creation fails. For example, if stdout pipe creation succeeds but stderr pipe creation fails, the stdout pipe fds are leaked. Each pipe creation should have a cleanup path for the previously created fds.
-- **Severity:** High
-
 ### [Resource Management] File: lot/src/linux/cgroup.rs
 - **Line(s):** 108-118
 - **Description:** `CgroupGuard::new()` uses `clock_gettime(CLOCK_MONOTONIC)` nanoseconds + PID for uniqueness. Two calls in the same nanosecond from the same PID (theoretically possible on fast hardware) would collide. The `fs::create_dir` call would fail with EEXIST, propagating as an IO error. This is extremely unlikely but possible under high concurrency.
@@ -126,16 +105,6 @@
 - **Line(s):** 1428-1436
 - **Description:** Child-side pipe handles are only closed when `command.stdin == SandboxStdio::Piped` (and similarly for stdout/stderr). If stdin is `Inherit`, `child_stdin` is the actual stdin handle from `GetStdHandle`. This handle should NOT be closed. The code is correct in its conditional closing, but the inherited handle case for `Null` (where `child_stdin == INVALID_HANDLE_VALUE`) is also correctly handled by `close_handle_if_valid`. This is fine but the logic is not obvious.
 - **Severity:** Low
-
-### [Resource Management] File: lot/src/linux/mod.rs
-- **Line(s):** 465-474
-- **Description:** `LinuxSandboxedChild` uses `Cell<bool>` for the `waited` flag. `Cell` is `!Sync`, which means `LinuxSandboxedChild` cannot be shared across threads. However, since the struct does not implement `Sync` explicitly and is only used through `SandboxedChild` which also doesn't impl `Sync`, this is acceptable. The `wait()` method takes `&self` rather than `&mut self`, so concurrent `wait()` calls could race on `waitpid`. Using `&mut self` for `wait()` would be safer.
-- **Severity:** High
-
-### [Resource Management] File: lot/src/macos/mod.rs
-- **Line(s):** 228-234
-- **Description:** Same issue as Linux: `MacSandboxedChild` uses `Cell<bool>` for `waited`, and `wait()` takes `&self`. Two concurrent callers of `wait()` could both call `waitpid`, where the second call would get ECHILD. The `&self` signature is required by the `platform_dispatch` macro but creates a correctness hazard.
-- **Severity:** High
 
 ---
 
@@ -164,11 +133,6 @@
 ---
 
 ## Testing
-
-### [Testing] File: lot/src/linux/seccomp.rs
-- **Line(s):** 36 (entire file)
-- **Description:** Seccomp filter is only built and tested on `x86_64`. The `#[cfg(target_arch = "x86_64")]` gate means `aarch64` Linux (e.g., AWS Graviton, Apple Silicon Linux VMs) gets no seccomp protection at all. There is no CI job for `aarch64-unknown-linux-gnu`.
-- **Severity:** High
 
 ### [Testing] File: lot/tests/integration.rs
 - **Line(s):** 1-641
@@ -199,16 +163,3 @@
 - **Description:** `FILE_GENERIC_READ`, `FILE_GENERIC_WRITE`, `FILE_GENERIC_EXECUTE` are defined as raw constants rather than using `windows-sys` feature flags. The comment explains this is to avoid extra feature dependencies, which is a valid trade-off, but these constants should have comments linking to the MSDN documentation for verification.
 - **Severity:** Low
 
----
-
-## Documentation
-
-### [Documentation] File: lot/src/linux/cgroup.rs
-- **Line(s):** 133-137
-- **Description:** `max_cpu_seconds` is silently ignored on Linux. The comment explains why (cgroupv2 `cpu.max` controls bandwidth, not total time), but this is not documented in the public `ResourceLimits` struct or the crate-level docs. Callers setting `max_cpu_seconds` on Linux get no warning that it has no effect.
-- **Severity:** High
-
-### [Documentation] File: lot/src/policy.rs
-- **Line(s):** 248-257
-- **Description:** `ResourceLimits` doc comments say "None = no limit" but do not mention that `max_cpu_seconds` is only enforced on Windows (via Job Objects) and macOS (via RLIMIT_CPU). Linux ignores it entirely. This is a doc-implementation mismatch that could lead to false security assumptions.
-- **Severity:** High

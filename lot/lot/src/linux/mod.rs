@@ -4,10 +4,10 @@ mod cgroup;
 mod namespace;
 mod seccomp;
 
-use std::cell::Cell;
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::command::SandboxCommand;
 use crate::policy::SandboxPolicy;
@@ -159,7 +159,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         .map_err(|e| SandboxError::Setup(format!("pre-fork preparation: {e}")))?;
 
     // Build seccomp filter before forking (allocates)
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     let bpf_filter = seccomp::build_filter(policy)
         .map_err(|e| SandboxError::Setup(format!("seccomp filter build: {e}")))?;
 
@@ -194,9 +194,10 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         const STEP_DUP2: i32 = 5;
         const STEP_CHDIR: i32 = 6;
         const STEP_MOUNT_PROC: i32 = 7;
-        const STEP_SECCOMP: i32 = 8;
-        const STEP_EXEC: i32 = 9;
-        const STEP_CGROUP: i32 = 10;
+        const STEP_PIVOT_ROOT: i32 = 8;
+        const STEP_SECCOMP: i32 = 9;
+        const STEP_EXEC: i32 = 10;
+        const STEP_CGROUP: i32 = 11;
 
         // Macro to report error and exit from helper.
         // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
@@ -224,7 +225,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // Close all inherited fds except the ones the helper/inner-child need.
         // This prevents write-open fds from other threads (e.g. std::fs::copy)
         // from being held open, which would cause ETXTBSY on execve in sibling
-        // processes. See docs/LINUX_PARALLEL_SPAWN_ETXTBSY.md.
+        // processes.
         // SAFETY: helper is single-threaded after fork; listed fds are valid.
         unsafe {
             close_inherited_fds(&[err_pipe_wr, child_stdin, child_stdout, child_stderr]);
@@ -343,13 +344,11 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 unsafe { unix::close_if_not_std(child_stderr) };
             }
 
-            // Mount /proc and pivot_root. Must happen in the inner child:
-            // - mount("proc") requires the caller to be inside the new PID
-            //   namespace, which only takes effect after fork().
-            // - /proc must be mounted BEFORE pivot_root, otherwise the
-            //   lazy-unmounted old root leaves stale procfs entries that
-            //   cause mnt_already_visible() to reject the mount.
-            if let Err(e) = namespace::finish_mount_namespace(&new_root) {
+            // Mount /proc — must happen in the inner child (inside PID
+            // namespace) and BEFORE pivot_root, otherwise the lazy-unmounted
+            // old root leaves stale procfs entries that cause
+            // mnt_already_visible() to reject the mount.
+            if let Err(e) = namespace::mount_proc_in_new_root(&new_root) {
                 helper_bail!(
                     err_pipe_wr,
                     STEP_MOUNT_PROC,
@@ -357,9 +356,18 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 );
             }
 
+            // Pivot into the new root and unmount the old root.
+            if let Err(e) = namespace::pivot_root(&new_root) {
+                helper_bail!(
+                    err_pipe_wr,
+                    STEP_PIVOT_ROOT,
+                    e.raw_os_error().unwrap_or(libc::EPERM)
+                );
+            }
+
             // Change working directory if specified. Must happen AFTER
-            // finish_mount_namespace() because pivot_root does chdir("/")
-            // which would overwrite any earlier chdir. After pivot_root,
+            // pivot_root() because it does chdir("/") which would overwrite
+            // any earlier chdir. After pivot_root,
             // bind-mounted policy paths are at their original absolute
             // locations in the new filesystem.
             if let Some(ref cwd) = prefork.base.cwd {
@@ -373,7 +381,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
             // Apply seccomp filter (last step before exec — seccomp must be
             // applied after all setup syscalls are complete)
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {
                 if let Err(e) = seccomp::apply_filter(&bpf_filter) {
                     helper_bail!(
@@ -449,9 +457,10 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             5 => "dup2 (stdio)",
             6 => "chdir",
             7 => "mount /proc",
-            8 => "seccomp",
-            9 => "execve",
-            10 => "cgroup join",
+            8 => "pivot_root",
+            9 => "seccomp",
+            10 => "execve",
+            11 => "cgroup join",
             _ => "unknown",
         };
         // Reap the helper so we don't leak a zombie
@@ -471,7 +480,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             stdin_fd: parent_stdin,
             stdout_fd: parent_stdout,
             stderr_fd: parent_stderr,
-            waited: Cell::new(false),
+            waited: AtomicBool::new(false),
             cgroup_guard,
         },
     })
@@ -488,7 +497,8 @@ pub struct LinuxSandboxedChild {
     stdout_fd: Option<i32>,
     stderr_fd: Option<i32>,
     /// True once the helper has been reaped via waitpid.
-    waited: Cell<bool>,
+    /// AtomicBool prevents concurrent double-wait via compare_exchange.
+    waited: AtomicBool,
     /// Held until drop to enforce resource limits and clean up the cgroup.
     cgroup_guard: Option<CgroupGuard>,
 }
@@ -499,17 +509,36 @@ impl LinuxSandboxedChild {
     }
 
     pub fn kill(&self) -> io::Result<()> {
+        if self.waited.load(Ordering::Acquire) {
+            return Ok(());
+        }
         // Kill the helper process. The inner child has PR_SET_PDEATHSIG
         // set to SIGKILL, so it dies automatically when the helper exits.
         // SAFETY: valid pid, SIGKILL is a well-known signal
         let rc = unsafe { libc::kill(self.helper_pid, libc::SIGKILL) };
         if rc != 0 {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            // ESRCH means the process is already gone — not an error.
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                return Err(err);
+            }
         }
         Ok(())
     }
 
     pub fn wait(&self) -> io::Result<std::process::ExitStatus> {
+        // Prevent concurrent double-wait which would race on the same PID.
+        if self
+            .waited
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process already waited on",
+            ));
+        }
+
         let mut status: libc::c_int = 0;
         // SAFETY: valid pid, valid pointer
         loop {
@@ -523,11 +552,17 @@ impl LinuxSandboxedChild {
             }
             break;
         }
-        self.waited.set(true);
         Ok(unix::exit_status_from_raw(status))
     }
 
     pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
+        if self.waited.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process already waited on",
+            ));
+        }
+
         let mut status: libc::c_int = 0;
         // SAFETY: valid pid, valid pointer, WNOHANG for non-blocking
         let rc = unsafe { libc::waitpid(self.helper_pid, &raw mut status, libc::WNOHANG) };
@@ -537,7 +572,18 @@ impl LinuxSandboxedChild {
         if rc == 0 {
             return Ok(None);
         }
-        self.waited.set(true);
+        // Child exited — atomically claim the reap so concurrent callers
+        // don't double-wait on a potentially recycled PID.
+        if self
+            .waited
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process already waited on",
+            ));
+        }
         Ok(Some(unix::exit_status_from_raw(status)))
     }
 
@@ -603,7 +649,7 @@ impl LinuxSandboxedChild {
     pub fn kill_and_cleanup(mut self) -> crate::Result<()> {
         self.close_fds();
 
-        if !self.waited.get() {
+        if !self.waited.load(Ordering::Acquire) {
             self.kill().map_err(crate::SandboxError::Io)?;
             self.wait().map_err(crate::SandboxError::Io)?;
         }
@@ -620,7 +666,7 @@ impl Drop for LinuxSandboxedChild {
     fn drop(&mut self) {
         self.close_fds();
 
-        if !self.waited.get() {
+        if !self.waited.load(Ordering::Acquire) {
             // Kill and reap the helper to prevent zombie leak.
             // SAFETY: helper_pid is valid; blocking wait ensures the zombie
             // is reaped (SIGKILL delivery is near-instant).
