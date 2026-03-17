@@ -229,6 +229,15 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         if inner_pid == 0 {
             // === INNER CHILD (PID 1 inside namespace) ===
 
+            // Ensure the inner child is killed when the helper dies.
+            // The helper used unshare(CLONE_NEWPID), so it is NOT PID 1 in the
+            // new namespace — the inner child is. Without this, killing the
+            // helper would orphan the inner child (reparented to system init)
+            // instead of collapsing the PID namespace.
+            // SAFETY: PR_SET_PDEATHSIG is a well-known prctl operation.
+            // The signal setting is preserved across execve.
+            unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+
             // Set up stdio: dup2 the child fds to 0/1/2
             if child_stdin != 0 {
                 // SAFETY: both fds are valid
@@ -407,8 +416,8 @@ impl LinuxSandboxedChild {
     }
 
     pub fn kill(&self) -> io::Result<()> {
-        // The helper is PID namespace init; killing it collapses the
-        // namespace and kills all descendants.
+        // Kill the helper process. The inner child has PR_SET_PDEATHSIG
+        // set to SIGKILL, so it dies automatically when the helper exits.
         // SAFETY: valid pid, SIGKILL is a well-known signal
         let rc = unsafe { libc::kill(self.helper_pid, libc::SIGKILL) };
         if rc != 0 {
