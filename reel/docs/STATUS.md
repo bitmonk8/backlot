@@ -103,14 +103,16 @@ Two-layer fix applied:
 
 CI results after fix: 168 pass, 2 fail (unrelated), finished in 7s (was 70s before fix, infinite before diagnostics).
 
-### Linux CI remaining failures (2 tests)
+### Linux CI remaining failures (2 tests) — FIXED
 
-- `integration_sandbox_rg_with_ancestor_traverse` — needs investigation
-- `integration_sandbox_temp_dir_no_pivot_to_project` — needs investigation
+Both failures were platform-specific test issues, not sandbox bugs:
+
+- `integration_sandbox_rg_with_ancestor_traverse` — hardcoded `rg.exe` binary name. On Linux the binary is `rg`, not `rg.exe`. The isolated cache copy contained `rg` but the test looked for `rg.exe`. Fixed: use `cfg!(windows)` conditional for binary name.
+- `integration_sandbox_temp_dir_no_pivot_to_project` — asserted `is_error` on nu's `cp` output, but nu's `cp` on Linux doesn't report an error when writing to a read-only bind mount (returns empty list instead). The sandbox correctly prevents the write (file does not exist). Fixed: check filesystem state (file non-existence) as primary assertion instead of relying on nu error reporting.
 
 ### macOS CI failures (4 tests)
 
-Same nu_glob ancestor traversal issue as issue #9c. `reel read`, `reel write`, `reel edit` custom commands use `open`/`ls` which go through nu_glob's component-by-component path walk. macOS Seatbelt sandbox doesn't grant intermediate directory access. Plus `rg.exe` not found (wrong binary name for macOS in one test).
+Same nu_glob ancestor traversal issue as issue #9c. `reel read`, `reel write`, `reel edit` custom commands use `open`/`ls` which go through nu_glob's component-by-component path walk. macOS Seatbelt sandbox doesn't grant intermediate directory access. The `rg.exe` binary name issue (wrong name for non-Windows) is now fixed.
 
 ## Work Candidates
 
