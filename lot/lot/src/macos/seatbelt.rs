@@ -1,9 +1,10 @@
 #![allow(unsafe_code)]
 
+use std::collections::HashSet;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::raw::{c_char, c_int};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::policy::SandboxPolicy;
 
@@ -159,12 +160,72 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
         append_rule(&mut profile, "file-read*", "subpath", path);
     }
 
+    // Ancestor directory metadata: macOS needs stat() on every component of a
+    // path to traverse to it. Grant file-read-metadata on each ancestor of
+    // every policy path so the kernel allows directory traversal.
+    let ancestor_dirs = collect_ancestor_dirs(policy, program_path);
+    for ancestor in &ancestor_dirs {
+        append_rule(&mut profile, "file-read-metadata", "literal", ancestor);
+    }
+
     // Network access
     if policy.allow_network {
         profile.push_str("(allow network*)\n");
     }
 
     profile
+}
+
+/// Collect ancestor directories of all policy paths and the program path that
+/// need file-read-metadata grants for directory traversal. Excludes `/` (already
+/// granted) and the policy paths themselves (already have broader grants via
+/// subpath rules).
+fn collect_ancestor_dirs(policy: &SandboxPolicy, program_path: &Path) -> Vec<PathBuf> {
+    let mut policy_paths: HashSet<PathBuf> = HashSet::new();
+    let mut ancestors: HashSet<PathBuf> = HashSet::new();
+
+    let all_raw_paths = policy
+        .read_paths
+        .iter()
+        .chain(policy.write_paths.iter())
+        .chain(policy.exec_paths.iter());
+
+    for raw in all_raw_paths {
+        let resolved = resolve_path(raw);
+        policy_paths.insert(resolved.clone());
+        add_ancestors(&resolved, &mut ancestors);
+    }
+
+    add_ancestors(&resolve_path(program_path), &mut ancestors);
+
+    // Remove policy paths themselves — they already have broader grants.
+    for p in &policy_paths {
+        ancestors.remove(p);
+    }
+
+    // Also exclude paths already covered by METADATA_SYSTEM_PATHS.
+    for sys in METADATA_SYSTEM_PATHS {
+        ancestors.remove(Path::new(sys));
+    }
+
+    let mut sorted: Vec<PathBuf> = ancestors.into_iter().collect();
+    sorted.sort();
+    sorted
+}
+
+/// Walk parent directories up to (but excluding) `/` and insert each into `set`.
+fn add_ancestors(path: &Path, set: &mut HashSet<PathBuf>) {
+    if !path.is_absolute() {
+        return;
+    }
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if parent == Path::new("/") {
+            break;
+        }
+        set.insert(parent.to_path_buf());
+        current = parent;
+    }
 }
 
 /// Escape a path string for use in SBPL rules.
@@ -378,5 +439,99 @@ mod tests {
         let path = Path::new("/tmp/has)paren");
         let escaped = escape_sbpl_path(path).unwrap();
         assert_eq!(escaped, "/tmp/has\\)paren");
+    }
+
+    #[test]
+    fn ancestor_dirs_basic() {
+        let policy = SandboxPolicy {
+            read_paths: vec![PathBuf::from("/a/b/c/d")],
+            write_paths: vec![],
+            exec_paths: vec![],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let ancestors = collect_ancestor_dirs(&policy, &test_program());
+        // /a, /a/b, /a/b/c — but not "/" and not the path itself
+        assert!(ancestors.contains(&PathBuf::from("/a")));
+        assert!(ancestors.contains(&PathBuf::from("/a/b")));
+        assert!(ancestors.contains(&PathBuf::from("/a/b/c")));
+        assert!(!ancestors.contains(&PathBuf::from("/")));
+        assert!(!ancestors.contains(&PathBuf::from("/a/b/c/d")));
+    }
+
+    #[test]
+    fn ancestor_dirs_deduplicates() {
+        let policy = SandboxPolicy {
+            read_paths: vec![PathBuf::from("/a/b/c")],
+            write_paths: vec![PathBuf::from("/a/b/d")],
+            exec_paths: vec![],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let ancestors = collect_ancestor_dirs(&policy, &test_program());
+        // /a and /a/b appear once each despite shared ancestry
+        assert_eq!(ancestors.iter().filter(|p| *p == &PathBuf::from("/a")).count(), 1);
+        assert_eq!(ancestors.iter().filter(|p| *p == &PathBuf::from("/a/b")).count(), 1);
+    }
+
+    #[test]
+    fn ancestor_dirs_excludes_system_metadata_paths() {
+        let policy = SandboxPolicy {
+            read_paths: vec![PathBuf::from("/usr/local/share/data")],
+            write_paths: vec![],
+            exec_paths: vec![],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let ancestors = collect_ancestor_dirs(&policy, &test_program());
+        // /usr and /usr/local are in METADATA_SYSTEM_PATHS, so excluded
+        assert!(!ancestors.contains(&PathBuf::from("/usr")));
+        assert!(!ancestors.contains(&PathBuf::from("/usr/local")));
+        // /usr/local/share is NOT in METADATA_SYSTEM_PATHS, so included
+        assert!(ancestors.contains(&PathBuf::from("/usr/local/share")));
+    }
+
+    #[test]
+    fn ancestor_dirs_empty_policy() {
+        let policy = SandboxPolicy {
+            read_paths: vec![],
+            write_paths: vec![],
+            exec_paths: vec![],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        // Program path /usr/bin/true still contributes /usr/bin as ancestor
+        // (/usr is excluded via METADATA_SYSTEM_PATHS).
+        let ancestors = collect_ancestor_dirs(&policy, &test_program());
+        assert!(ancestors.contains(&PathBuf::from("/usr/bin")));
+        assert!(!ancestors.contains(&PathBuf::from("/usr")));
+    }
+
+    #[test]
+    fn profile_contains_ancestor_metadata_rules() {
+        // /opt/mybin from exec_paths should produce ancestor /opt
+        let policy = basic_policy();
+        let profile = generate_profile(&policy, &test_program());
+        assert!(
+            profile.contains("(allow file-read-metadata (literal \"/opt\"))"),
+            "profile should contain ancestor metadata for /opt"
+        );
+    }
+
+    #[test]
+    fn ancestor_metadata_before_network() {
+        let mut policy = basic_policy();
+        policy.allow_network = true;
+        let profile = generate_profile(&policy, &test_program());
+        let ancestor_pos = profile.find("(allow file-read-metadata (literal \"/opt\"))");
+        let network_pos = profile.find("(allow network*)");
+        assert!(
+            ancestor_pos.is_some() && network_pos.is_some(),
+            "both ancestor metadata and network rules must be present"
+        );
+        assert!(
+            ancestor_pos.unwrap() < network_pos.unwrap(),
+            "ancestor metadata rules must appear before network rules"
+        );
     }
 }

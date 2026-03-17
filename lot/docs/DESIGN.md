@@ -105,7 +105,8 @@ void sandbox_free_error(char *errorbuf);
 - Add `(allow file-read* (subpath "..."))` for read-only paths.
 - Add `(allow file-read* (subpath "...")) (allow file-write* (subpath "..."))` for read-write paths.
 - Add `(allow process-exec (subpath "..."))` for executable paths.
-- Add `(allow network-outbound) (allow network-inbound)` if network permitted.
+- Add `(allow network*)` if network permitted.
+- Add `(allow file-read-metadata (literal "..."))` for each ancestor directory of all policy paths and the program binary. Enables `stat()`-based path traversal (e.g., nu_glob walking path components). Uses `literal` (exact match), not `subpath`. Excludes `/` and system paths already granted.
 - Always allow: system libraries (`/usr/lib`, `/System/Library`), dynamic linker cache, `/dev/urandom`.
 - `mach-lookup` is unrestricted (narrowing breaks most programs).
 
