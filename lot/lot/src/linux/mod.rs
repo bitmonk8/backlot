@@ -288,8 +288,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 });
             }
             // SAFETY: fd is valid, pid_bytes points into stack-allocated buf
-            let written =
-                unsafe { libc::write(fd, pid_bytes.as_ptr().cast(), pid_bytes.len()) };
+            let written = unsafe { libc::write(fd, pid_bytes.as_ptr().cast(), pid_bytes.len()) };
             // Save errno before close() can clobber it.
             // SAFETY: errno access has no preconditions
             let write_errno = unsafe { *libc::__errno_location() };
