@@ -83,6 +83,8 @@ struct FilesystemConfig {
     #[serde(default)]
     exec: Vec<PathBuf>,
     #[serde(default)]
+    deny: Vec<PathBuf>,
+    #[serde(default)]
     include_platform_exec: bool,
     #[serde(default)]
     include_platform_lib: bool,
@@ -235,6 +237,9 @@ fn build_policy(config: &SandboxConfig) -> lot::Result<lot::SandboxPolicy> {
     }
     for path in &config.filesystem.exec {
         builder = builder.exec_path(path);
+    }
+    for path in &config.filesystem.deny {
+        builder = builder.deny_path(path);
     }
     if config.filesystem.include_platform_exec {
         builder = builder.include_platform_exec_paths();

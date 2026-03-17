@@ -386,6 +386,7 @@ mod tests {
             read_paths,
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: ResourceLimits::default(),
         }
@@ -444,6 +445,7 @@ mod tests {
             read_paths: vec![tmp.path().to_path_buf()],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -494,6 +496,7 @@ mod tests {
             read_paths: vec![PathBuf::from("/tmp/read")],
             write_paths: vec![PathBuf::from("/tmp/write")],
             exec_paths: vec![PathBuf::from("/usr/bin")],
+            deny_paths: vec![],
             allow_network: true,
             limits: ResourceLimits::default(),
         };

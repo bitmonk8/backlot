@@ -139,6 +139,7 @@ fn make_policy(read_paths: Vec<PathBuf>, write_paths: Vec<PathBuf>) -> lot::Sand
         read_paths,
         write_paths,
         exec_paths,
+        deny_paths: Vec::new(),
         allow_network: false,
         limits: lot::ResourceLimits::default(),
     }
@@ -531,4 +532,115 @@ fn test_wait_returns_exit_status() {
         );
         eprintln!("[diag] PASSED: exit 42 verified");
     }
+}
+
+#[test]
+fn test_deny_path_blocks_access_to_subtree() {
+    eprintln!("[diag] === test_deny_path_blocks_access_to_subtree ===");
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let allowed_dir = tmp.path().join("workspace");
+    let denied_dir = allowed_dir.join("secrets");
+    std::fs::create_dir_all(&denied_dir).expect("create denied dir");
+
+    // Write a file inside the denied subtree.
+    let secret_file = denied_dir.join("secret.txt");
+    std::fs::write(&secret_file, "secret_data").expect("write secret file");
+
+    // Write a file outside the denied subtree (should remain readable).
+    let public_file = allowed_dir.join("public.txt");
+    std::fs::write(&public_file, "public_data").expect("write public file");
+
+    let (program, args) = cat_command(&secret_file);
+
+    #[allow(unused_mut)]
+    let mut exec_paths = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        if std::path::Path::new("/bin").exists() {
+            exec_paths.push(PathBuf::from("/bin"));
+        }
+        if std::path::Path::new("/usr/bin").exists()
+            && std::fs::canonicalize("/usr/bin").ok() != std::fs::canonicalize("/bin").ok()
+        {
+            exec_paths.push(PathBuf::from("/usr/bin"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        exec_paths.push(PathBuf::from("/bin"));
+        exec_paths.push(PathBuf::from("/usr/bin"));
+    }
+
+    let allowed_dir_canon =
+        std::fs::canonicalize(&allowed_dir).expect("canonicalize allowed_dir");
+    let denied_dir_canon =
+        std::fs::canonicalize(&denied_dir).expect("canonicalize denied_dir");
+
+    let policy = lot::SandboxPolicy {
+        read_paths: vec![allowed_dir_canon],
+        write_paths: vec![],
+        exec_paths,
+        deny_paths: vec![denied_dir_canon],
+        allow_network: false,
+        limits: lot::ResourceLimits::default(),
+    };
+
+    // Part 1: reading a file inside the denied subtree must fail.
+    let mut cmd = lot::SandboxCommand::new(&program);
+    cmd.args(&args);
+    cmd.stdout(lot::SandboxStdio::Piped);
+    cmd.stderr(lot::SandboxStdio::Piped);
+
+    let child = must_spawn(&policy, &cmd);
+    let output = child.wait_with_output().expect("wait_with_output");
+
+    eprintln!("[diag] denied read exit status: {:?}", output.status);
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "reading denied path should fail, but exited with: {:?}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("secret_data"),
+        "sandbox should have blocked reading the secret, but stdout contained it"
+    );
+    eprintln!(
+        "[diag] PASSED: deny path blocked access (exit code={:?})",
+        output.status.code()
+    );
+
+    // Part 2: reading a file outside the denied subtree must still succeed.
+    let (pub_program, pub_args) = cat_command(&public_file);
+    let mut pub_cmd = lot::SandboxCommand::new(&pub_program);
+    pub_cmd.args(&pub_args);
+    pub_cmd.stdout(lot::SandboxStdio::Piped);
+    pub_cmd.stderr(lot::SandboxStdio::Piped);
+
+    let pub_child = must_spawn(&policy, &pub_cmd);
+    let pub_output = pub_child.wait_with_output().expect("wait_with_output");
+
+    eprintln!(
+        "[diag] public read exit status: {:?}",
+        pub_output.status
+    );
+
+    assert!(
+        pub_output.status.success(),
+        "reading non-denied path should succeed, but exited with: {:?}\nstderr: {}",
+        pub_output.status,
+        String::from_utf8_lossy(&pub_output.stderr)
+    );
+    let pub_stdout = String::from_utf8_lossy(&pub_output.stdout);
+    assert!(
+        pub_stdout.contains("public_data"),
+        "non-denied file should be readable, but stdout was: {pub_stdout}"
+    );
+    eprintln!("[diag] PASSED: non-denied sibling remains accessible");
 }

@@ -5,9 +5,11 @@ use crate::error::SandboxError;
 /// Defines the filesystem, network, and resource constraints for a sandboxed
 /// process.
 ///
-/// Paths in `read_paths`, `write_paths`, and `exec_paths` must exist and must
-/// not overlap with each other. Call [`SandboxPolicy::validate`] (or let
-/// [`spawn`](crate::spawn) call it) to check these constraints.
+/// Paths in `read_paths`, `write_paths`, `exec_paths`, and `deny_paths` must
+/// exist. Grant paths must not overlap with each other. Each deny path must be
+/// a strict child of a grant path, and no grant path may be nested under a deny
+/// path. Call [`SandboxPolicy::validate`] (or let [`spawn`](crate::spawn) call
+/// it) to check these constraints.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     /// Paths the child can read (recursive).
@@ -16,6 +18,9 @@ pub struct SandboxPolicy {
     pub write_paths: Vec<PathBuf>,
     /// Paths the child can execute from (recursive).
     pub exec_paths: Vec<PathBuf>,
+    /// Subtrees denied all access, overriding any grants. Each entry must be
+    /// a strict child of at least one grant path.
+    pub deny_paths: Vec<PathBuf>,
     /// Allow outbound network access.
     pub allow_network: bool,
     /// Resource limits.
@@ -125,13 +130,54 @@ fn check_intra_overlap(paths: &[PathBuf], name: &str) -> Result<(), SandboxError
     Ok(())
 }
 
+/// Verify that each deny path is a strict child of at least one grant path,
+/// and that no grant path is a child of a deny path (unreachable grant).
+fn check_deny_coverage(
+    deny_paths: &[PathBuf],
+    read_paths: &[PathBuf],
+    write_paths: &[PathBuf],
+    exec_paths: &[PathBuf],
+) -> Result<(), SandboxError> {
+    let all_grants: Vec<&PathBuf> = read_paths
+        .iter()
+        .chain(write_paths.iter())
+        .chain(exec_paths.iter())
+        .collect();
+
+    for deny in deny_paths {
+        let covered = all_grants.iter().any(|grant| is_parent_of(grant, deny));
+        if !covered {
+            return Err(SandboxError::InvalidPolicy(format!(
+                "deny path is not a strict child of any grant path: {}",
+                deny.display()
+            )));
+        }
+    }
+
+    // Reject grant paths nested under deny paths — they would be unreachable.
+    for grant in &all_grants {
+        for deny in deny_paths {
+            if is_parent_of(deny, grant) {
+                return Err(SandboxError::InvalidPolicy(format!(
+                    "grant path {} is under deny path {} and would be unreachable",
+                    grant.display(),
+                    deny.display()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 impl SandboxPolicy {
-    /// Returns the union of `read_paths`, `write_paths`, and `exec_paths`.
+    /// Returns the union of `read_paths`, `write_paths`, `exec_paths`, and `deny_paths`.
     pub fn all_paths(&self) -> Vec<&std::path::Path> {
         self.read_paths
             .iter()
             .chain(self.write_paths.iter())
             .chain(self.exec_paths.iter())
+            .chain(self.deny_paths.iter())
             .map(PathBuf::as_path)
             .collect()
     }
@@ -139,7 +185,9 @@ impl SandboxPolicy {
     /// Validate the policy before applying it.
     ///
     /// Returns [`SandboxError::InvalidPolicy`] if any path does not exist, if
-    /// paths overlap across or within sets, or if resource limits are zero.
+    /// grant paths overlap across or within sets, if deny paths are not strict
+    /// children of grant paths, if a grant path is nested under a deny path,
+    /// or if resource limits are zero.
     /// Called automatically by [`spawn()`](crate::spawn).
     pub fn validate(&self) -> Result<(), SandboxError> {
         if self.read_paths.is_empty() && self.write_paths.is_empty() && self.exec_paths.is_empty() {
@@ -164,11 +212,17 @@ impl SandboxPolicy {
             .iter()
             .map(|p| canon(p, "exec_paths"))
             .collect::<Result<_, _>>()?;
+        let deny_canon: Vec<PathBuf> = self
+            .deny_paths
+            .iter()
+            .map(|p| canon(p, "deny_paths"))
+            .collect::<Result<_, _>>()?;
 
         // Check for intra-set overlaps.
         check_intra_overlap(&read_canon, "read_paths")?;
         check_intra_overlap(&write_canon, "write_paths")?;
         check_intra_overlap(&exec_canon, "exec_paths")?;
+        check_intra_overlap(&deny_canon, "deny_paths")?;
 
         // Check for cross-set overlaps (exact match + parent/child).
         //
@@ -179,6 +233,10 @@ impl SandboxPolicy {
         check_cross_overlap_directional(&read_canon, "read_paths", &write_canon, "write_paths")?;
         check_cross_overlap(&read_canon, "read_paths", &exec_canon, "exec_paths")?;
         check_cross_overlap(&write_canon, "write_paths", &exec_canon, "exec_paths")?;
+
+        // Each deny path must be a strict child of at least one grant path.
+        // Exact matches are rejected — callers should remove the grant instead.
+        check_deny_coverage(&deny_canon, &read_canon, &write_canon, &exec_canon)?;
 
         self.limits.validate()?;
 
@@ -234,6 +292,7 @@ mod tests {
             read_paths: vec![path],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         }
@@ -252,6 +311,7 @@ mod tests {
             read_paths: Vec::new(),
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -265,6 +325,7 @@ mod tests {
             read_paths: vec![PathBuf::from("/surely/does/not/exist/abc123")],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -278,6 +339,7 @@ mod tests {
             read_paths: vec![PathBuf::from("/surely/does/not/exist/abc123")],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -297,6 +359,7 @@ mod tests {
             read_paths: vec![p.clone()],
             write_paths: vec![p],
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -316,6 +379,7 @@ mod tests {
             read_paths: vec![parent],
             write_paths: vec![child],
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -334,6 +398,7 @@ mod tests {
             read_paths: vec![child],
             write_paths: vec![parent],
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -349,6 +414,7 @@ mod tests {
             read_paths: vec![p.clone()],
             write_paths: Vec::new(),
             exec_paths: vec![p],
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -364,6 +430,7 @@ mod tests {
             read_paths: Vec::new(),
             write_paths: vec![p.clone()],
             exec_paths: vec![p],
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -378,6 +445,7 @@ mod tests {
             read_paths: Vec::new(),
             write_paths: Vec::new(),
             exec_paths: vec![tmp.path().to_path_buf()],
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -391,6 +459,7 @@ mod tests {
             read_paths: vec![tmp.path().to_path_buf()],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits {
                 max_memory_bytes: Some(1024 * 1024),
@@ -411,6 +480,7 @@ mod tests {
             ],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -425,6 +495,7 @@ mod tests {
             read_paths: vec![tmp.path().to_path_buf()],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits {
                 max_memory_bytes: Some(0),
@@ -442,6 +513,7 @@ mod tests {
             read_paths: vec![tmp.path().to_path_buf()],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits {
                 max_processes: Some(0),
@@ -459,6 +531,7 @@ mod tests {
             read_paths: vec![tmp.path().to_path_buf()],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits {
                 max_cpu_seconds: Some(0),
@@ -477,6 +550,7 @@ mod tests {
             read_paths: vec![p.clone(), p],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -500,6 +574,7 @@ mod tests {
             read_paths: vec![child],
             write_paths: Vec::new(),
             exec_paths: vec![parent],
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -519,6 +594,7 @@ mod tests {
             read_paths: Vec::new(),
             write_paths: Vec::new(),
             exec_paths: vec![p.clone(), p],
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -527,6 +603,117 @@ mod tests {
         assert!(
             msg.contains("duplicate"),
             "error should mention duplicate: {msg}"
+        );
+    }
+
+    #[test]
+    fn deny_path_valid_strict_child_of_grant() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let denied = tmp.path().join("secrets");
+        std::fs::create_dir(&denied).expect("create denied dir");
+
+        let policy = SandboxPolicy {
+            read_paths: vec![parent],
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            deny_paths: vec![denied],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        policy.validate().expect("valid policy with deny path");
+    }
+
+    #[test]
+    fn deny_path_not_covered_by_any_grant_rejected() {
+        let tmp = make_temp_dir();
+        let denied = tmp.path().to_path_buf();
+
+        let other = make_temp_dir();
+        let grant = other.path().to_path_buf();
+
+        let policy = SandboxPolicy {
+            read_paths: vec![grant],
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            deny_paths: vec![denied],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("deny path is not a strict child"),
+            "error should mention deny coverage: {msg}"
+        );
+    }
+
+    #[test]
+    fn deny_path_exact_match_with_grant_rejected() {
+        let tmp = make_temp_dir();
+        let p = tmp.path().to_path_buf();
+
+        let policy = SandboxPolicy {
+            read_paths: vec![p.clone()],
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            deny_paths: vec![p],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("deny path is not a strict child"),
+            "exact match should be rejected: {msg}"
+        );
+    }
+
+    #[test]
+    fn deny_paths_intra_overlap_rejected() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let deny_parent = tmp.path().join("a");
+        let deny_child = tmp.path().join("a").join("b");
+        std::fs::create_dir_all(&deny_child).expect("create nested dirs");
+
+        let policy = SandboxPolicy {
+            read_paths: vec![parent],
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            deny_paths: vec![deny_parent, deny_child],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("overlap") || msg.contains("parent"),
+            "nested deny paths should be rejected: {msg}"
+        );
+    }
+
+    #[test]
+    fn grant_under_deny_rejected() {
+        let tmp = make_temp_dir();
+        let grant_parent = tmp.path().to_path_buf();
+        let denied = tmp.path().join("denied");
+        let grant_under_deny = tmp.path().join("denied").join("exception");
+        std::fs::create_dir_all(&grant_under_deny).expect("create dirs");
+
+        let policy = SandboxPolicy {
+            read_paths: vec![grant_parent],
+            write_paths: vec![grant_under_deny],
+            exec_paths: Vec::new(),
+            deny_paths: vec![denied],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unreachable"),
+            "grant under deny should be rejected: {msg}"
         );
     }
 }

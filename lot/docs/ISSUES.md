@@ -70,11 +70,11 @@ Trivial method but untested directly. Tested transitively through prerequisite f
 **Category:** Testing
 **Files:** `lot/src/error.rs`, `lot/src/windows/appcontainer.rs`
 
-## `SandboxPolicy::all_paths()` naming
+## `SandboxPolicy::all_paths()` semantics
 
-`all_paths()` could become incomplete if new path categories are added. `allowed_paths()` would be more precise.
+`all_paths()` now includes `deny_paths` alongside grant paths. Callers using it for ancestor traverse ACE computation (e.g., `nul_device.rs`) will grant traverse ACEs for deny path ancestors — harmless but semantically wrong. Consider splitting into `grant_paths()` for traverse/prerequisite use and `all_paths()` for cases needing both. Name `allowed_paths()` is also imprecise now that deny paths are included.
 
-**Category:** Naming
+**Category:** Separation of concerns
 **File:** `lot/src/policy.rs`
 
 ## Non-Windows prerequisite stubs inline in `lib.rs`
@@ -196,3 +196,52 @@ All test jobs run `cargo test -p lot`. Any future tests added to `lot-cli` will 
 
 **Category:** Testing
 **File:** `.github/workflows/ci.yml`
+
+## No seatbelt unit test for deny rules in generated SBPL profile
+
+The seatbelt test module has no test that sets `deny_paths` on the policy and verifies the generated profile contains `(deny file-read* ...)`, `(deny file-write* ...)`, `(deny file-read-metadata ...)`, `(deny process-exec ...)`, and `(deny file-map-executable ...)` rules, or that they appear after allow rules.
+
+**Category:** Testing
+**File:** `lot/src/macos/seatbelt.rs`
+
+## No integration test for deny path blocking writes
+
+The deny path integration test only checks that reading from a denied path fails. A test with `write_paths` containing the parent and `deny_paths` containing a child, then attempting to write inside the denied subtree, would cover the write-deny path.
+
+**Category:** Testing
+**File:** `lot/tests/integration.rs`
+
+## No builder unit tests for `deny_path()` / `deny_paths()`
+
+The builder has no tests for deny path addition, deduplication, or silent skip of nonexistent paths.
+
+**Category:** Testing
+**File:** `lot/src/policy_builder.rs`
+
+## No integration test for deny path blocking execution
+
+No test attempts to execute a binary inside a denied subtree. The integration test only covers read-denial.
+
+**Category:** Testing
+**File:** `lot/tests/integration.rs`
+
+## No unit test for `deny_access()` / `apply_ace()` deny mode
+
+`deny_access()` delegates to `apply_ace()` with `DENY_ACCESS` mode, but no unit test exercises this path directly.
+
+**Category:** Testing
+**File:** `lot/src/windows/appcontainer.rs`
+
+## Symlink-into-deny-path behavior untested
+
+No test creates a symlink pointing into a denied subtree to verify path resolution behavior across platforms.
+
+**Category:** Testing
+**File:** `lot/tests/integration.rs`
+
+## `deny_access()` naming
+
+`deny_access` is generic. `deny_all_file_access` would be more precise since it denies `FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE`.
+
+**Category:** Naming
+**File:** `lot/src/windows/appcontainer.rs`

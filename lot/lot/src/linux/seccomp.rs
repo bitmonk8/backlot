@@ -319,6 +319,7 @@ mod tests {
             read_paths: vec![],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: crate::ResourceLimits::default(),
         };
@@ -334,6 +335,7 @@ mod tests {
             read_paths: vec![],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: true,
             limits: crate::ResourceLimits::default(),
         };
@@ -349,6 +351,7 @@ mod tests {
             read_paths: vec![],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: crate::ResourceLimits::default(),
         };
@@ -400,6 +403,7 @@ mod tests {
             read_paths: vec![],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: crate::ResourceLimits::default(),
         };
@@ -455,6 +459,7 @@ mod tests {
             read_paths: vec![],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: crate::ResourceLimits::default(),
         };

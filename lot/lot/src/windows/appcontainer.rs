@@ -14,7 +14,8 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, EXPLICIT_ACCESS_W, GetNamedSecurityInfoW,
-    NO_MULTIPLE_TRUSTEE, SDDL_REVISION_1, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW,
+    DENY_ACCESS, NO_MULTIPLE_TRUSTEE, SDDL_REVISION_1, SE_FILE_OBJECT, SET_ACCESS,
+    SetEntriesInAclW,
     SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::Isolation::{
@@ -317,7 +318,8 @@ fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
+/// Add or modify an ACE for `sid` on `path` with the given access mode and mask.
+fn apply_ace(sid: PSID, path: &Path, access_mode: i32, access_mask: u32) -> io::Result<()> {
     let wide_path = path_to_wide(path);
     let mut current_dacl: *mut ACL = std::ptr::null_mut();
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -339,12 +341,6 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
         return Err(win32_to_io(err));
     }
 
-    let access_mask = if writable {
-        FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE
-    } else {
-        FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
-    };
-
     let trustee = TRUSTEE_W {
         pMultipleTrustee: std::ptr::null_mut(),
         MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
@@ -356,7 +352,7 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
 
     let ea = EXPLICIT_ACCESS_W {
         grfAccessPermissions: access_mask,
-        grfAccessMode: SET_ACCESS,
+        grfAccessMode: access_mode,
         grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
         Trustee: trustee,
     };
@@ -366,6 +362,7 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
     // SAFETY: Merging a new ACE into the existing DACL.
     let err = unsafe { SetEntriesInAclW(1, &raw const ea, current_dacl, &raw mut new_dacl) };
     if err != ERROR_SUCCESS {
+        // SAFETY: sd from GetNamedSecurityInfoW.
         unsafe {
             LocalFree(sd.cast());
         }
@@ -395,6 +392,23 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
         return Err(win32_to_io(err));
     }
     Ok(())
+}
+
+fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
+    let access_mask = if writable {
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE
+    } else {
+        FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+    };
+    apply_ace(sid, path, SET_ACCESS, access_mask)
+}
+
+/// Add an explicit deny ACE for the AppContainer SID on a path. Windows
+/// evaluates explicit denies before explicit allows, so this overrides
+/// any inherited or direct allow ACEs.
+fn deny_access(sid: PSID, path: &Path) -> io::Result<()> {
+    let access_mask = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
+    apply_ace(sid, path, DENY_ACCESS, access_mask)
 }
 
 // ── Sentinel file ────────────────────────────────────────────────────
@@ -965,12 +979,13 @@ fn spawn_inner(
     profile_name: &str,
     ac_sid: PSID,
 ) -> Result<crate::SandboxedChild> {
-    // Collect all paths that need ACL modification.
+    // Collect all paths that need ACL modification (grants + denies).
     let all_paths: Vec<PathBuf> = policy
         .read_paths
         .iter()
         .chain(policy.write_paths.iter())
         .chain(policy.exec_paths.iter())
+        .chain(policy.deny_paths.iter())
         .cloned()
         .collect();
 
@@ -1025,7 +1040,7 @@ fn spawn_with_sentinel(
         };
     }
 
-    try_setup!(grant_acls(ac_sid, policy), "grant ACLs");
+    try_setup!(apply_policy_acls(ac_sid, policy), "apply policy ACLs");
 
     let job = try_setup!(JobObject::new(), "create job object");
     try_setup!(job.set_limits(&policy.limits), "set job limits");
@@ -1392,7 +1407,7 @@ fn close_optional_handle(h: Option<HANDLE>) {
     }
 }
 
-fn grant_acls(sid: PSID, policy: &SandboxPolicy) -> io::Result<()> {
+fn apply_policy_acls(sid: PSID, policy: &SandboxPolicy) -> io::Result<()> {
     for path in &policy.read_paths {
         grant_access(sid, path, false)?;
     }
@@ -1401,6 +1416,11 @@ fn grant_acls(sid: PSID, policy: &SandboxPolicy) -> io::Result<()> {
     }
     for path in &policy.exec_paths {
         grant_access(sid, path, false)?;
+    }
+    // Deny ACEs are evaluated before allow ACEs by Windows, so these
+    // override any inherited allows from parent grant paths.
+    for path in &policy.deny_paths {
+        deny_access(sid, path)?;
     }
     Ok(())
 }
@@ -1460,6 +1480,7 @@ mod tests {
             read_paths: vec![tmp.path().to_path_buf()],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -1488,6 +1509,7 @@ mod tests {
             read_paths: vec![allowed.path().to_path_buf()],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -1516,6 +1538,7 @@ mod tests {
             read_paths: vec![tmp.path().to_path_buf()],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -1547,6 +1570,7 @@ mod tests {
             read_paths: vec![tmp.path().to_path_buf()],
             write_paths: Vec::new(),
             exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         };

@@ -101,29 +101,29 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     }
     // Also allow metadata on all policy-granted paths
     for path in &policy.read_paths {
-        append_rule(&mut profile, "file-read-metadata", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path);
     }
     for path in &policy.write_paths {
-        append_rule(&mut profile, "file-read-metadata", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path);
     }
     for path in &policy.exec_paths {
-        append_rule(&mut profile, "file-read-metadata", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path);
     }
 
     // Scoped process-exec: target binary + exec_paths + system bin dirs.
     // Each also needs file-read* and file-map-executable so dyld can load the binary.
-    append_rule(&mut profile, "process-exec", "literal", program_path);
-    append_rule(&mut profile, "file-read*", "literal", program_path);
-    append_rule(&mut profile, "file-map-executable", "literal", program_path);
+    append_sbpl_rule(&mut profile, "allow", "process-exec", "literal", program_path);
+    append_sbpl_rule(&mut profile, "allow", "file-read*", "literal", program_path);
+    append_sbpl_rule(&mut profile, "allow", "file-map-executable", "literal", program_path);
     for path in &policy.exec_paths {
-        append_rule(&mut profile, "process-exec", "subpath", path);
-        append_rule(&mut profile, "file-map-executable", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "process-exec", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-map-executable", "subpath", path);
     }
     for sys_path in EXEC_SYSTEM_PATHS {
         let sys = std::path::Path::new(sys_path);
-        append_rule(&mut profile, "process-exec", "subpath", sys);
-        append_rule(&mut profile, "file-read*", "subpath", sys);
-        append_rule(&mut profile, "file-map-executable", "subpath", sys);
+        append_sbpl_rule(&mut profile, "allow", "process-exec", "subpath", sys);
+        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", sys);
+        append_sbpl_rule(&mut profile, "allow", "file-map-executable", "subpath", sys);
     }
 
     profile.push_str("(allow process-fork)\n");
@@ -146,18 +146,29 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
 
     // Policy-specified read paths
     for path in &policy.read_paths {
-        append_rule(&mut profile, "file-read*", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path);
     }
 
     // Policy-specified write paths get both read and write
     for path in &policy.write_paths {
-        append_rule(&mut profile, "file-read*", "subpath", path);
-        append_rule(&mut profile, "file-write*", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-write*", "subpath", path);
     }
 
     // Exec paths get read access (needed to load the binary)
     for path in &policy.exec_paths {
-        append_rule(&mut profile, "file-read*", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path);
+    }
+
+    // Deny rules override grants above. SBPL uses last-match-wins, so these
+    // must appear after the allow rules for the denied subtrees.
+    for path in &policy.deny_paths {
+        append_sbpl_rule(&mut profile, "deny", "file-read*", "subpath", path);
+        // file-read-metadata is a separate SBPL operation not covered by file-read*
+        append_sbpl_rule(&mut profile, "deny", "file-read-metadata", "subpath", path);
+        append_sbpl_rule(&mut profile, "deny", "file-write*", "subpath", path);
+        append_sbpl_rule(&mut profile, "deny", "process-exec", "subpath", path);
+        append_sbpl_rule(&mut profile, "deny", "file-map-executable", "subpath", path);
     }
 
     // Ancestor directory metadata: macOS needs stat() on every component of a
@@ -165,7 +176,7 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     // every policy path so the kernel allows directory traversal.
     let ancestor_dirs = collect_ancestor_dirs(policy, program_path);
     for ancestor in &ancestor_dirs {
-        append_rule(&mut profile, "file-read-metadata", "literal", ancestor);
+        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "literal", ancestor);
     }
 
     // Network access
@@ -245,14 +256,22 @@ fn resolve_path(path: &Path) -> std::path::PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Append an SBPL `(allow <op> (<filter> "<path>"))` rule.
+/// Append an SBPL `(<action> <op> (<filter> "<path>"))` rule.
 /// Resolves symlinks via canonicalize because SBPL matches real paths.
-fn append_rule(profile: &mut String, operation: &str, filter: &str, path: &Path) {
+fn append_sbpl_rule(
+    profile: &mut String,
+    action: &str,
+    operation: &str,
+    filter: &str,
+    path: &Path,
+) {
     let resolved = resolve_path(path);
     let Ok(escaped) = escape_sbpl_path(&resolved) else {
         return;
     };
-    profile.push_str("(allow ");
+    profile.push_str("(");
+    profile.push_str(action);
+    profile.push_str(" ");
     profile.push_str(operation);
     profile.push_str(" (");
     profile.push_str(filter);
@@ -308,6 +327,7 @@ mod tests {
             read_paths: vec![PathBuf::from("/tmp/test_read")],
             write_paths: vec![PathBuf::from("/tmp/test_write")],
             exec_paths: vec![PathBuf::from("/opt/mybin")],
+            deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
         }
@@ -419,6 +439,7 @@ mod tests {
             read_paths: vec![],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -447,6 +468,7 @@ mod tests {
             read_paths: vec![PathBuf::from("/a/b/c/d")],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -465,6 +487,7 @@ mod tests {
             read_paths: vec![PathBuf::from("/a/b/c")],
             write_paths: vec![PathBuf::from("/a/b/d")],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -480,6 +503,7 @@ mod tests {
             read_paths: vec![PathBuf::from("/usr/local/share/data")],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: ResourceLimits::default(),
         };
@@ -497,6 +521,7 @@ mod tests {
             read_paths: vec![],
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: ResourceLimits::default(),
         };

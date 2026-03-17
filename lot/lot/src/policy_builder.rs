@@ -13,6 +13,7 @@ pub struct SandboxPolicyBuilder {
     read_paths: Vec<PathBuf>,
     write_paths: Vec<PathBuf>,
     exec_paths: Vec<PathBuf>,
+    deny_paths: Vec<PathBuf>,
     allow_network: bool,
     limits: ResourceLimits,
 }
@@ -78,6 +79,28 @@ impl SandboxPolicyBuilder {
         self
     }
 
+    /// Add a deny path. Canonicalized on insert; silently skipped if
+    /// non-existent. No deduplication against grant paths — the deny is
+    /// intentional and preserved.
+    #[must_use]
+    pub fn deny_path(mut self, path: impl AsRef<Path>) -> Self {
+        if let Ok(canon) = std::fs::canonicalize(path.as_ref()) {
+            if !self.deny_paths.contains(&canon) {
+                self.deny_paths.push(canon);
+            }
+        }
+        self
+    }
+
+    /// Add multiple deny paths. Convenience wrapper around [`deny_path`](Self::deny_path).
+    #[must_use]
+    pub fn deny_paths(mut self, paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Self {
+        for p in paths {
+            self = self.deny_path(p);
+        }
+        self
+    }
+
     /// Add the platform temp directory to write paths.
     #[must_use]
     pub fn include_temp_dirs(self) -> Self {
@@ -139,6 +162,7 @@ impl SandboxPolicyBuilder {
             read_paths: self.read_paths,
             write_paths: self.write_paths,
             exec_paths: self.exec_paths,
+            deny_paths: self.deny_paths,
             allow_network: self.allow_network,
             limits: self.limits,
         };

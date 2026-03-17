@@ -403,6 +403,7 @@ mod tokio_tests {
                 read_paths: vec![std::path::PathBuf::from("/usr")],
                 write_paths: vec![],
                 exec_paths: vec![],
+                deny_paths: vec![],
                 allow_network: false,
                 limits: crate::policy::ResourceLimits::default(),
             };
@@ -424,6 +425,7 @@ mod tokio_tests {
                 read_paths: vec![],
                 write_paths: vec![],
                 exec_paths: vec![system32],
+                deny_paths: vec![],
                 allow_network: true,
                 limits: crate::policy::ResourceLimits::default(),
             };
@@ -462,6 +464,7 @@ mod tokio_tests {
                 read_paths: vec![std::path::PathBuf::from("/usr")],
                 write_paths: vec![],
                 exec_paths: vec![],
+                deny_paths: vec![],
                 allow_network: false,
                 limits: crate::policy::ResourceLimits::default(),
             };
@@ -494,6 +497,7 @@ mod tokio_tests {
                 read_paths: vec![],
                 write_paths: vec![],
                 exec_paths: vec![system32],
+                deny_paths: vec![],
                 allow_network: false,
                 limits: crate::policy::ResourceLimits::default(),
             };

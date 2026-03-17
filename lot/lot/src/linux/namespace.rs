@@ -146,6 +146,17 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
         }
     }
 
+    // Deny paths: overmount with empty read-only tmpfs so the subtree
+    // appears as an empty directory. Must happen after the parent grant
+    // mounts above.
+    for path in &policy.deny_paths {
+        if let Some(s) = path.to_str() {
+            let dest = format!("{new_root}{s}");
+            mkdir_p(&dest)?;
+            mount_empty_tmpfs(&dest)?;
+        }
+    }
+
     // /dev/null, /dev/zero, /dev/urandom via bind mount from host
     for dev in &["/dev/null", "/dev/zero", "/dev/urandom"] {
         create_dev_node(&new_root, dev)?;
@@ -214,6 +225,30 @@ fn mount_tmpfs(target: &str) -> io::Result<()> {
             c_fstype.as_ptr(),
             libc::MS_NOSUID | libc::MS_NODEV,
             std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Mount an empty read-only tmpfs at the given path. Used to mask deny paths
+/// so the subtree appears as an inaccessible empty directory.
+fn mount_empty_tmpfs(target: &str) -> io::Result<()> {
+    let c_target = to_cstring(target)?;
+    let c_fstype = to_cstring("tmpfs")?;
+    let c_source = to_cstring("tmpfs")?;
+    let c_opts = to_cstring("size=0")?;
+
+    // SAFETY: all pointers are valid CStrings, flags make the mount read-only
+    let rc = unsafe {
+        libc::mount(
+            c_source.as_ptr(),
+            c_target.as_ptr(),
+            c_fstype.as_ptr(),
+            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            c_opts.as_ptr().cast(),
         )
     };
     if rc != 0 {

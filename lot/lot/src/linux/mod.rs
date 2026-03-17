@@ -562,6 +562,7 @@ mod tests {
             read_paths,
             write_paths: vec![],
             exec_paths: vec![],
+            deny_paths: vec![],
             allow_network: false,
             limits: ResourceLimits::default(),
         }
