@@ -119,7 +119,7 @@ jobs:
         run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
       - name: Configure AppContainer prerequisites
         run: cargo run -p reel-cli -- setup --verbose
-      - run: cargo test -- --test-threads=1 --nocapture
+      - run: cargo test -- --test-threads=1
 
   build:
     name: Build (${{ matrix.os }})

@@ -549,17 +549,14 @@ async fn spawn_nu_process(
     let session_temp_dir = tempfile::TempDir::new_in(&temp_base)
         .map_err(|e| format!("failed to create session temp dir: {e}"))?;
 
-    let t0 = std::time::Instant::now();
     let policy = build_nu_sandbox_policy(project_root, grant, cache_dir, session_temp_dir.path())
         .map_err(|e| format!("sandbox setup failed: {e}"))?;
-    let t_policy = t0.elapsed();
 
     let nu_binary = resolve_nu_binary(cache_dir);
     let config_files = resolve_config_files(cache_dir);
     let rg_binary = resolve_rg_binary(cache_dir);
     let project_root = project_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let t_blocking = std::time::Instant::now();
         let mut cmd = SandboxCommand::new(&nu_binary);
         cmd.arg("--mcp");
 
@@ -590,10 +587,8 @@ async fn spawn_nu_process(
             cmd.env("REEL_RG_PATH", path);
         }
 
-        let t_pre_spawn = t_blocking.elapsed();
         let mut child =
             lot::spawn(&policy, &cmd).map_err(|e| format!("failed to spawn nu: {e}"))?;
-        let t_lot_spawn = t_blocking.elapsed();
 
         let stdin = child.take_stdin().ok_or("failed to capture nu stdin")?;
         let stdout = child.take_stdout().ok_or("failed to capture nu stdout")?;
@@ -629,12 +624,10 @@ async fn spawn_nu_process(
         let init_bytes = serde_json::to_vec(&init_request)
             .map_err(|e| format!("failed to serialize init request: {e}"))?;
 
-        let t_pre_handshake = t_blocking.elapsed();
         send_line(&proc.stdin, &init_bytes)?;
 
         // Read initialize response (uses skip loop like rpc_call).
         let init_response = read_response(&mut proc.stdout, 0)?;
-        let t_handshake = t_blocking.elapsed();
 
         if let Some(err) = init_response.error {
             return Err(format!("MCP initialize failed: {}", err.message));
@@ -650,13 +643,6 @@ async fn spawn_nu_process(
             .map_err(|e| format!("failed to serialize notification: {e}"))?;
 
         send_line(&proc.stdin, &notif_bytes)?;
-
-        let t_total = t_blocking.elapsed();
-        eprintln!(
-            "[SPAWN-TIMING] policy={t_policy:?} cmd_setup={t_pre_spawn:?} lot_spawn={:?} pre_handshake={t_pre_handshake:?} handshake={:?} total={t_total:?}",
-            t_lot_spawn.saturating_sub(t_pre_spawn),
-            t_handshake.saturating_sub(t_pre_handshake),
-        );
 
         Ok(proc)
     })
