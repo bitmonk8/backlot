@@ -1847,4 +1847,263 @@ mod tests {
             eprintln!("CONCLUSION: Both read and exec succeeded — sandbox is not restricting.");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Full tool execution path integration tests (issue #2)
+    //
+    // Validates execute_tool() → NuSession → subprocess → result parsing.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_execute_tool_read_end_to_end() {
+        // Full path: execute_tool("Read") → translate_tool_call → nu session → parse result.
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        let test_file = tmp.path().join("e2e_read.txt");
+        std::fs::write(&test_file, "line1\nline2\nline3\n").unwrap();
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({"file_path": nu_path(&test_file)});
+        let result =
+            crate::tools::execute_tool("tu_e2e".into(), "Read", &input, tmp.path(), grant, session)
+                .await;
+        assert!(
+            !result.is_error,
+            "Read tool should succeed, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("line1"),
+            "result should contain file content, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("line2"),
+            "result should contain line2, got: {}",
+            result.content
+        );
+        assert_eq!(result.tool_use_id, "tu_e2e");
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_write_end_to_end() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let target = tmp.path().join("e2e_written.txt");
+        let input =
+            serde_json::json!({"file_path": nu_path(&target), "content": "written via e2e"});
+        let result = crate::tools::execute_tool(
+            "tu_write".into(),
+            "Write",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Write tool should succeed, got error: {}",
+            result.content
+        );
+        let on_disk = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(on_disk, "written via e2e");
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_glob_end_to_end() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::NU | ToolGrant::WRITE;
+
+        std::fs::write(tmp.path().join("a.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "").unwrap();
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({"pattern": "*.rs", "path": nu_path(tmp.path())});
+        let result = crate::tools::execute_tool(
+            "tu_glob".into(),
+            "Glob",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Glob tool should succeed, got error: {}",
+            result.content
+        );
+        assert!(result.content.contains("a.rs"));
+        assert!(result.content.contains("b.rs"));
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_nushell_end_to_end() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::NU;
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({"command": "2 + 3"});
+        let result = crate::tools::execute_tool(
+            "tu_nu".into(),
+            "NuShell",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "NuShell tool should succeed, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains('5'),
+            "expected 5 in output, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_grant_denied() {
+        // execute_tool checks grants before touching nu session.
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::NU; // no WRITE
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({"file_path": "x.txt", "content": "hi"});
+        let result = crate::tools::execute_tool(
+            "tu_denied".into(),
+            "Write",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("not permitted"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Sandbox network denial integration test (issue #37)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_sandbox_network_denied_without_grant() {
+        // Without NETWORK grant, the sandbox should block outbound network access.
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        // NU only — no NETWORK grant.
+        let grant = ToolGrant::NU;
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        // Attempt an outbound HTTP request. This should fail because the
+        // sandbox denies network access without the NETWORK grant.
+        // Use `http get` which is nu's built-in HTTP client.
+        let result = try_eval(
+            session,
+            "http get 'http://httpbin.org/get'",
+            15,
+            tmp.path(),
+            grant,
+        )
+        .await;
+
+        // The network operation should fail — either the evaluate returns an
+        // error, or nu reports an error via is_error.
+        match result {
+            Err(e) => {
+                // Timeout or process failure is acceptable — network was blocked.
+                eprintln!("network blocked (evaluate error): {e}");
+            }
+            Ok(out) => {
+                assert!(
+                    out.is_error,
+                    "network request should be denied without NETWORK grant, got success: {}",
+                    out.content
+                );
+                eprintln!("network blocked (nu error): {}", out.content);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_network_allowed_with_grant() {
+        // With NETWORK grant, the sandbox should allow outbound network access.
+        // This test serves as the positive control for the denial test above.
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        // NU + NETWORK grant.
+        let grant = ToolGrant::NU | ToolGrant::NETWORK;
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        // Attempt an outbound HTTP request. With NETWORK granted, this should
+        // succeed (assuming the test environment has internet access).
+        let result = try_eval(
+            session,
+            "http get 'http://httpbin.org/get' | get url",
+            30,
+            tmp.path(),
+            grant,
+        )
+        .await;
+
+        // If the test environment has no internet, this test may fail — that's
+        // acceptable. The key property is that the sandbox does NOT block it.
+        match result {
+            Ok(out) => {
+                if out.is_error {
+                    // Check if it's a sandbox denial vs. a network connectivity issue.
+                    let is_sandbox_denial = out.content.contains("denied")
+                        || out.content.contains("Permission")
+                        || out.content.contains("not allowed");
+                    assert!(
+                        !is_sandbox_denial,
+                        "network should not be sandbox-denied with NETWORK grant: {}",
+                        out.content
+                    );
+                    eprintln!(
+                        "NOTE: network request failed (likely no internet): {}",
+                        out.content
+                    );
+                }
+            }
+            Err(e) => {
+                // Timeout may occur if there's no internet — that's not a sandbox issue.
+                eprintln!("NOTE: network request failed (likely no internet): {e}");
+            }
+        }
+    }
 }

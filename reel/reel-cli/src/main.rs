@@ -317,6 +317,168 @@ fn emit_error(code: &str, message: &str) {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // parse_config tests (issue #12)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_config_valid_grant_sequence() {
+        let yaml = r#"
+model: "test-model"
+grant:
+  - write
+  - nu
+  - network
+"#;
+        let (config, grant) = parse_config(yaml).unwrap();
+        assert_eq!(
+            grant,
+            reel::ToolGrant::WRITE | reel::ToolGrant::NU | reel::ToolGrant::NETWORK
+        );
+        assert_eq!(config.model(), "test-model");
+    }
+
+    #[test]
+    fn parse_config_null_grant() {
+        let yaml = r#"
+model: "test-model"
+grant: null
+"#;
+        let (_config, grant) = parse_config(yaml).unwrap();
+        assert_eq!(grant, reel::ToolGrant::empty());
+    }
+
+    #[test]
+    fn parse_config_absent_grant() {
+        let yaml = r#"
+model: "test-model"
+"#;
+        let (_config, grant) = parse_config(yaml).unwrap();
+        assert_eq!(grant, reel::ToolGrant::empty());
+    }
+
+    #[test]
+    fn parse_config_non_sequence_grant_error() {
+        let yaml = r#"
+model: "test-model"
+grant: "write"
+"#;
+        let err = parse_config(yaml).unwrap_err();
+        assert!(
+            err.contains("grant must be a list"),
+            "expected list error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_config_non_string_element_error() {
+        let yaml = r#"
+model: "test-model"
+grant:
+  - write
+  - 42
+"#;
+        let err = parse_config(yaml).unwrap_err();
+        assert!(
+            err.contains("must be strings"),
+            "expected strings error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_config_unknown_grant_name_propagates_error() {
+        let yaml = r#"
+model: "test-model"
+grant:
+  - write
+  - bogus
+"#;
+        let err = parse_config(yaml).unwrap_err();
+        assert!(
+            err.contains("unknown grant: bogus"),
+            "expected from_names error propagation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_config_invalid_yaml() {
+        let err = parse_config("{{{{not yaml").unwrap_err();
+        assert!(
+            err.contains("config parse"),
+            "expected parse error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_config_strips_grant_before_passing_to_flick() {
+        let yaml = r#"
+model: "test-model"
+grant:
+  - nu
+"#;
+        let (config, grant) = parse_config(yaml).unwrap();
+        assert_eq!(grant, reel::ToolGrant::NU);
+        assert_eq!(config.model(), "test-model");
+    }
+
+    #[test]
+    fn parse_config_empty_grant_sequence() {
+        let yaml = r#"
+model: "test-model"
+grant: []
+"#;
+        let (_config, grant) = parse_config(yaml).unwrap();
+        assert_eq!(grant, reel::ToolGrant::empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // emit_error output shape tests (issue #12)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn error_output_shape() {
+        let output = ErrorOutput {
+            status: "Error",
+            error: ErrorDetail {
+                code: "test_code".into(),
+                message: "test message".into(),
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["status"], "Error");
+        assert_eq!(parsed["error"]["code"], "test_code");
+        assert_eq!(parsed["error"]["message"], "test message");
+    }
+
+    #[test]
+    fn success_output_serialization_shape() {
+        let output = SuccessOutput {
+            status: "Ok",
+            content: serde_json::json!({"key": "value"}),
+            usage: Some(UsageOutput {
+                input_tokens: 100,
+                output_tokens: 50,
+                cost_usd: 0.001,
+            }),
+            tool_calls: 3,
+            response_hash: Some("abc123".into()),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["status"], "Ok");
+        assert_eq!(parsed["content"]["key"], "value");
+        assert_eq!(parsed["usage"]["input_tokens"], 100);
+        assert_eq!(parsed["tool_calls"], 3);
+        assert_eq!(parsed["response_hash"], "abc123");
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();

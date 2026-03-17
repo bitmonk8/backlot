@@ -862,6 +862,154 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // ToolHandler dispatch tests (issue #1)
+    // -----------------------------------------------------------------------
+
+    /// A mock ToolHandler that records whether it was called.
+    struct MockToolHandler {
+        tool_name: String,
+        response: String,
+        call_count: Arc<AtomicU32>,
+    }
+
+    impl MockToolHandler {
+        fn new(name: &str, response: &str) -> Self {
+            Self {
+                tool_name: name.into(),
+                response: response.into(),
+                call_count: Arc::new(AtomicU32::new(0)),
+            }
+        }
+    }
+
+    impl ToolHandler for MockToolHandler {
+        fn definition(&self) -> tools::ToolDefinition {
+            tools::ToolDefinition {
+                name: self.tool_name.clone(),
+                description: "mock tool".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        fn execute<'a>(
+            &'a self,
+            tool_use_id: String,
+            _input: &'a JsonValue,
+        ) -> Pin<Box<dyn std::future::Future<Output = ToolExecResult> + Send + 'a>> {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            let response = self.response.clone();
+            Box::pin(async move {
+                ToolExecResult {
+                    tool_use_id,
+                    content: response,
+                    is_error: false,
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_custom_tool_by_name() {
+        let handler = MockToolHandler::new("MyCustomTool", "custom result");
+        let call_count = Arc::clone(&handler.call_count);
+
+        let factory = mock_client_factory(|| {
+            MultiShotProvider::new(vec![
+                flick::provider::ModelResponse {
+                    text: None,
+                    thinking: Vec::new(),
+                    tool_calls: vec![flick::provider::ToolCallResponse {
+                        call_id: "tc_custom".into(),
+                        tool_name: "MyCustomTool".into(),
+                        arguments: "{}".into(),
+                    }],
+                    usage: flick::provider::UsageResponse::default(),
+                },
+                flick::provider::ModelResponse {
+                    text: Some(r#"{"result":"ok"}"#.into()),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: flick::provider::UsageResponse::default(),
+                },
+            ])
+        });
+
+        // Use a CountingToolExecutor so we can verify the built-in executor was NOT called.
+        let builtin_calls = Arc::new(AtomicU32::new(0));
+        let agent = test_agent(
+            factory,
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&builtin_calls),
+            }),
+        );
+
+        let mut request = test_request();
+        request.grant = ToolGrant::NU;
+        request.custom_tools = vec![Box::new(handler)];
+
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+        assert_eq!(builtin_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn custom_tool_with_builtin_name_rejected_as_duplicate() {
+        // A custom tool named "Read" collides with the built-in Read tool.
+        // Flick rejects duplicate tool names at config build time.
+        let handler = MockToolHandler::new("Read", "custom read override");
+
+        let mut request = test_request();
+        request.grant = ToolGrant::NU;
+        request.custom_tools = vec![Box::new(handler)];
+
+        let result = Agent::build_effective_config(&request);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate"),
+            "expected duplicate error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_falls_through_to_builtin_executor() {
+        // When the model calls a tool name not in custom_tools, it goes to the built-in executor.
+        let builtin_calls = Arc::new(AtomicU32::new(0));
+        let agent = test_agent(
+            tool_then_complete_factory(),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&builtin_calls),
+            }),
+        );
+
+        let mut request = test_request();
+        request.grant = ToolGrant::NU;
+        // No custom tools — "Read" call goes to built-in executor.
+        request.custom_tools = Vec::new();
+
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        assert!(result.is_ok());
+        assert_eq!(builtin_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn custom_tool_definitions_included_in_config() {
+        let handler = MockToolHandler::new("SpecialTool", "result");
+        let mut request = test_request();
+        request.grant = ToolGrant::NU;
+        request.custom_tools = vec![Box::new(handler)];
+
+        let config = Agent::build_effective_config(&request).unwrap();
+        let tool_names: Vec<&str> = config.tools().iter().map(|t| t.name()).collect();
+        assert!(tool_names.contains(&"SpecialTool"));
+        // Built-in tools should also be present.
+        assert!(tool_names.contains(&"Read"));
+    }
+
     #[tokio::test]
     async fn build_client_propagates_factory_error() {
         let agent = test_agent(

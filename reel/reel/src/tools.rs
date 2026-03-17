@@ -1345,6 +1345,81 @@ mod tests {
         assert!(tool_definitions(ToolGrant::WRITE).is_empty());
     }
 
+    // -- ToolGrant::from_names tests (issue #36) --
+
+    #[test]
+    fn from_names_empty_returns_empty_grant() {
+        let empty: &[&str] = &[];
+        let grant = ToolGrant::from_names(empty).unwrap();
+        assert_eq!(grant, ToolGrant::empty());
+    }
+
+    #[test]
+    fn from_names_write_only() {
+        let grant = ToolGrant::from_names(&["write"]).unwrap();
+        assert_eq!(grant, ToolGrant::WRITE);
+    }
+
+    #[test]
+    fn from_names_nu_only() {
+        let grant = ToolGrant::from_names(&["nu"]).unwrap();
+        assert_eq!(grant, ToolGrant::NU);
+    }
+
+    #[test]
+    fn from_names_network_only() {
+        let grant = ToolGrant::from_names(&["network"]).unwrap();
+        assert_eq!(grant, ToolGrant::NETWORK);
+    }
+
+    #[test]
+    fn from_names_combined_flags() {
+        let grant = ToolGrant::from_names(&["write", "nu", "network"]).unwrap();
+        assert_eq!(grant, ToolGrant::WRITE | ToolGrant::NU | ToolGrant::NETWORK);
+    }
+
+    #[test]
+    fn from_names_duplicate_flags_idempotent() {
+        let grant = ToolGrant::from_names(&["write", "write", "nu"]).unwrap();
+        assert_eq!(grant, ToolGrant::WRITE | ToolGrant::NU);
+    }
+
+    #[test]
+    fn from_names_unknown_grant_error() {
+        let err = ToolGrant::from_names(&["write", "bogus"]).unwrap_err();
+        assert_eq!(err.name, "bogus");
+        assert!(err.to_string().contains("unknown grant: bogus"));
+    }
+
+    #[test]
+    fn from_names_unknown_grant_first_position() {
+        let err = ToolGrant::from_names(&["invalid"]).unwrap_err();
+        assert_eq!(err.name, "invalid");
+    }
+
+    #[test]
+    fn from_names_case_sensitive() {
+        // "Write" (capital W) is not recognized — only lowercase "write".
+        let err = ToolGrant::from_names(&["Write"]).unwrap_err();
+        assert_eq!(err.name, "Write");
+    }
+
+    #[test]
+    fn from_names_with_string_vec() {
+        // Verify it works with Vec<String> (not just &[&str]).
+        let names = vec!["nu".to_string(), "write".to_string()];
+        let grant = ToolGrant::from_names(&names).unwrap();
+        assert_eq!(grant, ToolGrant::NU | ToolGrant::WRITE);
+    }
+
+    #[test]
+    fn grant_parse_error_is_std_error() {
+        let err = GrantParseError {
+            name: "foo".into(),
+        };
+        let _: &dyn std::error::Error = &err;
+    }
+
     #[tokio::test]
     async fn test_legacy_tool_names_rejected() {
         for name in ["read_file", "write_file", "edit_file", "glob", "grep", "nu"] {

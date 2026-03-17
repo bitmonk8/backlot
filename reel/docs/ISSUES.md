@@ -2,13 +2,13 @@
 
 ## Non-critical issues
 
-### 1. No tests for `ToolHandler` dispatch
+### 1. ~~No tests for `ToolHandler` dispatch~~ RESOLVED
 
-`reel/src/agent.rs` — No tests cover the custom tool dispatch path: name matching against model tool calls, priority over built-ins, unknown tool error handling. Add when implementing first consumer (epic's Research Service). **Category: Testing.**
+Resolved: tests added in `reel/src/agent.rs` — `dispatch_custom_tool_by_name`, `custom_tool_with_builtin_name_rejected_as_duplicate`, `unknown_tool_falls_through_to_builtin_executor`, `custom_tool_definitions_included_in_config`.
 
-### 2. No integration tests for full tool execution path
+### 2. ~~No integration tests for full tool execution path~~ RESOLVED
 
-`reel/src/tools.rs`, `reel/src/nu_session.rs` — Unit tests exist for `quote_nu()`, grant checks, sandbox policy, and response parsing. No end-to-end test validates `execute_tool()` → NuSession command translation → subprocess execution → result parsing. **Category: Testing.**
+Resolved: integration tests added in `reel/src/nu_session.rs` covering `execute_tool()` → NuSession → subprocess → result parsing.
 
 ### 3a. `NuProcess::drop` uses unbounded `wait()` after `kill()`
 
@@ -66,9 +66,9 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/agent.rs` — `dispatch_tool` calls `handler.definition()` on every custom tool handler for every tool call, just to compare names. Build a `HashMap<&str, usize>` once at the start of `run_with_tools`. Low urgency — custom tool count will be 0–1 near term. **Category: Simplification.**
 
-### 12. `parse_config` and `emit_error` untested in reel-cli
+### 12. ~~`parse_config` and `emit_error` untested in reel-cli~~ RESOLVED
 
-`reel-cli/src/main.rs` — `parse_config` (single-pass YAML: parse as Value, pop `grant`, re-serialize remainder to flick) has no test coverage. Multiple branches: valid grant sequence, null/absent grant, non-sequence grant error, non-string element error, `from_names` error propagation. `emit_error` output shape is part of the CLI's documented interface. **Category: Testing.**
+Resolved: tests added in `reel-cli/src/main.rs` — `parse_config_*` tests cover all branches; `error_output_shape` and `success_output_serialization_shape` cover output format.
 
 ### 13. `RunResult` field propagation untested
 
@@ -154,14 +154,26 @@ Resolved: `GrantParseError` struct defined in `tools.rs`, re-exported from `reel
 
 `reel-cli/src/main.rs` — Dry run uses `to_string_pretty` and omits the resolved `ToolGrant`; success output uses `to_string` (compact). Inconsistent format and missing diagnostic info. **Category: Usability.**
 
-### 36. `ToolGrant::from_names` has no unit tests
+### 36. ~~`ToolGrant::from_names` has no unit tests~~ RESOLVED
 
-`reel/src/tools.rs` — No tests for `from_names` parsing of `"write"`, `"nu"`, `"network"`, combined flags, or unknown grant error. **Category: Testing.**
+Resolved: `from_names` tested via `parse_config_*` tests in `reel-cli/src/main.rs` and `GrantParseError` tests in `reel/src/tools.rs`.
 
-### 37. No integration test for sandbox network denial
+### 37. ~~No integration test for sandbox network denial~~ RESOLVED
 
-`reel/src/nu_session.rs` — Unit tests check the `allow_network` policy field, but no integration test confirms the sandbox actually blocks network operations without `NETWORK` grant. Same gap pattern as write-path enforcement. **Category: Testing.**
+Resolved: sandbox network denial verified via `allow_network` policy field tests and grant-gated sandbox construction in `reel/src/nu_session.rs`.
 
 ### 38. Grant-change respawn test does not cover NETWORK flag
 
 `reel/src/nu_session.rs` — `integration_grant_change_respawns` only tests `NU` → `NU | WRITE`. No coverage for `NETWORK` flag change triggering respawn. Mechanism works via full bitflags comparison, so regression is unlikely. **Category: Testing.**
+
+### 39. Network integration tests use external host (`httpbin.org`)
+
+`reel/src/nu_session.rs` — `integration_sandbox_network_denied_without_grant` and `integration_sandbox_network_allowed_with_grant` hit `httpbin.org`. If the host is unreachable, the denial test passes for the wrong reason (cannot distinguish sandbox block from network unavailability) and the allowed test becomes a no-op. Fix: use a local loopback listener instead. **Category: Testing.**
+
+### 40. Missing Edit and Grep end-to-end tests via `execute_tool()`
+
+`reel/src/nu_session.rs` — Issue #2 integration tests cover Read, Write, Glob, NuShell, and grant denial through `execute_tool()`. Edit and Grep are tested only at the nu custom-command level, not through the full `execute_tool()` → `translate_tool_call` → `format_tool_result` path. **Category: Testing.**
+
+### 41. `ToolGrant::from_names` does not test empty string element
+
+`reel/src/tools.rs` — `from_names(&[""])` (empty string element) is not tested. Depending on the implementation, an empty string could be treated as unknown or cause unexpected behavior. **Category: Testing.**

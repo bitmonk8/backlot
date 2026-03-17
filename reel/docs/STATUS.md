@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 146 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
+**Core agent runtime and tooling implemented. All 179 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
 
 ## What Is Implemented
 
@@ -16,7 +16,8 @@
 - **Network control** (`nu_session.rs`, `tools.rs`) — `ToolGrant::NETWORK` flag gates sandbox network access. Network denied by default; requires explicit `network` grant in config. Closes issue #22.
 - **Config API cleanup** — `build_request_config` uses clone-and-mutate (closes issue #27). CLI `parse_config` uses single-pass YAML parsing: parse as `Value`, pop `grant`, pass remainder to flick (closes issue #16).
 - **Typed error types** — `GrantParseError` struct for `ToolGrant::from_names`. Re-exported from `reel::GrantParseError` (closes issue #30).
-- **Test counts** — 146 tests total, all pass locally.
+- **Test coverage expansion** — `ToolGrant::from_names` unit tests (issue #36), custom `ToolHandler` dispatch tests (issue #1), full tool execution path integration tests (issue #2), CLI `parse_config`/`emit_error` tests (issue #12), sandbox network denial integration tests (issue #37).
+- **Test counts** — 179 tests total (168 reel + 11 reel-cli), all pass locally.
 
 ## What Is NOT Implemented
 
@@ -59,4 +60,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-No high-priority items remain. Testing gaps from ISSUES.md and NuSession correctness issues (#20, #21, #3a) are candidates for future work.
+Testing gaps #1, #2, #12, #36, #37 resolved. Remaining candidates: NuSession correctness (#20, #21, #3a), remaining testing gaps (#3b, #3d, #3e, #3f, #6, #7, #13, #14, #15, #38), simplification (#3c, #10, #11, #17, #18).
