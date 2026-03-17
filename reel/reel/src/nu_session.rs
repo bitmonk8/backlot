@@ -2270,6 +2270,136 @@ mod tests {
         }
     }
 
+    /// Verify that lot's kill() actually terminates the inner child (nu).
+    ///
+    /// Hypothesis: on Linux, lot uses unshare(CLONE_NEWPID) which does NOT
+    /// place the helper in the new PID namespace. The inner child is PID 1 in
+    /// the new namespace. Killing the helper does NOT collapse the namespace,
+    /// so the inner child (nu) survives and holds pipes open, causing hangs.
+    ///
+    /// This test checks process liveness via /proc rather than testing pipe
+    /// behavior, to avoid leaking a blocked spawn_blocking task that would
+    /// hang the tokio runtime shutdown.
+    #[tokio::test]
+    async fn diag_kill_closes_pipes() {
+        skip_no_nu!();
+        let project = tmp_sandbox_project();
+        let (session, _cache) = isolated_session();
+        try_spawn(&session, project.path(), ToolGrant::NU).await;
+
+        // Get the child PID (helper PID) before killing
+        let helper_pid = {
+            let st = session.state.lock().await;
+            let proc = st.process.as_ref().unwrap();
+            let guard = proc.child_handle.lock().unwrap();
+            guard.as_ref().map(|c| c.id())
+        };
+        eprintln!("DIAG-KILL: helper_pid = {:?}", helper_pid);
+
+        // On Linux, find the inner child PID via /proc before killing
+        #[cfg(target_os = "linux")]
+        let inner_child_pids: Vec<u32> = if let Some(pid) = helper_pid {
+            let children_path = format!("/proc/{pid}/task/{pid}/children");
+            match std::fs::read_to_string(&children_path) {
+                Ok(children) => {
+                    let pids: Vec<u32> = children
+                        .trim()
+                        .split_whitespace()
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    eprintln!("DIAG-KILL: helper children before kill: {:?}", pids);
+                    pids
+                }
+                Err(e) => {
+                    eprintln!("DIAG-KILL: could not read children: {e}");
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+
+        // Kill via session.kill() (same path as timeout recovery)
+        session.kill().await;
+        eprintln!("DIAG-KILL: session.kill() completed");
+
+        // Wait briefly for processes to die
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Check if the helper and inner child are still alive (Linux only)
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(pid) = helper_pid {
+                let helper_status = format!("/proc/{pid}/status");
+                match std::fs::read_to_string(&helper_status) {
+                    Ok(status) => {
+                        let state_line = status
+                            .lines()
+                            .find(|l| l.starts_with("State:"))
+                            .unwrap_or("State: unknown");
+                        eprintln!("DIAG-KILL: helper status after kill: {state_line}");
+                    }
+                    Err(_) => eprintln!("DIAG-KILL: helper /proc entry gone (reaped or dead)"),
+                }
+            }
+
+            for inner_pid in &inner_child_pids {
+                let status_path = format!("/proc/{inner_pid}/status");
+                match std::fs::read_to_string(&status_path) {
+                    Ok(status) => {
+                        let state_line = status
+                            .lines()
+                            .find(|l| l.starts_with("State:"))
+                            .unwrap_or("State: unknown");
+                        let name_line = status
+                            .lines()
+                            .find(|l| l.starts_with("Name:"))
+                            .unwrap_or("Name: unknown");
+                        let ppid_line = status
+                            .lines()
+                            .find(|l| l.starts_with("PPid:"))
+                            .unwrap_or("PPid: unknown");
+                        eprintln!(
+                            "DIAG-KILL: inner child {inner_pid} STILL ALIVE: \
+                             {state_line}, {name_line}, {ppid_line}"
+                        );
+                        eprintln!(
+                            "DIAG-KILL: CONFIRMED — lot's kill() does not terminate \
+                             the inner child. The helper is NOT PID namespace init \
+                             (it used unshare, not clone). Killing it orphans the \
+                             inner child instead of collapsing the namespace."
+                        );
+                        // Clean up: kill the inner child directly so it doesn't
+                        // leak and block subsequent tests
+                        let _ = std::process::Command::new("kill")
+                            .args(["-9", &inner_pid.to_string()])
+                            .output();
+                        eprintln!("DIAG-KILL: sent SIGKILL to inner child {inner_pid}");
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "DIAG-KILL: inner child {inner_pid} /proc entry gone — \
+                             process terminated (namespace collapsed correctly)"
+                        );
+                    }
+                }
+            }
+
+            if inner_child_pids.is_empty() {
+                eprintln!(
+                    "DIAG-KILL: could not find inner child PIDs — \
+                     cannot verify kill behavior"
+                );
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            eprintln!("DIAG-KILL: /proc inspection only available on Linux");
+            let _ = helper_pid;
+        }
+    }
+
     /// Test with stderr captured to see if open prints errors there
     #[tokio::test]
     async fn diag_open_with_stderr() {
@@ -2320,7 +2450,7 @@ mod tests {
             next_id: 1,
             grant,
             project_root: project.path().to_path_buf(),
-            child_handle,
+            child_handle: Arc::clone(&child_handle),
             _session_temp_dir: session_temp_dir,
         };
 
@@ -2358,7 +2488,7 @@ mod tests {
         let result2 = rpc_call(&mut proc, &ls_cmd);
         eprintln!("DIAG-STDERR ls result: {:?}", result2);
 
-        // Now read stderr
+        // Now read stderr with a timeout thread
         let mut stderr_buf = BufReader::new(stderr);
         use std::io::Read;
         let stderr_handle = std::thread::spawn(move || {
@@ -2379,8 +2509,7 @@ mod tests {
 
         // Kill the process to unblock stderr read
         {
-            let mut guard = proc
-                .child_handle
+            let mut guard = child_handle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref mut child) = *guard {
@@ -2388,8 +2517,29 @@ mod tests {
             }
         }
 
-        match stderr_handle.join() {
-            Ok(stderr_text) => {
+        // Wait for stderr thread with a timeout — on Linux, lot's kill() sends
+        // SIGKILL to the helper process but the inner child (nu, PID 1 in the
+        // PID namespace) may survive because the helper used unshare(CLONE_NEWPID)
+        // rather than clone(CLONE_NEWPID), so the helper is NOT PID namespace
+        // init. If the inner child survives, it holds the stderr pipe open and
+        // this join would block forever.
+        let join_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let stderr_result = loop {
+            if stderr_handle.is_finished() {
+                break Some(stderr_handle.join());
+            }
+            if std::time::Instant::now() >= join_deadline {
+                eprintln!(
+                    "DIAG-STDERR: stderr thread did not finish within 5s after kill — \
+                     inner child likely survived helper kill (PID namespace not collapsed)"
+                );
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+
+        match stderr_result {
+            Some(Ok(stderr_text)) => {
                 if stderr_text.is_empty() {
                     eprintln!("DIAG-STDERR: stderr is empty");
                 } else {
@@ -2399,8 +2549,16 @@ mod tests {
                     );
                 }
             }
-            Err(_) => eprintln!("DIAG-STDERR: stderr thread panicked"),
+            Some(Err(_)) => eprintln!("DIAG-STDERR: stderr thread panicked"),
+            None => {
+                eprintln!("DIAG-STDERR: TIMEOUT — kill did not close stderr pipe");
+            }
         }
+
+        // Drop proc to close our end of the pipes — this will cause the
+        // surviving inner child to get SIGPIPE on next write, eventually
+        // killing it.
+        drop(proc);
     }
 
     /// Narrow down the exact divergence between `path exists` (works) and
