@@ -405,9 +405,40 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
 /// Add an explicit deny ACE for the AppContainer SID on a path. Windows
 /// evaluates explicit denies before explicit allows, so this overrides
 /// any inherited or direct allow ACEs.
+///
+/// For directories, the deny ACE is applied with `SUB_CONTAINERS_AND_OBJECTS_INHERIT`
+/// (via `apply_ace`) so newly created children inherit it. Existing children do not
+/// reliably receive inherited ACEs from `SetNamedSecurityInfoW`, so we also walk
+/// the tree and apply the deny ACE directly to every existing entry.
 fn deny_access(sid: PSID, path: &Path) -> io::Result<()> {
     let access_mask = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
-    apply_ace(sid, path, DENY_ACCESS, access_mask)
+    apply_ace(sid, path, DENY_ACCESS, access_mask)?;
+
+    // Recursively apply the deny ACE to all existing children so that
+    // inheritance gaps in SetNamedSecurityInfoW are covered.
+    if path.is_dir() {
+        deny_access_recursive(sid, path, access_mask);
+    }
+    Ok(())
+}
+
+/// Walk `dir` recursively and apply a deny ACE to every entry. Errors on
+/// individual entries (permission denied, races, etc.) are silently skipped.
+fn deny_access_recursive(sid: PSID, dir: &Path, access_mask: u32) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let child = entry.path();
+        let _ = apply_ace(sid, &child, DENY_ACCESS, access_mask);
+        // Recurse into subdirectories.
+        if child.is_dir() {
+            deny_access_recursive(sid, &child, access_mask);
+        }
+    }
 }
 
 // ── Sentinel file ────────────────────────────────────────────────────

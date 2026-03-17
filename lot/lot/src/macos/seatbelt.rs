@@ -293,9 +293,9 @@ fn append_sbpl_rule(
     let Ok(escaped) = escape_sbpl_path(&resolved) else {
         return;
     };
-    profile.push_str("(");
+    profile.push('(');
     profile.push_str(action);
-    profile.push_str(" ");
+    profile.push(' ');
     profile.push_str(operation);
     profile.push_str(" (");
     profile.push_str(filter);
