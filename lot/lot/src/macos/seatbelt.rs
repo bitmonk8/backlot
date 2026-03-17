@@ -112,12 +112,30 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
 
     // Scoped process-exec: target binary + exec_paths + system bin dirs.
     // Each also needs file-read* and file-map-executable so dyld can load the binary.
-    append_sbpl_rule(&mut profile, "allow", "process-exec", "literal", program_path);
+    append_sbpl_rule(
+        &mut profile,
+        "allow",
+        "process-exec",
+        "literal",
+        program_path,
+    );
     append_sbpl_rule(&mut profile, "allow", "file-read*", "literal", program_path);
-    append_sbpl_rule(&mut profile, "allow", "file-map-executable", "literal", program_path);
+    append_sbpl_rule(
+        &mut profile,
+        "allow",
+        "file-map-executable",
+        "literal",
+        program_path,
+    );
     for path in &policy.exec_paths {
         append_sbpl_rule(&mut profile, "allow", "process-exec", "subpath", path);
-        append_sbpl_rule(&mut profile, "allow", "file-map-executable", "subpath", path);
+        append_sbpl_rule(
+            &mut profile,
+            "allow",
+            "file-map-executable",
+            "subpath",
+            path,
+        );
     }
     for sys_path in EXEC_SYSTEM_PATHS {
         let sys = std::path::Path::new(sys_path);
@@ -176,7 +194,13 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     // every policy path so the kernel allows directory traversal.
     let ancestor_dirs = collect_ancestor_dirs(policy, program_path);
     for ancestor in &ancestor_dirs {
-        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "literal", ancestor);
+        append_sbpl_rule(
+            &mut profile,
+            "allow",
+            "file-read-metadata",
+            "literal",
+            ancestor,
+        );
     }
 
     // Network access
@@ -493,8 +517,20 @@ mod tests {
         };
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
         // /a and /a/b appear once each despite shared ancestry
-        assert_eq!(ancestors.iter().filter(|p| *p == &PathBuf::from("/a")).count(), 1);
-        assert_eq!(ancestors.iter().filter(|p| *p == &PathBuf::from("/a/b")).count(), 1);
+        assert_eq!(
+            ancestors
+                .iter()
+                .filter(|p| *p == &PathBuf::from("/a"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            ancestors
+                .iter()
+                .filter(|p| *p == &PathBuf::from("/a/b"))
+                .count(),
+            1
+        );
     }
 
     #[test]

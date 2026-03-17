@@ -572,10 +572,8 @@ fn test_deny_path_blocks_access_to_subtree() {
         exec_paths.push(PathBuf::from("/usr/bin"));
     }
 
-    let allowed_dir_canon =
-        std::fs::canonicalize(&allowed_dir).expect("canonicalize allowed_dir");
-    let denied_dir_canon =
-        std::fs::canonicalize(&denied_dir).expect("canonicalize denied_dir");
+    let allowed_dir_canon = std::fs::canonicalize(&allowed_dir).expect("canonicalize allowed_dir");
+    let denied_dir_canon = std::fs::canonicalize(&denied_dir).expect("canonicalize denied_dir");
 
     let policy = lot::SandboxPolicy {
         read_paths: vec![allowed_dir_canon],
@@ -626,10 +624,7 @@ fn test_deny_path_blocks_access_to_subtree() {
     let pub_child = must_spawn(&policy, &pub_cmd);
     let pub_output = pub_child.wait_with_output().expect("wait_with_output");
 
-    eprintln!(
-        "[diag] public read exit status: {:?}",
-        pub_output.status
-    );
+    eprintln!("[diag] public read exit status: {:?}", pub_output.status);
 
     assert!(
         pub_output.status.success(),
