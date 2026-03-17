@@ -102,10 +102,6 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/nu_session.rs` — `spawn()` returns early if `process.is_some()` without checking whether the existing process matches the requested parameters. **Category: Correctness.**
 
-### 22. Nu sandbox allows network unconditionally
-
-`reel/src/nu_session.rs` — `build_nu_sandbox_policy` sets `.allow_network(true)` regardless of grant level. A model-crafted NuShell command could exfiltrate data. **Category: Security.**
-
 ### 23. Nu stderr discarded
 
 `reel/src/nu_session.rs` — `cmd.stderr(SandboxStdio::Null)` silently drops nu stderr. Errors outside JSON-RPC are lost. **Category: Debuggability.**
@@ -157,3 +153,15 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 ### 35. reel-cli dry run output omits grant info and uses different JSON format
 
 `reel-cli/src/main.rs` — Dry run uses `to_string_pretty` and omits the resolved `ToolGrant`; success output uses `to_string` (compact). Inconsistent format and missing diagnostic info. **Category: Usability.**
+
+### 36. `ToolGrant::from_names` has no unit tests
+
+`reel/src/tools.rs` — No tests for `from_names` parsing of `"write"`, `"nu"`, `"network"`, combined flags, or unknown grant error. **Category: Testing.**
+
+### 37. No integration test for sandbox network denial
+
+`reel/src/nu_session.rs` — Unit tests check the `allow_network` policy field, but no integration test confirms the sandbox actually blocks network operations without `NETWORK` grant. Same gap pattern as write-path enforcement. **Category: Testing.**
+
+### 38. Grant-change respawn test does not cover NETWORK flag
+
+`reel/src/nu_session.rs` — `integration_grant_change_respawns` only tests `NU` → `NU | WRITE`. No coverage for `NETWORK` flag change triggering respawn. Mechanism works via full bitflags comparison, so regression is unlikely. **Category: Testing.**

@@ -56,10 +56,12 @@ system_prompt: "You are a code assistant."
 # --- Reel-specific fields ---
 
 # Tool grants: which built-in tools the agent may use.
-# Possible values: "write", "nu". Omit or leave empty for read-only tools.
+# Possible values: "write", "nu", "network". Omit or leave empty for read-only tools.
+# "network" enables outbound network access from the sandbox (denied by default).
 grant:
   - nu
   - write
+  - network
 ```
 
 ### How it works

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 145 tests pass locally and in CI on all three platforms.** Lot dependency at rev `c3cc94d`. CI fully green: Windows (145 pass), Linux (145 pass), macOS (145 pass). Linux CI now runs tests in parallel (ETXTBSY fix in lot).
+**Core agent runtime and tooling implemented. All 146 tests pass locally.** Lot dependency at rev `c3cc94d`. CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
 
 ## What Is Implemented
 
@@ -13,13 +13,13 @@
 - **CLI binary** (`reel-cli`) — `reel run` (execute agent query with YAML config, stdin, dry-run) and `reel setup` (Windows AppContainer ACL prerequisites). Two-pass YAML config parsing: extract reel `grant` field, pass remainder to flick. Uses `reel::sandbox` for all platform prerequisite checks.
 - **Build infrastructure** (`build.rs`) — Downloads prebuilt NuShell 0.111.0 and ripgrep 14.1.1 binaries for target platform, verifies SHA-256, caches in `target/nu-cache/`. Generates `reel_config.nu` and `reel_env.nu` for nu custom commands.
 - **CI pipeline** — GitHub Actions: fmt, clippy, test, build on Ubuntu, macOS, Windows. Rust 1.93.1 toolchain. Dependencies use pinned git revs (lot, flick). Linux CI uses dynamic cgroup delegation (discovers runner's actual cgroup, enables controllers hierarchically, creates sibling cgroup).
-- **Test counts** — 145 tests total, all pass locally. (25 assertion-free diagnostic tests removed.)
+- **Network control** (`nu_session.rs`, `tools.rs`) — `ToolGrant::NETWORK` flag gates sandbox network access. Network denied by default; requires explicit `network` grant in config. Closes issue #22.
+- **Test counts** — 146 tests total, all pass locally.
 
 ## What Is NOT Implemented
 
 These are known gaps with no corresponding code:
 
-- **Network control** — Sandbox always allows network. Should be gated by grant or policy (issue #22).
 - **Proper error types** — `ToolGrant::from_names` returns `Result<_, String>`. Should use typed errors (issue #30).
 - **Config API mutations** — Flick's `RequestConfig` cannot be mutated post-parse; reel reconstructs via serialization workaround (issue #27).
 - **ToolHandler consumer** — Trait exists but no real consumer yet. Design assumes epic's Research Service as first consumer.
@@ -32,7 +32,7 @@ All 6 built-in tools execute through a shared NuShell session (custom commands o
 
 ### Grant-based tool availability
 
-Bitflags (`WRITE`, `NU`) determine tool list and sandbox policy. Binary decision — no per-tool grants.
+Bitflags (`WRITE`, `NU`, `NETWORK`) determine tool list and sandbox policy. Binary decision — no per-tool grants. Network access denied by default; requires explicit `NETWORK` grant.
 
 ### Tool loop over streaming
 
@@ -53,15 +53,11 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 | Format | pass | |
 | Clippy (all 3) | pass | |
 | Build (all 3) | pass | |
-| Test (Windows) | pass | 145 pass |
-| Test (Linux) | pass | 145 pass |
-| Test (macOS) | pass | 145 pass |
+| Test (Windows) | pass | |
+| Test (Linux) | pass | |
+| Test (macOS) | pass | |
 
 ## Work Candidates
-
-### Network control for sandbox (issue #22)
-
-Sandbox unconditionally allows network. A model-crafted NuShell command could exfiltrate data. Should be gated by grant or policy.
 
 ### Config API cleanup (issues #27, #16)
 

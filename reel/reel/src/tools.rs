@@ -20,11 +20,13 @@ bitflags! {
     ///
     /// All tools execute through the nu session. WRITE controls whether
     /// mutation tools (Write, Edit) are available and whether the sandbox
-    /// grants write access to the project root.
+    /// grants write access to the project root. NETWORK controls whether
+    /// the sandbox allows outbound network access.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ToolGrant: u8 {
-        const WRITE = 0b0000_0001;
-        const NU    = 0b0000_0010;
+        const WRITE   = 0b0000_0001;
+        const NU      = 0b0000_0010;
+        const NETWORK = 0b0000_0100;
     }
 }
 
@@ -36,6 +38,7 @@ impl ToolGrant {
             match name.as_ref() {
                 "write" => flags |= Self::WRITE,
                 "nu" => flags |= Self::NU,
+                "network" => flags |= Self::NETWORK,
                 other => return Err(format!("unknown grant: {other}")),
             }
         }

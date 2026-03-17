@@ -500,7 +500,7 @@ fn build_nu_sandbox_policy(
 ) -> lot::Result<lot::SandboxPolicy> {
     let mut builder = SandboxPolicyBuilder::new()
         .write_path(session_temp_dir)
-        .allow_network(true);
+        .allow_network(grant.contains(ToolGrant::NETWORK));
 
     if grant.contains(ToolGrant::WRITE) {
         builder = builder.write_path(project_root);
@@ -719,12 +719,32 @@ mod tests {
     }
 
     #[test]
-    fn test_build_nu_sandbox_policy_allows_network() {
+    fn test_build_nu_sandbox_policy_denies_network_by_default() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
         let policy =
             build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
-        assert!(policy.allow_network);
+        assert!(
+            !policy.allow_network,
+            "network should be denied when NETWORK grant is absent"
+        );
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_allows_network_with_grant() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(
+            tmp.path(),
+            ToolGrant::NU | ToolGrant::NETWORK,
+            None,
+            sess_tmp.path(),
+        )
+        .unwrap();
+        assert!(
+            policy.allow_network,
+            "network should be allowed when NETWORK grant is present"
+        );
     }
 
     #[test]
