@@ -114,7 +114,7 @@ fn parse_config(text: &str) -> Result<(reel::RequestConfig, reel::ToolGrant), St
                         .ok_or_else(|| "grant entries must be strings".to_string())
                 })
                 .collect::<Result<_, _>>()?;
-            reel::ToolGrant::from_names(&strs)?
+            reel::ToolGrant::from_names(&strs).map_err(|e| e.to_string())?
         }
         Some(serde_yml::Value::Null) | None => reel::ToolGrant::empty(),
         Some(_) => return Err("grant must be a list of strings".into()),

@@ -15,13 +15,13 @@
 - **CI pipeline** — GitHub Actions: fmt, clippy, test, build on Ubuntu, macOS, Windows. Rust 1.93.1 toolchain. Dependencies use pinned git revs (lot, flick). Linux CI uses dynamic cgroup delegation (discovers runner's actual cgroup, enables controllers hierarchically, creates sibling cgroup).
 - **Network control** (`nu_session.rs`, `tools.rs`) — `ToolGrant::NETWORK` flag gates sandbox network access. Network denied by default; requires explicit `network` grant in config. Closes issue #22.
 - **Config API cleanup** — `build_request_config` uses clone-and-mutate (closes issue #27). CLI `parse_config` uses single-pass YAML parsing: parse as `Value`, pop `grant`, pass remainder to flick (closes issue #16).
+- **Typed error types** — `GrantParseError` struct for `ToolGrant::from_names`. Re-exported from `reel::GrantParseError` (closes issue #30).
 - **Test counts** — 146 tests total, all pass locally.
 
 ## What Is NOT Implemented
 
 These are known gaps with no corresponding code:
 
-- **Proper error types** — `ToolGrant::from_names` returns `Result<_, String>`. Should use typed errors (issue #30).
 - **ToolHandler consumer** — Trait exists but no real consumer yet. Design assumes epic's Research Service as first consumer.
 
 ## Design Choices (intentional constraints)
@@ -59,6 +59,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-### Proper error types (issue #30)
-
-`ToolGrant::from_names` returns `Result<_, String>`. Library crate should define typed errors.
+No high-priority items remain. Testing gaps from ISSUES.md and NuSession correctness issues (#20, #21, #3a) are candidates for future work.

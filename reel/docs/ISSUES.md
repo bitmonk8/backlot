@@ -130,9 +130,9 @@ Resolved: `RequestConfig` now derives `Clone`; `build_request_config` clones and
 
 `reel/src/nu_session.rs` — Creates `<project_root>/.reel/tmp/` for tempdir. The tempdir itself is cleaned up, but the `.reel/tmp/` parent directory is left behind. Should use system temp dir or clean up the parent. **Category: Side effects.**
 
-### 30. `ToolGrant::from_names` returns `Result<_, String>` instead of a proper error type
+### 30. ~~`ToolGrant::from_names` returns `Result<_, String>` instead of a proper error type~~ RESOLVED
 
-`reel/src/tools.rs` — Library crate should define error types for better consumer error handling. **Category: API design.**
+Resolved: `GrantParseError` struct defined in `tools.rs`, re-exported from `reel::GrantParseError`.
 
 ### 31. `test_support` re-exports leak flick internal types through reel's public API
 

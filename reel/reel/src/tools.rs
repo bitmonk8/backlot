@@ -11,6 +11,21 @@ use serde_json::Value as JsonValue;
 use std::fmt::Write;
 use std::path::Path;
 
+/// Error returned when parsing tool grant names.
+#[derive(Debug, Clone)]
+pub struct GrantParseError {
+    /// The unrecognized grant name.
+    pub name: String,
+}
+
+impl std::fmt::Display for GrantParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown grant: {}", self.name)
+    }
+}
+
+impl std::error::Error for GrantParseError {}
+
 const MAX_NU_OUTPUT: usize = 64 * 1024;
 const DEFAULT_NU_TIMEOUT_SECS: u64 = 120;
 const MAX_NU_TIMEOUT_SECS: u64 = 600;
@@ -32,14 +47,18 @@ bitflags! {
 
 impl ToolGrant {
     /// Parse a list of grant names into a `ToolGrant` bitflag.
-    pub fn from_names(names: &[impl AsRef<str>]) -> Result<Self, String> {
+    pub fn from_names(names: &[impl AsRef<str>]) -> Result<Self, GrantParseError> {
         let mut flags = Self::empty();
         for name in names {
             match name.as_ref() {
                 "write" => flags |= Self::WRITE,
                 "nu" => flags |= Self::NU,
                 "network" => flags |= Self::NETWORK,
-                other => return Err(format!("unknown grant: {other}")),
+                other => {
+                    return Err(GrantParseError {
+                        name: other.to_string(),
+                    })
+                }
             }
         }
         Ok(flags)

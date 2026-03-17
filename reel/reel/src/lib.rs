@@ -16,7 +16,7 @@ pub use nu_session::NuSession;
 /// Describes a tool's name, description, and JSON Schema parameters as seen
 /// by the model.
 pub use tools::ToolDefinition;
-pub use tools::{ToolExecResult, ToolGrant, tool_definitions};
+pub use tools::{GrantParseError, ToolExecResult, ToolGrant, tool_definitions};
 
 // Re-export flick types consumers need for building AgentEnvironment / config.
 /// Opaque tool configuration type. Used when injecting tools into a
