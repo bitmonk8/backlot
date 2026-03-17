@@ -57,7 +57,7 @@ impl ToolGrant {
                 other => {
                     return Err(GrantParseError {
                         name: other.to_string(),
-                    })
+                    });
                 }
             }
         }
