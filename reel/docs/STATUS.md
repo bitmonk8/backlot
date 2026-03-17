@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 145 tests pass locally and in CI on all three platforms.** Lot dependency at rev `0729510`. CI fully green: Windows (145 pass), Linux (145 pass), macOS (145 pass).
+**Core agent runtime and tooling implemented. All 145 tests pass locally and in CI on all three platforms.** Lot dependency at rev `c3cc94d`. CI fully green: Windows (145 pass), Linux (145 pass), macOS (145 pass). Linux CI now runs tests in parallel (ETXTBSY fix in lot).
 
 ## What Is Implemented
 
