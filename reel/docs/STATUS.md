@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 170 tests pass locally.** Lot dependency updated to rev `1a6fc30` which includes Linux namespace fixes (mount_proc, pivot_root, cwd ordering), cgroup delegation improvements, seccomp allowlist fixes, and PR_SET_PDEATHSIG for reliable inner child termination. CI pipeline updated with proper Linux cgroup delegation matching lot's working setup. Windows CI green (170 pass). Linux CI nearly green (168 pass, 2 fail — unrelated rg/temp issues). macOS CI has 4 failures (nu_glob intermediate directory traversal, issue #9c).
+**Core agent runtime and tooling implemented. All 170 tests pass locally.** Lot dependency updated to rev `1a6fc30` which includes Linux namespace fixes (mount_proc, pivot_root, cwd ordering), cgroup delegation improvements, seccomp allowlist fixes, and PR_SET_PDEATHSIG for reliable inner child termination. CI pipeline updated with proper Linux cgroup delegation matching lot's working setup. Windows CI green (170 pass). Linux CI green (170 pass). macOS CI has 3 failures (nu_glob intermediate directory traversal, issue #9c).
 
 ## What Is Implemented
 
@@ -81,8 +81,8 @@ Updated lot from `4e478de` to `a17cedf` (45 commits). Key changes consumed by re
 | Clippy (all 3) | pass | |
 | Build (all 3) | pass | |
 | Test (Windows) | pass | 170 pass |
-| Test (Linux) | pass (2 unrelated failures) | 168 pass, 2 fail — see below |
-| Test (macOS) | fail | 4 failures — nu_glob intermediate directory traversal (issue #9c) |
+| Test (Linux) | pass | 170 pass |
+| Test (macOS) | fail | 3 failures — nu_glob intermediate directory traversal (issue #9c) |
 
 ### Linux CI progress
 
