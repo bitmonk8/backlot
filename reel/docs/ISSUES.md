@@ -10,45 +10,37 @@
 
 `reel/src/tools.rs`, `reel/src/nu_session.rs` — Unit tests exist for `quote_nu()`, grant checks, sandbox policy, and response parsing. No end-to-end test validates `execute_tool()` → NuSession command translation → subprocess execution → result parsing. **Category: Testing.**
 
-### 3. Items migrated from epic
-
-The following issues were originally tracked in epic's `docs/ISSUES.md` and moved here during the reel extraction. Line numbers refer to reel's copies of the files.
-
-#### 3a. `NuProcess::drop` uses unbounded `wait()` after `kill()`
+### 3a. `NuProcess::drop` uses unbounded `wait()` after `kill()`
 
 `child.wait()` in `Drop` uses `WaitForSingleObject(INFINITE)`. If `kill()` fails silently, `wait()` blocks indefinitely. Practical likelihood very low. Drop impl relies on struct field declaration order for kill→wait→TempDir-drop. **Category: Correctness (edge case).**
 
-#### 3b. Per-session temp dir test gaps
+### 3b. Per-session temp dir test gaps
 
 Missing tests: nu seeing overridden `TEMP`/`TMP` env vars, read-only session writing to temp dir, temp dir cleanup on drop, `spawn_nu_process` with nonexistent `project_root`, policy test asserting absence of system temp dirs from `write_paths`. **Category: Testing.**
 
-#### 3c. Policy test boilerplate duplication
+### 3c. Policy test boilerplate duplication
 
 5 `build_nu_sandbox_policy` tests repeat identical `TempDir` + `TempDir::new_in` setup. Extract a helper. **Category: Simplification.**
 
-#### 3d. Tests assume `REEL_RG_PATH` is always set
+### 3d. Tests assume `REEL_RG_PATH` is always set
 
 Two tests use `^$env.REEL_RG_PATH` without guarding for absence. **Category: Testing.**
 
-#### 3e. No test for `rg_binary = None` branch
+### 3e. No test for `rg_binary = None` branch
 
 No test covers `resolve_rg_binary` returning `None`. **Category: Testing.**
 
-#### 3f. `resolve_rg_binary` has no direct unit tests
+### 3f. `resolve_rg_binary` has no direct unit tests
 
 Tested only indirectly through integration tests. **Category: Testing.**
 
-#### 3g. `isolated_session()` silent fallback defeats isolation
+### 3g. `isolated_session()` silent fallback defeats isolation
 
 Falls back to `NuSession::new()` when `tmp_sandbox_cache()` returns `None`. Should panic instead. **Category: Testing.**
 
-#### 3h. No mechanism to prevent `NuSession::new()` in tests
+### 3h. No mechanism to prevent `NuSession::new()` in tests
 
 Nothing prevents tests from using `NuSession::new()` directly instead of `isolated_session()`. **Category: Testing.**
-
-### ~~4. `lot` dependency uses local path override~~ (FIXED)
-
-Fixed: replaced with `git = "https://github.com/bitmonk8/lot", rev = "8b468d7"`. **Category: Build.**
 
 ### 5. `Agent::run()` dispatch heuristic uses `ToolGrant::NU` instead of tool availability
 
@@ -66,123 +58,6 @@ Fixed: replaced with `git = "https://github.com/bitmonk8/lot", rev = "8b468d7"`.
 
 `reel/src/lib.rs` — `pub use nu_session::NuSession` is part of the public API but no consumer uses it directly. Consider removing after API stabilization. **Category: Placement.**
 
-### ~~9. Pre-existing test failures~~ (PARTIALLY FIXED)
-
-#### ~~9a. Sandbox policy path overlap (5 tests)~~ (FIXED)
-
-Fixed by lot rev `f131ad9` which allows write-path children under read-path parents.
-
-#### ~~9b. Nu custom commands not loaded~~ (FIXED)
-
-Fixed: removed obsolete `--string` flag from `reel_config.nu` for nu 0.111.0.
-
-#### 9c. Nu built-in file commands fail inside AppContainer sandbox (3 tests)
-
-**Root cause: missing ALL APPLICATION PACKAGES traverse ACEs on intermediate directories between the volume root and the sandbox policy paths.** nu_glob walks path components from root to leaf, calling `fs::metadata()` at each level. When an intermediate directory lacks the traverse ACE, `fs::metadata()` returns "Permission denied" and nu_glob produces zero matches.
-
-##### Root cause mechanism
-
-nu 0.111.0's `ls` and `open` commands resolve file paths through `glob_from()` → `nu_glob::glob_with()`. The nu_glob crate's `fill_todo` function (`crates/nu-glob/src/lib.rs:977-996`) walks path components **one at a time from the filesystem root**. For non-glob patterns (literal filenames), it calls `fs::metadata(&next_path)` at each intermediate directory to verify it exists before descending.
-
-Inside a Windows AppContainer, `fs::metadata()` requires `FILE_READ_ATTRIBUTES` permission on the target path. Directories that lack an ALL APPLICATION PACKAGES (`S-1-15-2-1`) traverse ACE (which includes `FILE_READ_ATTRIBUTES`) return "Permission denied". nu_glob treats this as "path doesn't exist" and produces an empty iterator.
-
-In contrast, nu's `glob` command uses the `wax` crate → `walkdir` → `std::fs::read_dir()`, which enumerates the parent directory via `FindFirstFileW`/`FindNextFileW`. This works because the AppContainer has access to the granted leaf directory directly, without needing to traverse intermediates one at a time.
-
-Similarly, `path exists` calls `fs::metadata()` on the **full final path** in a single call. The AppContainer allows this for paths within the grant because the per-profile ACE on the policy path (with `SUB_CONTAINERS_AND_OBJECTS_INHERIT`) covers the full path. Only the component-by-component walk triggers the intermediate directory check.
-
-##### How lot's ACL system works (two tiers)
-
-1. **Per-spawn** (`grant_acls` in `appcontainer.rs:1385`): Grants the ephemeral per-profile AppContainer SID on the exact policy paths (read/write/exec). Runs at normal privilege. Does NOT grant on ancestors.
-
-2. **Prerequisites** (`grant_appcontainer_prerequisites` in `nul_device.rs:617`): Grants ALL APPLICATION PACKAGES traverse ACEs (`FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE`) on every ancestor directory of the input paths, plus NUL device access. Requires elevation. Designed as one-time machine setup.
-
-`compute_ancestors` (`nul_device.rs:352-377`) walks `parent()` up to the volume root. It excludes the input paths themselves — only ancestors.
-
-##### The gap
-
-`reel setup` (`reel-cli/src/main.rs:276`) passes only `cwd` to `grant_appcontainer_prerequisites`. This grants traverse ACEs on ancestors of cwd. But the test sandbox paths are **children** of cwd (e.g., `<cwd>/reel/target/sandbox-test/.tmpXXX`). The intermediate directories between cwd and the sandbox path (`reel/`, `reel/target/`, `reel/target/sandbox-test/`) receive NO traverse ACEs because they are descendants of cwd, not ancestors.
-
-##### Evidence: intermediate directory metadata failure
-
-Diagnostic test `diag_intermediate_dir_metadata` probes `path exists` and `path type` (which calls `fs::symlink_metadata`) on every path component from root to the test file inside the AppContainer:
-
-| Path component | `path exists` | `path type` |
-|---|---|---|
-| `C:\` | true | dir |
-| `C:\UnitySrc` | true | dir |
-| `C:\UnitySrc\reel` | true | dir |
-| `C:\UnitySrc\reel\reel` | **false** | **Permission denied** |
-| `C:\UnitySrc\reel\reel\target` | **false** | **Permission denied** |
-| `C:\UnitySrc\reel\reel\target\sandbox-test` | **false** | **Permission denied** |
-| `...\sandbox-test\.tmpXXX` (granted dir) | true | dir |
-| `...\sandbox-test\.tmpXXX\probe.txt` | true | file |
-
-`C:\` and `C:\UnitySrc` have ALL APPLICATION PACKAGES traverse ACEs (from a prior `reel setup` run). `C:\UnitySrc\reel` has inherited `BUILTIN\Users:(RX)` which provides sufficient access. `C:\UnitySrc\reel\reel` through `sandbox-test` have neither — the AppContainer cannot read their attributes.
-
-##### Confirmed fix
-
-Manually granting ALL APPLICATION PACKAGES traverse ACEs on the intermediate directories (`C:\UnitySrc\reel\reel`, `reel\target`, `reel\target\sandbox-test`) causes all 3 tests to pass. This was verified by running `grant_appcontainer_prerequisites` with paths deep enough to cover the test sandbox directory.
-
-##### How `open` fails silently
-
-`open` uses the same `glob_from()` → `nu_glob` path as `ls` (`crates/nu-command/src/filesystem/open.rs:110-126`). When nu_glob returns zero matches (due to the intermediate directory permission failure), the `output` vec is empty. At line 258-259, `open` returns `PipelineData::empty()` — no error, no data, just nothing.
-
-##### Affected nu commands and code paths
-
-| Command | Crate | Function | Fails because |
-|---|---|---|---|
-| `ls <file>` | nu_glob | `fill_todo` (lib.rs:992) | `fs::metadata()` on intermediate dir |
-| `ls <glob>` | nu_glob | `fill_todo` (lib.rs:999) | `fs::read_dir()` on intermediate dir |
-| `open <file>` | nu_glob (via glob_from) | same as ls | same; then silently returns empty |
-| `glob <pattern>` | wax/walkdir | `read_dir` on leaf dir | **works** — no intermediate walk |
-| `path exists` | std | `fs::metadata` on full path | **works** — single call to leaf |
-
-##### Verified behavior inside AppContainer (lot::spawn)
-
-**Commands that FAIL (all due to nu_glob intermediate directory walk):**
-- `ls` (no args) — "No matches found for Expand(`*`)"
-- `ls <file-path>` — "No matches found for DoNotExpand(`...`)"
-- `ls *.txt`, `ls **/*.txt` — "No matches found"
-- `open <file>` (any variant) — silently returns `nothing`
-
-**Commands that WORK (bypass nu_glob or use direct path access):**
-- `ls <dir-path>`, `ls .` — uses `read_dir` on the granted directory directly
-- `glob '*'`, `glob <exact-path>` — uses wax crate, not nu_glob
-- `path exists`, `path type`, `path expand` — single `fs::metadata` on full path
-- `save --force <file>` — direct file write, no glob resolution
-- `pwd`, `cd` — no file lookup
-- External commands via `^` — work (e.g., `rg`)
-
-##### Fix options
-
-**A. Fix reel's `cmd_setup`**: Pass the actual sandbox working directories (not just cwd) to `grant_appcontainer_prerequisites`, so all intermediates between root and the sandbox path get traverse ACEs.
-
-**B. Make lot's `grant_acls` also grant ancestor traverse ACEs**: Would make every spawn self-contained but requires elevation at spawn time, breaking lot's two-tier design.
-
-**C. Rewrite reel's nu custom commands**: Avoid `ls <file>` and `open <file>` entirely. Use `glob` + `ls <dir> | where` for metadata, and an alternative read mechanism (e.g., external command) for file content. Workaround — does not fix the ACL gap.
-
-##### Nushell source references (tag 0.111.0)
-
-- `crates/nu-glob/src/lib.rs:977-996` — `fill_todo`: component-by-component walk with `fs::metadata()`
-- `crates/nu-engine/src/glob_from.rs:32-105` — `glob_from`: constructs absolute glob pattern, calls `nu_glob::glob_with()`
-- `crates/nu-command/src/filesystem/ls.rs:441-468` — `ls` calls `glob_from`, checks `peek().is_none()` for empty iterator
-- `crates/nu-command/src/filesystem/open.rs:110-126,258-259` — `open` calls `glob_from`, returns empty on zero matches
-- `crates/nu-command/src/filesystem/glob.rs:197-251` — `glob` uses wax crate, walks via `walkdir::read_dir`
-
-##### Diagnostic tests
-
-In `reel/src/nu_session.rs`, prefixed with `diag_`. Run with `cargo test -p reel diag_ -- --nocapture`.
-
-- `diag_intermediate_dir_metadata` — probes `path exists`/`path type` on every component from root to test file
-- `diag_metadata_divergence` — shows `path exists` works but `ls <file>` fails for same path
-- `diag_glob_from_path_flow` — shows `glob` works but `ls` fails for same pattern
-- `diag_nu_mcp_without_lot` — proves all commands work without AppContainer
-- `diag_raw_ls_in_sandbox` — shows `ls <file>` fails but `ls <dir>` works
-- `diag_glob_vs_ls_appcontainer` — shows `glob '*'` works but `ls` (same pattern) fails
-- `diag_bytestream_vs_string` — shows `open` returns `nothing`
-
-**Category: Missing ancestor traverse ACEs on intermediate directories between volume root and sandbox policy paths.**
-
 ### 10. `extract_text` uses mutable loop instead of iterator
 
 `reel/src/agent.rs` — `extract_text` iterates forward with a `let mut last_text` variable. Replace with `result.content.iter().rev().find_map(...)`. **Category: Simplification.**
@@ -199,9 +74,9 @@ In `reel/src/nu_session.rs`, prefixed with `diag_`. Run with `cargo test -p reel
 
 `reel/src/agent.rs` — `usage` and `response_hash` mapping from `FlickResult` is untested in both `run_structured` and `run_with_tools` paths. All mock providers use `UsageResponse::default()`. Need tests with non-default usage/hash values. **Category: Testing.**
 
-### 14. `ToolCallsPending` in structured mode — test deleted, not replaced
+### 14. `ToolCallsPending` in structured mode untested
 
-`reel/src/agent.rs` — `run_structured` bails when the model hallucinates tool calls. Epic previously tested this; the test was deleted during extraction but not recreated in reel. **Category: Testing.**
+`reel/src/agent.rs` — `run_structured` bails when the model hallucinates tool calls. No test covers this path. **Category: Testing.**
 
 ### 15. Multi-tool-call-per-round counting untested
 
@@ -223,7 +98,7 @@ In `reel/src/nu_session.rs`, prefixed with `diag_`. Run with `cargo test -p reel
 
 `reel-cli/Cargo.toml` — `reel-cli` depends on `lot` directly and calls `lot::appcontainer_prerequisites_met` / `lot::grant_appcontainer_prerequisites`. Reel should re-export these via a `reel::sandbox` module so consumers don't depend on lot directly.
 
-This is blocking for any library consumer of reel. Lot's spawn-time traverse ACE grants (rev `4e478de`) handle user-owned directories automatically, but system directories (e.g., `C:\Users`) require a one-time elevated setup via `grant_appcontainer_prerequisites`. Without reel re-exporting these APIs, library consumers cannot implement their own elevated setup command — they must add a direct lot dependency and track its version independently.
+Blocking for library consumers. System directories (e.g., `C:\Users`) require a one-time elevated setup via `grant_appcontainer_prerequisites`. Without reel re-exporting these APIs, library consumers must add a direct lot dependency.
 
 **Affected APIs that need re-export:**
 - `grant_appcontainer_prerequisites(paths: &[&Path]) -> Result<()>`
