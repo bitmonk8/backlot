@@ -81,8 +81,17 @@ Updated lot from `4e478de` to `a17cedf` (45 commits). Key changes consumed by re
 | Clippy (all 3) | pass | |
 | Build (all 3) | pass | |
 | Test (Windows) | pass | 169 pass |
-| Test (Linux) | pending | Was 24 failures (cwd bug), fix pushed |
+| Test (Linux) | investigating | Seccomp fixes resolved nu crash; tests now run but hang (likely deadlock in kill/respawn or timeout test) |
 | Test (macOS) | fail | 4 failures — nu_glob intermediate directory traversal (issue #9c) |
+
+### Linux CI progress
+
+Three lot bugs fixed to get nu running inside Linux sandbox:
+1. **chdir after pivot_root** (lot rev `87af454`): `chdir(cwd)` was before `finish_mount_namespace()` which does `pivot_root + chdir("/")`, overwriting the cwd.
+2. **chdir in seccomp** (lot rev `c1c4724`): `SYS_chdir`/`SYS_fchdir` missing from allowlist. Nu's startup `set_current_dir()` returned EPERM.
+3. **socketpair in seccomp** (lot rev `a17cedf`): `SYS_socketpair` missing from allowlist. Tokio's signal handler creates UnixStream via `socketpair()`.
+
+After all three fixes, `nu -c 'echo hello'` works correctly inside the sandbox. `nu --mcp` starts and responds to MCP initialize. However, the full test suite hangs (>1 hour) — likely a deadlock in a test that kills/respawns the nu process or waits for a timeout. Needs investigation.
 
 ### macOS CI failures (4 tests)
 
