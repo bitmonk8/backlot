@@ -250,7 +250,7 @@ fn cmd_setup(args: &SetupArgs) -> Result<(), String> {
 fn check_windows_prerequisites(verbose: bool) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("failed to get cwd: {e}"))?;
     let paths: Vec<&std::path::Path> = vec![cwd.as_path()];
-    let ok = lot::appcontainer_prerequisites_met(&paths);
+    let ok = reel::sandbox::appcontainer_prerequisites_met(&paths);
 
     if verbose {
         eprintln!(
@@ -276,7 +276,7 @@ fn configure_windows_prerequisites(verbose: bool) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("failed to get cwd: {e}"))?;
     let paths: Vec<&std::path::Path> = vec![cwd.as_path()];
 
-    lot::grant_appcontainer_prerequisites(&paths).map_err(|e| {
+    reel::sandbox::grant_appcontainer_prerequisites(&paths).map_err(|e| {
         format!("Failed to grant AppContainer prerequisites: {e}. Try running as administrator.")
     })?;
 

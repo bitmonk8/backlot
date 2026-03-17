@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod nu_session;
+pub mod sandbox;
 pub mod tools;
 
 // Re-export public API types.

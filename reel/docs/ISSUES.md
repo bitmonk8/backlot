@@ -94,22 +94,6 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/agent.rs` — One-line public method that calls `Self::build_request_config(request)`. The indirection adds no value. **Category: Simplification.**
 
-### 19. reel does not re-export lot's sandbox prerequisite APIs
-
-`reel-cli/Cargo.toml` — `reel-cli` depends on `lot` directly and calls `lot::appcontainer_prerequisites_met` / `lot::grant_appcontainer_prerequisites`. Reel should re-export these via a `reel::sandbox` module so consumers don't depend on lot directly.
-
-Blocking for library consumers. System directories (e.g., `C:\Users`) require a one-time elevated setup via `grant_appcontainer_prerequisites`. Without reel re-exporting these APIs, library consumers must add a direct lot dependency.
-
-**Affected APIs that need re-export:**
-- `grant_appcontainer_prerequisites(paths: &[&Path]) -> Result<()>`
-- `grant_appcontainer_prerequisites_for_policy(policy: &SandboxPolicy) -> Result<()>`
-- `appcontainer_prerequisites_met(paths: &[&Path]) -> bool`
-- `appcontainer_prerequisites_met_for_policy(policy: &SandboxPolicy) -> bool`
-- `is_elevated() -> bool`
-- `SandboxError::PrerequisitesNotMet` variant (for matching spawn failures)
-
-**Category: API completeness.**
-
 ### 20. `evaluate_inner` holds lock during nu process spawn
 
 `reel/src/nu_session.rs` — `evaluate_inner` awaits `spawn_nu_process` while holding the async `Mutex`, blocking `kill()` if spawn hangs. Should spawn outside the lock. **Category: Concurrency.**

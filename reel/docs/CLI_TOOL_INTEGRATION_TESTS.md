@@ -36,6 +36,3 @@ The failing commands use:
 
 Investigate how nu's `ls`, `open`, and `save` resolve paths inside AppContainer. The difference between the passing and failing commands suggests the issue is in how nu built-in file commands handle absolute paths vs directory-relative operations within the sandbox.
 
-## Re-export lot prerequisite functions (separate issue)
-
-Tracked in ISSUES.md #19. reel-cli depends on lot directly for `appcontainer_prerequisites_met` / `grant_appcontainer_prerequisites`. These should be re-exported via a `reel::sandbox` module.
