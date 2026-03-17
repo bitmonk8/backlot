@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flick = { git = "https://github.com/bitmonk8/flick", rev = "84424ce" }
 bitflags = "2"
-lot = { git = "https://github.com/bitmonk8/lot", rev = "1a6fc30", features = ["tokio"] }
+lot = { git = "https://github.com/bitmonk8/lot", rev = "0729510", features = ["tokio"] }
 tempfile = "3"
 
 [build-dependencies]
