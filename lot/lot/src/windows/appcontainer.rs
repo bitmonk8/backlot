@@ -14,8 +14,9 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, DENY_ACCESS, EXPLICIT_ACCESS_W,
-    GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SDDL_REVISION_1, SE_FILE_OBJECT, SET_ACCESS,
-    SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SDDL_REVISION_1, SE_FILE_OBJECT,
+    SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+    TRUSTEE_W,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile,
@@ -416,14 +417,19 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
 fn deny_access(sid: PSID, path: &Path) -> io::Result<()> {
     let access_mask = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
 
-    // Step 1: Protect the DACL to stop the parent's allow ACE from propagating.
-    // This converts existing inherited ACEs to explicit ACEs on this directory.
     if path.is_dir() {
+        // Step 1: Protect the DACL to stop the parent's allow ACE from
+        // propagating further. Converts inherited ACEs to explicit.
         protect_dacl(path)?;
+
+        // Step 2: Revoke any (now explicit) allow ACE for this SID that was
+        // inherited from the parent grant. Without this, the allow would
+        // propagate to children alongside the deny, and Windows evaluates
+        // inherited ACEs in DACL order (not deny-first).
+        apply_ace(sid, path, REVOKE_ACCESS, access_mask)?;
     }
 
-    // Step 2: Add the deny ACE. SetEntriesInAclW places explicit denies before
-    // explicit allows, so this will precede the (now explicit) parent allow.
+    // Step 3: Add the deny ACE.
     apply_ace(sid, path, DENY_ACCESS, access_mask)?;
 
     Ok(())
