@@ -2303,7 +2303,6 @@ mod tests {
             match std::fs::read_to_string(&children_path) {
                 Ok(children) => {
                     let pids: Vec<u32> = children
-                        .trim()
                         .split_whitespace()
                         .filter_map(|s| s.parse().ok())
                         .collect();

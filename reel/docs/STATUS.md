@@ -93,30 +93,29 @@ Three lot bugs fixed to get nu running inside Linux sandbox:
 
 After all three fixes, `nu -c 'echo hello'` works correctly inside the sandbox. `nu --mcp` starts and responds to MCP initialize.
 
-#### Root cause: lot's kill() does not terminate the inner child
+#### Root cause: lot's kill() does not terminate the inner child directly
 
-The full test suite hangs because lot's `kill()` sends SIGKILL to the **helper process**, but the helper is NOT PID 1 in the PID namespace. Lot uses `unshare(CLONE_NEWPID)` (line 169 in `lot/src/linux/mod.rs`), which does NOT move the calling process into the new namespace — only future children are placed in it. So:
+Lot uses `unshare(CLONE_NEWPID)` (line 169 in `lot/src/linux/mod.rs`), which does NOT move the helper into the new PID namespace — only its children are placed in it. The inner child (nu) is PID 1 in the new namespace. The comment on lot line 410-411 ("The helper is PID namespace init; killing it collapses the namespace") is **technically incorrect** — the helper is NOT PID namespace init.
 
-- **Helper**: stays in the parent PID namespace (NOT PID namespace init)
-- **Inner child** (nu): is PID 1 in the new PID namespace (confirmed by comment on line 230)
-- `kill(helper_pid, SIGKILL)` kills the helper, but the inner child is orphaned (reparented to system init) and **keeps running**
-- Nu holds the write ends of stdout/stderr pipes, so `read_line()` blocks forever
+However, CI evidence shows a nuanced picture:
 
-The comment on lot line 410-411 ("The helper is PID namespace init; killing it collapses the namespace") is **incorrect**.
+**When `NuProcess` is dropped after kill** (normal `session.kill()` path): the parent's stdin pipe is closed → nu receives EOF on stdin → nu exits gracefully. The `diag_kill_closes_pipes` test confirmed the inner child (PID 6323) was gone 500ms after kill. This works because `session.kill()` calls `st.process.take()` which drops the `NuProcess`, closing its `stdin: File`.
 
-**Evidence from CI**: The `diag_open_with_stderr` test was the last test to start (alphabetically after `diag_open_vs_alternatives`). It completed its `rpc_call` operations, then hung at `stderr_handle.join()` because the killed helper's inner child (nu) kept the stderr pipe open. The run was cancelled after 6+ hours.
+**When `NuProcess` is NOT dropped** (timeout/spawn_blocking path or raw `child.kill()`): the parent's stdin pipe remains open → nu stays alive → stdout/stderr pipes stay open → `read_line()` blocks forever. The `diag_open_with_stderr` test confirmed: after `child.kill()` (without dropping `NuProcess`), the stderr thread timed out at 5s — the inner child survived.
 
-**Impact on reel**: Any test or production use that calls `kill()` or triggers a timeout will leave nu processes orphaned. The `integration_timeout_kills_process` test will also hang because:
-1. Timeout fires → `kill()` called → helper dies, nu survives
-2. `spawn_blocking` task blocked on `read_line` from orphaned nu → leaked
-3. Test function returns → tokio runtime shutdown waits for leaked task → hang
+**Timeout scenario deadlock**: When `evaluate()` times out:
+1. `tokio::time::timeout` drops the `evaluate_inner` future → `spawn_blocking` JoinHandle dropped (task continues)
+2. `session.kill()` sends SIGKILL to helper through `inflight_child`
+3. But `NuProcess` (with `stdin: File`) is inside the `spawn_blocking` closure
+4. The closure is blocked on `read_line(stdout)` → can't complete → NuProcess can't drop → stdin stays open → nu stays alive → circular dependency
+5. `integration_timeout_kills_process` took 60s (the `sleep 60sec` in nu expired naturally, then nu exited)
 
-**Fix required in lot**: Either:
-- (A) Track the inner child PID and kill it directly (lot knows `inner_pid` from the fork return)
-- (B) Use `clone(CLONE_NEWPID)` instead of `fork()+unshare()` so the helper IS PID 1
-- (C) Have the helper close child pipe FDs after fork AND kill inner child before exiting
+**CI results after diagnostic fixes** (commit a156540): 168 passed, 2 failed (unrelated rg/temp dir issues), finished in 70s. No hang. The 60s delay in `integration_timeout_kills_process` is the `sleep 60sec` command completing naturally (nu was not killed by lot's `kill()`).
 
-Diagnostic tests `diag_kill_closes_pipes` and updated `diag_open_with_stderr` are deployed to verify this hypothesis in CI.
+**Fix options**:
+- **(A) Fix lot**: Track inner child PID, kill both helper AND inner child. Or use `clone(CLONE_NEWPID)` so the helper IS PID namespace init.
+- **(B) Fix reel**: In `kill()`, close the parent's stdin pipe end to trigger nu's EOF exit. Requires storing a duplicate stdin handle in session state accessible from `kill()`.
+- **(C) Combine**: Fix lot for correctness, and add stdin closure in reel as defense-in-depth.
 
 ### macOS CI failures (4 tests)
 
