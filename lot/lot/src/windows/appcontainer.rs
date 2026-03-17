@@ -22,8 +22,8 @@ use windows_sys::Win32::Security::Isolation::{
 };
 use windows_sys::Win32::Security::{
     ACL, AllocateAndInitializeSid, DACL_SECURITY_INFORMATION, FreeSid, GetSecurityDescriptorDacl,
-    OBJECT_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SID_IDENTIFIER_AUTHORITY,
+    OBJECT_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SID_IDENTIFIER_AUTHORITY,
     SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::System::Console::{
@@ -402,43 +402,80 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
     apply_ace(sid, path, SET_ACCESS, access_mask)
 }
 
-/// Add an explicit deny ACE for the AppContainer SID on a path. Windows
-/// evaluates explicit denies before explicit allows, so this overrides
-/// any inherited or direct allow ACEs.
+/// Add an explicit deny ACE for the AppContainer SID on a path.
 ///
-/// For directories, the deny ACE is applied with `SUB_CONTAINERS_AND_OBJECTS_INHERIT`
-/// (via `apply_ace`) so newly created children inherit it. Existing children do not
-/// reliably receive inherited ACEs from `SetNamedSecurityInfoW`, so we also walk
-/// the tree and apply the deny ACE directly to every existing entry.
+/// The parent directory may have an inheritable allow ACE (from `grant_access`).
+/// Simply adding a deny ACE is insufficient because Windows evaluates inherited
+/// allows before inherited denies when both arrive from different ancestors.
+///
+/// To guarantee the deny takes effect, this function first protects the denied
+/// directory's DACL (`PROTECTED_DACL_SECURITY_INFORMATION`), which converts
+/// inherited ACEs to explicit and blocks further inheritance from the parent.
+/// Then it adds the explicit deny ACE, which `SetEntriesInAclW` places before
+/// explicit allows in canonical DACL order.
 fn deny_access(sid: PSID, path: &Path) -> io::Result<()> {
     let access_mask = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
+
+    // Step 1: Protect the DACL to stop the parent's allow ACE from propagating.
+    // This converts existing inherited ACEs to explicit ACEs on this directory.
+    if path.is_dir() {
+        protect_dacl(path)?;
+    }
+
+    // Step 2: Add the deny ACE. SetEntriesInAclW places explicit denies before
+    // explicit allows, so this will precede the (now explicit) parent allow.
     apply_ace(sid, path, DENY_ACCESS, access_mask)?;
 
-    // Recursively apply the deny ACE to all existing children so that
-    // inheritance gaps in SetNamedSecurityInfoW are covered.
-    if path.is_dir() {
-        deny_access_recursive(sid, path, access_mask);
-    }
     Ok(())
 }
 
-/// Walk `dir` recursively and apply a deny ACE to every entry. Errors on
-/// individual entries (permission denied, races, etc.) are silently skipped.
-fn deny_access_recursive(sid: PSID, dir: &Path, access_mask: u32) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
+/// Set `PROTECTED_DACL_SECURITY_INFORMATION` on a path, blocking inheritance
+/// from parent directories. Existing inherited ACEs are converted to explicit.
+fn protect_dacl(path: &Path) -> io::Result<()> {
+    let wide_path = path_to_wide(path);
+    let mut current_dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+
+    // SAFETY: Reading current DACL.
+    let err = unsafe {
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut current_dacl,
+            std::ptr::null_mut(),
+            &raw mut sd,
+        )
     };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let child = entry.path();
-        let _ = apply_ace(sid, &child, DENY_ACCESS, access_mask);
-        // Recurse into subdirectories.
-        if child.is_dir() {
-            deny_access_recursive(sid, &child, access_mask);
-        }
+    if err != ERROR_SUCCESS {
+        return Err(win32_to_io(err));
     }
+
+    // SAFETY: Re-applying the same DACL with PROTECTED flag. This converts
+    // inherited ACEs to explicit and stops further inheritance from parent.
+    let err = unsafe {
+        SetNamedSecurityInfoW(
+            wide_path.as_ptr().cast_mut(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            current_dacl,
+            std::ptr::null(),
+        )
+    };
+
+    // SAFETY: sd from GetNamedSecurityInfoW.
+    unsafe {
+        LocalFree(sd.cast());
+    }
+
+    if err != ERROR_SUCCESS {
+        return Err(win32_to_io(err));
+    }
+    Ok(())
 }
 
 // ── Sentinel file ────────────────────────────────────────────────────
