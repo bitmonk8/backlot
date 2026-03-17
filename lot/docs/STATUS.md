@@ -22,12 +22,12 @@
 
 ## Next Work
 
-Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 35 findings: 3 critical, 8 high, 14 medium, 10 low.
+Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 32 findings remaining: 0 critical, 9 high, 13 medium, 10 low.
 
-### 1. Fix critical issues
+### 1. ~~Fix critical issues~~ (Done)
 
-- **Silent cgroup failure drops resource limits.** `CgroupGuard::new()` failure is swallowed via `.ok()` in `linux/mod.rs:143-147`. Cgroup join failure in the helper (lines 265-281) also silently continues. Callers get no indication their `max_memory_bytes`/`max_processes`/`max_cpu_seconds` were ignored. Fix: return `SandboxError::Setup` when cgroup creation or join fails, or at minimum surface a warning.
-- **PID recycling race in cgroup `kill_all()` fallback.** `cgroup.rs:156-180` reads PIDs from `cgroup.procs` and sends SIGKILL without verifying the PID still belongs to the cgroup. On kernels < 5.14 (no `cgroup.kill`), an unrelated process can be killed. Fix: use `pidfd_open` where available, or verify cgroup membership before kill.
+- ~~**Silent cgroup failure drops resource limits.**~~ Fixed: `spawn()` now returns `SandboxError::Setup` when cgroup creation or join fails and `ResourceLimits::has_any()` is true. Cgroup join failure in the helper now reports via `helper_bail!`. If no limits are requested, cgroup failure is still silently ignored.
+- ~~**PID recycling race in cgroup `kill_all()` fallback.**~~ Fixed: `kill_all()` fallback now verifies each PID's cgroup membership via `/proc/{pid}/cgroup` before sending SIGKILL. Narrow TOCTOU window remains but the unbounded race is eliminated.
 
 ### 2. Fix high issues
 

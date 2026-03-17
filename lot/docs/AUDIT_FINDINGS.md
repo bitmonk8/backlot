@@ -4,15 +4,15 @@
 
 | Severity | Count |
 |----------|-------|
-| Critical | 3     |
-| High     | 8     |
-| Medium   | 14    |
+| Critical | 0     |
+| High     | 9     |
+| Medium   | 13    |
 | Low      | 10    |
-| **Total** | **35** |
+| **Total** | **32** |
 
 | Category | Count |
 |----------|-------|
-| Correctness | 8 |
+| Correctness | 5 |
 | Security | 6 |
 | Error Handling | 4 |
 | Resource Management | 5 |
@@ -24,21 +24,6 @@
 ---
 
 ## Correctness
-
-### [Correctness] File: lot/src/linux/cgroup.rs
-- **Line(s):** 156-180
-- **Description:** `kill_all()` fallback path has a PID recycling race. Between reading a PID from `cgroup.procs` and sending SIGKILL, the process may have exited and the PID reassigned to an unrelated process. The code documents this but does not mitigate it (e.g., by using `pidfd_open` on kernels that support it).
-- **Severity:** Critical
-
-### [Correctness] File: lot/src/linux/mod.rs
-- **Line(s):** 143-147
-- **Description:** When `cgroup::available()` returns true but `CgroupGuard::new()` fails, the error is silently swallowed via `.ok()`. Resource limits specified by the caller are silently not enforced. The caller has no indication that their `max_memory_bytes`, `max_processes`, or `max_cpu_seconds` were ignored.
-- **Severity:** Critical
-
-### [Correctness] File: lot/src/linux/mod.rs
-- **Line(s):** 265-281
-- **Description:** If moving the helper into the cgroup fails (fd open or write fails), the code silently continues without resource limits. Combined with the silent `.ok()` above, there is no path that reports cgroup failures to the caller.
-- **Severity:** High
 
 ### [Correctness] File: lot/src/linux/namespace.rs
 - **Line(s):** 123-129

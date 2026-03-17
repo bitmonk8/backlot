@@ -257,6 +257,19 @@ pub struct ResourceLimits {
 }
 
 impl ResourceLimits {
+    /// Returns `true` if any resource limit is set.
+    ///
+    /// Uses destructuring so adding a field to `ResourceLimits` without
+    /// updating this function produces a compile error.
+    pub const fn has_any(&self) -> bool {
+        let Self {
+            max_memory_bytes,
+            max_processes,
+            max_cpu_seconds,
+        } = self;
+        max_memory_bytes.is_some() || max_processes.is_some() || max_cpu_seconds.is_some()
+    }
+
     fn validate(&self) -> Result<(), SandboxError> {
         if self.max_memory_bytes == Some(0) {
             return Err(SandboxError::InvalidPolicy(

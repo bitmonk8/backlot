@@ -152,7 +152,8 @@ impl CgroupGuard {
     /// Kill all processes remaining in the cgroup.
     ///
     /// Prefers `cgroup.kill` (kernel 5.14+) which atomically kills all processes.
-    /// Falls back to reading `cgroup.procs` and sending SIGKILL to each PID.
+    /// Falls back to reading `cgroup.procs` and sending SIGKILL to each PID,
+    /// with a `/proc/{pid}/cgroup` membership check to mitigate PID recycling.
     fn kill_all(&self) {
         // Try atomic cgroup.kill first (available since kernel 5.14).
         let kill_path = self.path.join("cgroup.kill");
@@ -161,22 +162,50 @@ impl CgroupGuard {
         }
 
         // Fallback: read PIDs and kill individually.
-        // WARNING: This path has a PID recycling race — between reading a PID
-        // from cgroup.procs and sending SIGKILL, the process may have exited
-        // and the PID may have been reassigned to an unrelated process.
+        // A TOCTOU window remains between the membership check and kill(),
+        // but it is substantially narrower than killing without any check.
         let procs_path = self.path.join("cgroup.procs");
         let Ok(contents) = fs::read_to_string(&procs_path) else {
             return;
         };
+
+        // Derive the expected cgroup relative path from our absolute path.
+        // Our path is /sys/fs/cgroup/<relative>, and /proc/PID/cgroup
+        // contains "0::/<relative>".
+        let expected_suffix = self
+            .path
+            .strip_prefix("/sys/fs/cgroup")
+            .unwrap_or(&self.path);
+
         for line in contents.lines() {
-            if let Ok(pid) = line.trim().parse::<i32>() {
-                // SAFETY: SIGKILL is a well-known signal; pid comes from the
-                // kernel's cgroup.procs file.
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                }
+            let Ok(pid) = line.trim().parse::<i32>() else {
+                continue;
+            };
+            // Verify the PID still belongs to our cgroup before killing.
+            if !Self::pid_in_cgroup(pid, expected_suffix) {
+                continue;
+            }
+            // SAFETY: kill() with a valid signal number has no UB preconditions.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
             }
         }
+    }
+
+    /// Check whether a PID's cgroupv2 entry matches the expected path.
+    /// Returns `false` if the check cannot be performed (process already exited).
+    fn pid_in_cgroup(pid: i32, expected_suffix: &Path) -> bool {
+        let cgroup_file = format!("/proc/{pid}/cgroup");
+        let Ok(contents) = fs::read_to_string(cgroup_file) else {
+            return false;
+        };
+        for line in contents.lines() {
+            if let Some(rest) = line.strip_prefix("0::") {
+                let relative = rest.trim_start_matches('/');
+                return Path::new(relative) == expected_suffix;
+            }
+        }
+        false
     }
 }
 

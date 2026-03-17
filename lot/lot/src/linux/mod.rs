@@ -139,9 +139,18 @@ fn itoa_stack(mut val: u64, buf: &mut [u8; 20]) -> &[u8] {
 
 pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<SandboxedChild> {
     // Create cgroup before forking so the helper can move itself into it.
-    // If cgroups are unavailable, we proceed without resource limits.
-    let cgroup_guard = if cgroup::available() {
-        CgroupGuard::new(&policy.limits).ok()
+    // If the policy requests resource limits and cgroup setup fails, return
+    // an error rather than silently dropping the limits.
+    let cgroup_guard = if policy.limits.has_any() {
+        if !cgroup::available() {
+            return Err(SandboxError::Setup(
+                "resource limits requested but cgroups v2 unavailable".into(),
+            ));
+        }
+        Some(
+            CgroupGuard::new(&policy.limits)
+                .map_err(|e| SandboxError::Setup(format!("cgroup creation failed: {e}")))?,
+        )
     } else {
         None
     };
@@ -187,6 +196,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         const STEP_MOUNT_PROC: i32 = 7;
         const STEP_SECCOMP: i32 = 8;
         const STEP_EXEC: i32 = 9;
+        const STEP_CGROUP: i32 = 10;
 
         // Macro to report error and exit from helper.
         // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
@@ -262,6 +272,8 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
         // Move helper into the cgroup so both helper and inner child inherit
         // the resource limits. Uses pre-built CString path to avoid allocation.
+        // Failure is fatal: the cgroup was successfully created and the
+        // process should join it to enforce the requested resource limits.
         if let Some(ref procs_path) = prefork.cgroup_procs_path {
             // SAFETY: getpid has no preconditions
             let my_pid = unsafe { libc::getpid() };
@@ -270,14 +282,22 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             let pid_bytes = itoa_stack(my_pid as u64, &mut buf);
             // SAFETY: open() with a valid CString path
             let fd = unsafe { libc::open(procs_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
-            if fd >= 0 {
-                // SAFETY: fd is valid, pid_bytes points into stack-allocated buf
-                let _ = unsafe { libc::write(fd, pid_bytes.as_ptr().cast(), pid_bytes.len()) };
-                // SAFETY: fd is valid
-                unsafe { libc::close(fd) };
+            if fd < 0 {
+                helper_bail!(err_pipe_wr, STEP_CGROUP, unsafe {
+                    *libc::__errno_location()
+                });
             }
-            // If cgroup join fails, continue without resource limits rather
-            // than aborting the entire spawn.
+            // SAFETY: fd is valid, pid_bytes points into stack-allocated buf
+            let written =
+                unsafe { libc::write(fd, pid_bytes.as_ptr().cast(), pid_bytes.len()) };
+            // Save errno before close() can clobber it.
+            // SAFETY: errno access has no preconditions
+            let write_errno = unsafe { *libc::__errno_location() };
+            // SAFETY: fd is valid
+            unsafe { libc::close(fd) };
+            if written < 0 {
+                helper_bail!(err_pipe_wr, STEP_CGROUP, write_errno);
+            }
         }
 
         // Fork again to enter the PID namespace (inner child gets PID 1 inside)
@@ -432,6 +452,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             7 => "mount /proc",
             8 => "seccomp",
             9 => "execve",
+            10 => "cgroup join",
             _ => "unknown",
         };
         // Reap the helper so we don't leak a zombie
