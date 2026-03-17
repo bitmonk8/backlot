@@ -591,32 +591,9 @@ fn test_deny_path_blocks_access_to_subtree() {
     cmd.stderr(lot::SandboxStdio::Piped);
 
     let child = must_spawn(&policy, &cmd);
-
-    // On Windows, dump ACLs while sandbox is active (before wait_with_output
-    // consumes the child and triggers cleanup).
-    #[cfg(target_os = "windows")]
-    {
-        for (label, p) in [
-            ("workspace", &allowed_dir),
-            ("secrets", &denied_dir),
-            ("secret.txt", &secret_file),
-        ] {
-            if let Ok(out) = std::process::Command::new("icacls").arg(p).output() {
-                eprintln!(
-                    "[diag] icacls {label} (pre-cleanup):\n{}",
-                    String::from_utf8_lossy(&out.stdout)
-                );
-            }
-        }
-    }
-
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] denied read exit status: {:?}", output.status);
-    eprintln!(
-        "[diag] stdout: {:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
     eprintln!(
         "[diag] stderr: {:?}",
         String::from_utf8_lossy(&output.stderr)
