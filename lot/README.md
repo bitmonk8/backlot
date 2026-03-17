@@ -43,6 +43,7 @@ let policy = SandboxPolicy {
     read_paths: vec![PathBuf::from("/usr/lib")],
     write_paths: vec![],
     exec_paths: vec![PathBuf::from("/usr/bin")],
+    deny_paths: vec![],
     allow_network: false,
     limits: ResourceLimits {
         max_memory_bytes: Some(64 * 1024 * 1024), // 64 MB
@@ -93,12 +94,13 @@ pub struct SandboxPolicy {
     pub read_paths: Vec<PathBuf>,    // Recursive read access
     pub write_paths: Vec<PathBuf>,   // Recursive read+write access
     pub exec_paths: Vec<PathBuf>,    // Recursive execute access
+    pub deny_paths: Vec<PathBuf>,    // Denied subtrees (overrides grants)
     pub allow_network: bool,         // Outbound network access
     pub limits: ResourceLimits,
 }
 ```
 
-Paths must exist. No overlaps allowed within or across path lists. At least one path must be specified.
+Paths must exist. No overlaps allowed within or across grant path lists. Each deny path must be a strict child of at least one grant path. At least one grant path must be specified.
 
 ### `SandboxPolicyBuilder`
 
@@ -110,6 +112,7 @@ use lot::SandboxPolicyBuilder;
 let policy = SandboxPolicyBuilder::new()
     .read_path("/project")              // auto-canonicalized; skipped if non-existent
     .write_path("/project/src")         // deduped against read_paths
+    .deny_path("/project/src/secrets")  // block access to subtree
     .include_temp_dirs()                // platform temp dir → write_paths
     .include_platform_exec_paths()      // /usr/bin, System32, etc.
     .include_platform_lib_paths()       // /usr/lib, /usr/include, etc.
@@ -221,6 +224,8 @@ filesystem:
   exec:
     - /usr/bin
     - /project/bin
+  deny:
+    - /project/data/secrets      # block access to subtree within granted paths
   include_platform_exec: true    # /usr/bin, /bin, System32, etc.
   include_platform_lib: true     # /usr/lib, /usr/include, Framework dirs, etc.
   include_temp: true             # Platform temp directory → write_paths
@@ -338,6 +343,7 @@ For user-owned directories, `spawn()` grants ancestor traverse ACEs automaticall
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (restricting it breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
 - Windows: AppContainer processes cannot access `\\.\NUL` without a one-time system fix (see above).
+- Deny paths: `stat()` succeeds on denied paths on Linux (shows empty tmpfs metadata) but fails on macOS/Windows. File access is blocked on all platforms.
 
 ## Requirements
 

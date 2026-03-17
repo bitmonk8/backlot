@@ -85,8 +85,9 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 2. Bind-mount allowed read-only paths with `MS_RDONLY | MS_NOSUID | MS_NODEV`.
 3. Bind-mount allowed read-write paths with `MS_NOSUID | MS_NODEV`.
 4. Bind-mount allowed executable paths with `MS_RDONLY | MS_NOSUID | MS_NODEV` (no `MS_NOEXEC`).
-5. `pivot_root` into the new root. Unmount old root.
-6. Essential paths (`/proc`, `/dev/null`, `/dev/urandom`, dynamic linker paths) are always mounted read-only.
+5. Overmount each deny path with an empty read-only tmpfs (`size=0`, `MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC`). Must happen after step 2–4 so the parent grant mount exists. The denied subtree appears as an empty directory; reads/writes/creates fail with ENOENT/EROFS.
+6. `pivot_root` into the new root. Unmount old root.
+7. Essential paths (`/proc`, `/dev/null`, `/dev/urandom`, dynamic linker paths) are always mounted read-only.
 
 **Single-threaded constraint:** `CLONE_NEWUSER` requires the calling process to be single-threaded. Lot handles this by forking a single-threaded helper process before calling `clone()` with namespace flags. The caller (which may be multi-threaded/tokio) never directly enters the namespace. Mount namespace setup is split into two phases (helper + inner child) to correctly mount `/proc` after the PID namespace is active.
 
@@ -106,6 +107,7 @@ void sandbox_free_error(char *errorbuf);
 - Add `(allow file-read* (subpath "...")) (allow file-write* (subpath "..."))` for read-write paths.
 - Add `(allow process-exec (subpath "..."))` for executable paths.
 - Add `(allow network*)` if network permitted.
+- Add `(deny file-read* ...)`, `(deny file-read-metadata ...)`, `(deny file-write* ...)`, `(deny process-exec ...)`, `(deny file-map-executable ...)` for deny paths. Must appear after allow rules (SBPL uses last-match-wins).
 - Add `(allow file-read-metadata (literal "..."))` for each ancestor directory of all policy paths and the program binary. Enables `stat()`-based path traversal (e.g., nu_glob walking path components). Uses `literal` (exact match), not `subpath`. Excludes `/` and system paths already granted.
 - Always allow: system libraries (`/usr/lib`, `/System/Library`), dynamic linker cache, `/dev/urandom`.
 - `mach-lookup` is unrestricted (narrowing breaks most programs).
@@ -130,6 +132,7 @@ void sandbox_free_error(char *errorbuf);
 
 **Filesystem access:**
 - Before launch, grant the package SID read or read-write ACL entries on allowed paths (`SetEntriesInAcl`, `SetNamedSecurityInfo`).
+- For deny paths, add explicit deny ACEs (`DENY_ACCESS` with `FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE`, `SUB_CONTAINERS_AND_OBJECTS_INHERIT`). Windows evaluates explicit denies before explicit allows, so these override inherited grants from parent directories.
 - On cleanup, remove the ACL entries (restore original DACLs from saved SDDL strings).
 
 **Network access:**
@@ -202,6 +205,22 @@ Win32 App Isolation (Windows 11 24H2+) builds on AppContainer with a Brokering F
 
 ---
 
+## Deny Paths
+
+Deny paths carve out subtrees from granted paths, blocking all access (read, write, execute) to the denied directory and everything beneath it. Each deny path must be a strict child of at least one grant path — a deny with no enclosing grant is rejected as `InvalidPolicy` (already denied by default). An exact match between a deny and grant path is also rejected (remove the grant instead). No grant path may be nested under a deny path (unreachable grant). Deny paths must not overlap with each other.
+
+### Cross-platform behavior
+
+| Aspect | Linux | macOS | Windows |
+|---|---|---|---|
+| Denied subtree visible in parent `readdir`? | Yes (empty dir) | Yes | Yes |
+| `stat()` on denied path succeeds? | Yes (empty tmpfs) | No (EPERM) | No (ACCESS_DENIED) |
+| Read/write/create inside denied path | Fails (ENOENT/EROFS) | Fails (EPERM) | Fails (ACCESS_DENIED) |
+
+The `stat()` inconsistency on Linux is accepted: the security guarantee (no file access inside denied subtrees) holds on all platforms.
+
+---
+
 ## Graceful Degradation
 
 Lot does not silently degrade. If a required mechanism is unavailable, `spawn()` returns `SandboxError::Setup` with a diagnostic message.
@@ -228,6 +247,7 @@ Lot does not silently degrade. If a required mechanism is unavailable, `spawn()`
 ### Integration tests (platform-specific, require real OS mechanisms)
 - Spawn sandboxed process, verify it can read allowed paths.
 - Verify it cannot read disallowed paths or write to read-only paths.
+- Deny paths: verify denied subtrees block reads while sibling paths remain accessible.
 - Network denied: verify `connect()` fails.
 - Memory limit: child exceeds limit, gets killed.
 - Process limit: child fork-bombs, limited by cgroup/job object.
