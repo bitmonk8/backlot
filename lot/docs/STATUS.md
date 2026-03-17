@@ -23,7 +23,6 @@
 ## Next Work
 
 1. **First real-world usage / `lot run` testing.** The CLI and library are complete but haven't been exercised end-to-end outside unit/integration tests.
-2. **CI validation of deny_paths.** The deny_paths feature builds and passes clippy locally. Needs CI run on all platforms to confirm integration tests pass.
 
 ## CI Status
 
