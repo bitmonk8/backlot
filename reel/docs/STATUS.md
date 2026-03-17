@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 170 tests pass locally and in CI on all three platforms.** Lot dependency at rev `0729510`. CI fully green: Windows (170 pass), Linux (170 pass), macOS (170 pass).
+**Core agent runtime and tooling implemented. All 145 tests pass locally and in CI on all three platforms.** Lot dependency at rev `0729510`. CI fully green: Windows (145 pass), Linux (145 pass), macOS (145 pass).
 
 ## What Is Implemented
 
@@ -12,7 +12,7 @@
 - **CLI binary** (`reel-cli`) — `reel run` (execute agent query with YAML config, stdin, dry-run) and `reel setup` (Windows AppContainer ACL prerequisites). Two-pass YAML config parsing: extract reel `grant` field, pass remainder to flick.
 - **Build infrastructure** (`build.rs`) — Downloads prebuilt NuShell 0.111.0 and ripgrep 14.1.1 binaries for target platform, verifies SHA-256, caches in `target/nu-cache/`. Generates `reel_config.nu` and `reel_env.nu` for nu custom commands.
 - **CI pipeline** — GitHub Actions: fmt, clippy, test, build on Ubuntu, macOS, Windows. Rust 1.93.1 toolchain. Dependencies use pinned git revs (lot, flick). Linux CI uses dynamic cgroup delegation (discovers runner's actual cgroup, enables controllers hierarchically, creates sibling cgroup).
-- **Test counts** — 170 tests total, all pass locally.
+- **Test counts** — 145 tests total, all pass locally. (25 assertion-free diagnostic tests removed.)
 
 ## What Is NOT Implemented
 
@@ -53,9 +53,9 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 | Format | pass | |
 | Clippy (all 3) | pass | |
 | Build (all 3) | pass | |
-| Test (Windows) | pass | 170 pass |
-| Test (Linux) | pass | 170 pass |
-| Test (macOS) | pass | 170 pass |
+| Test (Windows) | pass | 145 pass |
+| Test (Linux) | pass | 145 pass |
+| Test (macOS) | pass | 145 pass |
 
 ## Work Candidates
 
