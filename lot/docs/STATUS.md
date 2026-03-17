@@ -22,7 +22,26 @@
 
 ## Next Work
 
-1. **First real-world usage / `lot run` testing.** The CLI and library are complete but haven't been exercised end-to-end outside unit/integration tests.
+Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 35 findings: 3 critical, 8 high, 14 medium, 10 low.
+
+### 1. Fix critical issues
+
+- **Silent cgroup failure drops resource limits.** `CgroupGuard::new()` failure is swallowed via `.ok()` in `linux/mod.rs:143-147`. Cgroup join failure in the helper (lines 265-281) also silently continues. Callers get no indication their `max_memory_bytes`/`max_processes`/`max_cpu_seconds` were ignored. Fix: return `SandboxError::Setup` when cgroup creation or join fails, or at minimum surface a warning.
+- **PID recycling race in cgroup `kill_all()` fallback.** `cgroup.rs:156-180` reads PIDs from `cgroup.procs` and sends SIGKILL without verifying the PID still belongs to the cgroup. On kernels < 5.14 (no `cgroup.kill`), an unrelated process can be killed. Fix: use `pidfd_open` where available, or verify cgroup membership before kill.
+
+### 2. Fix high issues
+
+- **Non-UTF-8 paths silently skipped in mount namespace.** `namespace.rs:123-147` drops paths that fail `to_str()`. Fix: return an error instead of silently skipping.
+- **`setup_stdio_pipes` leaks fds on partial failure.** `unix.rs:150-188` creates up to 6 fds; if later pipes fail, earlier ones leak. Fix: add cleanup on error paths.
+- **System dirs always mounted regardless of policy.** `namespace.rs:98-120` bind-mounts `/lib`, `/usr/lib`, `/bin`, `/usr/bin`, `/etc` unconditionally, exposing a broad attack surface. Fix: make system dir mounts configurable or restrict `/etc` to specific needed files.
+- **`wait(&self)` race via `Cell<bool>`.** Linux and macOS child types use `Cell<bool>` for `waited` with `wait()` taking `&self`, allowing concurrent waitpid race. Fix: use `&mut self` or atomic flag.
+- **No seccomp on aarch64 Linux.** `seccomp.rs` is gated on `#[cfg(target_arch = "x86_64")]`. Fix: add aarch64 syscall table.
+- **`max_cpu_seconds` silently ignored on Linux.** No API-level documentation warns callers. Fix: document in `ResourceLimits` and consider returning an error or warning when set on Linux.
+
+### 3. Remaining work
+
+- Fix medium/low audit findings (see `docs/AUDIT_FINDINGS.md`)
+- First real-world usage / `lot run` testing
 
 ## CI Status
 
@@ -49,4 +68,4 @@ Ubuntu 24.04 requires `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`
 - Linux cgroup tests require a delegated subtree with `+memory +pids` in `subtree_control`. CI creates this under the runner's cgroup parent.
 - Windows: AppContainer processes need a one-time elevated setup for NUL device access and system directory traverse ACEs (see `grant_appcontainer_prerequisites()`). For user-owned directories, `spawn()` grants traverse ACEs automatically at spawn time.
 - Linux deny paths: `stat()` succeeds on denied paths (shows empty tmpfs metadata). macOS/Windows deny `stat()`. Documented cross-platform inconsistency; security guarantee holds on all platforms.
-- Linux kernels < 5.9 lack `close_range`; parallel `lot::spawn()` calls from multi-threaded processes may hit ETXTBSY on those kernels. See `docs/LINUX_PARALLEL_SPAWN_ETXTBSY.md`.
+- Linux kernels < 5.9 lack `close_range`; parallel `lot::spawn()` calls from multi-threaded processes may hit ETXTBSY on those kernels. The `close_range` fd cleanup in `close_inherited_fds` mitigates this on 5.9+; on older kernels the race remains possible but spawn still works.
