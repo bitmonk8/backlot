@@ -81,7 +81,7 @@ Updated lot from `4e478de` to `a17cedf` (45 commits). Key changes consumed by re
 | Clippy (all 3) | pass | |
 | Build (all 3) | pass | |
 | Test (Windows) | pass | 169 pass |
-| Test (Linux) | investigating | Seccomp fixes resolved nu crash; tests now run but hang (likely deadlock in kill/respawn or timeout test) |
+| Test (Linux) | investigating | Root cause identified: lot's kill() does not terminate the inner child (see below) |
 | Test (macOS) | fail | 4 failures — nu_glob intermediate directory traversal (issue #9c) |
 
 ### Linux CI progress
@@ -91,7 +91,32 @@ Three lot bugs fixed to get nu running inside Linux sandbox:
 2. **chdir in seccomp** (lot rev `c1c4724`): `SYS_chdir`/`SYS_fchdir` missing from allowlist. Nu's startup `set_current_dir()` returned EPERM.
 3. **socketpair in seccomp** (lot rev `a17cedf`): `SYS_socketpair` missing from allowlist. Tokio's signal handler creates UnixStream via `socketpair()`.
 
-After all three fixes, `nu -c 'echo hello'` works correctly inside the sandbox. `nu --mcp` starts and responds to MCP initialize. However, the full test suite hangs (>1 hour) — likely a deadlock in a test that kills/respawns the nu process or waits for a timeout. Needs investigation.
+After all three fixes, `nu -c 'echo hello'` works correctly inside the sandbox. `nu --mcp` starts and responds to MCP initialize.
+
+#### Root cause: lot's kill() does not terminate the inner child
+
+The full test suite hangs because lot's `kill()` sends SIGKILL to the **helper process**, but the helper is NOT PID 1 in the PID namespace. Lot uses `unshare(CLONE_NEWPID)` (line 169 in `lot/src/linux/mod.rs`), which does NOT move the calling process into the new namespace — only future children are placed in it. So:
+
+- **Helper**: stays in the parent PID namespace (NOT PID namespace init)
+- **Inner child** (nu): is PID 1 in the new PID namespace (confirmed by comment on line 230)
+- `kill(helper_pid, SIGKILL)` kills the helper, but the inner child is orphaned (reparented to system init) and **keeps running**
+- Nu holds the write ends of stdout/stderr pipes, so `read_line()` blocks forever
+
+The comment on lot line 410-411 ("The helper is PID namespace init; killing it collapses the namespace") is **incorrect**.
+
+**Evidence from CI**: The `diag_open_with_stderr` test was the last test to start (alphabetically after `diag_open_vs_alternatives`). It completed its `rpc_call` operations, then hung at `stderr_handle.join()` because the killed helper's inner child (nu) kept the stderr pipe open. The run was cancelled after 6+ hours.
+
+**Impact on reel**: Any test or production use that calls `kill()` or triggers a timeout will leave nu processes orphaned. The `integration_timeout_kills_process` test will also hang because:
+1. Timeout fires → `kill()` called → helper dies, nu survives
+2. `spawn_blocking` task blocked on `read_line` from orphaned nu → leaked
+3. Test function returns → tokio runtime shutdown waits for leaked task → hang
+
+**Fix required in lot**: Either:
+- (A) Track the inner child PID and kill it directly (lot knows `inner_pid` from the fork return)
+- (B) Use `clone(CLONE_NEWPID)` instead of `fork()+unshare()` so the helper IS PID 1
+- (C) Have the helper close child pipe FDs after fork AND kill inner child before exiting
+
+Diagnostic tests `diag_kill_closes_pipes` and updated `diag_open_with_stderr` are deployed to verify this hypothesis in CI.
 
 ### macOS CI failures (4 tests)
 
