@@ -66,6 +66,60 @@ fn prepare_prefork(
     })
 }
 
+/// Close all file descriptors >= 3 except those in `keep_fds`, using the
+/// `close_range` syscall (Linux 5.9+). This prevents inherited write-open fds
+/// from other threads from causing ETXTBSY when a sibling process calls execve.
+///
+/// If `close_range` is unavailable (kernel < 5.9), this is a no-op — the
+/// ETXTBSY race remains possible but spawn still works correctly.
+///
+/// # Safety
+/// Must only be called in a single-threaded forked child (the helper process).
+/// At most 8 fds >= 3 may appear in `keep_fds`; excess entries are dropped (debug_assert in debug builds).
+unsafe fn close_inherited_fds(keep_fds: &[i32]) {
+    let mut sorted = [0i32; 8];
+    let mut len = 0usize;
+    for &fd in keep_fds {
+        if fd >= 3 && len < sorted.len() {
+            sorted[len] = fd;
+            len += 1;
+        }
+    }
+    debug_assert!(
+        keep_fds.iter().filter(|&&fd| fd >= 3).count() <= 8,
+        "close_inherited_fds: more than 8 fds >= 3 passed"
+    );
+    // No heap allocation post-fork (allocator may be in inconsistent state).
+    for i in 1..len {
+        let mut j = i;
+        while j > 0 && sorted[j - 1] > sorted[j] {
+            sorted.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    let mut deduped = [0i32; 8];
+    let mut dlen = 0usize;
+    for i in 0..len {
+        if dlen == 0 || sorted[i] != deduped[dlen - 1] {
+            deduped[dlen] = sorted[i];
+            dlen += 1;
+        }
+    }
+
+    // Close fd ranges in the gaps between kept fds (inclusive bounds).
+    let mut start: u32 = 3;
+    for i in 0..dlen {
+        let keep = deduped[i] as u32;
+        if start < keep {
+            // SAFETY: helper is single-threaded; closing stray inherited fds is safe.
+            unsafe { libc::syscall(libc::SYS_close_range, start, keep - 1, 0u32) };
+        }
+        start = keep + 1;
+    }
+    // SAFETY: same as above; u32::MAX means "up to the highest possible fd".
+    unsafe { libc::syscall(libc::SYS_close_range, start, u32::MAX, 0u32) };
+}
+
 /// Convert a u64 to ASCII digits in a caller-provided stack buffer.
 /// Returns the slice of `buf` containing the ASCII digits.
 /// Does not allocate — safe to call post-fork.
@@ -156,6 +210,15 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
         // Close parent's stdio pipe ends (not the child's — those are needed for inner child)
         unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
+
+        // Close all inherited fds except the ones the helper/inner-child need.
+        // This prevents write-open fds from other threads (e.g. std::fs::copy)
+        // from being held open, which would cause ETXTBSY on execve in sibling
+        // processes. See docs/LINUX_PARALLEL_SPAWN_ETXTBSY.md.
+        // SAFETY: helper is single-threaded after fork; listed fds are valid.
+        unsafe {
+            close_inherited_fds(&[err_pipe_wr, child_stdin, child_stdout, child_stderr]);
+        }
 
         // Unshare namespaces. Skip CLONE_NEWNET when network access is allowed
         // so the child inherits the parent's network namespace.

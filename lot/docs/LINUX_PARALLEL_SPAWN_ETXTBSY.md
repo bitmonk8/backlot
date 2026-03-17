@@ -33,27 +33,6 @@ Each test is designed for parallel execution:
 
 Despite this isolation, `ETXTBSY` occurs.
 
-## Linux spawn path
-
-`lot::spawn()` on Linux (`lot/src/linux/mod.rs`) does the following:
-
-1. `fork()` a helper process.
-2. Helper calls `unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | ...)`.
-3. Helper calls `setup_mount_namespace()` (`lot/src/linux/namespace.rs`),
-   which creates a tmpfs root at `/tmp/lot-newroot-{pid}` and bind-mounts:
-   - System directories (`/lib`, `/usr/lib`, `/bin`, `/usr/bin`, `/etc`)
-   - Policy `read_paths` (read-only bind mount)
-   - Policy `write_paths` (read-write bind mount)
-   - Policy `exec_paths` (read-only + exec bind mount)
-4. Helper `fork()`s again to create the inner child (PID 1 in new
-   namespace).
-5. Inner child calls `finish_mount_namespace()` (mounts `/proc`,
-   `pivot_root`).
-6. Inner child calls `execve()` on the binary.
-
-The binary is **not copied** — it is bind-mounted from the host filesystem
-into the namespace. Each helper gets a unique root path via `getpid()`.
-
 ## ETXTBSY semantics
 
 On Linux, `execve` returns `ETXTBSY` when:
@@ -61,68 +40,96 @@ On Linux, `execve` returns `ETXTBSY` when:
 > The executable is open for writing by one or more processes.
 > — execve(2)
 
-This means some process has a write file descriptor open on the binary
-being exec'd. The kernel tracks this at the inode level, not the path
-level.
+The kernel checks `inode->i_writecount` in `fs/exec.c:deny_write_access()`.
+Any process holding a write-open fd on the inode — regardless of which path
+it used to open it — blocks `execve` on that inode.
 
-## Hypothesis
+## Root cause: inherited write fds across fork()
 
-The exact mechanism is not confirmed, but likely candidates:
+The problem is **fd table inheritance across `fork()` in a multi-threaded
+process**.
 
-1. **`std::fs::copy` race at inode level:** `std::fs::copy` on Linux uses
-   `copy_file_range` or `sendfile`, which opens the destination for write.
-   Even though each test copies to a distinct path, if the filesystem
-   deduplicates at the block/inode level (e.g., on a CoW filesystem like
-   btrfs, or within a container overlay), the kernel might see multiple
-   paths as the same inode, causing a write-open on one copy to block
-   `execve` on another.
+Rust's parallel test runner runs all tests in a single process with multiple
+threads. `lot::spawn()` calls `fork()` to create the
+helper process. `fork()` duplicates the **entire fd table** of the calling
+process, including fds held by other threads.
 
-2. **Bind-mount propagation:** The `exec_paths` bind-mount connects the
-   per-test cache dir into the namespace. If bind-mount setup in one
-   namespace interacts with the source directory while another process is
-   writing to a different file in a sibling directory under the same parent,
-   the kernel's mount propagation could briefly mark the source as busy.
+### The race
 
-3. **Timing of copy vs spawn across threads:** Although `tmp_sandbox_cache()`
-   completes before `NuSession::spawn()` is called within a single test,
-   Rust's parallel test runner executes multiple tests concurrently. Test A's
-   `std::fs::copy` to `cache_A/nu` might race with test B's `execve` of
-   `cache_B/nu` if the underlying filesystem resolves both to related
-   structures.
+1. **Thread A** calls `std::fs::copy()` to copy the nu binary to
+   `/tmp/test_A/nu`. This opens the destination for writing. (The fd has
+   `O_CLOEXEC` via Rust's stdlib, but that is irrelevant — `O_CLOEXEC`
+   takes effect at `execve`, not `fork`.)
 
-## Impact
+2. **Thread B** calls `lot::spawn()` → `fork()`. The helper process
+   inherits **all** fds from the parent, including Thread A's write-open fd
+   to `/tmp/test_A/nu`.
+
+3. The helper closes only the fds it knows about: parent pipe ends and
+   parent stdio fds. It **does not close** the inherited write fd.
+
+4. The helper calls `fork()` again for the inner child, then blocks on
+   `waitpid()`. It holds the write fd for the **entire lifetime** of the
+   sandboxed process.
+
+5. Thread A finishes `std::fs::copy()`, closes its fd in the parent
+   process. Thread A then calls `lot::spawn()` → inner child →
+   `execve("/tmp/test_A/nu")`.
+
+6. Kernel checks `inode->i_writecount` on `/tmp/test_A/nu`. Thread B's
+   helper still has a write fd open on that inode → **ETXTBSY**.
+
+### Why the inner child's O_CLOEXEC doesn't help
+
+The inner child (created by the helper's second `fork()`) also inherits the
+stray write fd. When the inner child calls `execve`, `O_CLOEXEC` closes it
+**in the inner child's process**. But the helper process never calls
+`execve` — it just does `waitpid()`. The helper retains the write fd for
+its entire lifetime.
+
+### Why per-test isolation doesn't help
+
+Each test copies to a distinct path and gets a distinct inode. The leak
+is not path-based — it is fd-based. `fork()` copies the fd table at a
+point-in-time snapshot. If any thread holds a write fd at that instant,
+the forked child inherits it.
+
+### Why it only affects Linux
+
+macOS and Windows backends do not use `fork()` for process creation.
+macOS uses `fork()`+`exec()` where the forked child applies seatbelt and
+immediately execs (closing `O_CLOEXEC` fds). Windows uses
+`CreateProcessW` which does not inherit arbitrary fds.
+
+On Linux, the helper process sits in `waitpid()` without ever calling
+`execve`, so inherited `O_CLOEXEC` fds are never closed.
+
+## Impact (before fix)
 
 - **Linux CI must use `--test-threads=1`** for tests that spawn sandboxed
   processes.
-- **Windows and macOS are unaffected** — AppContainer and Seatbelt do not
-  use mount namespaces or bind-mounts, so no inode-level conflicts occur.
+- **Windows and macOS are unaffected.**
 
-## Workaround
+## Fix: `close_range` in the helper (implemented)
 
-Run tests sequentially on Linux:
+The helper process now calls `close_range` (Linux 5.9+) immediately after
+`fork()` to close all file descriptors >= 3 except the ones it needs:
 
-```
-cargo test -- --test-threads=1
-```
+- `err_pipe_wr`
+- `child_stdin`, `child_stdout`, `child_stderr` (if piped)
 
-## Potential fixes (not implemented)
+The implementation in `linux/mod.rs:close_inherited_fds()` sorts the kept
+fds and calls `close_range` in segments around them, avoiding heap
+allocation (allocator state is unreliable post-fork).
 
-1. **Retry with backoff:** Catch `ETXTBSY` in the spawn error path and
-   retry after a short delay. Simple but masks the root cause.
+If `close_range` is unavailable (kernel < 5.9), the call is a no-op and
+the ETXTBSY race remains possible. `close_range` is available on all
+kernels since 5.9 (2020), which covers all supported CI and production
+targets.
 
-2. **Pre-copy all binaries before any test spawns:** Use a `once_cell` or
-   test fixture to copy all binaries before the parallel test phase begins,
-   ensuring no `std::fs::copy` overlaps with any `execve`.
+### Alternatives considered
 
-3. **Hardlink instead of copy:** `std::fs::hard_link` does not open the
-   file for writing. Each test would get a distinct path backed by the same
-   inode (intentionally). Since `execve` only checks for write-open fds,
-   not link count, this might avoid the race. However, hard links would
-   mean `exec_paths` bind-mounts in different namespaces point to the same
-   inode — which could reintroduce the problem if bind-mount setup itself
-   triggers inode-level locking.
-
-4. **Investigate the kernel code path:** Determine exactly which operation
-   sets the `ETXTBSY` flag. `fs/exec.c:deny_write_access()` checks
-   `inode->i_writecount`. Identifying which operation increments
-   `i_writecount` during parallel spawn would pinpoint the root cause.
+- **Iterate `/proc/self/fd`:** More portable but requires readdir
+  post-fork.
+- **Pre-copy binaries before tests:** Test-side fix only; doesn't protect
+  arbitrary callers of `lot::spawn()`.
