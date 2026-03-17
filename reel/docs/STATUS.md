@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 169 tests pass locally.** Lot dependency updated to rev `a17cedf` which includes Linux namespace fixes (mount_proc, pivot_root, cwd ordering) and cgroup delegation improvements. CI pipeline updated with proper Linux cgroup delegation matching lot's working setup. Windows CI green. Linux and macOS CI pending validation after lot cwd fix.
+**Core agent runtime and tooling implemented. All 170 tests pass locally.** Lot dependency updated to rev `1a6fc30` which includes Linux namespace fixes (mount_proc, pivot_root, cwd ordering), cgroup delegation improvements, seccomp allowlist fixes, and PR_SET_PDEATHSIG for reliable inner child termination. CI pipeline updated with proper Linux cgroup delegation matching lot's working setup. Windows CI green (170 pass). Linux CI nearly green (168 pass, 2 fail — unrelated rg/temp issues). macOS CI has 4 failures (nu_glob intermediate directory traversal, issue #9c).
 
 ## What Is Implemented
 
@@ -12,7 +12,7 @@
 - **CLI binary** (`reel-cli`) — `reel run` (execute agent query with YAML config, stdin, dry-run) and `reel setup` (Windows AppContainer ACL prerequisites). Two-pass YAML config parsing: extract reel `grant` field, pass remainder to flick.
 - **Build infrastructure** (`build.rs`) — Downloads prebuilt NuShell 0.111.0 and ripgrep 14.1.1 binaries for target platform, verifies SHA-256, caches in `target/nu-cache/`. Generates `reel_config.nu` and `reel_env.nu` for nu custom commands.
 - **CI pipeline** — GitHub Actions: fmt, clippy, test, build on Ubuntu, macOS, Windows. Rust 1.93.1 toolchain. Dependencies use pinned git revs (lot, flick). Linux CI uses dynamic cgroup delegation (discovers runner's actual cgroup, enables controllers hierarchically, creates sibling cgroup).
-- **Test counts** — 169 tests total, all pass locally.
+- **Test counts** — 170 tests total, all pass locally.
 
 ## What Is NOT Implemented
 
@@ -80,8 +80,8 @@ Updated lot from `4e478de` to `a17cedf` (45 commits). Key changes consumed by re
 | Format | pass | |
 | Clippy (all 3) | pass | |
 | Build (all 3) | pass | |
-| Test (Windows) | pass | 169 pass |
-| Test (Linux) | investigating | Root cause identified: lot's kill() does not terminate the inner child (see below) |
+| Test (Windows) | pass | 170 pass |
+| Test (Linux) | pass (2 unrelated failures) | 168 pass, 2 fail — see below |
 | Test (macOS) | fail | 4 failures — nu_glob intermediate directory traversal (issue #9c) |
 
 ### Linux CI progress
@@ -93,29 +93,20 @@ Three lot bugs fixed to get nu running inside Linux sandbox:
 
 After all three fixes, `nu -c 'echo hello'` works correctly inside the sandbox. `nu --mcp` starts and responds to MCP initialize.
 
-#### Root cause: lot's kill() does not terminate the inner child directly
+#### Fixed: lot's kill() now terminates the inner child (lot rev `1a6fc30`)
 
-Lot uses `unshare(CLONE_NEWPID)` (line 169 in `lot/src/linux/mod.rs`), which does NOT move the helper into the new PID namespace — only its children are placed in it. The inner child (nu) is PID 1 in the new namespace. The comment on lot line 410-411 ("The helper is PID namespace init; killing it collapses the namespace") is **technically incorrect** — the helper is NOT PID namespace init.
+Root cause was that lot used `unshare(CLONE_NEWPID)` which does NOT place the helper in the new PID namespace. The inner child (nu) is PID 1 in the namespace. Killing the helper orphaned the inner child instead of collapsing the namespace. When `NuProcess` was trapped in a `spawn_blocking` closure (timeout path), stdin remained open, nu stayed alive, and `read_line()` blocked indefinitely.
 
-However, CI evidence shows a nuanced picture:
+Two-layer fix applied:
+- **lot (rev `1a6fc30`)**: `prctl(PR_SET_PDEATHSIG, SIGKILL)` in the inner child before exec. The kernel automatically SIGKILLs the inner child when the helper dies.
+- **reel (defense-in-depth)**: `NuProcess::stdin` changed to `Arc<Mutex<Option<File>>>` (`StdinHandle`). Stored in `SessionState::inflight_stdin` during `evaluate_inner` Phase 2. `kill()` takes and drops the File to close the pipe, triggering EOF on nu even if the lot-level kill fails.
 
-**When `NuProcess` is dropped after kill** (normal `session.kill()` path): the parent's stdin pipe is closed → nu receives EOF on stdin → nu exits gracefully. The `diag_kill_closes_pipes` test confirmed the inner child (PID 6323) was gone 500ms after kill. This works because `session.kill()` calls `st.process.take()` which drops the `NuProcess`, closing its `stdin: File`.
+CI results after fix: 168 pass, 2 fail (unrelated), finished in 7s (was 70s before fix, infinite before diagnostics).
 
-**When `NuProcess` is NOT dropped** (timeout/spawn_blocking path or raw `child.kill()`): the parent's stdin pipe remains open → nu stays alive → stdout/stderr pipes stay open → `read_line()` blocks forever. The `diag_open_with_stderr` test confirmed: after `child.kill()` (without dropping `NuProcess`), the stderr thread timed out at 5s — the inner child survived.
+### Linux CI remaining failures (2 tests)
 
-**Timeout scenario deadlock**: When `evaluate()` times out:
-1. `tokio::time::timeout` drops the `evaluate_inner` future → `spawn_blocking` JoinHandle dropped (task continues)
-2. `session.kill()` sends SIGKILL to helper through `inflight_child`
-3. But `NuProcess` (with `stdin: File`) is inside the `spawn_blocking` closure
-4. The closure is blocked on `read_line(stdout)` → can't complete → NuProcess can't drop → stdin stays open → nu stays alive → circular dependency
-5. `integration_timeout_kills_process` took 60s (the `sleep 60sec` in nu expired naturally, then nu exited)
-
-**CI results after diagnostic fixes** (commit a156540): 168 passed, 2 failed (unrelated rg/temp dir issues), finished in 70s. No hang. The 60s delay in `integration_timeout_kills_process` is the `sleep 60sec` command completing naturally (nu was not killed by lot's `kill()`).
-
-**Fix options**:
-- **(A) Fix lot**: Track inner child PID, kill both helper AND inner child. Or use `clone(CLONE_NEWPID)` so the helper IS PID namespace init.
-- **(B) Fix reel**: In `kill()`, close the parent's stdin pipe end to trigger nu's EOF exit. Requires storing a duplicate stdin handle in session state accessible from `kill()`.
-- **(C) Combine**: Fix lot for correctness, and add stdin closure in reel as defense-in-depth.
+- `integration_sandbox_rg_with_ancestor_traverse` — needs investigation
+- `integration_sandbox_temp_dir_no_pivot_to_project` — needs investigation
 
 ### macOS CI failures (4 tests)
 
@@ -125,4 +116,4 @@ Same nu_glob ancestor traversal issue as issue #9c. `reel read`, `reel write`, `
 
 ### Re-export lot's sandbox prerequisite APIs (issue #19)
 
-Lot rev `a17cedf` grants traverse ACEs on user-owned ancestor directories automatically at spawn time. System directories (e.g., `C:\Users`) still require a one-time elevated setup via `grant_appcontainer_prerequisites`. Reel does not re-export these APIs, so library consumers cannot implement their own elevated setup command without a direct lot dependency. Add a `reel::sandbox` module re-exporting the prerequisite APIs, `is_elevated()`, and the `PrerequisitesNotMet` error variant. Update `reel-cli` to use the re-exports.
+Lot rev `1a6fc30` grants traverse ACEs on user-owned ancestor directories automatically at spawn time. System directories (e.g., `C:\Users`) still require a one-time elevated setup via `grant_appcontainer_prerequisites`. Reel does not re-export these APIs, so library consumers cannot implement their own elevated setup command without a direct lot dependency. Add a `reel::sandbox` module re-exporting the prerequisite APIs, `is_elevated()`, and the `PrerequisitesNotMet` error variant. Update `reel-cli` to use the re-exports.
