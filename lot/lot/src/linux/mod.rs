@@ -99,17 +99,17 @@ unsafe fn close_inherited_fds(keep_fds: &[i32]) {
     }
     let mut deduped = [0i32; 8];
     let mut dlen = 0usize;
-    for i in 0..len {
-        if dlen == 0 || sorted[i] != deduped[dlen - 1] {
-            deduped[dlen] = sorted[i];
+    for &fd in sorted.iter().take(len) {
+        if dlen == 0 || fd != deduped[dlen - 1] {
+            deduped[dlen] = fd;
             dlen += 1;
         }
     }
 
     // Close fd ranges in the gaps between kept fds (inclusive bounds).
     let mut start: u32 = 3;
-    for i in 0..dlen {
-        let keep = deduped[i] as u32;
+    for &keep_fd in deduped.iter().take(dlen) {
+        let keep = keep_fd as u32;
         if start < keep {
             // SAFETY: helper is single-threaded; closing stray inherited fds is safe.
             unsafe { libc::syscall(libc::SYS_close_range, start, keep - 1, 0u32) };
