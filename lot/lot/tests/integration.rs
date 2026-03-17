@@ -595,9 +595,36 @@ fn test_deny_path_blocks_access_to_subtree() {
 
     eprintln!("[diag] denied read exit status: {:?}", output.status);
     eprintln!(
+        "[diag] stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    eprintln!(
         "[diag] stderr: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    // On Windows, also dump the ACL on the secret file for diagnostics.
+    #[cfg(target_os = "windows")]
+    {
+        let icacls = std::process::Command::new("icacls")
+            .arg(&secret_file)
+            .output();
+        if let Ok(out) = icacls {
+            eprintln!(
+                "[diag] icacls secret_file:\n{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+        let icacls_dir = std::process::Command::new("icacls")
+            .arg(&denied_dir)
+            .output();
+        if let Ok(out) = icacls_dir {
+            eprintln!(
+                "[diag] icacls denied_dir:\n{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+    }
 
     assert!(
         !output.status.success(),
