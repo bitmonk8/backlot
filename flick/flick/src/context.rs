@@ -61,7 +61,8 @@ pub enum ContentBlock {
 impl Context {
     pub async fn load_from_file(path: &std::path::Path) -> Result<Self, crate::error::FlickError> {
         let data = tokio::fs::read_to_string(path).await?;
-        let ctx: Self = serde_json::from_str(&data).map_err(crate::error::FlickError::ContextParse)?;
+        let ctx: Self =
+            serde_json::from_str(&data).map_err(crate::error::FlickError::ContextParse)?;
         Self::validate_message_order(&ctx.messages)?;
         Ok(ctx)
     }
@@ -182,8 +183,8 @@ pub async fn load_tool_results(path: &Path) -> Result<Vec<ContentBlock>, crate::
 
     // Deserialize into raw JSON values first so we can produce specific
     // validation errors instead of opaque serde messages.
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(&data).map_err(|e| crate::error::FlickError::ToolResultParse(e.to_string()))?;
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&data)
+        .map_err(|e| crate::error::FlickError::ToolResultParse(e.to_string()))?;
 
     if entries.is_empty() {
         return Err(crate::error::FlickError::ToolResultParse(
@@ -550,10 +551,7 @@ mod tests {
     async fn load_tool_results_malformed_json() {
         let f = write_temp_file(b"not json at all");
         let err = load_tool_results(f.path()).await.unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::FlickError::ToolResultParse(_)
-        ));
+        assert!(matches!(err, crate::error::FlickError::ToolResultParse(_)));
     }
 
     #[tokio::test]
@@ -570,10 +568,7 @@ mod tests {
         let f = write_temp_file(json);
         let err = load_tool_results(f.path()).await.unwrap_err();
         // A JSON object instead of array fails at the Vec<Value> parse step
-        assert!(matches!(
-            err,
-            crate::error::FlickError::ToolResultParse(_)
-        ));
+        assert!(matches!(err, crate::error::FlickError::ToolResultParse(_)));
     }
 
     #[tokio::test]

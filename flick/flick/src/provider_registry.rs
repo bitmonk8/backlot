@@ -169,10 +169,10 @@ impl ProviderRegistry {
             }
             Err(e) => return Err(CredentialError::Io(e)),
         });
-        let bytes = Zeroizing::new(
-            hex::decode(hex_str.trim())
-                .map_err(|_| CredentialError::InvalidSecretKey("secret key: invalid hex".into()))?,
-        );
+        let bytes =
+            Zeroizing::new(hex::decode(hex_str.trim()).map_err(|_| {
+                CredentialError::InvalidSecretKey("secret key: invalid hex".into())
+            })?);
         let key: [u8; 32] = bytes
             .as_slice()
             .try_into()
@@ -273,8 +273,8 @@ impl ProviderRegistry {
         &self,
         providers: &BTreeMap<String, StoredProvider>,
     ) -> Result<(), CredentialError> {
-        let text = toml::to_string(providers)
-            .map_err(|e| CredentialError::TomlParse(e.to_string()))?;
+        let text =
+            toml::to_string(providers).map_err(|e| CredentialError::TomlParse(e.to_string()))?;
         let path = self.providers_path();
 
         let tmp_path = path.with_extension("tmp");
@@ -746,7 +746,10 @@ mod tests {
         let result = registry
             .set("bad name", "key", ApiKind::Messages, "https://ok.com", None)
             .await;
-        assert!(matches!(result, Err(CredentialError::InvalidProviderName(_))));
+        assert!(matches!(
+            result,
+            Err(CredentialError::InvalidProviderName(_))
+        ));
     }
 
     #[tokio::test]
@@ -754,7 +757,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let registry = ProviderRegistry::load(dir.path().to_path_buf());
         let result = registry.get("").await;
-        assert!(matches!(result, Err(CredentialError::InvalidProviderName(_))));
+        assert!(matches!(
+            result,
+            Err(CredentialError::InvalidProviderName(_))
+        ));
     }
 
     #[tokio::test]
@@ -762,6 +768,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let registry = ProviderRegistry::load(dir.path().to_path_buf());
         let result = registry.remove("bad/name").await;
-        assert!(matches!(result, Err(CredentialError::InvalidProviderName(_))));
+        assert!(matches!(
+            result,
+            Err(CredentialError::InvalidProviderName(_))
+        ));
     }
 }
