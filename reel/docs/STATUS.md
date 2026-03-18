@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 206 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
+**Core agent runtime and tooling implemented. All 216 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
 
 ## What Is Implemented
 
@@ -27,7 +27,10 @@
 - **Network test robustness** — `looks_like_sandbox_denial` shared helper with expanded keyword list covering macOS Seatbelt, Windows AppContainer, and Linux seccomp/namespace denial wording (issue #63). Allowed-network test uses `http_responding_listener` that sends a real HTTP 200 response, ensuring the `Ok` path is exercised and the sandbox-denial assertion is tested (issue #62). Denied-network test verifies sandbox-specific error wording on platforms with active enforcement, logs a warning otherwise (issue #64).
 - **Naming cleanup batch** — Renamed `ToolGrant::READ` → `ToolGrant::TOOLS` (issue #51). Renamed `cache_dir`/`resolve_cache_dir`/`with_cache_dir` → `tool_dir`/`resolve_tool_dir`/`with_tool_dir` (issue #61). Renamed misleading test `run_with_tools_counts_multi_tool_rounds` → `run_with_tools_counts_multi_calls_in_round` (issue #54). Renamed misleading test `bounded_reap_returns_true_on_immediate_exit` → `bounded_reap_returns_true_on_error` (issue #59).
 - **CLI fixes batch** — Blocking stdin read wrapped in `spawn_blocking` (issue #33). `--timeout 0` rejected with validation error (issue #34). Dry-run output uses compact JSON and includes resolved grant names (issue #35).
-- **Test counts** — 206 tests total (191 reel + 15 reel-cli), all pass locally.
+- **Tool execution coverage batch** — Edit and Grep end-to-end integration tests via `execute_tool()` (issue #40). `ToolGrant::from_names` empty-string rejection test (issue #41).
+- **Ripgrep resolution tests** — `resolve_rg_binary` direct unit test for tool_dir lookup (issue #3f), None-when-absent branch (issue #3e), compile-time tool dir validation (issue #3d).
+- **Agent test gap coverage** — Boundary test for exactly `MAX_TOOL_CALLS` (200) succeeding (issue #53). Timeout during `client.resume()` in tool loop (issue #6). `RunResult` usage/response_hash propagation in both structured and tool-loop modes (issue #13).
+- **Test counts** — 216 tests total (201 reel + 15 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
 ## What Is NOT Implemented
@@ -71,16 +74,5 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-Ordered by planned execution. Clusters group tightly-related issues for single-PR batches.
-
-### Batch 2: Tool execution coverage (#40, #41)
-Test additions only. #40: missing Edit/Grep end-to-end tests via `execute_tool()`. #41: `from_names` empty-string element untested.
-
-### Batch 3: Ripgrep resolution tests (#3d, #3e, #3f)
-Three test gaps on `resolve_rg_binary`. Very contained.
-
-### Batch 4: Agent test gaps (#53, #6, #13)
-#53: boundary test for exactly 200 tool calls. #6: timeout during resume phase. #13: `RunResult` field propagation.
-
 ### Remaining (unscheduled)
-NuSession stderr capture (#23), public API surface (#31, #8), NuSession internals (#55, #56, #57, #58, #60), grant model (#52).
+NuSession stderr capture (#23), public API surface (#31, #8), NuSession internals (#55, #56, #57, #58, #60), grant model (#52), tool timeout (#26), glob robustness (#28), duplicate tool dispatch (#48), network test helpers (#65, #66, #67), CLI test gaps (#68, #69), test skip conventions (#70), test provider consolidation (#71), agent test improvements (#72, #73).

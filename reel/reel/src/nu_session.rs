@@ -1013,6 +1013,68 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // resolve_rg_binary tests (#3d, #3e, #3f)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_rg_binary_finds_binary_in_tool_dir() {
+        let tool = tempfile::TempDir::new().unwrap();
+        let rg_name = if cfg!(windows) { "rg.exe" } else { "rg" };
+        let rg_path = tool.path().join(rg_name);
+        std::fs::write(&rg_path, b"fake").unwrap();
+
+        let result = resolve_rg_binary(Some(tool.path()));
+        let found = result.expect("should find rg when it exists in tool_dir");
+        assert!(found.is_absolute(), "returned path should be absolute");
+        assert!(found.exists(), "returned path should exist on disk");
+    }
+
+    #[test]
+    fn resolve_rg_binary_missing_binary_in_tool_dir() {
+        // tool_dir exists but contains no rg binary. The function should
+        // skip tool_dir and either find rg next to the test exe or fall
+        // back to bare "rg" (which is not absolute → returns None).
+        let empty_dir = tempfile::TempDir::new().unwrap();
+        let result = resolve_rg_binary(Some(empty_dir.path()));
+        match result {
+            Some(p) => {
+                // rg found next to the test executable — must not be inside empty_dir.
+                assert!(p.is_absolute(), "found rg should be absolute");
+                assert!(p.exists(), "found rg should exist on disk");
+                assert!(
+                    !p.starts_with(empty_dir.path()),
+                    "rg should NOT come from the empty tool_dir, got: {p:?}"
+                );
+            }
+            None => {
+                // Expected: no rg next to exe, bare "rg" fallback is not absolute.
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_rg_binary_with_compile_time_tool_dir() {
+        // When NU_CACHE_DIR is set at compile time, resolve_rg_binary
+        // should find rg there because build.rs downloads it.
+        let tool_dir = option_env!("NU_CACHE_DIR");
+        match tool_dir {
+            Some(dir) => {
+                let result = resolve_rg_binary(Some(Path::new(dir)));
+                assert!(
+                    result.is_some(),
+                    "rg should exist in NU_CACHE_DIR when set: {dir}"
+                );
+                let p = result.unwrap();
+                assert!(p.is_absolute());
+                assert!(p.exists());
+            }
+            None => {
+                eprintln!("SKIP: NU_CACHE_DIR not set at compile time");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // try_parse_response tests
     // -----------------------------------------------------------------------
 
@@ -2298,6 +2360,89 @@ mod tests {
         );
         assert!(result.content.contains("a.rs"));
         assert!(result.content.contains("b.rs"));
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_edit_end_to_end() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+
+        let test_file = tmp.path().join("e2e_edit.txt");
+        std::fs::write(&test_file, "hello world\nsecond line\n").unwrap();
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({
+            "file_path": nu_path(&test_file),
+            "old_string": "hello world",
+            "new_string": "goodbye world"
+        });
+        let result = crate::tools::execute_tool(
+            "tu_edit".into(),
+            "Edit",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Edit tool should succeed, got error: {}",
+            result.content
+        );
+        let on_disk = std::fs::read_to_string(&test_file).unwrap();
+        assert!(
+            on_disk.contains("goodbye world"),
+            "file should contain 'goodbye world', got: {on_disk}"
+        );
+        assert!(
+            !on_disk.contains("hello world"),
+            "file should no longer contain 'hello world', got: {on_disk}"
+        );
+        assert_eq!(result.tool_use_id, "tu_edit");
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_grep_end_to_end() {
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+
+        let test_file = tmp.path().join("e2e_grep.txt");
+        std::fs::write(&test_file, "some text\nfindme_marker\nmore text\n").unwrap();
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({
+            "pattern": "findme_marker",
+            "path": nu_path(tmp.path())
+        });
+        let result = crate::tools::execute_tool(
+            "tu_grep".into(),
+            "Grep",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Grep tool should succeed, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("e2e_grep.txt"),
+            "result should contain the matching file name, got: {}",
+            result.content
+        );
+        assert_eq!(result.tool_use_id, "tu_grep");
     }
 
     #[tokio::test]

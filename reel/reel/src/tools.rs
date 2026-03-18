@@ -1450,6 +1450,13 @@ mod tests {
         assert_eq!(grant, ToolGrant::TOOLS | ToolGrant::WRITE);
     }
 
+    #[test]
+    fn from_names_empty_string_rejected() {
+        let err = ToolGrant::from_names(&["write", "", "tools"]).unwrap_err();
+        assert_eq!(err.name, "");
+        assert!(err.to_string().contains("unknown grant: "));
+    }
+
     // -- ToolGrant::to_names tests --
 
     #[test]

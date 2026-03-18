@@ -1216,4 +1216,255 @@ mod tests {
         // Should have executed exactly 200 calls (4 rounds × 50) before the 5th round trips the cap (250 > 200).
         assert_eq!(tool_calls_counter.load(Ordering::Relaxed), 200);
     }
+
+    // -----------------------------------------------------------------------
+    // Exactly MAX_TOOL_CALLS boundary (#53)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_with_tools_exactly_max_tool_calls_succeeds() {
+        // 50 calls x 4 rounds = 200 = MAX_TOOL_CALLS. Should succeed (cap is >200, not >=200).
+        let tool_calls_counter = Arc::new(AtomicU32::new(0));
+        let agent = Agent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_secs(60),
+            mock_client_factory(|| {
+                let mut responses: Vec<flick::provider::ModelResponse> = (1..=4)
+                    .map(|round| flick::provider::ModelResponse {
+                        text: None,
+                        thinking: Vec::new(),
+                        tool_calls: (0..50)
+                            .map(|i| flick::provider::ToolCallResponse {
+                                call_id: format!("tc_r{round}_{i}"),
+                                tool_name: "Read".into(),
+                                arguments: r#"{"file_path":"/tmp/x"}"#.into(),
+                            })
+                            .collect(),
+                        usage: flick::provider::UsageResponse::default(),
+                    })
+                    .collect();
+                responses.push(flick::provider::ModelResponse {
+                    text: Some(r#"{"boundary":"ok"}"#.into()),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: flick::provider::UsageResponse::default(),
+                });
+                MultiShotProvider::new(responses)
+            }),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&tool_calls_counter),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::TOOLS;
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        assert!(
+            result.is_ok(),
+            "exactly 200 tool calls should succeed, got: {}",
+            result.unwrap_err()
+        );
+        let r = result.unwrap();
+        assert_eq!(tool_calls_counter.load(Ordering::Relaxed), 200);
+        assert_eq!(r.tool_calls, 200);
+        assert_eq!(r.output["boundary"], "ok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeout during resume (tool loop) phase (#6)
+    // -----------------------------------------------------------------------
+
+    /// Provider where first call returns tool calls quickly, but the
+    /// second call (resume) sleeps forever so the timeout fires.
+    struct FastThenSlowProvider {
+        call_count: AtomicU32,
+    }
+
+    impl flick::DynProvider for FastThenSlowProvider {
+        fn call_boxed<'a>(
+            &'a self,
+            _params: flick::provider::RequestParams<'a>,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            flick::provider::ModelResponse,
+                            flick::error::ProviderError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+            if call == 0 {
+                // First call: return a tool call immediately.
+                Box::pin(async {
+                    Ok(flick::provider::ModelResponse {
+                        text: None,
+                        thinking: Vec::new(),
+                        tool_calls: vec![flick::provider::ToolCallResponse {
+                            call_id: "tc_1".into(),
+                            tool_name: "Read".into(),
+                            arguments: r#"{"file_path":"/tmp/x"}"#.into(),
+                        }],
+                        usage: flick::provider::UsageResponse::default(),
+                    })
+                })
+            } else {
+                // Resume call: sleep forever so timeout fires.
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Ok(flick::provider::ModelResponse {
+                        text: Some("never reached".into()),
+                        thinking: Vec::new(),
+                        tool_calls: Vec::new(),
+                        usage: flick::provider::UsageResponse::default(),
+                    })
+                })
+            }
+        }
+
+        fn build_request(
+            &self,
+            _params: flick::provider::RequestParams<'_>,
+        ) -> Result<serde_json::Value, flick::error::ProviderError> {
+            Ok(serde_json::json!({"model": "test"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_times_out_during_resume() {
+        let tool_calls_counter = Arc::new(AtomicU32::new(0));
+        let agent = Agent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_millis(500),
+            mock_client_factory(|| {
+                Box::new(FastThenSlowProvider {
+                    call_count: AtomicU32::new(0),
+                }) as Box<dyn flick::DynProvider>
+            }),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&tool_calls_counter),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::TOOLS;
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected 'timed out' in error, got: {err}"
+        );
+        // Tool executor should have been called once (before the slow resume).
+        assert_eq!(tool_calls_counter.load(Ordering::Relaxed), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // RunResult field propagation (#13)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_structured_propagates_usage() {
+        let agent = test_agent(
+            mock_client_factory(|| {
+                MultiShotProvider::new(vec![flick::provider::ModelResponse {
+                    text: Some(r#"{"field_test":true}"#.into()),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: flick::provider::UsageResponse {
+                        input_tokens: 1000,
+                        output_tokens: 500,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                    },
+                }])
+            }),
+            Box::new(DefaultToolExecutor),
+        );
+        let request = test_request();
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let r = result.unwrap_or_else(|e| panic!("{e}"));
+
+        // Output parsed correctly.
+        assert_eq!(r.output["field_test"], true);
+
+        // Usage propagated from provider.
+        let usage = r.usage.expect("usage should be Some");
+        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.output_tokens, 500);
+        // cost_usd is 0.0 since test model has no pricing info.
+        assert!(usage.cost_usd.abs() < f64::EPSILON);
+
+        // tool_calls should be 0 in structured mode.
+        assert_eq!(r.tool_calls, 0);
+
+        // response_hash is always None from the flick runner (context_hash not set).
+        assert!(r.response_hash.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_propagates_usage_fields() {
+        let tool_calls_counter = Arc::new(AtomicU32::new(0));
+        let agent = test_agent(
+            mock_client_factory(|| {
+                MultiShotProvider::new(vec![
+                    // First response: tool call with non-default usage.
+                    flick::provider::ModelResponse {
+                        text: None,
+                        thinking: Vec::new(),
+                        tool_calls: vec![flick::provider::ToolCallResponse {
+                            call_id: "tc_1".into(),
+                            tool_name: "Read".into(),
+                            arguments: r#"{"file_path":"/tmp/test"}"#.into(),
+                        }],
+                        usage: flick::provider::UsageResponse {
+                            input_tokens: 800,
+                            output_tokens: 200,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
+                        },
+                    },
+                    // Completion with non-default usage.
+                    flick::provider::ModelResponse {
+                        text: Some(r#"{"usage_test":true}"#.into()),
+                        thinking: Vec::new(),
+                        tool_calls: Vec::new(),
+                        usage: flick::provider::UsageResponse {
+                            input_tokens: 1200,
+                            output_tokens: 300,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
+                        },
+                    },
+                ])
+            }),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&tool_calls_counter),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::TOOLS;
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let r = result.unwrap_or_else(|e| panic!("{e}"));
+
+        // Output correct.
+        assert_eq!(r.output["usage_test"], true);
+
+        // Usage from the completing response.
+        let usage = r.usage.expect("usage should be Some");
+        assert_eq!(usage.input_tokens, 1200);
+        assert_eq!(usage.output_tokens, 300);
+        // cost_usd is 0.0 since test model has no pricing info.
+        assert!(usage.cost_usd.abs() < f64::EPSILON);
+
+        // tool_calls count.
+        assert_eq!(r.tool_calls, 1);
+        assert_eq!(tool_calls_counter.load(Ordering::Relaxed), 1);
+
+        // response_hash (always None from runner).
+        assert!(r.response_hash.is_none());
+    }
 }
