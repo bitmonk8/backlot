@@ -102,3 +102,14 @@ Checks `ToolResult` blocks are only in user messages but doesn't check the symme
 **Category:** Testing
 
 The `code()` method maps these new variants to string codes, but no test verifies the mapping.
+
+---
+
+## 12. Flaky test `history::tests::record_with_resume_hash` on ubuntu-latest CI
+
+**File:** `flick/src/history.rs:183-208`
+**Category:** Testing
+
+`record_with_resume_hash` intermittently fails on ubuntu-latest CI runners. The test writes to a tempdir via `tokio::fs` async append, then reads back and asserts the line contains `"resume_hash":"somehash"`. Passes consistently on macOS, Windows, and local ubuntu. Likely a filesystem timing issue with async I/O on CI ephemeral runners. Observed 2026-03-18 (CI run 23239580696).
+
+**Fix:** Either add an explicit `file.flush().await` / `file.shutdown().await` before reading back, or switch the test to synchronous I/O since it only writes one line.
