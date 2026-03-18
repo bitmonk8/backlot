@@ -17,6 +17,7 @@
 - **Config API cleanup** — `build_request_config` uses clone-and-mutate (closes issue #27). CLI `parse_config` uses single-pass YAML parsing: parse as `Value`, pop `grant`, pass remainder to flick (closes issue #16).
 - **Typed error types** — `GrantParseError` struct for `ToolGrant::from_names`. Re-exported from `reel::GrantParseError` (closes issue #30).
 - **Test coverage expansion** — `ToolGrant::from_names` unit tests (issue #36), custom `ToolHandler` dispatch tests (issue #1), full tool execution path integration tests (issue #2), CLI `parse_config`/`emit_error` tests (issue #12), sandbox network denial integration tests (issue #37).
+- **Simplification batch** — Policy test helper `policy_test_fixture` deduplicates sandbox policy test setup (issue #3c). `extract_text` uses reverse iterator (issue #10). `dispatch_tool` uses `HashMap<String, usize>` index for O(1) custom tool lookup (issue #11). CLI prerequisite path resolution extracted to `resolve_prerequisite_paths` (issue #17). `build_request_config` is the single public config-building method on `Agent` (issue #18).
 - **Test counts** — 179 tests total (168 reel + 11 reel-cli), all pass locally.
 
 ## What Is NOT Implemented
@@ -60,4 +61,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-Remaining candidates: testing gaps (#3b, #3d, #3e, #3f, #3g, #3h, #6, #7, #13, #14, #15, #38, #39, #40, #41, #43, #44, #45, #46), simplification (#3c, #10, #11, #17, #18), other (#42, #47).
+Remaining candidates: testing gaps (#3b, #3d, #3e, #3f, #3g, #3h, #6, #7, #13, #14, #15, #38, #39, #40, #41, #43, #44, #45, #46), other (#42, #47).

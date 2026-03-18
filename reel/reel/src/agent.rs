@@ -10,6 +10,7 @@ use anyhow::{Context, bail};
 use flick::result::ResultStatus;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
@@ -197,7 +198,11 @@ impl Agent {
     // Config building
     // -----------------------------------------------------------------------
 
-    fn build_request_config(request: &AgentRequestConfig) -> anyhow::Result<flick::RequestConfig> {
+    /// Build the effective request config with tool definitions injected.
+    /// Useful for dry-run / debugging, or called internally before model invocation.
+    pub fn build_request_config(
+        request: &AgentRequestConfig,
+    ) -> anyhow::Result<flick::RequestConfig> {
         let built_in_tools = tools::tool_definitions(request.grant);
         let custom_tool_defs = request.custom_tools.iter().map(|h| h.definition());
 
@@ -217,14 +222,6 @@ impl Agent {
         }
 
         Ok(config)
-    }
-
-    /// Build the effective request config for inspection without running the model.
-    /// Useful for dry-run / debugging.
-    pub fn build_effective_config(
-        request: &AgentRequestConfig,
-    ) -> anyhow::Result<flick::RequestConfig> {
-        Self::build_request_config(request)
     }
 
     // -----------------------------------------------------------------------
@@ -275,6 +272,14 @@ impl Agent {
                 .map_err(|e| anyhow::anyhow!("failed to spawn nu session: {e}"))?;
         }
 
+        // Build custom tool name→index map once to avoid calling definition() per dispatch.
+        let custom_tool_index: HashMap<String, usize> = request
+            .custom_tools
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h.definition().name, i))
+            .collect();
+
         let mut result = tokio::time::timeout(self.timeout, client.run(query, &mut context))
             .await
             .map_err(|_| anyhow::anyhow!("agent call timed out after {:?}", self.timeout))?
@@ -300,6 +305,7 @@ impl Agent {
                         request.grant,
                         &nu_session,
                         &request.custom_tools,
+                        &custom_tool_index,
                     )
                     .await;
                 tool_results.push(flick::ContentBlock::ToolResult {
@@ -331,6 +337,7 @@ impl Agent {
     // Tool dispatch
     // -----------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_tool(
         &self,
         tool_use_id: String,
@@ -339,12 +346,11 @@ impl Agent {
         grant: ToolGrant,
         nu_session: &NuSession,
         custom_tools: &[Box<dyn ToolHandler>],
+        custom_tool_index: &HashMap<String, usize>,
     ) -> ToolExecResult {
         // Custom tools first — allows consumers to override built-in tools if needed.
-        for handler in custom_tools {
-            if handler.definition().name == name {
-                return handler.execute(tool_use_id, input).await;
-            }
+        if let Some(&idx) = custom_tool_index.get(name) {
+            return custom_tools[idx].execute(tool_use_id, input).await;
         }
 
         // Built-in tools via nu session.
@@ -405,15 +411,14 @@ fn check_error(result: &flick::FlickResult) -> anyhow::Result<()> {
 }
 
 fn extract_text(result: &flick::FlickResult) -> anyhow::Result<String> {
-    let mut last_text: Option<&str> = None;
-    for block in &result.content {
-        if let flick::ContentBlock::Text { text } = block {
-            last_text = Some(text.as_str());
-        }
-    }
-
-    last_text
-        .map(ToOwned::to_owned)
+    result
+        .content
+        .iter()
+        .rev()
+        .find_map(|block| match block {
+            flick::ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
         .context("no text block found in model output")
 }
 
@@ -965,7 +970,7 @@ mod tests {
         request.grant = ToolGrant::NU;
         request.custom_tools = vec![Box::new(handler)];
 
-        let result = Agent::build_effective_config(&request);
+        let result = Agent::build_request_config(&request);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1003,7 +1008,7 @@ mod tests {
         request.grant = ToolGrant::NU;
         request.custom_tools = vec![Box::new(handler)];
 
-        let config = Agent::build_effective_config(&request).unwrap();
+        let config = Agent::build_request_config(&request).unwrap();
         let tool_names: Vec<&str> = config.tools().iter().map(flick::ToolConfig::name).collect();
         assert!(tool_names.contains(&"SpecialTool"));
         // Built-in tools should also be present.

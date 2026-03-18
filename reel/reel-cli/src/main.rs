@@ -149,10 +149,9 @@ async fn cmd_run(args: RunArgs) -> Result<(), String> {
         custom_tools: Vec::new(),
     };
 
-    // Dry run: build the effective config and print it without calling the model.
+    // Dry run: build the request config and print it without calling the model.
     if args.dry_run {
-        let effective =
-            reel::Agent::build_effective_config(&request).map_err(|e| format!("{e}"))?;
+        let effective = reel::Agent::build_request_config(&request).map_err(|e| format!("{e}"))?;
         let dry_output = serde_json::json!({
             "model": effective.model(),
             "system_prompt": effective.system_prompt(),
@@ -249,10 +248,16 @@ fn cmd_setup(args: &SetupArgs) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn check_windows_prerequisites(verbose: bool) -> Result<(), String> {
+fn resolve_prerequisite_paths() -> Result<Vec<std::path::PathBuf>, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("failed to get cwd: {e}"))?;
-    let paths: Vec<&std::path::Path> = vec![cwd.as_path()];
-    let ok = reel::sandbox::appcontainer_prerequisites_met(&paths);
+    Ok(vec![cwd])
+}
+
+#[cfg(target_os = "windows")]
+fn check_windows_prerequisites(verbose: bool) -> Result<(), String> {
+    let paths = resolve_prerequisite_paths()?;
+    let refs: Vec<&std::path::Path> = paths.iter().map(AsRef::as_ref).collect();
+    let ok = reel::sandbox::appcontainer_prerequisites_met(&refs);
 
     if verbose {
         eprintln!(
@@ -275,10 +280,10 @@ fn configure_windows_prerequisites(verbose: bool) -> Result<(), String> {
         eprintln!("Granting AppContainer prerequisites (NUL device + ancestor traverse ACEs)...");
     }
 
-    let cwd = std::env::current_dir().map_err(|e| format!("failed to get cwd: {e}"))?;
-    let paths: Vec<&std::path::Path> = vec![cwd.as_path()];
+    let paths = resolve_prerequisite_paths()?;
+    let refs: Vec<&std::path::Path> = paths.iter().map(AsRef::as_ref).collect();
 
-    reel::sandbox::grant_appcontainer_prerequisites(&paths).map_err(|e| {
+    reel::sandbox::grant_appcontainer_prerequisites(&refs).map_err(|e| {
         format!("Failed to grant AppContainer prerequisites: {e}. Try running as administrator.")
     })?;
 

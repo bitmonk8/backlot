@@ -699,17 +699,21 @@ async fn spawn_nu_process(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_build_nu_sandbox_policy_write_grant() {
+    /// Creates a `TempDir` with a nested session temp dir and builds a sandbox policy.
+    /// Returns `(project_tmp, session_tmp, policy)`.
+    fn policy_test_fixture(
+        grant: ToolGrant,
+        cache: Option<&Path>,
+    ) -> (tempfile::TempDir, tempfile::TempDir, lot::SandboxPolicy) {
         let tmp = tempfile::TempDir::new().unwrap();
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy = build_nu_sandbox_policy(
-            tmp.path(),
-            ToolGrant::WRITE | ToolGrant::NU,
-            None,
-            sess_tmp.path(),
-        )
-        .unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), grant, cache, sess_tmp.path()).unwrap();
+        (tmp, sess_tmp, policy)
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_write_grant() {
+        let (tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::WRITE | ToolGrant::NU, None);
         let canon = tmp.path().canonicalize().unwrap();
 
         let covered_by_write = policy
@@ -730,10 +734,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_no_write_grant() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy =
-            build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
+        let (tmp, sess_tmp, policy) = policy_test_fixture(ToolGrant::NU, None);
         let canon = tmp.path().canonicalize().unwrap();
         let sess_canon = sess_tmp.path().canonicalize().unwrap();
 
@@ -755,10 +756,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_denies_network_by_default() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy =
-            build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::NU, None);
         assert!(
             !policy.allow_network,
             "network should be denied when NETWORK grant is absent"
@@ -767,15 +765,8 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_allows_network_with_grant() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy = build_nu_sandbox_policy(
-            tmp.path(),
-            ToolGrant::NU | ToolGrant::NETWORK,
-            None,
-            sess_tmp.path(),
-        )
-        .unwrap();
+        let (_tmp, _sess_tmp, policy) =
+            policy_test_fixture(ToolGrant::NU | ToolGrant::NETWORK, None);
         assert!(
             policy.allow_network,
             "network should be allowed when NETWORK grant is present"
@@ -784,10 +775,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_no_exec_paths_without_cache() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy =
-            build_nu_sandbox_policy(tmp.path(), ToolGrant::NU, None, sess_tmp.path()).unwrap();
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::NU, None);
         assert!(
             policy.exec_paths.is_empty(),
             "exec_paths should be empty when no cache dir provided"

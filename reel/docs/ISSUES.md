@@ -6,10 +6,6 @@
 
 Missing tests: nu seeing overridden `TEMP`/`TMP` env vars, read-only session writing to temp dir, temp dir cleanup on drop, `spawn_nu_process` with nonexistent `project_root`, policy test asserting absence of system temp dirs from `write_paths`. **Category: Testing.**
 
-### 3c. Policy test boilerplate duplication
-
-5 `build_nu_sandbox_policy` tests repeat identical `TempDir` + `TempDir::new_in` setup. Extract a helper. **Category: Simplification.**
-
 ### 3d. Tests assume `REEL_RG_PATH` is always set
 
 Two tests use `^$env.REEL_RG_PATH` without guarding for absence. **Category: Testing.**
@@ -46,14 +42,6 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/lib.rs` — `pub use nu_session::NuSession` is part of the public API but no consumer uses it directly. Consider removing after API stabilization. **Category: Placement.**
 
-### 10. `extract_text` uses mutable loop instead of iterator
-
-`reel/src/agent.rs` — `extract_text` iterates forward with a `let mut last_text` variable. Replace with `result.content.iter().rev().find_map(...)`. **Category: Simplification.**
-
-### 11. `dispatch_tool` linear scan on custom tools
-
-`reel/src/agent.rs` — `dispatch_tool` calls `handler.definition()` on every custom tool handler for every tool call, just to compare names. Build a `HashMap<&str, usize>` once at the start of `run_with_tools`. Low urgency — custom tool count will be 0–1 near term. **Category: Simplification.**
-
 ### 13. `RunResult` field propagation untested
 
 `reel/src/agent.rs` — `usage` and `response_hash` mapping from `FlickResult` is untested in both `run_structured` and `run_with_tools` paths. All mock providers use `UsageResponse::default()`. Need tests with non-default usage/hash values. **Category: Testing.**
@@ -65,14 +53,6 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 ### 15. Multi-tool-call-per-round counting untested
 
 `reel/src/agent.rs` — `total_tool_calls += tool_calls.len() as u32` accumulates across rounds. No test verifies correct counting when a single round returns multiple tool calls. **Category: Testing.**
-
-### 17. reel-cli Windows setup functions duplicate cwd setup
-
-`reel-cli/src/main.rs` — `check_windows_prerequisites` and `configure_windows_prerequisites` both do `current_dir()` → `vec![cwd.as_path()]`. Extract a helper. **Category: Simplification.**
-
-### 18. `build_effective_config` is a trivial wrapper
-
-`reel/src/agent.rs` — One-line public method that calls `Self::build_request_config(request)`. The indirection adds no value. **Category: Simplification.**
 
 ### 23. Nu stderr discarded
 
@@ -157,3 +137,11 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 ### 47. `evaluate_inner` process steal race after `ensure_process`
 
 `reel/src/nu_session.rs` — `evaluate_inner` calls `ensure_process()` (which releases and re-acquires the lock internally), then acquires the lock again to `.take()` the process. Between these two lock acquisitions, a concurrent caller could `.take()` the process, causing `"internal: process unavailable after spawn"`. Not triggered today (evaluate calls are sequential per agent turn), but latent if concurrent evaluate is ever used. **Category: Concurrency.**
+
+### 48. Duplicate custom tool names: HashMap changes first-match to last-match semantics
+
+`reel/src/agent.rs` — `dispatch_tool` previously used linear scan (first match wins). The `HashMap<String, usize>` built via `collect()` keeps the last entry for duplicate keys. No practical impact: duplicate custom tool names are not a supported scenario, and `build_request_config` rejects duplicate names against built-ins. **Category: Testing.**
+
+### 49. `policy_test_fixture` cache parameter has no `Some(...)` caller
+
+`reel/src/nu_session.rs` — `policy_test_fixture(grant, cache)` accepts `Option<&Path>` but all callers pass `None`. The `includes_cache_dir_exec` test still constructs dirs manually because it needs a cache dir outside the project root. The parameter is untested. **Category: Testing.**
