@@ -2,18 +2,6 @@
 
 ## Non-critical issues
 
-### 1. ~~No tests for `ToolHandler` dispatch~~ RESOLVED
-
-Resolved: tests added in `reel/src/agent.rs` — `dispatch_custom_tool_by_name`, `custom_tool_with_builtin_name_rejected_as_duplicate`, `unknown_tool_falls_through_to_builtin_executor`, `custom_tool_definitions_included_in_config`.
-
-### 2. ~~No integration tests for full tool execution path~~ RESOLVED
-
-Resolved: integration tests added in `reel/src/nu_session.rs` covering `execute_tool()` → NuSession → subprocess → result parsing.
-
-### 3a. `NuProcess::drop` uses unbounded `wait()` after `kill()`
-
-`child.wait()` in `Drop` uses `WaitForSingleObject(INFINITE)`. If `kill()` fails silently, `wait()` blocks indefinitely. Practical likelihood very low. Drop impl relies on struct field declaration order for kill→wait→TempDir-drop. **Category: Correctness (edge case).**
-
 ### 3b. Per-session temp dir test gaps
 
 Missing tests: nu seeing overridden `TEMP`/`TMP` env vars, read-only session writing to temp dir, temp dir cleanup on drop, `spawn_nu_process` with nonexistent `project_root`, policy test asserting absence of system temp dirs from `write_paths`. **Category: Testing.**
@@ -66,10 +54,6 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/agent.rs` — `dispatch_tool` calls `handler.definition()` on every custom tool handler for every tool call, just to compare names. Build a `HashMap<&str, usize>` once at the start of `run_with_tools`. Low urgency — custom tool count will be 0–1 near term. **Category: Simplification.**
 
-### 12. ~~`parse_config` and `emit_error` untested in reel-cli~~ RESOLVED
-
-Resolved: tests added in `reel-cli/src/main.rs` — `parse_config_*` tests cover all branches; `error_output_shape` and `success_output_serialization_shape` cover output format.
-
 ### 13. `RunResult` field propagation untested
 
 `reel/src/agent.rs` — `usage` and `response_hash` mapping from `FlickResult` is untested in both `run_structured` and `run_with_tools` paths. All mock providers use `UsageResponse::default()`. Need tests with non-default usage/hash values. **Category: Testing.**
@@ -82,10 +66,6 @@ Resolved: tests added in `reel-cli/src/main.rs` — `parse_config_*` tests cover
 
 `reel/src/agent.rs` — `total_tool_calls += tool_calls.len() as u32` accumulates across rounds. No test verifies correct counting when a single round returns multiple tool calls. **Category: Testing.**
 
-### 16. ~~reel-cli two-pass YAML config parse over-engineered~~ RESOLVED
-
-Resolved: single-pass parse as `serde_yml::Value`, pop `grant`, pass remainder to flick.
-
 ### 17. reel-cli Windows setup functions duplicate cwd setup
 
 `reel-cli/src/main.rs` — `check_windows_prerequisites` and `configure_windows_prerequisites` both do `current_dir()` → `vec![cwd.as_path()]`. Extract a helper. **Category: Simplification.**
@@ -93,14 +73,6 @@ Resolved: single-pass parse as `serde_yml::Value`, pop `grant`, pass remainder t
 ### 18. `build_effective_config` is a trivial wrapper
 
 `reel/src/agent.rs` — One-line public method that calls `Self::build_request_config(request)`. The indirection adds no value. **Category: Simplification.**
-
-### 20. `evaluate_inner` holds lock during nu process spawn
-
-`reel/src/nu_session.rs` — `evaluate_inner` awaits `spawn_nu_process` while holding the async `Mutex`, blocking `kill()` if spawn hangs. Should spawn outside the lock. **Category: Concurrency.**
-
-### 21. `spawn()` does not verify grant/project_root match
-
-`reel/src/nu_session.rs` — `spawn()` returns early if `process.is_some()` without checking whether the existing process matches the requested parameters. **Category: Correctness.**
 
 ### 23. Nu stderr discarded
 
@@ -118,10 +90,6 @@ Resolved: single-pass parse as `serde_yml::Value`, pop `grant`, pass remainder t
 
 `reel/src/tools.rs` — Only the NuShell tool respects model-provided timeout. File tools (Read, Write, Edit, Glob, Grep) use 120s. Slow Grep on large codebases cannot be extended. **Category: Feature gap.**
 
-### 27. ~~`build_request_config` reconstructs config via accessors — may lose future fields~~ RESOLVED
-
-Resolved: `RequestConfig` now derives `Clone`; `build_request_config` clones and mutates via `add_tools`.
-
 ### 28. `reel glob` has no depth limit or symlink protection
 
 `reel/build.rs` (REEL_CONFIG_NU) — `reel glob` runs `glob $pattern` with a 1000-result cap but no depth limit. A `**/*` pattern in a deep tree with symlink cycles could hang before the cap is reached. **Category: Robustness.**
@@ -129,10 +97,6 @@ Resolved: `RequestConfig` now derives `Clone`; `build_request_config` clones and
 ### 29. `NuSession` leaves `.reel/tmp/` directory in project root
 
 `reel/src/nu_session.rs` — Creates `<project_root>/.reel/tmp/` for tempdir. The tempdir itself is cleaned up, but the `.reel/tmp/` parent directory is left behind. Should use system temp dir or clean up the parent. **Category: Side effects.**
-
-### 30. ~~`ToolGrant::from_names` returns `Result<_, String>` instead of a proper error type~~ RESOLVED
-
-Resolved: `GrantParseError` struct defined in `tools.rs`, re-exported from `reel::GrantParseError`.
 
 ### 31. `test_support` re-exports leak flick internal types through reel's public API
 
@@ -154,14 +118,6 @@ Resolved: `GrantParseError` struct defined in `tools.rs`, re-exported from `reel
 
 `reel-cli/src/main.rs` — Dry run uses `to_string_pretty` and omits the resolved `ToolGrant`; success output uses `to_string` (compact). Inconsistent format and missing diagnostic info. **Category: Usability.**
 
-### 36. ~~`ToolGrant::from_names` has no unit tests~~ RESOLVED
-
-Resolved: `from_names` tested via `parse_config_*` tests in `reel-cli/src/main.rs` and `GrantParseError` tests in `reel/src/tools.rs`.
-
-### 37. ~~No integration test for sandbox network denial~~ RESOLVED
-
-Resolved: sandbox network denial verified via `allow_network` policy field tests and grant-gated sandbox construction in `reel/src/nu_session.rs`.
-
 ### 38. Grant-change respawn test does not cover NETWORK flag
 
 `reel/src/nu_session.rs` — `integration_grant_change_respawns` only tests `NU` → `NU | WRITE`. No coverage for `NETWORK` flag change triggering respawn. Mechanism works via full bitflags comparison, so regression is unlikely. **Category: Testing.**
@@ -177,3 +133,27 @@ Resolved: sandbox network denial verified via `allow_network` policy field tests
 ### 41. `ToolGrant::from_names` does not test empty string element
 
 `reel/src/tools.rs` — `from_names(&[""])` (empty string element) is not tested. Depending on the implementation, an empty string could be treated as unknown or cause unexpected behavior. **Category: Testing.**
+
+### 42. `eprintln!` in library `NuProcess::drop`
+
+`reel/src/nu_session.rs` — `NuProcess::drop` uses `eprintln!` to warn when the bounded wait times out. Library crates should not write directly to stderr; consumers embedding reel get unexpected output. Replace with `tracing::warn!` when a logging dependency is added, or remove the warning. **Category: Separation of concerns.**
+
+### 43. `NuProcess::drop` timeout branch untested
+
+`reel/src/nu_session.rs` — The 5-second deadline branch in `NuProcess::drop` (where `try_wait` never returns exit status) has no test coverage. The poll loop is embedded in `Drop` on a concrete type with no test seam. Extract into a testable function to enable unit testing. **Category: Testing.**
+
+### 44. TOCTOU re-check path in `evaluate_inner` untested
+
+`reel/src/nu_session.rs` — The `still_needs == false` branch (where a concurrent caller already installed a compatible process) in `ensure_process`'s respawn block has no test coverage. Core correctness invariant of the lock-free spawn pattern. **Category: Testing.**
+
+### 45. `spawn()` respawn on parameter mismatch untested
+
+`reel/src/nu_session.rs` — `spawn()` called with different project_root or grant (triggering kill-and-respawn) has no direct test. Covered indirectly via `evaluate` path. **Category: Testing.**
+
+### 46. `evaluate_inner` Phase 3 generation-mismatch-with-OK-result untested
+
+`reel/src/nu_session.rs` — When `evaluate_inner` completes successfully but `generation != generation_at_start` (a concurrent `kill()` or respawn occurred), the process is silently dropped instead of written back. This discard path has no test coverage. **Category: Testing.**
+
+### 47. `evaluate_inner` process steal race after `ensure_process`
+
+`reel/src/nu_session.rs` — `evaluate_inner` calls `ensure_process()` (which releases and re-acquires the lock internally), then acquires the lock again to `.take()` the process. Between these two lock acquisitions, a concurrent caller could `.take()` the process, causing `"internal: process unavailable after spawn"`. Not triggered today (evaluate calls are sequential per agent turn), but latent if concurrent evaluate is ever used. **Category: Concurrency.**

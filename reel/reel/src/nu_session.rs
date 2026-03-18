@@ -92,6 +92,12 @@ struct NuProcess {
     _session_temp_dir: tempfile::TempDir,
 }
 
+impl NuProcess {
+    fn is_compatible(&self, project_root: &Path, grant: ToolGrant) -> bool {
+        self.grant == grant && self.project_root == project_root
+    }
+}
+
 impl Drop for NuProcess {
     fn drop(&mut self) {
         let mut guard = self
@@ -100,9 +106,21 @@ impl Drop for NuProcess {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref mut child) = *guard {
             let _ = child.kill();
-            // Reap the child so it releases handles before _session_temp_dir
-            // is dropped — on Windows, open handles prevent directory deletion.
-            let _ = child.wait();
+            // Bounded wait: poll try_wait to reap the child so it releases
+            // handles before _session_temp_dir is dropped (on Windows, open
+            // handles prevent directory deletion). If kill() failed silently,
+            // we must not block forever.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while matches!(child.try_wait(), Ok(None)) {
+                if std::time::Instant::now() >= deadline {
+                    eprintln!(
+                        "warning: nu process did not exit within 5s after kill, \
+                         abandoning wait"
+                    );
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
     }
 }
@@ -170,17 +188,48 @@ impl NuSession {
     }
 
     /// Eagerly spawn the nu MCP process so it is warm by the first tool call.
+    ///
+    /// If a process already exists but was spawned with different grant or
+    /// project_root, kills the old one and spawns a replacement.
     pub async fn spawn(&self, project_root: &Path, grant: ToolGrant) -> Result<(), String> {
-        let mut st = self.state.lock().await;
-        if st.process.is_some() {
+        self.ensure_process(project_root, grant).await
+    }
+
+    /// Ensure a compatible process is running, spawning one if needed.
+    ///
+    /// Releases the async mutex before the potentially-blocking
+    /// `spawn_nu_process` call so `kill()` is not blocked. On
+    /// re-acquisition, re-checks both compatibility and generation to
+    /// discard the new process if another caller won the race or
+    /// `kill()` fired during the spawn.
+    async fn ensure_process(&self, project_root: &Path, grant: ToolGrant) -> Result<(), String> {
+        let (needs_spawn, gen_before) = {
+            let st = self.state.lock().await;
+            let needs = st
+                .process
+                .as_ref()
+                .is_none_or(|p| !p.is_compatible(project_root, grant));
+            (needs, st.generation)
+        };
+        if !needs_spawn {
             return Ok(());
         }
-        st.generation += 1;
         let proc = spawn_nu_process(project_root, grant, self.cache_dir.as_deref()).await?;
-        st.process = Some(proc);
-        // Release the mutex before returning so other callers (evaluate, kill)
-        // are not blocked while the caller continues.
-        drop(st);
+        let mut st = self.state.lock().await;
+        // Discard if kill() fired while we were outside the lock.
+        if st.generation != gen_before {
+            return Ok(()); // proc dropped, NuProcess::Drop kills it
+        }
+        // Re-check: another caller may have installed a compatible process.
+        let still_needs = st
+            .process
+            .as_ref()
+            .is_none_or(|p| !p.is_compatible(project_root, grant));
+        if still_needs {
+            st.generation += 1;
+            drop(st.process.replace(proc));
+        }
+        // else: proc dropped here, NuProcess::Drop kills it
         Ok(())
     }
 
@@ -260,25 +309,12 @@ impl NuSession {
         project_root: &Path,
         grant: ToolGrant,
     ) -> Result<NuOutput, String> {
-        // Phase 1: Acquire lock, ensure process is running, take it out.
-        // Store the child handle in state so kill() can reach it during Phase 2.
+        // Phase 1: Ensure a compatible process is running.
+        self.ensure_process(project_root, grant).await?;
+
+        // Phase 1b: Take the process out and register inflight handles.
         let (proc, generation_at_start) = {
             let mut st = self.state.lock().await;
-
-            let needs_restart = st
-                .process
-                .as_ref()
-                .is_none_or(|p| p.grant != grant || p.project_root != project_root);
-
-            if needs_restart {
-                // Bump generation when spawning a new process.
-                st.generation += 1;
-                st.process.take();
-                let new_proc =
-                    spawn_nu_process(project_root, grant, self.cache_dir.as_deref()).await?;
-                st.process = Some(new_proc);
-            }
-
             let proc = st
                 .process
                 .take()
@@ -286,7 +322,6 @@ impl NuSession {
             st.inflight_child = Some(Arc::clone(&proc.child_handle));
             st.inflight_stdin = Some(Arc::clone(&proc.stdin));
             let generation = st.generation;
-            drop(st);
             (proc, generation)
         };
         // Lock released — blocking I/O below does not hold the async mutex,
