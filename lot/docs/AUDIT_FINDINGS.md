@@ -16,15 +16,17 @@
 
 ## Critical (2)
 
-### C1. [Correctness] File: lot/src/windows/cmdline.rs
+### C1. [Correctness] File: lot/src/windows/cmdline.rs — FIXED
 - **Line(s):** 41
 - **Description:** `arg.to_string_lossy()` silently replaces invalid UTF-16 sequences with U+FFFD (replacement character), corrupting non-UTF-16 arguments. Should iterate over `arg.encode_wide()` directly.
 - **Impact:** Silent data corruption of command-line arguments could cause sandboxed processes to receive wrong arguments, undermining sandbox correctness.
+- **Fix:** Rewrote `append_escaped_arg` to operate on UTF-16 code units via `encode_wide()` directly, preserving unpaired surrogates.
 
-### C2. [Correctness] File: lot/src/macos/mod.rs
+### C2. [Correctness] File: lot/src/macos/mod.rs — FIXED
 - **Line(s):** 113-116
 - **Description:** `setsid()` failure causes `_exit(71)` without writing to error pipe. Parent receives EOF and proceeds as if spawn succeeded, losing error context. Should use child_bail macro with a STEP_SETSID constant.
 - **Impact:** Parent treats a failed spawn as successful. The sandboxed process may not exist or may run in an incorrect session, breaking isolation assumptions.
+- **Fix:** Moved `child_bail!` macro and step constants before `setsid()` call. Added `STEP_SETSID = 1`. `setsid()` failure now writes error to pipe so parent correctly returns `SandboxError::Setup`.
 
 ---
 

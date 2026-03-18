@@ -99,28 +99,12 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // === CHILD PROCESS (single-threaded after fork) ===
 
         // Step constants for error reporting via child_bail protocol
+        const STEP_SETSID: i32 = 1;
         const STEP_SEATBELT: i32 = 2;
         const STEP_RLIMIT: i32 = 3;
         const STEP_DUP2: i32 = 4;
         const STEP_CHDIR: i32 = 5;
         const STEP_EXEC: i32 = 6;
-
-        // Start a new session so the child becomes its own process group leader.
-        // This lets the parent killpg() all descendants, not just the direct child.
-        // setsid() only fails with EPERM if the process is already a session
-        // leader, which cannot happen after fork (fresh PID != parent SID).
-        // SAFETY: setsid() is async-signal-safe per POSIX, safe to call after fork.
-        if unsafe { libc::setsid() } < 0 {
-            // killpg() requires PGID == PID; abort if we can't guarantee that.
-            unsafe { libc::_exit(71) }; // EX_OSERR
-        }
-
-        // Close parent's end of error pipe
-        // SAFETY: valid fd
-        unsafe { libc::close(err_pipe_rd) };
-
-        // Close parent's stdio pipe ends
-        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
 
         // Macro to report error and exit from child.
         // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
@@ -135,6 +119,22 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 unsafe { libc::_exit(1) };
             }};
         }
+
+        // Start a new session so the child becomes its own process group leader.
+        // This lets the parent killpg() all descendants, not just the direct child.
+        // setsid() only fails with EPERM if the process is already a session
+        // leader, which cannot happen after fork (fresh PID != parent SID).
+        // SAFETY: setsid() is async-signal-safe per POSIX, safe to call after fork.
+        if unsafe { libc::setsid() } < 0 {
+            child_bail!(err_pipe_wr, STEP_SETSID, unsafe { *libc::__error() });
+        }
+
+        // Close parent's end of error pipe
+        // SAFETY: valid fd
+        unsafe { libc::close(err_pipe_rd) };
+
+        // Close parent's stdio pipe ends
+        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
 
         // Apply seatbelt profile — permanent, inherited by exec'd process
         if let Err(e) = seatbelt::apply_profile(&profile) {

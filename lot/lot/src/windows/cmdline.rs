@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 // ── Command-line building/quoting ────────────────────────────────────
 
@@ -34,12 +34,23 @@ pub fn build_command_line(program: &OsString, args: &[OsString]) -> Vec<u16> {
     os_to_wide(&cmd)
 }
 
+const WIDE_SPACE: u16 = b' ' as u16;
+const WIDE_TAB: u16 = b'\t' as u16;
+const WIDE_QUOTE: u16 = b'"' as u16;
+const WIDE_BACKSLASH: u16 = b'\\' as u16;
+
 /// Escape an argument following `CommandLineToArgvW` rules:
 /// - If the arg contains spaces, tabs, or quotes, wrap in quotes.
 /// - Inside quotes, backslashes before a quote must be doubled, and quotes become `\"`.
+///
+/// Operates on UTF-16 code units directly to avoid `to_string_lossy()` corruption
+/// of arguments containing unpaired surrogates.
 fn append_escaped_arg(cmd: &mut OsString, arg: &OsString) {
-    let s = arg.to_string_lossy();
-    let needs_quoting = s.is_empty() || s.contains(' ') || s.contains('\t') || s.contains('"');
+    let wide: Vec<u16> = arg.as_os_str().encode_wide().collect();
+    let needs_quoting = wide.is_empty()
+        || wide
+            .iter()
+            .any(|&c| c == WIDE_SPACE || c == WIDE_TAB || c == WIDE_QUOTE);
 
     if !needs_quoting {
         cmd.push(arg);
@@ -48,23 +59,38 @@ fn append_escaped_arg(cmd: &mut OsString, arg: &OsString) {
 
     cmd.push("\"");
 
+    // Batch contiguous non-special code units to avoid per-unit allocation
+    let mut plain = Vec::<u16>::new();
     let mut backslash_count: usize = 0;
-    for ch in s.chars() {
-        if ch == '\\' {
+
+    let flush_plain = |cmd: &mut OsString, plain: &mut Vec<u16>| {
+        if !plain.is_empty() {
+            cmd.push(OsString::from_wide(plain));
+            plain.clear();
+        }
+    };
+
+    for &unit in &wide {
+        if unit == WIDE_BACKSLASH {
             backslash_count += 1;
-        } else if ch == '"' {
+        } else if unit == WIDE_QUOTE {
             // Double the backslashes before a quote, then emit \"
+            flush_plain(cmd, &mut plain);
             for _ in 0..backslash_count {
                 cmd.push("\\");
             }
             backslash_count = 0;
             cmd.push("\\\"");
         } else {
+            // Flush pending backslashes as-is
+            for _ in 0..backslash_count {
+                cmd.push("\\");
+            }
             backslash_count = 0;
-            let mut buf = [0u8; 4];
-            cmd.push(ch.encode_utf8(&mut buf) as &str);
+            plain.push(unit);
         }
     }
+    flush_plain(cmd, &mut plain);
     // Double trailing backslashes before the closing quote
     for _ in 0..backslash_count {
         cmd.push("\\");
