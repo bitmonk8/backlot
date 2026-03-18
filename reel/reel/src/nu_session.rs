@@ -1254,6 +1254,7 @@ mod tests {
     /// Each sandbox test gets its own cache dir so AppContainer ACL
     /// operations on exec_path do not interfere between concurrent tests.
     fn tmp_sandbox_cache() -> tempfile::TempDir {
+        #[allow(clippy::option_env_unwrap)] // Intentional: panic at test-time, not compile-time.
         let src = option_env!("NU_CACHE_DIR")
             .expect("NU_CACHE_DIR not set at compile time — cannot create isolated sandbox cache");
         let dest =
