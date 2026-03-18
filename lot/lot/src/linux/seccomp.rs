@@ -221,16 +221,14 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             PR_SET_TIMERSLACK,
             PR_GET_TIMERSLACK,
         ];
-        let prctl_rules: Vec<SeccompRule> = allowed_ops
-            .iter()
-            .map(|&op| {
-                SeccompRule::new(vec![
-                    SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, op)
-                        .expect("valid prctl condition"),
-                ])
-                .expect("valid prctl rule")
-            })
-            .collect();
+        let mut prctl_rules = Vec::with_capacity(allowed_ops.len());
+        for &op in &allowed_ops {
+            let cond = SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, op)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            let rule = SeccompRule::new(vec![cond])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            prctl_rules.push(rule);
+        }
         rules.insert(libc::SYS_prctl, prctl_rules);
     }
 
@@ -246,16 +244,14 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
         const FIONCLEX: u64 = 0x5450; // clear close-on-exec
 
         let allowed_reqs = [TCGETS, TIOCGWINSZ, TIOCGPGRP, FIONREAD, FIOCLEX, FIONCLEX];
-        let ioctl_rules: Vec<SeccompRule> = allowed_reqs
-            .iter()
-            .map(|&req| {
-                SeccompRule::new(vec![
-                    SeccompCondition::new(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, req)
-                        .expect("valid ioctl condition"),
-                ])
-                .expect("valid ioctl rule")
-            })
-            .collect();
+        let mut ioctl_rules = Vec::with_capacity(allowed_reqs.len());
+        for &req in &allowed_reqs {
+            let cond = SeccompCondition::new(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, req)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            let rule = SeccompRule::new(vec![cond])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            ioctl_rules.push(rule);
+        }
         rules.insert(libc::SYS_ioctl, ioctl_rules);
     }
 

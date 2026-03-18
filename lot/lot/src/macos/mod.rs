@@ -94,6 +94,15 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     if child_pid == 0 {
         // === CHILD PROCESS (single-threaded after fork) ===
 
+        // Step constants for error reporting (consistent with Linux helper_bail)
+        const STEP_SETSID: i32 = 1;
+        const STEP_SEATBELT: i32 = 2;
+        const STEP_RLIMIT: i32 = 3;
+        const STEP_DUP2: i32 = 4;
+        const STEP_CHDIR: i32 = 5;
+        const STEP_EXEC: i32 = 6;
+        let _ = STEP_SETSID; // used only for documentation
+
         // Start a new session so the child becomes its own process group leader.
         // This lets the parent killpg() all descendants, not just the direct child.
         // setsid() only fails with EPERM if the process is already a session
@@ -110,15 +119,6 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
         // Close parent's stdio pipe ends
         unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
-
-        // Step constants for error reporting (consistent with Linux helper_bail)
-        const STEP_SETSID: i32 = 1;
-        const STEP_SEATBELT: i32 = 2;
-        const STEP_RLIMIT: i32 = 3;
-        const STEP_DUP2: i32 = 4;
-        const STEP_CHDIR: i32 = 5;
-        const STEP_EXEC: i32 = 6;
-        let _ = STEP_SETSID; // used only for documentation
 
         // Macro to report error and exit from child.
         // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
