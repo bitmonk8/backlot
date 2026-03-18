@@ -12,6 +12,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use zeroize::Zeroizing;
 
 const NONCE_LEN: usize = 12;
+const AUTH_TAG_LEN: usize = 16; // Poly1305 authentication tag
 const PREFIX: &str = "enc3:";
 
 /// Serialized form for a single provider entry in the TOML file.
@@ -44,6 +45,28 @@ pub struct ProviderRegistry {
     dir: PathBuf,
 }
 
+fn validate_provider_name(name: &str) -> Result<(), CredentialError> {
+    if name.is_empty() {
+        return Err(CredentialError::InvalidFormat(
+            "provider name must not be empty".into(),
+        ));
+    }
+    if name.len() > 255 {
+        return Err(CredentialError::InvalidFormat(
+            "provider name must not exceed 255 characters".into(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(CredentialError::InvalidFormat(
+            "provider name must contain only [a-zA-Z0-9_-]".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl ProviderRegistry {
     /// Load from the default `~/.flick/` directory.
     pub fn load_default() -> Result<Self, CredentialError> {
@@ -58,6 +81,7 @@ impl ProviderRegistry {
 
     /// Decrypt and return the full provider entry for the given name.
     pub async fn get(&self, name: &str) -> Result<ProviderInfo, CredentialError> {
+        validate_provider_name(name)?;
         let key = self.load_secret_key().await?;
         let providers = self.load_providers_file().await?;
         let stored = providers
@@ -94,6 +118,12 @@ impl ProviderRegistry {
         base_url: &str,
         compat: Option<CompatFlags>,
     ) -> Result<(), CredentialError> {
+        validate_provider_name(name)?;
+        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+            return Err(CredentialError::InvalidFormat(
+                "base_url must start with http:// or https://".into(),
+            ));
+        }
         let key = self.load_or_create_secret_key().await?;
         let encrypted = encrypt(&key, api_key, name)?;
 
@@ -113,6 +143,7 @@ impl ProviderRegistry {
 
     /// Remove a provider entry. Returns true if it existed.
     pub async fn remove(&self, name: &str) -> Result<bool, CredentialError> {
+        validate_provider_name(name)?;
         let mut providers = self.load_providers_file().await?;
         let existed = providers.remove(name).is_some();
         if existed {
@@ -172,7 +203,16 @@ impl ProviderRegistry {
                 .await;
             match file_result {
                 Ok(mut file) => {
-                    file.write_all(hex_key.as_bytes()).await?;
+                    if let Err(e) = file.write_all(hex_key.as_bytes()).await {
+                        drop(file);
+                        let _ = tokio::fs::remove_file(&path).await;
+                        return Err(CredentialError::Io(e));
+                    }
+                    if let Err(e) = file.sync_all().await {
+                        drop(file);
+                        let _ = tokio::fs::remove_file(&path).await;
+                        return Err(CredentialError::Io(e));
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     return self.load_secret_key().await;
@@ -191,6 +231,11 @@ impl ProviderRegistry {
             match file_result {
                 Ok(mut file) => {
                     if let Err(e) = file.write_all(hex_key.as_bytes()).await {
+                        drop(file);
+                        let _ = tokio::fs::remove_file(&path).await;
+                        return Err(CredentialError::Io(e));
+                    }
+                    if let Err(e) = file.sync_all().await {
                         drop(file);
                         let _ = tokio::fs::remove_file(&path).await;
                         return Err(CredentialError::Io(e));
@@ -246,7 +291,10 @@ impl ProviderRegistry {
                 return Err(e);
             }
         }
-        tokio::fs::rename(&tmp_path, &path).await?;
+        if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(CredentialError::Io(e));
+        }
         Ok(())
     }
 }
@@ -404,7 +452,7 @@ fn encrypt(key: &[u8; 32], plaintext: &str, provider: &str) -> Result<String, Cr
                 aad: provider.as_bytes(),
             },
         )
-        .map_err(|_| CredentialError::InvalidFormat("encryption failed".into()))?;
+        .map_err(|_| CredentialError::EncryptionFailed)?;
 
     let mut combined = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     combined.extend_from_slice(&nonce_bytes);
@@ -418,7 +466,7 @@ fn decrypt(key: &[u8; 32], value: &str, provider: &str) -> Result<String, Creden
         .ok_or_else(|| CredentialError::InvalidFormat(format!("missing {PREFIX} prefix")))?;
     let combined =
         hex::decode(hex_str).map_err(|_| CredentialError::InvalidFormat("bad hex".into()))?;
-    if combined.len() < NONCE_LEN + 16 {
+    if combined.len() < NONCE_LEN + AUTH_TAG_LEN {
         return Err(CredentialError::InvalidFormat("too short".into()));
     }
     let (nonce_bytes, ciphertext) = combined.split_at(NONCE_LEN);
@@ -619,5 +667,95 @@ mod tests {
             unsafe { std::env::set_var(var_name, val) };
         }
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_provider_name_empty() {
+        assert!(matches!(
+            validate_provider_name(""),
+            Err(CredentialError::InvalidFormat(_))
+        ));
+    }
+
+    #[test]
+    fn validate_provider_name_too_long() {
+        let long = "a".repeat(256);
+        assert!(matches!(
+            validate_provider_name(&long),
+            Err(CredentialError::InvalidFormat(_))
+        ));
+    }
+
+    #[test]
+    fn validate_provider_name_invalid_chars() {
+        for bad in &["has space", "has.dot", "slash/bad", "colon:bad", "a@b"] {
+            assert!(
+                matches!(validate_provider_name(bad), Err(CredentialError::InvalidFormat(_))),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_provider_name_valid() {
+        for good in &["anthropic", "open-ai", "my_provider", "A1-b2_c3"] {
+            assert!(validate_provider_name(good).is_ok(), "expected ok for {good:?}");
+        }
+    }
+
+    #[test]
+    fn validate_provider_name_max_length() {
+        let max = "a".repeat(255);
+        assert!(validate_provider_name(&max).is_ok());
+    }
+
+    #[tokio::test]
+    async fn set_rejects_bad_base_url() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let result = registry
+            .set("test", "key", ApiKind::Messages, "ftp://bad.com", None)
+            .await;
+        assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
+    }
+
+    #[tokio::test]
+    async fn set_accepts_http_and_https() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        registry
+            .set("a", "key", ApiKind::Messages, "https://ok.com", None)
+            .await
+            .expect("https should work");
+        registry
+            .set("b", "key", ApiKind::Messages, "http://ok.com", None)
+            .await
+            .expect("http should work");
+    }
+
+    #[tokio::test]
+    async fn set_rejects_invalid_name() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let result = registry
+            .set("bad name", "key", ApiKind::Messages, "https://ok.com", None)
+            .await;
+        assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
+    }
+
+    #[tokio::test]
+    async fn get_rejects_invalid_name() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let result = registry.get("").await;
+        assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
+    }
+
+    #[tokio::test]
+    async fn remove_rejects_invalid_name() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let result = registry.remove("bad/name").await;
+        assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
     }
 }

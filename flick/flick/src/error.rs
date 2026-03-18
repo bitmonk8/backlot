@@ -114,6 +114,9 @@ pub enum CredentialError {
 
     #[error("invalid credential format: {0}")]
     InvalidFormat(String),
+
+    #[error("encryption failed")]
+    EncryptionFailed,
 }
 
 #[cfg(test)]
@@ -191,6 +194,10 @@ mod tests {
             CredentialError::InvalidFormat("bad".into())
                 .to_string()
                 .contains("bad")
+        );
+        assert_eq!(
+            CredentialError::EncryptionFailed.to_string(),
+            "encryption failed"
         );
     }
 

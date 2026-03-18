@@ -39,3 +39,21 @@ The nested `mul_add` chain could be replaced with a plain `a*b + c*d + ...` expr
 **Category:** Simplification
 
 Four nearly identical blocks validate pricing fields with the same `!v.is_finite() || v < 0.0` check. A helper function would reduce duplication.
+
+---
+
+## 5. Base URL validation allows degenerate URLs
+
+**File:** `flick/src/provider_registry.rs:122-126`
+**Category:** Testing
+
+`set()` checks that `base_url` starts with `http://` or `https://` but does not validate the URL is well-formed beyond that. Degenerate values like `"https://"` (no host) pass validation but would fail at reqwest request time. Stricter parsing (e.g., `url::Url::parse`) would catch these earlier.
+
+---
+
+## 6. No test coverage for corrupt secret key file
+
+**File:** `flick/src/provider_registry.rs:163-181`
+**Category:** Testing
+
+`load_secret_key` has error paths for invalid hex and wrong-length keys, but no test covers reading a corrupt `.secret_key` file. Could be tested by writing invalid content to the key file path before calling `get()`.

@@ -1,60 +1,12 @@
 # Flick — Backlog
 
-27 items in 6 active clusters, ordered by value (highest first).
+20 items in 5 active clusters, ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
 ---
 
-## 1. Security & Credentials (7 items)
-
-Base URL validation, credential zeroization, secret key write atomicity, temp file cleanup. All touch `provider_registry.rs` or its security surface.
-
-### L2. Provider `base_url` not validated for URL sanity — `provider_registry.rs`
-
-`ProviderInfo.base_url` accepts any string. Values like `file:///etc/passwd` would be passed to reqwest (which rejects non-HTTP schemes at request time with an opaque error). An `http://localhost/...` URL could be used for SSRF if flick ever runs as a service.
-
-- **M** — Fix Risk: Low — Effort: Low
-
-### L20. Unix key-write failure leaves corrupted `.secret_key` — `provider_registry.rs`
-
-On the Unix code path in `load_or_create_secret_key`, if `file.write_all(hex_key.as_bytes()).await` fails the error propagates via `?` without deleting the partially-written file. Subsequent `load_secret_key` calls fail with `InvalidFormat`; `load_or_create_secret_key` retries `create_new` which hits `AlreadyExists` and re-loads the corrupt file. The Windows path correctly deletes on write failure.
-
-- **M** — Fix Risk: Low — Effort: Trivial
-
-### T7. No provider name validation in `ProviderRegistry::get`/`set` — `provider_registry.rs`
-
-Public API accepts any `&str` including TOML-special characters. Caller validates, but the store itself does not enforce invariants.
-
-- **L** — Fix Risk: Low — Effort: Trivial
-
-### T8. `encrypt` error uses wrong variant name — `provider_registry.rs`
-
-`InvalidFormat("encryption failed")` — semantically wrong for an encryption operation. The error path is practically unreachable.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T48. Temp providers file not cleaned up on `rename` failure — `provider_registry.rs`
-
-If `tokio::fs::rename` fails (e.g., destination locked on Windows), the `.tmp` file containing all providers is left on disk. It will be overwritten on the next `set()` call so there is no data-loss, but it is a robustness gap.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T49. Poly1305 authentication tag size 16 is a magic number — `provider_registry.rs`
-
-The minimum-length check `combined.len() < NONCE_LEN + 16` uses the literal `16` (Poly1305 tag length) without a named constant.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T51. Secret key file not `fsync`'d before returning — `provider_registry.rs`
-
-Neither the Unix nor Windows path calls `sync_all()` after writing the key file. A power failure between `write_all` and OS flush leaves the file empty or truncated.
-
-- **L** — Fix Risk: Low — Effort: Trivial
-
----
-
-## 2. Context & Serialization Robustness (4 items)
+## 1. Context & Serialization Robustness (4 items)
 
 Unknown content block types, empty content vecs, message ordering validation, missing serde defaults. All in `context.rs`.
 
@@ -84,7 +36,7 @@ A serialised message with the `content` key absent fails deserialisation with "m
 
 ---
 
-## 3. Error Type Hygiene (5 items)
+## 2. Error Type Hygiene (5 items)
 
 Overloaded error variants, wrong variant names, misattributed JSON errors. One sweep through `error.rs` and its consumers.
 
@@ -120,7 +72,7 @@ Any `serde_json::Error` propagated via `?` in a `FlickError` context becomes `Fl
 
 ---
 
-## 4. Provider — Messages API & Architecture (4 items)
+## 3. Provider — Messages API & Architecture (4 items)
 
 Temperature+thinking guard, system prompt as array (for caching), tool_choice support, provider trait coherence. `messages.rs` and `provider.rs`.
 
@@ -150,7 +102,7 @@ The Messages provider always omits `tool_choice`, relying on the Anthropic defau
 
 ---
 
-## 5. CLI Input Handling (4 items)
+## 4. CLI Input Handling (4 items)
 
 Stdin size limits, provider name/key validation, whitespace-only input messages. All in `main.rs`.
 
@@ -180,7 +132,7 @@ No length cap or control character check on the API key value.
 
 ---
 
-## 6. Test Coverage Gaps (3 items)
+## 5. Test Coverage Gaps (3 items)
 
 Missing tests for context overflow, credential edge cases, destructive mock reads, integration history verification. Independent items but suitable for a single test-writing session.
 

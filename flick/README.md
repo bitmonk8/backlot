@@ -74,7 +74,7 @@ flick run --config flick.yaml --query "What is Rust?"
 
 ## Provider Registry
 
-Providers are stored at `~/.flick/providers` (TOML, encrypted with ChaCha20-Poly1305). A 256-bit secret key is generated on first use and stored at `~/.flick/.secret_key` with restrictive file permissions.
+Providers are stored at `~/.flick/providers` (TOML, encrypted with ChaCha20-Poly1305). A 256-bit secret key is generated on first use and stored at `~/.flick/.secret_key` with restrictive file permissions. Secret key writes are fsync'd and cleaned up on failure. Provider names must match `[a-zA-Z0-9_-]` (max 255 chars). Base URLs must use `http://` or `https://`.
 
 ```sh
 # Add a provider
@@ -394,7 +394,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-255 tests (202 lib, 22 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
+265 tests (212 lib, 22 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
 
 ## License
 
