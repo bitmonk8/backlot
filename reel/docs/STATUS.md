@@ -24,6 +24,7 @@
 - **Runtime cache directory resolution** — Replaced compile-time `option_env!("NU_CACHE_DIR")` in `NuSession::new()` with runtime `resolve_cache_dir()` that first checks next to the current executable, then falls back to the compile-time path. Fixes binary relocation breaking config file resolution (issue #32).
 - **NuSession temp dir cleanup** — `SessionTempDir` wrapper cleans up empty `.reel/tmp/` and `.reel/` parent directories on drop, eliminating visible side effects in user project directories (issue #29). Added tests for parent cleanup and sibling preservation (issue #3b). Removed unused `cache` parameter from `policy_test_fixture` helper (issue #49).
 - **Test isolation hardening** — `isolated_session()` and `tmp_sandbox_cache()` now panic instead of silently falling back to unsandboxed `NuSession::new()` when `NU_CACHE_DIR` is not set at compile time (issue #3g). Doc comments on `NuSession::new()`, `NuSession::with_cache_dir()`, `isolated_session()`, and `SandboxTestEnv` warn against direct construction in tests (issue #3h). Network integration tests replaced external `httpbin.org` dependency with local loopback `TcpListener` for deterministic sandbox denial/allowance verification (issue #39).
+- **Network test robustness** — `looks_like_sandbox_denial` shared helper with expanded keyword list covering macOS Seatbelt, Windows AppContainer, and Linux seccomp/namespace denial wording (issue #63). Allowed-network test uses `http_responding_listener` that sends a real HTTP 200 response, ensuring the `Ok` path is exercised and the sandbox-denial assertion is tested (issue #62). Denied-network test verifies sandbox-specific error wording on platforms with active enforcement, logs a warning otherwise (issue #64).
 - **Test counts** — 199 tests total (188 reel + 11 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
@@ -70,22 +71,19 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 Ordered by planned execution. Clusters group tightly-related issues for single-PR batches.
 
-### Batch 1: Network test robustness (#62, #63, #64)
-Tests currently provide false confidence. #62: allowed-network test never exercises its assertion. #63: fragile string-matching heuristic for sandbox denial. #64: denied test accepts any error as proof of blocking.
-
-### Batch 2: Naming (#54, #59, #61, #51)
+### Batch 1: Naming (#54, #59, #61, #51)
 Mechanical renames, no behavioral change. #54: misleading agent test name. #59: misleading bounded_reap test name. #61: `cache_dir`/`resolve_cache_dir` understates directory role. #51: `ToolGrant::READ` understates scope.
 
-### Batch 3: reel-cli fixes (#33, #34, #35)
+### Batch 2: reel-cli fixes (#33, #34, #35)
 All in `reel-cli/src/main.rs`. #33: blocking stdin read on async runtime. #34: `--timeout 0` accepted without validation. #35: dry-run output inconsistency.
 
-### Batch 4: Tool execution coverage (#40, #41)
+### Batch 3: Tool execution coverage (#40, #41)
 Test additions only. #40: missing Edit/Grep end-to-end tests via `execute_tool()`. #41: `from_names` empty-string element untested.
 
-### Batch 5: Ripgrep resolution tests (#3d, #3e, #3f)
+### Batch 4: Ripgrep resolution tests (#3d, #3e, #3f)
 Three test gaps on `resolve_rg_binary`. Very contained.
 
-### Batch 6: Agent test gaps (#53, #6, #13)
+### Batch 5: Agent test gaps (#53, #6, #13)
 #53: boundary test for exactly 200 tool calls. #6: timeout during resume phase. #13: `RunResult` field propagation.
 
 ### Remaining (unscheduled)

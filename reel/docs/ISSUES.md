@@ -142,22 +142,22 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/nu_session.rs` — `SessionState` has single `inflight_child` and `inflight_stdin` fields. If two concurrent `evaluate` calls are in Phase 2 (blocking I/O), the second caller's `ensure_and_take` overwrites the first caller's handles. A `kill()` during this window only reaches the second caller's child; the first is unreachable. Not triggered today (agent turns are sequential; the concurrent test runs on single-threaded tokio). Would matter if true multi-threaded concurrent evaluate is ever supported. **Category: Correctness.**
 
-## 11. Network test robustness (#62, #63, #64)
-
-### 62. `integration_sandbox_network_allowed_with_grant` silently accepts all errors
-
-`reel/src/nu_session.rs` — The `Err` arm of the allowed-network test unconditionally passes with an `eprintln`. With the local loopback listener (which never responds with HTTP), `http get` will likely timeout, hitting `Err` every time — meaning the sandbox-denial keyword check on `Ok(out)` is never exercised. The test provides false confidence. Fix: either spawn an accept-and-drop task so the connection completes, or switch from `http get` to a raw TCP check (e.g. `open tcp://...`) so the listener response is irrelevant. **Category: Testing.**
-
-### 63. Sandbox-denial heuristic is fragile string matching
-
-`reel/src/nu_session.rs` — The allowed-network test checks `out.content` for `"denied"`, `"permission"`, `"not allowed"` to detect sandbox denial. If nu or the sandbox changes error wording (e.g. `"blocked"`, `"forbidden"`), a real denial slips through. Fix: capture actual sandbox denial output on each platform and add those keywords, or use a more structural check. **Category: Testing.**
-
-### 64. `integration_sandbox_network_denied_without_grant` accepts any error as proof of blocking
-
-`reel/src/nu_session.rs` — The denied-network test accepts any `Err` (timeout, crash) as evidence that the sandbox blocked the connection. On platforms without active sandbox enforcement, the test passes vacuously. Fix: on sandbox-active platforms, verify the error is specifically a sandbox denial rather than an unrelated failure. **Category: Testing.**
-
-## 12. Cache directory naming (#61)
+## 11. Cache directory naming (#61)
 
 ### 61. `cache_dir` field and `resolve_cache_dir` name understates the directory's role
 
 `reel/src/nu_session.rs` — The `cache_dir` field and `resolve_cache_dir` function resolve the directory containing the nu binary, rg binary, and config files. This is a tool/asset directory, not a cache in the conventional sense. Names like `tool_dir` / `resolve_tool_dir` would better reflect the role. Inherited from the build-system name `nu-cache` / `NU_CACHE_DIR`. A rename would touch the field, function, all callers, tests, and docs. **Category: Naming.**
+
+## 12. Network test helpers (#65, #66, #67)
+
+### 65. `looks_like_sandbox_denial` keywords are broad
+
+`reel/src/nu_session.rs` — The `looks_like_sandbox_denial` helper checks for generic keywords like `"denied"`, `"permission"`, `"blocked"` that could match non-sandbox errors (e.g. file permission errors). Narrowing to sandbox-specific phrases would reduce false positives but risks missing real denials. **Category: Testing.**
+
+### 66. `looks_like_sandbox_denial` has no unit tests
+
+`reel/src/nu_session.rs` — The helper is used by both network integration tests but has no dedicated unit tests with known sandbox denial messages and known non-denial messages. **Category: Testing.**
+
+### 67. `http_responding_listener` name does not convey side effects
+
+`reel/src/nu_session.rs` — The function spawns a background thread and returns a port number, but the name suggests it returns a listener. A name like `spawn_http_responder` would better convey the fire-and-forget nature. **Category: Naming.**

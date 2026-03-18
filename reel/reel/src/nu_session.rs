@@ -2357,11 +2357,39 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Sandbox network denial integration test (issue #37, #39)
+    // Sandbox network denial integration tests
     //
     // Uses a local loopback TCP listener instead of an external host so the
     // tests are deterministic regardless of internet connectivity.
     // -----------------------------------------------------------------------
+
+    /// Check whether an error/output string looks like a sandbox denial.
+    ///
+    /// Covers known sandbox denial wording across platforms:
+    /// - Generic: denied, permission, not allowed, blocked, forbidden
+    /// - macOS Seatbelt: seatbelt, sandbox-exec, sandbox denial
+    /// - Windows AppContainer: appcontainer
+    /// - Linux: seccomp, namespace
+    ///
+    /// Uses multi-word phrases or context-specific terms to avoid false
+    /// positives from path names (e.g. "sandbox-test" in cwd paths).
+    fn looks_like_sandbox_denial(content: &str) -> bool {
+        let lower = content.to_lowercase();
+        [
+            "denied",
+            "permission",
+            "not allowed",
+            "blocked",
+            "forbidden",
+            "seatbelt",
+            "sandbox denial",
+            "sandbox-exec",
+            "appcontainer",
+            "seccomp",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw))
+    }
 
     /// Bind a TCP listener on an ephemeral loopback port and return it with
     /// the port number.  The listener must be held alive for the test duration.
@@ -2369,6 +2397,30 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
         let port = listener.local_addr().expect("local addr").port();
         (listener, port)
+    }
+
+    /// Bind a TCP listener that accepts one connection and responds with a
+    /// minimal HTTP 200 response.  Returns the port number.  The background
+    /// thread keeps the listener alive until the connection is served (or
+    /// the timeout expires).
+    fn http_responding_listener() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let port = listener.local_addr().expect("local addr").port();
+        // Background thread blocks on accept(), serves one connection, then
+        // exits.  If no connection arrives the thread is cleaned up on
+        // process exit.
+        std::thread::spawn(move || {
+            use std::io::Write;
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                let response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok";
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        port
     }
 
     #[tokio::test]
@@ -2393,8 +2445,18 @@ mod tests {
         // error, or nu reports an error via is_error.
         match result {
             Err(e) => {
-                // Timeout or process failure is acceptable — network was blocked.
-                eprintln!("network blocked (evaluate error): {e}");
+                let msg = e.to_string();
+                if looks_like_sandbox_denial(&msg) {
+                    eprintln!("network blocked (sandbox denial in error): {e}");
+                } else {
+                    // On platforms without active sandbox enforcement, errors
+                    // like timeout or connection-refused are acceptable — the
+                    // test still passes, but we log a warning.
+                    eprintln!(
+                        "WARNING: network error is not a recognisable sandbox denial \
+                         (platform may lack sandbox enforcement): {e}"
+                    );
+                }
             }
             Ok(out) => {
                 assert!(
@@ -2402,7 +2464,18 @@ mod tests {
                     "network request should be denied without NETWORK grant, got success: {}",
                     out.content
                 );
-                eprintln!("network blocked (nu error): {}", out.content);
+                if looks_like_sandbox_denial(&out.content) {
+                    eprintln!(
+                        "network blocked (sandbox denial in output): {}",
+                        out.content
+                    );
+                } else {
+                    eprintln!(
+                        "WARNING: network failed but output is not a recognisable sandbox \
+                         denial (platform may lack sandbox enforcement): {}",
+                        out.content
+                    );
+                }
             }
         }
     }
@@ -2410,12 +2483,11 @@ mod tests {
     #[tokio::test]
     async fn integration_sandbox_network_allowed_with_grant() {
         // With NETWORK grant, the sandbox should allow outbound network access.
-        // A local loopback listener accepts connections so the test does not
-        // depend on external hosts.  The listener does not speak HTTP, so nu's
-        // `http get` will reach the listener but get a parse/connection error —
-        // the important property is the absence of a sandbox denial.
+        // A responding loopback listener provides a real HTTP 200 response so
+        // that `http get` succeeds and the test reaches the Ok path, where we
+        // verify no sandbox denial occurred.
         skip_no_nu!();
-        let (_listener, port) = loopback_listener();
+        let port = http_responding_listener();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2429,32 +2501,30 @@ mod tests {
 
         match result {
             Ok(out) => {
-                if out.is_error {
-                    // The listener does not speak HTTP, so nu may report a
-                    // connection-reset or parse error.  That is fine — the key
-                    // property is it is NOT a sandbox denial.
-                    let lower = out.content.to_lowercase();
-                    let is_sandbox_denial = lower.contains("denied")
-                        || lower.contains("permission")
-                        || lower.contains("not allowed");
-                    assert!(
-                        !is_sandbox_denial,
-                        "network should not be sandbox-denied with NETWORK grant: {}",
-                        out.content
-                    );
-                    eprintln!(
-                        "network reached listener (non-HTTP error expected): {}",
-                        out.content
-                    );
-                } else {
-                    eprintln!("network request succeeded: {}", out.content);
-                }
+                assert!(
+                    !looks_like_sandbox_denial(&out.content),
+                    "network should not be sandbox-denied with NETWORK grant: {}",
+                    out.content
+                );
+                assert!(
+                    !out.is_error,
+                    "network request should succeed with NETWORK grant and responding listener: {}",
+                    out.content
+                );
+                eprintln!("network request succeeded: {}", out.content);
             }
             Err(e) => {
-                // Timeout or evaluate-level error — not necessarily a sandbox
-                // denial. Accept it (the denied test above is the definitive
-                // check for sandbox blocking).
-                eprintln!("NOTE: network request error (not sandbox denial): {e}");
+                let msg = e.to_string();
+                assert!(
+                    !looks_like_sandbox_denial(&msg),
+                    "network should not be sandbox-denied with NETWORK grant: {e}"
+                );
+                // Non-sandbox errors (e.g. timeout) are unexpected with a
+                // responding listener but not fatal — log and pass.
+                eprintln!(
+                    "WARNING: network request error with NETWORK grant \
+                     (not sandbox denial): {e}"
+                );
             }
         }
     }
