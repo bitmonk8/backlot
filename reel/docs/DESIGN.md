@@ -190,6 +190,17 @@ If `evaluate()` is called with different grant flags or project root than the
 running process, the process is killed and respawned with updated sandbox policy.
 A generation counter prevents stale processes from being reused.
 
+### Cache Directory Resolution
+
+The cache directory is resolved at runtime by `resolve_cache_dir()`:
+
+1. **Exe-adjacent** — if `reel_config.nu` exists next to the current executable
+   (same directory as the binary), that directory is used. This handles release
+   packaging and binary relocation.
+2. **Compile-time `NU_CACHE_DIR`** — the `build.rs`-emitted path, used during
+   development when binaries and config live in `target/nu-cache/`.
+3. **None** — no cache directory found; nu starts without custom commands.
+
 ---
 
 ## Tool System (`tools.rs`)
@@ -283,8 +294,7 @@ Supported platforms: Windows (x86_64, aarch64), Linux (x86_64, aarch64), macOS
 
 Skip env vars: `NU_SKIP_DOWNLOAD=1`, `RG_SKIP_DOWNLOAD=1`.
 
-Known issue (#32): `NU_CACHE_DIR` is baked at compile time. Relocating the
-binary breaks config file resolution.
+The runtime resolves `NU_CACHE_DIR` via `resolve_cache_dir()` — see NuShell Session section.
 
 ---
 

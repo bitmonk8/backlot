@@ -156,8 +156,10 @@ struct SessionState {
 pub struct NuSession {
     state: Mutex<SessionState>,
     /// Cache directory containing nu binary, rg binary, and config files.
-    /// Defaults to the build-time `NU_CACHE_DIR`. Tests override this to
-    /// isolate sandbox ACL operations per test.
+    /// Defaults to the value computed by `resolve_cache_dir()`, which first
+    /// checks next to the current executable, then falls back to the
+    /// compile-time `NU_CACHE_DIR`. Tests override this to isolate sandbox
+    /// ACL operations per test.
     cache_dir: Option<PathBuf>,
 }
 
@@ -181,7 +183,7 @@ impl NuSession {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(SessionState::default()),
-            cache_dir: option_env!("NU_CACHE_DIR").map(PathBuf::from),
+            cache_dir: resolve_cache_dir(),
         }
     }
 
@@ -499,6 +501,35 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
 // ---------------------------------------------------------------------------
 // Process spawning
 // ---------------------------------------------------------------------------
+
+/// Resolve the cache directory at runtime.
+///
+/// Search order:
+/// 1. Directory containing the current executable — if `reel_config.nu` exists
+///    there, the binary was packaged with config files alongside it.
+/// 2. Compile-time `NU_CACHE_DIR` — the build-time cache directory set by
+///    `build.rs`. Valid during development; goes stale if the binary is relocated.
+/// 3. `None` — no cache directory found.
+fn resolve_cache_dir() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+    let compile_time_dir = option_env!("NU_CACHE_DIR").map(Path::new);
+    resolve_cache_dir_from(exe_dir.as_deref(), compile_time_dir)
+}
+
+/// Testable inner function for [`resolve_cache_dir`].
+fn resolve_cache_dir_from(exe_dir: Option<&Path>, compile_time_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = exe_dir {
+        if dir.join("reel_config.nu").exists() {
+            return Some(dir.to_path_buf());
+        }
+    }
+    if let Some(dir) = compile_time_dir {
+        if dir.join("reel_config.nu").exists() {
+            return Some(dir.to_path_buf());
+        }
+    }
+    None
+}
 
 /// Resolve a binary by name using a standard search order:
 /// 1. Same directory as the current executable (release packaging).
@@ -866,6 +897,49 @@ mod tests {
     #[test]
     fn test_resolve_config_files_none_without_cache() {
         assert!(resolve_config_files(None).is_none());
+    }
+
+    #[test]
+    fn test_resolve_cache_dir_from_prefers_exe_dir() {
+        let exe_dir = tempfile::tempdir().unwrap();
+        let compile_dir = tempfile::tempdir().unwrap();
+        // Put sentinel in both dirs
+        std::fs::write(exe_dir.path().join("reel_config.nu"), "").unwrap();
+        std::fs::write(compile_dir.path().join("reel_config.nu"), "").unwrap();
+        let result = resolve_cache_dir_from(Some(exe_dir.path()), Some(compile_dir.path()));
+        assert_eq!(result.as_deref(), Some(exe_dir.path()));
+    }
+
+    #[test]
+    fn test_resolve_cache_dir_from_falls_back_to_compile_time() {
+        let compile_dir = tempfile::tempdir().unwrap();
+        std::fs::write(compile_dir.path().join("reel_config.nu"), "").unwrap();
+        // exe_dir is None
+        let result = resolve_cache_dir_from(None, Some(compile_dir.path()));
+        assert_eq!(result.as_deref(), Some(compile_dir.path()));
+    }
+
+    #[test]
+    fn test_resolve_cache_dir_from_returns_none_when_no_config() {
+        let empty_dir = tempfile::tempdir().unwrap();
+        let result = resolve_cache_dir_from(Some(empty_dir.path()), Some(empty_dir.path()));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_cache_dir_from_returns_none_when_no_dirs() {
+        let result = resolve_cache_dir_from(None, None);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_cache_dir_from_skips_exe_dir_without_config() {
+        let exe_dir = tempfile::tempdir().unwrap();
+        let compile_dir = tempfile::tempdir().unwrap();
+        // Only compile_dir has the sentinel file; exe_dir exists but lacks it.
+        std::fs::write(compile_dir.path().join("reel_config.nu"), "").unwrap();
+        let result = resolve_cache_dir_from(Some(exe_dir.path()), Some(compile_dir.path()));
+        assert_eq!(result.as_deref(), Some(compile_dir.path()));
     }
 
     // -----------------------------------------------------------------------

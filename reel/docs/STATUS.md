@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 192 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
+**Core agent runtime and tooling implemented. All 197 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
 
 ## What Is Implemented
 
@@ -21,7 +21,8 @@
 - **Grant model cleanup** — Renamed `ToolGrant::NU` → `ToolGrant::READ`. `WRITE` and `NETWORK` now imply `READ` in `from_names`. Config accepts `"read"` instead of `"nu"`. Closes issue #25.
 - **Agent dispatch and tool-loop semantics** — `run()` dispatch uses tool availability (built-in + custom) instead of `ToolGrant::READ` (issue #5). Per-session tool call cap `MAX_TOOL_CALLS = 200` (issue #24). Tests for `ToolCallsPending` in structured mode (issue #14), multi-tool-call-per-round counting (issue #15), custom-tools-only routing, and tool call cap exceeded.
 - **NuSession process lifecycle hardening** — Fixed process steal race in `evaluate_inner` by combining ensure+take into atomic `ensure_and_take` (issue #47). Removed `eprintln!` from library `NuProcess::drop` (issue #42). Extracted `bounded_reap` as testable function (issue #43). Added respawn tests for project root change (#7), NETWORK grant change (#38), `spawn()` parameter mismatch (#45). Added concurrent evaluate test (#44), kill-during-evaluate test (#46). Added Windows stabilization delay for flaky timeout test (#50).
-- **Test counts** — 192 tests total (181 reel + 11 reel-cli), all pass locally.
+- **Runtime cache directory resolution** — Replaced compile-time `option_env!("NU_CACHE_DIR")` in `NuSession::new()` with runtime `resolve_cache_dir()` that first checks next to the current executable, then falls back to the compile-time path. Fixes binary relocation breaking config file resolution (issue #32).
+- **Test counts** — 197 tests total (186 reel + 11 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
 ## What Is NOT Implemented
@@ -65,4 +66,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-Remaining candidates: testing gaps (#3b, #3d, #3e, #3f, #3g, #3h, #6, #13, #39, #40, #41, #53, #56, #57, #58), naming (#54, #59), simplification (#55), correctness (#60), other (#51, #52).
+Remaining candidates: testing gaps (#3b, #3d, #3e, #3f, #3g, #3h, #6, #13, #39, #40, #41, #53, #56, #57, #58), naming (#54, #59, #61), simplification (#55), correctness (#60), other (#51, #52).

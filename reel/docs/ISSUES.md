@@ -2,15 +2,7 @@
 
 Clusters ordered by impact/importance (highest first).
 
-## 1. NuSession portability (#32)
-
-Binary relocation breaks tool execution entirely — nu starts without custom commands and all tool calls fail.
-
-### 32. `NU_CACHE_DIR` is baked in at compile time
-
-`reel/src/nu_session.rs` — `option_env!("NU_CACHE_DIR")` is resolved at build time. If the binary is relocated, config files path goes stale and `resolve_config_files()` returns `None`, causing nu to start without custom commands (tool calls fail). Binary fallback works but config does not. **Category: Portability.**
-
-## 2. NuSession temp dir and side effects (#3b, #29, #49)
+## 1. NuSession temp dir and side effects (#3b, #29, #49)
 
 #29 leaves artifacts in user project directories — a visible side effect. All concern temp directory creation, visibility, cleanup.
 
@@ -26,7 +18,7 @@ Missing tests: nu seeing overridden `TEMP`/`TMP` env vars, read-only session wri
 
 `reel/src/nu_session.rs` — `policy_test_fixture(grant, cache)` accepts `Option<&Path>` but all callers pass `None`. The `includes_cache_dir_exec` test still constructs dirs manually because it needs a cache dir outside the project root. The parameter is untested. **Category: Testing.**
 
-## 3. NuSession stderr and debuggability (#23)
+## 2. NuSession stderr and debuggability (#23)
 
 Lost errors make debugging hard for all consumers.
 
@@ -34,7 +26,7 @@ Lost errors make debugging hard for all consumers.
 
 `reel/src/nu_session.rs` — `cmd.stderr(SandboxStdio::Null)` silently drops nu stderr. Errors outside JSON-RPC are lost. **Category: Debuggability.**
 
-## 4. Network test reliability (#39)
+## 3. Network test reliability (#39)
 
 Tests can pass for the wrong reason, masking real sandbox regressions.
 
@@ -42,7 +34,7 @@ Tests can pass for the wrong reason, masking real sandbox regressions.
 
 `reel/src/nu_session.rs` — `integration_sandbox_network_denied_without_grant` and `integration_sandbox_network_allowed_with_grant` hit `httpbin.org`. If the host is unreachable, the denial test passes for the wrong reason (cannot distinguish sandbox block from network unavailability) and the allowed test becomes a no-op. Fix: use a local loopback listener instead. **Category: Testing.**
 
-## 5. Test isolation infrastructure (#3g, #3h)
+## 4. Test isolation infrastructure (#3g, #3h)
 
 #3g is a bug that silently defeats test isolation — tests may appear isolated but actually run unsandboxed.
 
@@ -54,7 +46,7 @@ Falls back to `NuSession::new()` when `tmp_sandbox_cache()` returns `None`. Shou
 
 Nothing prevents tests from using `NuSession::new()` directly instead of `isolated_session()`. **Category: Testing.**
 
-## 6. Public API surface (#8, #31)
+## 5. Public API surface (#8, #31)
 
 #31 is a semver hazard — flick internal type changes silently break reel's public API. Matters when external consumers exist.
 
@@ -66,7 +58,7 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/lib.rs` — `pub use nu_session::NuSession` is part of the public API but no consumer uses it directly. Consider removing after API stabilization. **Category: Placement.**
 
-## 7. Agent run result and timeout tests (#6, #13, #53, #54)
+## 6. Agent run result and timeout tests (#6, #13, #53, #54)
 
 Test gaps on `Agent::run()` return value propagation, timeout, and tool-call-cap boundary behavior.
 
@@ -86,7 +78,7 @@ Test gaps on `Agent::run()` return value propagation, timeout, and tool-call-cap
 
 `reel/src/agent.rs` — `usage` and `response_hash` mapping from `FlickResult` is untested in both `run_structured` and `run_with_tools` paths. All mock providers use `UsageResponse::default()`. Need tests with non-default usage/hash values. **Category: Testing.**
 
-## 8. Tool execution coverage (#40, #41, #26)
+## 7. Tool execution coverage (#40, #41, #26)
 
 #26 is a feature gap (fixed 120s timeout). #40 and #41 are test gaps on the tool execution path.
 
@@ -102,7 +94,7 @@ Test gaps on `Agent::run()` return value propagation, timeout, and tool-call-cap
 
 `reel/src/tools.rs` — `from_names(&[""])` (empty string element) is not tested. Depending on the implementation, an empty string could be treated as unknown or cause unexpected behavior. **Category: Testing.**
 
-## 9. Nu glob robustness (#28)
+## 8. Nu glob robustness (#28)
 
 Potential hang on pathological input with symlink cycles.
 
@@ -110,7 +102,7 @@ Potential hang on pathological input with symlink cycles.
 
 `reel/build.rs` (REEL_CONFIG_NU) — `reel glob` runs `glob $pattern` with a 1000-result cap but no depth limit. A `**/*` pattern in a deep tree with symlink cycles could hang before the cap is reached. **Category: Robustness.**
 
-## 10. reel-cli fixes (#33, #34, #35)
+## 9. reel-cli fixes (#33, #34, #35)
 
 All in `reel-cli/src/main.rs`. #33 is a correctness issue (benign in practice). #34 and #35 are validation/usability.
 
@@ -126,7 +118,7 @@ All in `reel-cli/src/main.rs`. #33 is a correctness issue (benign in practice). 
 
 `reel-cli/src/main.rs` — Dry run uses `to_string_pretty` and omits the resolved `ToolGrant`; success output uses `to_string` (compact). Inconsistent format and missing diagnostic info. **Category: Usability.**
 
-## 11. Ripgrep resolution tests (#3d, #3e, #3f)
+## 10. Ripgrep resolution tests (#3d, #3e, #3f)
 
 Pure test gaps on a single code path (`resolve_rg_binary`).
 
@@ -142,7 +134,7 @@ No test covers `resolve_rg_binary` returning `None`. **Category: Testing.**
 
 Tested only indirectly through integration tests. **Category: Testing.**
 
-## 12. Custom tool dispatch (#48)
+## 11. Custom tool dispatch (#48)
 
 No practical impact — unsupported scenario, already guarded by `build_request_config`.
 
@@ -150,7 +142,7 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/agent.rs` — `dispatch_tool` previously used linear scan (first match wins). The `HashMap<String, usize>` built via `collect()` keeps the last entry for duplicate keys. No practical impact: duplicate custom tool names are not a supported scenario, and `build_request_config` rejects duplicate names against built-ins. **Category: Testing.**
 
-## 13. Grant model refinements (#51, #52)
+## 12. Grant model refinements (#51, #52)
 
 ### 51. `ToolGrant::READ` understates the flag's scope
 
@@ -160,7 +152,7 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/tools.rs` — The implication (WRITE implies READ, NETWORK implies READ) is enforced only in `from_names`. Library consumers constructing `ToolGrant` directly via bitflags can create bare `WRITE` without `READ`, which silently produces zero tool definitions. `tool_definitions` and `required_grant` defensively check `WRITE | READ` together, duplicating the invariant. Consider a normalizing constructor or custom `BitOr` to enforce at the type level. **Category: Separation of concerns.**
 
-## 14. NuSession minor refinements (#55, #56, #57, #58, #59)
+## 13. NuSession minor refinements (#55, #56, #57, #58, #59)
 
 ### 55. `ensure_and_take` inflight registration duplicated 3x
 
@@ -185,3 +177,9 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 ### 60. Singleton `inflight_child`/`inflight_stdin` fields cannot track concurrent callers
 
 `reel/src/nu_session.rs` — `SessionState` has single `inflight_child` and `inflight_stdin` fields. If two concurrent `evaluate` calls are in Phase 2 (blocking I/O), the second caller's `ensure_and_take` overwrites the first caller's handles. A `kill()` during this window only reaches the second caller's child; the first is unreachable. Not triggered today (agent turns are sequential; the concurrent test runs on single-threaded tokio). Would matter if true multi-threaded concurrent evaluate is ever supported. **Category: Correctness.**
+
+## 14. Cache directory naming (#61)
+
+### 61. `cache_dir` field and `resolve_cache_dir` name understates the directory's role
+
+`reel/src/nu_session.rs` — The `cache_dir` field and `resolve_cache_dir` function resolve the directory containing the nu binary, rg binary, and config files. This is a tool/asset directory, not a cache in the conventional sense. Names like `tool_dir` / `resolve_tool_dir` would better reflect the role. Inherited from the build-system name `nu-cache` / `NU_CACHE_DIR`. A rename would touch the field, function, all callers, tests, and docs. **Category: Naming.**
