@@ -573,7 +573,7 @@ mod tests {
         // Clean up from any prior run
         let _ = std::fs::remove_dir_all(&base);
 
-        mkdir_p(&nested).expect("mkdir_p should create nested dirs");
+        assert!(mkdir_p(&nested).is_ok(), "mkdir_p should create nested dirs");
         assert!(Path::new(&nested).is_dir(), "nested directory should exist");
 
         // Cleanup
@@ -583,9 +583,9 @@ mod tests {
     #[test]
     fn test_mkdir_p_existing_dir() {
         let existing = std::env::temp_dir();
-        let path_str = existing.to_str().expect("temp dir should be UTF-8");
+        let path_str = existing.to_str().unwrap_or("/tmp");
         // Should succeed without error on an already-existing directory
-        mkdir_p(path_str).expect("mkdir_p on existing dir should not fail");
+        assert!(mkdir_p(path_str).is_ok(), "mkdir_p on existing dir should not fail");
     }
 
     #[test]

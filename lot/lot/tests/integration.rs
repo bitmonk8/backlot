@@ -782,11 +782,12 @@ fn test_deny_path_blocks_execution() {
 
     #[cfg(not(target_os = "windows"))]
     {
+        use std::os::unix::fs::PermissionsExt;
+
         let script = denied.join("test.sh");
         std::fs::write(&script, "#!/bin/sh\necho SHOULD_NOT_RUN\n").expect("write script");
 
         // Make executable
-        use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
         let policy = make_deny_policy(&parent, &denied, false);
