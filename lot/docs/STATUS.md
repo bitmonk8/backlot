@@ -29,7 +29,6 @@ Full project audit completed (see `docs/AUDIT_FINDINGS.md`). All 13 medium and 1
 ### Remaining work
 
 - First real-world usage / `lot run` testing
-- CI: add `--features tokio` test run to cover `wait_with_output_timeout` integration tests
 
 ## CI Status
 
