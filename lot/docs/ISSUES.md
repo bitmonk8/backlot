@@ -329,3 +329,24 @@ The `for p in &self.X_paths { match canon(...) { ... } }` block is copy-pasted f
 
 **Category:** Separation of concerns
 **File:** `lot/src/windows/nul_device.rs`
+
+## Linux: `test_probe_clone_newuser_returns_result` assumes Ok unconditionally
+
+Test asserts `result.is_ok()` with message "probe should not return Err on a normal system". Could fail in restricted containers or seccomp-filtered environments where `fork()` is disallowed. Consider allowing `Err` as valid or gating the assertion.
+
+**Category:** Testing
+**File:** `lot/src/linux/namespace.rs`
+
+## Windows: No cmdline test for non-BMP Unicode or unpaired surrogates
+
+The cmdline.rs tests added for H6 cover spaces, quotes, backslashes, and empty args but do not cover non-BMP Unicode characters or unpaired surrogates. The underlying code (C1 fix) handles UTF-16 correctly via `encode_wide()`, but test coverage for these edge cases is missing.
+
+**Category:** Testing
+**File:** `lot/src/windows/cmdline.rs`
+
+## Windows: Symlink-into-deny-path test silently skips without developer mode
+
+`test_symlink_into_deny_path` on Windows returns early if symlink creation fails (requires developer mode or elevation). In standard CI without developer mode, the test provides no coverage. Consider `#[ignore]` with a reason or a more visible skip message.
+
+**Category:** Testing
+**File:** `lot/tests/integration.rs`

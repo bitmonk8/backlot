@@ -31,7 +31,7 @@ Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 41 findings ordered
 | Severity | Count | IDs | Status |
 |----------|-------|-----|--------|
 | Critical | 2 | C1–C2 | Fixed |
-| High | 8 | H1–H8 | Not started |
+| High | 8 | H1–H8 | Fixed |
 | Medium | 25 | M1–M25 | Not started |
 | Low | 6 | L1–L6 | Not started |
 

@@ -76,25 +76,97 @@ fn append_escaped_arg(cmd: &mut OsString, arg: &OsString) {
         } else if unit == WIDE_QUOTE {
             // Double the backslashes before a quote, then emit \"
             flush_plain(cmd, &mut plain);
-            for _ in 0..backslash_count {
+            for _ in 0..(backslash_count * 2) {
                 cmd.push("\\");
             }
             backslash_count = 0;
             cmd.push("\\\"");
         } else {
-            // Flush pending backslashes as-is
-            for _ in 0..backslash_count {
-                cmd.push("\\");
-            }
+            // Backslashes not followed by a quote are literal — add to plain
+            // buffer to preserve ordering with surrounding characters.
+            plain.extend(std::iter::repeat_n(WIDE_BACKSLASH, backslash_count));
             backslash_count = 0;
             plain.push(unit);
         }
     }
     flush_plain(cmd, &mut plain);
-    // Double trailing backslashes before the closing quote
-    for _ in 0..backslash_count {
+    // Double trailing backslashes before the closing quote — CommandLineToArgvW
+    // treats N backslashes followed by a quote as N/2 backslashes + escaped quote,
+    // so we must emit 2N to get N literal backslashes before the closing quote.
+    for _ in 0..(backslash_count * 2) {
         cmd.push("\\");
     }
 
     cmd.push("\"");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Decode a null-terminated wide string back to a Rust String for assertions.
+    fn wide_to_string(wide: &[u16]) -> String {
+        let without_null = wide.strip_suffix(&[0]).unwrap_or(wide);
+        String::from_utf16_lossy(without_null)
+    }
+
+    fn escape_one(arg: &str) -> String {
+        let mut cmd = OsString::new();
+        append_escaped_arg(&mut cmd, &OsString::from(arg));
+        cmd.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn test_simple_arg() {
+        let result = escape_one("hello");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_arg_with_spaces() {
+        let result = escape_one("hello world");
+        assert_eq!(result, "\"hello world\"");
+    }
+
+    #[test]
+    fn test_arg_with_quotes() {
+        let result = escape_one("say\"hi");
+        assert_eq!(result, "\"say\\\"hi\"");
+    }
+
+    #[test]
+    fn test_arg_with_backslashes_before_quote() {
+        // Input: c:\path\"arg — the `\` before `"` must be doubled per
+        // CommandLineToArgvW rules, plus the quote itself is escaped.
+        let result = escape_one("c:\\path\\\"arg");
+        assert_eq!(result, "\"c:\\path\\\\\\\"arg\"");
+    }
+
+    #[test]
+    fn test_empty_arg() {
+        let result = escape_one("");
+        assert_eq!(result, "\"\"");
+    }
+
+    #[test]
+    fn test_trailing_backslashes() {
+        // Trailing backslashes before the closing quote must be doubled.
+        let result = escape_one("path with\\");
+        assert_eq!(result, "\"path with\\\\\"");
+    }
+
+    #[test]
+    fn test_build_command_line() {
+        let program = OsString::from("my program.exe");
+        let args = vec![OsString::from("simple"), OsString::from("with space")];
+        let wide = build_command_line(&program, &args);
+        let result = wide_to_string(&wide);
+        assert_eq!(result, "\"my program.exe\" simple \"with space\"");
+    }
+
+    #[test]
+    fn test_arg_with_only_quotes() {
+        let result = escape_one("\"\"\"");
+        assert_eq!(result, "\"\\\"\\\"\\\"\"");
+    }
 }

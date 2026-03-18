@@ -32,45 +32,53 @@
 
 ## High (8)
 
-### H1. [Correctness] File: lot/src/windows/traverse_acl.rs
+### H1. [Correctness] File: lot/src/windows/traverse_acl.rs — FIXED
 - **Line(s):** 38-62
 - **Description:** `compute_ancestors()` silently skips non-existent paths via `canonicalize()` failure. If all paths fail, returns empty Vec, causing `appcontainer_prerequisites_met` to return `true` vacuously.
 - **Impact:** Vacuous truth on prerequisite check could cause sandbox to proceed without required traverse ACLs, weakening isolation.
+- **Fix:** Changed `compute_ancestors()` to return `Result<Vec<PathBuf>, SandboxError>`, propagating canonicalization errors. Updated all callers.
 
-### H2. [Correctness] File: lot/src/windows/appcontainer.rs
+### H2. [Correctness] File: lot/src/windows/appcontainer.rs — FIXED
 - **Line(s):** 560-586
 - **Description:** Spawn-time `grant_traverse` errors misclassified as `PrerequisitesNotMet`. Transient I/O errors on user-owned directories are indistinguishable from missing elevated prerequisites. The logic block starts at line 560 (all_paths collection) through 586 (PrerequisitesNotMet return).
 - **Impact:** Incorrect error classification prevents callers from distinguishing recoverable I/O errors from actual missing prerequisites.
+- **Fix:** `grant_traverse` errors containing "elevation" are classified as `PrerequisitesNotMet`; other errors propagate as `Setup`.
 
-### H3. [Error handling] File: lot/src/linux/namespace.rs
+### H3. [Error handling] File: lot/src/linux/namespace.rs — FIXED
 - **Line(s):** 45-67
 - **Description:** `probe_clone_newuser()` returns `false` on fork/waitpid failure without distinguishing "feature unavailable" from "system error". Callers get no error context.
 - **Impact:** System errors silently downgrade sandbox capability, potentially weakening isolation.
+- **Fix:** Changed return type to `Result<bool, SandboxError>`. `Ok(true)` = available, `Ok(false)` = kernel rejected, `Err` = system error. Caller uses `unwrap_or(false)` for capability probe context.
 
-### H4. [Testing] File: lot/tests/integration.rs
+### H4. [Testing] File: lot/tests/integration.rs — FIXED
 - **Line(s):** (missing tests)
 - **Description:** Missing integration tests: deny path blocking writes, deny path blocking execution, symlink-into-deny-path behavior. test_cleanup_after_drop Windows section has no actual assertion.
 - **Impact:** Deny path enforcement is a core sandbox guarantee. Missing integration tests for this path.
+- **Fix:** Added `test_deny_path_blocks_write`, `test_deny_path_blocks_execution`, `test_symlink_into_deny_path`. Fixed `test_cleanup_after_drop` Windows section to assert `cleanup_stale()` succeeds.
 
-### H5. [Testing] File: lot/src/linux/namespace.rs
+### H5. [Testing] File: lot/src/linux/namespace.rs — FIXED
 - **Line(s):** 539-547
 - **Description:** Only 1 test (`namespace_available_no_panic`). No coverage for: path_to_str non-UTF-8 rejection, conditional mount logic, mkdir_p edge cases, mount failures.
 - **Impact:** Namespace setup is the core Linux isolation mechanism.
+- **Fix:** Added `test_path_to_str_rejects_non_utf8`, `test_mkdir_p_creates_nested`, `test_mkdir_p_existing_dir`, `test_probe_clone_newuser_returns_result`.
 
-### H6. [Testing] File: lot/src/windows/cmdline.rs
+### H6. [Testing] File: lot/src/windows/cmdline.rs — FIXED
 - **Line(s):** (entire file)
 - **Description:** No tests for `build_command_line()` or `append_escaped_arg()`. Missing edge cases: args with only quotes, mixed backslashes/quotes, empty args, Unicode beyond BMP.
 - **Impact:** Command-line escaping bugs could allow argument injection in sandboxed processes.
+- **Fix:** Added 8 unit tests: `test_simple_arg`, `test_arg_with_spaces`, `test_arg_with_quotes`, `test_arg_with_backslashes_before_quote`, `test_empty_arg`, `test_trailing_backslashes`, `test_build_command_line`, `test_arg_with_only_quotes`. Tests uncovered two bugs: backslash doubling before quotes and trailing backslashes were not doubled; both fixed.
 
-### H7. [Testing] File: lot/src/windows/nul_device.rs
+### H7. [Testing] File: lot/src/windows/nul_device.rs — FIXED
 - **Line(s):** 340-359
 - **Description:** Tests `nul_device_accessible_returns_bool` and `appcontainer_prerequisites_met_empty_paths` assign result to `_` without assertions. Only verify no-panic, not correctness.
 - **Impact:** These functions gate sandbox prerequisites; tests that don't assert correctness provide false confidence.
+- **Fix:** `nul_device_accessible` test now asserts deterministic result across two calls. `appcontainer_prerequisites_met_empty_paths` test asserts result equals `nul_device_accessible()` (empty paths = no ancestor checks).
 
-### H8. [Documentation-implementation mismatch] File: README.md
+### H8. [Documentation-implementation mismatch] File: README.md — FIXED
 - **Line(s):** 42-53, 92-100, 177-187
 - **Description:** (1) Basic example uses struct literal syntax (`SandboxPolicy { read_paths: ... }`) but fields are private; example will not compile — must use `SandboxPolicy::new()` or `SandboxPolicyBuilder`. (2) API section shows `SandboxPolicy` with public fields (`pub read_paths`). (3) `SandboxError` enum listing omits `PrerequisitesNotMet` variant which exists in error.rs:31-36.
 - **Impact:** Non-compiling examples prevent users from using the library.
+- **Fix:** Rewrote basic example to use `SandboxPolicyBuilder`. Updated `SandboxPolicy` section to show getter methods instead of public fields. Added `PrerequisitesNotMet` to `SandboxError` enum listing.
 
 ---
 

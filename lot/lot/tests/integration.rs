@@ -401,10 +401,15 @@ fn test_cleanup_after_drop() {
     // Platform-specific verification:
     #[cfg(target_os = "windows")]
     {
-        // Drop ran restore_from_sentinel for this child's sentinel.
-        // We don't call cleanup_stale() here — it scans ALL sentinels
-        // globally and would interfere with other tests running in parallel.
-        eprintln!("[diag] PASSED: drop completed without panic");
+        // Drop ran restore_from_sentinel. Verify no stale sentinel remains
+        // for this child by checking cleanup_stale succeeds without error.
+        let cleanup_result = lot::cleanup_stale();
+        assert!(
+            cleanup_result.is_ok(),
+            "cleanup_stale after drop should succeed: {:?}",
+            cleanup_result.err()
+        );
+        eprintln!("[diag] PASSED: drop completed and cleanup_stale OK");
     }
 
     #[cfg(target_os = "linux")]
@@ -638,6 +643,221 @@ fn test_deny_path_blocks_access_to_subtree() {
         "non-denied file should be readable, but stdout was: {pub_stdout}"
     );
     eprintln!("[diag] PASSED: non-denied sibling remains accessible");
+}
+
+/// Build a policy with a denied subdirectory inside a granted parent.
+fn make_deny_policy(
+    parent: &std::path::Path,
+    denied: &std::path::Path,
+    write: bool,
+) -> lot::SandboxPolicy {
+    #[allow(unused_mut)]
+    let mut exec_paths = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        if std::path::Path::new("/bin").exists() {
+            exec_paths.push(PathBuf::from("/bin"));
+        }
+        if std::path::Path::new("/usr/bin").exists()
+            && std::fs::canonicalize("/usr/bin").ok() != std::fs::canonicalize("/bin").ok()
+        {
+            exec_paths.push(PathBuf::from("/usr/bin"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        exec_paths.push(PathBuf::from("/bin"));
+        exec_paths.push(PathBuf::from("/usr/bin"));
+    }
+
+    let parent_canon = std::fs::canonicalize(parent).expect("canonicalize parent");
+    let denied_canon = std::fs::canonicalize(denied).expect("canonicalize denied");
+
+    let (read, write_paths) = if write {
+        (vec![], vec![parent_canon])
+    } else {
+        (vec![parent_canon], vec![])
+    };
+
+    lot::SandboxPolicy::new(
+        read,
+        write_paths,
+        exec_paths,
+        vec![denied_canon],
+        false,
+        lot::ResourceLimits::default(),
+    )
+}
+
+#[test]
+fn test_deny_path_blocks_write() {
+    eprintln!("[diag] === test_deny_path_blocks_write ===");
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let parent = tmp.path().join("workspace");
+    let denied = parent.join("readonly_zone");
+    std::fs::create_dir_all(&denied).expect("create denied dir");
+
+    let target_in_denied = denied.join("blocked.txt");
+    let target_in_parent = parent.join("allowed.txt");
+
+    let policy = make_deny_policy(&parent, &denied, true);
+
+    // Attempt write inside denied subdirectory — should fail.
+    let (program, args) = write_command(&target_in_denied);
+    let mut cmd = lot::SandboxCommand::new(&program);
+    cmd.args(&args);
+    cmd.stdout(lot::SandboxStdio::Piped);
+    cmd.stderr(lot::SandboxStdio::Piped);
+
+    let child = must_spawn(&policy, &cmd);
+    let output = child.wait_with_output().expect("wait");
+
+    eprintln!("[diag] denied write exit: {:?}", output.status);
+    assert!(
+        !target_in_denied.exists(),
+        "file in denied path must never be created, regardless of exit code"
+    );
+
+    // Attempt write to parent (outside denied) — should succeed.
+    let (program2, args2) = write_command(&target_in_parent);
+    let mut cmd2 = lot::SandboxCommand::new(&program2);
+    cmd2.args(&args2);
+    cmd2.stdout(lot::SandboxStdio::Piped);
+    cmd2.stderr(lot::SandboxStdio::Piped);
+
+    let child2 = must_spawn(&policy, &cmd2);
+    let output2 = child2.wait_with_output().expect("wait");
+
+    eprintln!("[diag] allowed write exit: {:?}", output2.status);
+    assert!(
+        output2.status.success(),
+        "write to parent (non-denied) should succeed, got: {:?}\nstderr: {}",
+        output2.status,
+        String::from_utf8_lossy(&output2.stderr)
+    );
+    assert!(
+        target_in_parent.exists(),
+        "file should exist in allowed parent"
+    );
+    eprintln!("[diag] PASSED");
+}
+
+#[test]
+fn test_deny_path_blocks_execution() {
+    eprintln!("[diag] === test_deny_path_blocks_execution ===");
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let parent = tmp.path().join("workspace");
+    let denied = parent.join("no_exec");
+    std::fs::create_dir_all(&denied).expect("create denied dir");
+
+    // Place a script/executable in the denied path.
+    #[cfg(target_os = "windows")]
+    {
+        let script = denied.join("test.bat");
+        std::fs::write(&script, "@echo SHOULD_NOT_RUN\r\n").expect("write bat");
+
+        let policy = make_deny_policy(&parent, &denied, false);
+
+        let mut cmd = lot::SandboxCommand::new("cmd.exe");
+        cmd.args(["/C", &script.to_string_lossy()]);
+        cmd.stdout(lot::SandboxStdio::Piped);
+        cmd.stderr(lot::SandboxStdio::Piped);
+
+        let child = must_spawn(&policy, &cmd);
+        let output = child.wait_with_output().expect("wait");
+
+        assert!(
+            !output.status.success(),
+            "process should have failed when executing from denied path"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("SHOULD_NOT_RUN"),
+            "execution inside denied path should be blocked, got: {stdout}"
+        );
+        eprintln!("[diag] PASSED");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let script = denied.join("test.sh");
+        std::fs::write(&script, "#!/bin/sh\necho SHOULD_NOT_RUN\n").expect("write script");
+
+        // Make executable
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let policy = make_deny_policy(&parent, &denied, false);
+
+        let mut cmd = lot::SandboxCommand::new("/bin/sh");
+        cmd.args(["-c", &format!("{}", script.display())]);
+        cmd.stdout(lot::SandboxStdio::Piped);
+        cmd.stderr(lot::SandboxStdio::Piped);
+
+        let child = must_spawn(&policy, &cmd);
+        let output = child.wait_with_output().expect("wait");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("SHOULD_NOT_RUN"),
+            "execution inside denied path should be blocked, got: {stdout}"
+        );
+        eprintln!("[diag] PASSED");
+    }
+}
+
+#[test]
+fn test_symlink_into_deny_path() {
+    eprintln!("[diag] === test_symlink_into_deny_path ===");
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let parent = tmp.path().join("workspace");
+    let denied = parent.join("forbidden");
+    std::fs::create_dir_all(&denied).expect("create denied dir");
+
+    let secret_file = denied.join("secret.txt");
+    std::fs::write(&secret_file, "secret_via_symlink").expect("write secret");
+
+    // Create symlink in the allowed area pointing into the denied area.
+    let symlink_path = parent.join("sneaky_link.txt");
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows symlinks may require developer mode or elevation.
+        // If symlink creation fails, skip the test.
+        if std::os::windows::fs::symlink_file(&secret_file, &symlink_path).is_err() {
+            eprintln!("[diag] SKIPPED: cannot create symlink (needs developer mode)");
+            return;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::os::unix::fs::symlink(&secret_file, &symlink_path).expect("create symlink");
+    }
+
+    let policy = make_deny_policy(&parent, &denied, false);
+
+    let (program, args) = cat_command(&symlink_path);
+    let mut cmd = lot::SandboxCommand::new(&program);
+    cmd.args(&args);
+    cmd.stdout(lot::SandboxStdio::Piped);
+    cmd.stderr(lot::SandboxStdio::Piped);
+
+    let child = must_spawn(&policy, &cmd);
+    let output = child.wait_with_output().expect("wait");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    eprintln!("[diag] exit: {:?}, stdout: {stdout:?}", output.status);
+
+    // The symlink target is in the denied area. Reading should fail or
+    // at minimum not return the secret data.
+    assert!(
+        !stdout.contains("secret_via_symlink"),
+        "symlink into denied path should not expose secret data"
+    );
+    eprintln!("[diag] PASSED");
 }
 
 // ── Tokio timeout tests ────────────────────────────────────────────

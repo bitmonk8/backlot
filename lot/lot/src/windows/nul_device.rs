@@ -293,7 +293,7 @@ fn apply_nul_dacl(wide_path: &[u16], current_dacl: *mut ACL, app_sid: PSID) -> c
 pub fn grant_appcontainer_prerequisites(paths: &[&Path]) -> crate::Result<()> {
     grant_nul_device()?;
 
-    let ancestors = super::traverse_acl::compute_ancestors(paths);
+    let ancestors = super::traverse_acl::compute_ancestors(paths)?;
     for ancestor in &ancestors {
         super::traverse_acl::grant_traverse(ancestor)?;
     }
@@ -308,7 +308,10 @@ pub fn appcontainer_prerequisites_met(paths: &[&Path]) -> bool {
         return false;
     }
 
-    let ancestors = super::traverse_acl::compute_ancestors(paths);
+    let Ok(ancestors) = super::traverse_acl::compute_ancestors(paths) else {
+        // Cannot canonicalize paths — prerequisites cannot be verified.
+        return false;
+    };
     ancestors
         .iter()
         .all(|a| super::traverse_acl::has_traverse_ace(a))
@@ -337,10 +340,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nul_device_accessible_returns_bool() {
-        // Verify it runs without panic and returns a definite value.
-        let result: bool = nul_device_accessible();
-        let _ = result;
+    fn nul_device_accessible_returns_deterministic() {
+        let first: bool = nul_device_accessible();
+        let second: bool = nul_device_accessible();
+        // System state should not change between two immediate calls.
+        assert_eq!(
+            first, second,
+            "nul_device_accessible should be deterministic"
+        );
     }
 
     #[test]
@@ -353,9 +360,15 @@ mod tests {
 
     #[test]
     fn appcontainer_prerequisites_met_empty_paths() {
-        // With no paths, only checks NUL device — must not panic.
+        // With no paths, only NUL device matters — no ancestors to check.
         let result: bool = appcontainer_prerequisites_met(&[]);
-        let _ = result;
+        // Empty paths means no ancestor check failures, so result should
+        // match nul_device_accessible() exactly.
+        let nul_ok = nul_device_accessible();
+        assert_eq!(
+            result, nul_ok,
+            "empty paths: prerequisites_met should equal nul_device_accessible"
+        );
     }
 
     #[test]

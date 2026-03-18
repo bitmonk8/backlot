@@ -31,26 +31,21 @@ lot = { version = "0.1", features = ["tokio"] }
 ### Basic Example
 
 ```rust
-use lot::{SandboxPolicy, SandboxCommand, ResourceLimits, spawn, probe};
-use std::path::PathBuf;
+use lot::{SandboxPolicyBuilder, SandboxCommand, spawn, probe};
 
 // Check available mechanisms
 let caps = probe();
 println!("{caps:?}");
 
-// Define policy
-let policy = SandboxPolicy {
-    read_paths: vec![PathBuf::from("/usr/lib")],
-    write_paths: vec![],
-    exec_paths: vec![PathBuf::from("/usr/bin")],
-    deny_paths: vec![],
-    allow_network: false,
-    limits: ResourceLimits {
-        max_memory_bytes: Some(64 * 1024 * 1024), // 64 MB
-        max_processes: Some(4),
-        max_cpu_seconds: None,
-    },
-};
+// Define policy via builder (auto-canonicalization, deduplication)
+let policy = SandboxPolicyBuilder::new()
+    .read_path("/usr/lib")
+    .exec_path("/usr/bin")
+    .allow_network(false)
+    .max_memory_bytes(64 * 1024 * 1024) // 64 MB
+    .max_processes(4)
+    .build()
+    .expect("policy invalid");
 
 // Build command
 let mut cmd = SandboxCommand::new("/usr/bin/echo");
@@ -89,15 +84,16 @@ Restores ACLs from sentinel files left by crashed sessions. Windows only; no-op 
 
 ### `SandboxPolicy`
 
+Fields are private. Construct via `SandboxPolicyBuilder` (recommended) or `SandboxPolicy::new()`.
+
 ```rust
-pub struct SandboxPolicy {
-    pub read_paths: Vec<PathBuf>,    // Recursive read access
-    pub write_paths: Vec<PathBuf>,   // Recursive read+write access
-    pub exec_paths: Vec<PathBuf>,    // Recursive execute access
-    pub deny_paths: Vec<PathBuf>,    // Denied subtrees (overrides grants)
-    pub allow_network: bool,         // Outbound network access
-    pub limits: ResourceLimits,
-}
+// Access via getter methods:
+policy.read_paths()    // &[PathBuf] — recursive read access
+policy.write_paths()   // &[PathBuf] — recursive read+write access
+policy.exec_paths()    // &[PathBuf] — recursive execute access
+policy.deny_paths()    // &[PathBuf] — denied subtrees (overrides grants)
+policy.allow_network() // bool — outbound network access
+policy.limits()        // &ResourceLimits
 ```
 
 Paths must exist. No overlaps allowed within or across grant path lists. Each deny path must be a strict child of at least one grant path. At least one grant path must be specified.
@@ -183,6 +179,7 @@ pub enum SandboxError {
     InvalidPolicy(String),      // Policy validation failed
     Cleanup(String),            // Post-session cleanup failed
     Timeout(Duration),          // Child exceeded timeout (from wait_with_output_timeout)
+    PrerequisitesNotMet { missing_paths, nul_device_missing }, // Windows: AppContainer ACL prerequisites missing
     Io(std::io::Error),         // Underlying I/O error
 }
 ```

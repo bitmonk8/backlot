@@ -25,8 +25,10 @@ pub fn available() -> bool {
 
     fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").map_or_else(
         // Sysctl absent — kernel may still support user namespaces.
-        // Fall back to a runtime probe.
-        |_| probe_clone_newuser(),
+        // Fall back to a runtime probe. System errors (fork/waitpid
+        // failure) are treated as unavailable rather than panicking,
+        // since this is a capability probe.
+        |_| probe_clone_newuser().unwrap_or(false),
         |contents| contents.trim() == "1",
     )
 }
@@ -38,18 +40,23 @@ fn is_apparmor_restricted() -> bool {
 }
 
 /// Fork a child that attempts `clone(CLONE_NEWUSER)` and immediately exits.
-/// Returns `true` if the child succeeds.
+///
+/// Returns `Ok(true)` if user namespaces are available, `Ok(false)` if the
+/// kernel rejected the namespace creation, or `Err` on system errors (fork/waitpid).
 ///
 /// The fork()+unshare()+_exit() probe uses only async-signal-safe functions
 /// between fork and _exit, so it is safe even in multi-threaded contexts.
-fn probe_clone_newuser() -> bool {
+fn probe_clone_newuser() -> std::result::Result<bool, crate::SandboxError> {
     // SAFETY: We fork, then the child calls `_exit` immediately.
     // Between fork and _exit in the child we only call async-signal-safe
     // functions (unshare, _exit). The parent only calls waitpid.
     unsafe {
         let pid = libc::fork();
         if pid < 0 {
-            return false;
+            return Err(crate::SandboxError::Setup(format!(
+                "fork() failed during user namespace probe: {}",
+                std::io::Error::last_os_error()
+            )));
         }
         if pid == 0 {
             // Child: try to create a user namespace, then exit.
@@ -60,9 +67,12 @@ fn probe_clone_newuser() -> bool {
         let mut status: libc::c_int = 0;
         let waited = libc::waitpid(pid, &raw mut status, 0);
         if waited < 0 {
-            return false;
+            return Err(crate::SandboxError::Setup(format!(
+                "waitpid() failed during user namespace probe: {}",
+                std::io::Error::last_os_error()
+            )));
         }
-        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+        Ok(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0)
     }
 }
 
@@ -543,5 +553,48 @@ mod tests {
     #[test]
     fn namespace_available_no_panic() {
         let _result = available();
+    }
+
+    #[test]
+    fn test_path_to_str_rejects_non_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let bad_bytes: &[u8] = &[0xff, 0xfe];
+        let bad_path = Path::new(OsStr::from_bytes(bad_bytes));
+        let result = path_to_str(bad_path, "test");
+        assert!(result.is_err(), "non-UTF-8 path should be rejected");
+    }
+
+    #[test]
+    fn test_mkdir_p_creates_nested() {
+        let base = std::env::temp_dir().join(format!("lot-test-mkdir-{}", std::process::id()));
+        let nested = format!("{}/a/b/c", base.display());
+        // Clean up from any prior run
+        let _ = std::fs::remove_dir_all(&base);
+
+        mkdir_p(&nested).expect("mkdir_p should create nested dirs");
+        assert!(Path::new(&nested).is_dir(), "nested directory should exist");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_mkdir_p_existing_dir() {
+        let existing = std::env::temp_dir();
+        let path_str = existing.to_str().expect("temp dir should be UTF-8");
+        // Should succeed without error on an already-existing directory
+        mkdir_p(path_str).expect("mkdir_p on existing dir should not fail");
+    }
+
+    #[test]
+    fn test_probe_clone_newuser_returns_result() {
+        // Should return Ok(bool), not panic, regardless of environment
+        let result = probe_clone_newuser();
+        assert!(
+            result.is_ok(),
+            "probe should not return Err on a normal system"
+        );
     }
 }

@@ -8,6 +8,11 @@
 
 use std::path::{Path, PathBuf};
 
+/// Marker substring embedded in `SandboxError::Setup` messages when the failure
+/// is due to insufficient privilege (ACCESS_DENIED). Used by `appcontainer.rs`
+/// to distinguish prerequisite failures from transient I/O errors.
+pub const ELEVATION_REQUIRED_MARKER: &str = "elevation required";
+
 use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT,
@@ -35,15 +40,22 @@ use super::{path_to_wide, win32_error_msg};
 
 /// Walk parents of each path up to the volume root, deduplicate.
 /// Does NOT include the paths themselves — only their ancestors.
-pub fn compute_ancestors<P: AsRef<Path>>(paths: &[P]) -> Vec<PathBuf> {
+///
+/// Returns an error if any path cannot be canonicalized, preventing
+/// vacuous-truth checks when all paths are silently skipped.
+pub fn compute_ancestors<P: AsRef<Path>>(
+    paths: &[P],
+) -> std::result::Result<Vec<PathBuf>, SandboxError> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
 
     for path in paths {
-        // Canonicalize to resolve relative paths and symlinks.
-        let Ok(canonical) = std::fs::canonicalize(path.as_ref()) else {
-            continue;
-        };
+        let canonical = std::fs::canonicalize(path.as_ref()).map_err(|e| {
+            SandboxError::Setup(format!(
+                "failed to canonicalize path {}: {e}",
+                path.as_ref().display()
+            ))
+        })?;
         let mut current = canonical.as_path();
         while let Some(parent) = current.parent() {
             // Stop when parent() returns the same path (volume root's parent is itself
@@ -58,7 +70,7 @@ pub fn compute_ancestors<P: AsRef<Path>>(paths: &[P]) -> Vec<PathBuf> {
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Check if a directory's DACL has an allow ACE for ALL APPLICATION PACKAGES
@@ -274,8 +286,9 @@ fn apply_traverse_dacl(
     if err != ERROR_SUCCESS {
         if err == ERROR_ACCESS_DENIED {
             return Err(SandboxError::Setup(format!(
-                "cannot modify DACL for {}: elevation (run as administrator) required",
+                "cannot modify DACL for {}: {} (run as administrator)",
                 display_path.display(),
+                ELEVATION_REQUIRED_MARKER,
             )));
         }
         return Err(SandboxError::Setup(format!(
@@ -289,12 +302,13 @@ fn apply_traverse_dacl(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn compute_ancestors_empty_input() {
-        let result = compute_ancestors::<&Path>(&[]);
+        let result = compute_ancestors::<&Path>(&[]).unwrap();
         assert!(result.is_empty());
     }
 
@@ -303,7 +317,7 @@ mod tests {
         // Use a path known to exist on all Windows machines.
         let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
         let path = PathBuf::from(format!("{system_root}\\System32"));
-        let ancestors = compute_ancestors(&[path.as_path()]);
+        let ancestors = compute_ancestors(&[path.as_path()]).unwrap();
 
         // Should contain at least the system root and the volume root.
         assert!(
@@ -329,12 +343,19 @@ mod tests {
         let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
         let p1 = PathBuf::from(format!("{system_root}\\System32"));
         let p2 = PathBuf::from(format!("{system_root}\\Temp"));
-        let ancestors = compute_ancestors(&[p1.as_path(), p2.as_path()]);
+        let ancestors = compute_ancestors(&[p1.as_path(), p2.as_path()]).unwrap();
 
         // Check no duplicates.
         let mut seen = std::collections::HashSet::new();
         for a in &ancestors {
             assert!(seen.insert(a), "duplicate ancestor: {}", a.display());
         }
+    }
+
+    #[test]
+    fn compute_ancestors_rejects_nonexistent_path() {
+        let result =
+            compute_ancestors(&[Path::new(r"C:\This\Path\Definitely\Does\Not\Exist\12345")]);
+        assert!(result.is_err(), "non-existent path should produce an error");
     }
 }

@@ -570,17 +570,24 @@ fn spawn_inner(
     // process can walk path components. Succeeds without elevation for
     // user-owned directories; fails for system directories that require
     // elevated setup via grant_appcontainer_prerequisites().
-    let ancestors = super::traverse_acl::compute_ancestors(&all_paths);
-    let mut failed: Vec<PathBuf> = Vec::new();
+    let ancestors = super::traverse_acl::compute_ancestors(&all_paths)?;
+    let mut prereq_failed: Vec<PathBuf> = Vec::new();
     for ancestor in &ancestors {
-        if super::traverse_acl::grant_traverse(ancestor).is_err() {
-            failed.push(ancestor.clone());
+        if let Err(e) = super::traverse_acl::grant_traverse(ancestor) {
+            // ACCESS_DENIED means elevation is required (PrerequisitesNotMet).
+            // Other errors are transient I/O failures propagated as Setup.
+            let is_access_denied = matches!(&e, SandboxError::Setup(msg) if msg.contains(super::traverse_acl::ELEVATION_REQUIRED_MARKER));
+            if is_access_denied {
+                prereq_failed.push(ancestor.clone());
+            } else {
+                return Err(e);
+            }
         }
     }
     let nul_missing = !super::nul_device::nul_device_accessible();
-    if !failed.is_empty() || nul_missing {
+    if !prereq_failed.is_empty() || nul_missing {
         return Err(SandboxError::PrerequisitesNotMet {
-            missing_paths: failed,
+            missing_paths: prereq_failed,
             nul_device_missing: nul_missing,
         });
     }
