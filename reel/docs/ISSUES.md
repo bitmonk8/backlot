@@ -1,50 +1,22 @@
 # Known Issues
 
-## Non-critical issues
+Clusters ordered by impact/importance (highest first).
 
-### 3b. Per-session temp dir test gaps
+## 1. Agent dispatch and tool-loop semantics (#5, #14, #15, #24, #25)
 
-Missing tests: nu seeing overridden `TEMP`/`TMP` env vars, read-only session writing to temp dir, temp dir cleanup on drop, `spawn_nu_process` with nonexistent `project_root`, policy test asserting absence of system temp dirs from `write_paths`. **Category: Testing.**
-
-### 3d. Tests assume `REEL_RG_PATH` is always set
-
-Two tests use `^$env.REEL_RG_PATH` without guarding for absence. **Category: Testing.**
-
-### 3e. No test for `rg_binary = None` branch
-
-No test covers `resolve_rg_binary` returning `None`. **Category: Testing.**
-
-### 3f. `resolve_rg_binary` has no direct unit tests
-
-Tested only indirectly through integration tests. **Category: Testing.**
-
-### 3g. `isolated_session()` silent fallback defeats isolation
-
-Falls back to `NuSession::new()` when `tmp_sandbox_cache()` returns `None`. Should panic instead. **Category: Testing.**
-
-### 3h. No mechanism to prevent `NuSession::new()` in tests
-
-Nothing prevents tests from using `NuSession::new()` directly instead of `isolated_session()`. **Category: Testing.**
+Contains the only correctness bug (#5) — blocks custom-tool-only consumers. #24 is a design gap allowing unbounded tool calls. All touch `agent.rs` routing/counting logic.
 
 ### 5. `Agent::run()` dispatch heuristic uses `ToolGrant::NU` instead of tool availability
 
 `reel/src/agent.rs` — `run()` decides between structured and tool-loop mode based on `ToolGrant::NU`. A consumer with only custom tools (no NU grant) would be routed to structured mode incorrectly. No such consumer exists yet. **Category: Correctness.**
 
-### 6. No test for timeout during resume (tool loop) phase
+### 25. `WRITE` without `NU` is accepted but meaningless
 
-`reel/src/agent.rs` — Timeout during `client.resume()` in the tool loop is not tested. The structured-mode timeout test covers the pattern. **Category: Testing.**
+`reel/src/agent.rs` — `ToolGrant::WRITE` without `ToolGrant::NU` produces empty tool list and routes to structured mode. No write capability. **Category: API clarity.**
 
-### 7. No test for project root change triggering NuSession respawn
+### 24. `MAX_TOOL_ROUNDS` caps rounds, not individual tool calls
 
-`reel/src/nu_session.rs` — `evaluate_inner` restarts the nu process when project root changes. Grant-change respawn test covers the mechanism but not this specific trigger. **Category: Testing.**
-
-### 8. `NuSession` re-exported but no external consumer
-
-`reel/src/lib.rs` — `pub use nu_session::NuSession` is part of the public API but no consumer uses it directly. Consider removing after API stabilization. **Category: Placement.**
-
-### 13. `RunResult` field propagation untested
-
-`reel/src/agent.rs` — `usage` and `response_hash` mapping from `FlickResult` is untested in both `run_structured` and `run_with_tools` paths. All mock providers use `UsageResponse::default()`. Need tests with non-default usage/hash values. **Category: Testing.**
+`reel/src/agent.rs` — A model sending 5 tool calls per round can execute 250+ calls within 50 rounds. Consider adding a per-session tool call cap. **Category: Design.**
 
 ### 14. `ToolCallsPending` in structured mode untested
 
@@ -54,37 +26,149 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/agent.rs` — `total_tool_calls += tool_calls.len() as u32` accumulates across rounds. No test verifies correct counting when a single round returns multiple tool calls. **Category: Testing.**
 
-### 23. Nu stderr discarded
+## 2. NuSession process lifecycle — spawn, respawn, teardown (#7, #38, #42, #43, #44, #45, #46, #47, #50)
 
-`reel/src/nu_session.rs` — `cmd.stderr(SandboxStdio::Null)` silently drops nu stderr. Errors outside JSON-RPC are lost. **Category: Debuggability.**
+#47 is a latent concurrency bug. #42 violates library conventions. The rest are test gaps on the core process management path — the foundation of all tool execution.
 
-### 24. `MAX_TOOL_ROUNDS` caps rounds, not individual tool calls
+### 47. `evaluate_inner` process steal race after `ensure_process`
 
-`reel/src/agent.rs` — A model sending 5 tool calls per round can execute 250+ calls within 50 rounds. Consider adding a per-session tool call cap. **Category: Design.**
+`reel/src/nu_session.rs` — `evaluate_inner` calls `ensure_process()` (which releases and re-acquires the lock internally), then acquires the lock again to `.take()` the process. Between these two lock acquisitions, a concurrent caller could `.take()` the process, causing `"internal: process unavailable after spawn"`. Not triggered today (evaluate calls are sequential per agent turn), but latent if concurrent evaluate is ever used. **Category: Concurrency.**
 
-### 25. `WRITE` without `NU` is accepted but meaningless
+### 42. `eprintln!` in library `NuProcess::drop`
 
-`reel/src/agent.rs` — `ToolGrant::WRITE` without `ToolGrant::NU` produces empty tool list and routes to structured mode. No write capability. **Category: API clarity.**
+`reel/src/nu_session.rs` — `NuProcess::drop` uses `eprintln!` to warn when the bounded wait times out. Library crates should not write directly to stderr; consumers embedding reel get unexpected output. Replace with `tracing::warn!` when a logging dependency is added, or remove the warning. **Category: Separation of concerns.**
 
-### 26. Built-in file tools have fixed 120s timeout
+### 7. No test for project root change triggering NuSession respawn
 
-`reel/src/tools.rs` — Only the NuShell tool respects model-provided timeout. File tools (Read, Write, Edit, Glob, Grep) use 120s. Slow Grep on large codebases cannot be extended. **Category: Feature gap.**
+`reel/src/nu_session.rs` — `evaluate_inner` restarts the nu process when project root changes. Grant-change respawn test covers the mechanism but not this specific trigger. **Category: Testing.**
 
-### 28. `reel glob` has no depth limit or symlink protection
+### 38. Grant-change respawn test does not cover NETWORK flag
 
-`reel/build.rs` (REEL_CONFIG_NU) — `reel glob` runs `glob $pattern` with a 1000-result cap but no depth limit. A `**/*` pattern in a deep tree with symlink cycles could hang before the cap is reached. **Category: Robustness.**
+`reel/src/nu_session.rs` — `integration_grant_change_respawns` only tests `NU` → `NU | WRITE`. No coverage for `NETWORK` flag change triggering respawn. Mechanism works via full bitflags comparison, so regression is unlikely. **Category: Testing.**
+
+### 45. `spawn()` respawn on parameter mismatch untested
+
+`reel/src/nu_session.rs` — `spawn()` called with different project_root or grant (triggering kill-and-respawn) has no direct test. Covered indirectly via `evaluate` path. **Category: Testing.**
+
+### 43. `NuProcess::drop` timeout branch untested
+
+`reel/src/nu_session.rs` — The 5-second deadline branch in `NuProcess::drop` (where `try_wait` never returns exit status) has no test coverage. The poll loop is embedded in `Drop` on a concrete type with no test seam. Extract into a testable function to enable unit testing. **Category: Testing.**
+
+### 44. TOCTOU re-check path in `evaluate_inner` untested
+
+`reel/src/nu_session.rs` — The `still_needs == false` branch (where a concurrent caller already installed a compatible process) in `ensure_process`'s respawn block has no test coverage. Core correctness invariant of the lock-free spawn pattern. **Category: Testing.**
+
+### 46. `evaluate_inner` Phase 3 generation-mismatch-with-OK-result untested
+
+`reel/src/nu_session.rs` — When `evaluate_inner` completes successfully but `generation != generation_at_start` (a concurrent `kill()` or respawn occurred), the process is silently dropped instead of written back. This discard path has no test coverage. **Category: Testing.**
+
+### 50. `integration_timeout_kills_process` flaky on Windows CI
+
+`reel/src/nu_session.rs` — The recovery phase after timeout (`result2.unwrap()` at line 1302) intermittently fails with `"nu process closed stdout unexpectedly"`. The timeout kills the nu process, and the subsequent `evaluate` call spawns a new one. On Windows CI runners, the respawned process occasionally closes stdout before the test reads the response — likely a timing issue with AppContainer teardown/respawn under load. Passes on retry. Observed on CI run `23235634543` (commit `d5956eb`). **Category: Testing.**
+
+## 3. NuSession portability (#32)
+
+Binary relocation breaks tool execution entirely — nu starts without custom commands and all tool calls fail.
+
+### 32. `NU_CACHE_DIR` is baked in at compile time
+
+`reel/src/nu_session.rs` — `option_env!("NU_CACHE_DIR")` is resolved at build time. If the binary is relocated, config files path goes stale and `resolve_config_files()` returns `None`, causing nu to start without custom commands (tool calls fail). Binary fallback works but config does not. **Category: Portability.**
+
+## 4. NuSession temp dir and side effects (#3b, #29, #49)
+
+#29 leaves artifacts in user project directories — a visible side effect. All concern temp directory creation, visibility, cleanup.
 
 ### 29. `NuSession` leaves `.reel/tmp/` directory in project root
 
 `reel/src/nu_session.rs` — Creates `<project_root>/.reel/tmp/` for tempdir. The tempdir itself is cleaned up, but the `.reel/tmp/` parent directory is left behind. Should use system temp dir or clean up the parent. **Category: Side effects.**
 
+### 3b. Per-session temp dir test gaps
+
+Missing tests: nu seeing overridden `TEMP`/`TMP` env vars, read-only session writing to temp dir, temp dir cleanup on drop, `spawn_nu_process` with nonexistent `project_root`, policy test asserting absence of system temp dirs from `write_paths`. **Category: Testing.**
+
+### 49. `policy_test_fixture` cache parameter has no `Some(...)` caller
+
+`reel/src/nu_session.rs` — `policy_test_fixture(grant, cache)` accepts `Option<&Path>` but all callers pass `None`. The `includes_cache_dir_exec` test still constructs dirs manually because it needs a cache dir outside the project root. The parameter is untested. **Category: Testing.**
+
+## 5. NuSession stderr and debuggability (#23)
+
+Lost errors make debugging hard for all consumers.
+
+### 23. Nu stderr discarded
+
+`reel/src/nu_session.rs` — `cmd.stderr(SandboxStdio::Null)` silently drops nu stderr. Errors outside JSON-RPC are lost. **Category: Debuggability.**
+
+## 6. Network test reliability (#39)
+
+Tests can pass for the wrong reason, masking real sandbox regressions.
+
+### 39. Network integration tests use external host (`httpbin.org`)
+
+`reel/src/nu_session.rs` — `integration_sandbox_network_denied_without_grant` and `integration_sandbox_network_allowed_with_grant` hit `httpbin.org`. If the host is unreachable, the denial test passes for the wrong reason (cannot distinguish sandbox block from network unavailability) and the allowed test becomes a no-op. Fix: use a local loopback listener instead. **Category: Testing.**
+
+## 7. Test isolation infrastructure (#3g, #3h)
+
+#3g is a bug that silently defeats test isolation — tests may appear isolated but actually run unsandboxed.
+
+### 3g. `isolated_session()` silent fallback defeats isolation
+
+Falls back to `NuSession::new()` when `tmp_sandbox_cache()` returns `None`. Should panic instead. **Category: Testing.**
+
+### 3h. No mechanism to prevent `NuSession::new()` in tests
+
+Nothing prevents tests from using `NuSession::new()` directly instead of `isolated_session()`. **Category: Testing.**
+
+## 8. Public API surface (#8, #31)
+
+#31 is a semver hazard — flick internal type changes silently break reel's public API. Matters when external consumers exist.
+
 ### 31. `test_support` re-exports leak flick internal types through reel's public API
 
 `reel/src/lib.rs` — When `testing` feature is enabled, types like `SingleShotProvider`, `DynProvider`, etc. are re-exported from flick. Changes to flick's test types break reel's API without any reel code changing. **Category: Semver hazard.**
 
-### 32. `NU_CACHE_DIR` is baked in at compile time
+### 8. `NuSession` re-exported but no external consumer
 
-`reel/src/nu_session.rs` — `option_env!("NU_CACHE_DIR")` is resolved at build time. If the binary is relocated, config files path goes stale and `resolve_config_files()` returns `None`, causing nu to start without custom commands (tool calls fail). Binary fallback works but config does not. **Category: Portability.**
+`reel/src/lib.rs` — `pub use nu_session::NuSession` is part of the public API but no consumer uses it directly. Consider removing after API stabilization. **Category: Placement.**
+
+## 9. Agent run result and timeout tests (#6, #13)
+
+Test gaps on `Agent::run()` return value propagation and timeout behavior.
+
+### 6. No test for timeout during resume (tool loop) phase
+
+`reel/src/agent.rs` — Timeout during `client.resume()` in the tool loop is not tested. The structured-mode timeout test covers the pattern. **Category: Testing.**
+
+### 13. `RunResult` field propagation untested
+
+`reel/src/agent.rs` — `usage` and `response_hash` mapping from `FlickResult` is untested in both `run_structured` and `run_with_tools` paths. All mock providers use `UsageResponse::default()`. Need tests with non-default usage/hash values. **Category: Testing.**
+
+## 10. Tool execution coverage (#40, #41, #26)
+
+#26 is a feature gap (fixed 120s timeout). #40 and #41 are test gaps on the tool execution path.
+
+### 26. Built-in file tools have fixed 120s timeout
+
+`reel/src/tools.rs` — Only the NuShell tool respects model-provided timeout. File tools (Read, Write, Edit, Glob, Grep) use 120s. Slow Grep on large codebases cannot be extended. **Category: Feature gap.**
+
+### 40. Missing Edit and Grep end-to-end tests via `execute_tool()`
+
+`reel/src/nu_session.rs` — Issue #2 integration tests cover Read, Write, Glob, NuShell, and grant denial through `execute_tool()`. Edit and Grep are tested only at the nu custom-command level, not through the full `execute_tool()` → `translate_tool_call` → `format_tool_result` path. **Category: Testing.**
+
+### 41. `ToolGrant::from_names` does not test empty string element
+
+`reel/src/tools.rs` — `from_names(&[""])` (empty string element) is not tested. Depending on the implementation, an empty string could be treated as unknown or cause unexpected behavior. **Category: Testing.**
+
+## 11. Nu glob robustness (#28)
+
+Potential hang on pathological input with symlink cycles.
+
+### 28. `reel glob` has no depth limit or symlink protection
+
+`reel/build.rs` (REEL_CONFIG_NU) — `reel glob` runs `glob $pattern` with a 1000-result cap but no depth limit. A `**/*` pattern in a deep tree with symlink cycles could hang before the cap is reached. **Category: Robustness.**
+
+## 12. reel-cli fixes (#33, #34, #35)
+
+All in `reel-cli/src/main.rs`. #33 is a correctness issue (benign in practice). #34 and #35 are validation/usability.
 
 ### 33. reel-cli blocking stdin read on single-threaded async runtime
 
@@ -98,54 +182,26 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel-cli/src/main.rs` — Dry run uses `to_string_pretty` and omits the resolved `ToolGrant`; success output uses `to_string` (compact). Inconsistent format and missing diagnostic info. **Category: Usability.**
 
-### 38. Grant-change respawn test does not cover NETWORK flag
+## 13. Ripgrep resolution tests (#3d, #3e, #3f)
 
-`reel/src/nu_session.rs` — `integration_grant_change_respawns` only tests `NU` → `NU | WRITE`. No coverage for `NETWORK` flag change triggering respawn. Mechanism works via full bitflags comparison, so regression is unlikely. **Category: Testing.**
+Pure test gaps on a single code path (`resolve_rg_binary`).
 
-### 39. Network integration tests use external host (`httpbin.org`)
+### 3d. Tests assume `REEL_RG_PATH` is always set
 
-`reel/src/nu_session.rs` — `integration_sandbox_network_denied_without_grant` and `integration_sandbox_network_allowed_with_grant` hit `httpbin.org`. If the host is unreachable, the denial test passes for the wrong reason (cannot distinguish sandbox block from network unavailability) and the allowed test becomes a no-op. Fix: use a local loopback listener instead. **Category: Testing.**
+Two tests use `^$env.REEL_RG_PATH` without guarding for absence. **Category: Testing.**
 
-### 40. Missing Edit and Grep end-to-end tests via `execute_tool()`
+### 3e. No test for `rg_binary = None` branch
 
-`reel/src/nu_session.rs` — Issue #2 integration tests cover Read, Write, Glob, NuShell, and grant denial through `execute_tool()`. Edit and Grep are tested only at the nu custom-command level, not through the full `execute_tool()` → `translate_tool_call` → `format_tool_result` path. **Category: Testing.**
+No test covers `resolve_rg_binary` returning `None`. **Category: Testing.**
 
-### 41. `ToolGrant::from_names` does not test empty string element
+### 3f. `resolve_rg_binary` has no direct unit tests
 
-`reel/src/tools.rs` — `from_names(&[""])` (empty string element) is not tested. Depending on the implementation, an empty string could be treated as unknown or cause unexpected behavior. **Category: Testing.**
+Tested only indirectly through integration tests. **Category: Testing.**
 
-### 42. `eprintln!` in library `NuProcess::drop`
+## 14. Custom tool dispatch (#48)
 
-`reel/src/nu_session.rs` — `NuProcess::drop` uses `eprintln!` to warn when the bounded wait times out. Library crates should not write directly to stderr; consumers embedding reel get unexpected output. Replace with `tracing::warn!` when a logging dependency is added, or remove the warning. **Category: Separation of concerns.**
-
-### 43. `NuProcess::drop` timeout branch untested
-
-`reel/src/nu_session.rs` — The 5-second deadline branch in `NuProcess::drop` (where `try_wait` never returns exit status) has no test coverage. The poll loop is embedded in `Drop` on a concrete type with no test seam. Extract into a testable function to enable unit testing. **Category: Testing.**
-
-### 44. TOCTOU re-check path in `evaluate_inner` untested
-
-`reel/src/nu_session.rs` — The `still_needs == false` branch (where a concurrent caller already installed a compatible process) in `ensure_process`'s respawn block has no test coverage. Core correctness invariant of the lock-free spawn pattern. **Category: Testing.**
-
-### 45. `spawn()` respawn on parameter mismatch untested
-
-`reel/src/nu_session.rs` — `spawn()` called with different project_root or grant (triggering kill-and-respawn) has no direct test. Covered indirectly via `evaluate` path. **Category: Testing.**
-
-### 46. `evaluate_inner` Phase 3 generation-mismatch-with-OK-result untested
-
-`reel/src/nu_session.rs` — When `evaluate_inner` completes successfully but `generation != generation_at_start` (a concurrent `kill()` or respawn occurred), the process is silently dropped instead of written back. This discard path has no test coverage. **Category: Testing.**
-
-### 47. `evaluate_inner` process steal race after `ensure_process`
-
-`reel/src/nu_session.rs` — `evaluate_inner` calls `ensure_process()` (which releases and re-acquires the lock internally), then acquires the lock again to `.take()` the process. Between these two lock acquisitions, a concurrent caller could `.take()` the process, causing `"internal: process unavailable after spawn"`. Not triggered today (evaluate calls are sequential per agent turn), but latent if concurrent evaluate is ever used. **Category: Concurrency.**
+No practical impact — unsupported scenario, already guarded by `build_request_config`.
 
 ### 48. Duplicate custom tool names: HashMap changes first-match to last-match semantics
 
 `reel/src/agent.rs` — `dispatch_tool` previously used linear scan (first match wins). The `HashMap<String, usize>` built via `collect()` keeps the last entry for duplicate keys. No practical impact: duplicate custom tool names are not a supported scenario, and `build_request_config` rejects duplicate names against built-ins. **Category: Testing.**
-
-### 50. `integration_timeout_kills_process` flaky on Windows CI
-
-`reel/src/nu_session.rs` — The recovery phase after timeout (`result2.unwrap()` at line 1302) intermittently fails with `"nu process closed stdout unexpectedly"`. The timeout kills the nu process, and the subsequent `evaluate` call spawns a new one. On Windows CI runners, the respawned process occasionally closes stdout before the test reads the response — likely a timing issue with AppContainer teardown/respawn under load. Passes on retry. Observed on CI run `23235634543` (commit `d5956eb`). **Category: Testing.**
-
-### 49. `policy_test_fixture` cache parameter has no `Some(...)` caller
-
-`reel/src/nu_session.rs` — `policy_test_fixture(grant, cache)` accepts `Option<&Path>` but all callers pass `None`. The `includes_cache_dir_exec` test still constructs dirs manually because it needs a cache dir outside the project root. The parameter is untested. **Category: Testing.**
