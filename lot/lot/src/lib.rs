@@ -418,13 +418,12 @@ mod tokio_tests {
         {
             // On Windows, use ping -n <seconds+1> 127.0.0.1 as a sleep substitute.
             // timeout.exe requires console input and doesn't work in piped mode.
-            let system_root =
-                std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
-            let system32 = std::path::PathBuf::from(format!("{system_root}\\System32"));
+            // No exec_paths needed — AppContainer inherits access to system binaries.
+            let tmp = std::env::temp_dir();
             let policy = SandboxPolicy::new(
+                vec![tmp],
                 vec![],
                 vec![],
-                vec![system32],
                 vec![],
                 true,
                 crate::policy::ResourceLimits::default(),
@@ -490,13 +489,12 @@ mod tokio_tests {
 
         #[cfg(windows)]
         {
-            let system_root =
-                std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
-            let system32 = std::path::PathBuf::from(format!("{system_root}\\System32"));
+            // No exec_paths needed — AppContainer inherits access to system binaries.
+            let tmp = std::env::temp_dir();
             let policy = SandboxPolicy::new(
+                vec![tmp],
                 vec![],
                 vec![],
-                vec![system32],
                 vec![],
                 false,
                 crate::policy::ResourceLimits::default(),
