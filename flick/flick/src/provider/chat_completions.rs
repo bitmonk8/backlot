@@ -106,7 +106,7 @@ impl DynProvider for ChatCompletionsProvider {
     {
         Box::pin(async move {
             if params.messages.is_empty() {
-                return Err(ProviderError::ResponseParse(
+                return Err(ProviderError::InvalidRequest(
                     "messages array is empty".into(),
                 ));
             }
@@ -127,7 +127,7 @@ impl DynProvider for ChatCompletionsProvider {
 
     fn build_request(&self, params: RequestParams<'_>) -> Result<serde_json::Value, ProviderError> {
         if params.messages.is_empty() {
-            return Err(ProviderError::ResponseParse(
+            return Err(ProviderError::InvalidRequest(
                 "messages array is empty".into(),
             ));
         }
@@ -989,10 +989,10 @@ mod tests {
         };
         let result = provider.call_boxed(params).await;
         match result {
-            Err(ProviderError::ResponseParse(msg)) => {
+            Err(ProviderError::InvalidRequest(msg)) => {
                 assert_eq!(msg, "messages array is empty");
             }
-            Err(other) => panic!("expected ResponseParse error, got: {other:?}"),
+            Err(other) => panic!("expected InvalidRequest error, got: {other:?}"),
             Ok(_) => panic!("expected error for empty messages, got Ok"),
         }
     }
@@ -1014,10 +1014,10 @@ mod tests {
         };
         let result = provider.build_request(params);
         match result {
-            Err(ProviderError::ResponseParse(msg)) => {
+            Err(ProviderError::InvalidRequest(msg)) => {
                 assert_eq!(msg, "messages array is empty");
             }
-            Err(other) => panic!("expected ResponseParse error, got: {other:?}"),
+            Err(other) => panic!("expected InvalidRequest error, got: {other:?}"),
             Ok(_) => panic!("expected error for empty messages, got Ok"),
         }
     }

@@ -54,9 +54,10 @@ pub(crate) const fn classify_for_retry(err: &ProviderError) -> RetryVerdict {
         ProviderError::Api { status, .. } if *status >= 500 || *status == 408 => {
             RetryVerdict::Retry { delay_ms: None }
         }
-        ProviderError::AuthFailed | ProviderError::ResponseParse(_) | ProviderError::Api { .. } => {
-            RetryVerdict::Fail
-        }
+        ProviderError::AuthFailed
+        | ProviderError::ResponseParse(_)
+        | ProviderError::InvalidRequest(_)
+        | ProviderError::Api { .. } => RetryVerdict::Fail,
     }
 }
 
@@ -272,6 +273,12 @@ mod tests {
     #[test]
     fn classify_response_parse_is_not_retryable() {
         let err = ProviderError::ResponseParse("bad data".into());
+        assert!(matches!(classify_for_retry(&err), RetryVerdict::Fail));
+    }
+
+    #[test]
+    fn classify_invalid_request_is_not_retryable() {
+        let err = ProviderError::InvalidRequest("empty messages".into());
         assert!(matches!(classify_for_retry(&err), RetryVerdict::Fail));
     }
 

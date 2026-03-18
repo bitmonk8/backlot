@@ -223,7 +223,7 @@ pub fn full_response(
 
 /// Helper: parse a `RequestConfig` from YAML.
 pub fn parse_config(yaml: &str) -> RequestConfig {
-    RequestConfig::parse_yaml(yaml).expect("config should parse")
+    RequestConfig::parse_yaml(yaml).unwrap_or_else(|e| panic!("config should parse: {e}"))
 }
 
 /// Helper: create a test `ModelInfo`.

@@ -30,7 +30,7 @@ pub enum FlickError {
     NoQuery,
 
     #[error("context parse error: {0}")]
-    ContextParse(#[from] serde_json::Error),
+    ContextParse(serde_json::Error),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -42,13 +42,7 @@ pub enum FlickError {
 impl FlickError {
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::Provider(p) => match p {
-                ProviderError::RateLimited { .. } => "rate_limit",
-                ProviderError::AuthFailed => "auth_failed",
-                ProviderError::Api { .. } => "api_error",
-                ProviderError::Http(_) => "provider_http_error",
-                ProviderError::ResponseParse(_) => "response_parse_error",
-            },
+            Self::Provider(p) => p.code(),
             Self::Config(_) => "config_error",
             Self::Credential(_) => "credential_error",
             Self::InvalidArguments(_) => "invalid_arguments",
@@ -104,6 +98,22 @@ pub enum ProviderError {
 
     #[error("authentication failed")]
     AuthFailed,
+
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+}
+
+impl ProviderError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::RateLimited { .. } => "rate_limit",
+            Self::AuthFailed => "auth_failed",
+            Self::Api { .. } => "api_error",
+            Self::Http(_) => "provider_http_error",
+            Self::ResponseParse(_) => "response_parse_error",
+            Self::InvalidRequest(_) => "invalid_request",
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -122,6 +132,18 @@ pub enum CredentialError {
 
     #[error("invalid credential format: {0}")]
     InvalidFormat(String),
+
+    #[error("invalid provider name: {0}")]
+    InvalidProviderName(String),
+
+    #[error("invalid base URL: {0}")]
+    InvalidBaseUrl(String),
+
+    #[error("invalid secret key: {0}")]
+    InvalidSecretKey(String),
+
+    #[error("TOML error: {0}")]
+    TomlParse(String),
 
     #[error("encryption failed")]
     EncryptionFailed,
@@ -157,6 +179,45 @@ mod tests {
             ProviderError::AuthFailed.to_string(),
             "authentication failed"
         );
+
+        let ir = ProviderError::InvalidRequest("bad input".into());
+        assert_eq!(ir.to_string(), "invalid request: bad input");
+    }
+
+    #[test]
+    fn provider_error_code() {
+        assert_eq!(
+            ProviderError::RateLimited {
+                retry_after_ms: None
+            }
+            .code(),
+            "rate_limit"
+        );
+        assert_eq!(ProviderError::AuthFailed.code(), "auth_failed");
+        assert_eq!(
+            ProviderError::Api {
+                status: 500,
+                message: "x".into()
+            }
+            .code(),
+            "api_error"
+        );
+        assert_eq!(
+            ProviderError::ResponseParse("x".into()).code(),
+            "response_parse_error"
+        );
+        assert_eq!(
+            ProviderError::InvalidRequest("x".into()).code(),
+            "invalid_request"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_error_code_http() {
+        let err = reqwest::get("http://[::1]:1")
+            .await
+            .expect_err("connection should fail");
+        assert_eq!(ProviderError::Http(err).code(), "provider_http_error");
     }
 
     #[test]
@@ -202,6 +263,26 @@ mod tests {
             CredentialError::InvalidFormat("bad".into())
                 .to_string()
                 .contains("bad")
+        );
+        assert!(
+            CredentialError::InvalidProviderName("empty".into())
+                .to_string()
+                .contains("empty")
+        );
+        assert!(
+            CredentialError::InvalidBaseUrl("ftp".into())
+                .to_string()
+                .contains("ftp")
+        );
+        assert!(
+            CredentialError::InvalidSecretKey("hex".into())
+                .to_string()
+                .contains("hex")
+        );
+        assert!(
+            CredentialError::TomlParse("syntax".into())
+                .to_string()
+                .contains("syntax")
         );
         assert_eq!(
             CredentialError::EncryptionFailed.to_string(),

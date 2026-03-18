@@ -47,12 +47,12 @@ pub struct ProviderRegistry {
 
 fn validate_provider_name(name: &str) -> Result<(), CredentialError> {
     if name.is_empty() {
-        return Err(CredentialError::InvalidFormat(
+        return Err(CredentialError::InvalidProviderName(
             "provider name must not be empty".into(),
         ));
     }
     if name.len() > 255 {
-        return Err(CredentialError::InvalidFormat(
+        return Err(CredentialError::InvalidProviderName(
             "provider name must not exceed 255 characters".into(),
         ));
     }
@@ -60,7 +60,7 @@ fn validate_provider_name(name: &str) -> Result<(), CredentialError> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(CredentialError::InvalidFormat(
+        return Err(CredentialError::InvalidProviderName(
             "provider name must contain only [a-zA-Z0-9_-]".into(),
         ));
     }
@@ -120,7 +120,7 @@ impl ProviderRegistry {
     ) -> Result<(), CredentialError> {
         validate_provider_name(name)?;
         if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-            return Err(CredentialError::InvalidFormat(
+            return Err(CredentialError::InvalidBaseUrl(
                 "base_url must start with http:// or https://".into(),
             ));
         }
@@ -171,12 +171,12 @@ impl ProviderRegistry {
         });
         let bytes = Zeroizing::new(
             hex::decode(hex_str.trim())
-                .map_err(|_| CredentialError::InvalidFormat("secret key: invalid hex".into()))?,
+                .map_err(|_| CredentialError::InvalidSecretKey("secret key: invalid hex".into()))?,
         );
         let key: [u8; 32] = bytes
             .as_slice()
             .try_into()
-            .map_err(|_| CredentialError::InvalidFormat("secret key must be 32 bytes".into()))?;
+            .map_err(|_| CredentialError::InvalidSecretKey("secret key must be 32 bytes".into()))?;
         Ok(Zeroizing::new(key))
     }
 
@@ -266,7 +266,7 @@ impl ProviderRegistry {
             Err(e) => return Err(CredentialError::Io(e)),
         };
         toml::from_str::<BTreeMap<String, StoredProvider>>(&text)
-            .map_err(|e| CredentialError::InvalidFormat(e.to_string()))
+            .map_err(|e| CredentialError::TomlParse(e.to_string()))
     }
 
     async fn write_providers_file(
@@ -274,7 +274,7 @@ impl ProviderRegistry {
         providers: &BTreeMap<String, StoredProvider>,
     ) -> Result<(), CredentialError> {
         let text = toml::to_string(providers)
-            .map_err(|e| CredentialError::InvalidFormat(e.to_string()))?;
+            .map_err(|e| CredentialError::TomlParse(e.to_string()))?;
         let path = self.providers_path();
 
         let tmp_path = path.with_extension("tmp");
@@ -673,7 +673,7 @@ mod tests {
     fn validate_provider_name_empty() {
         assert!(matches!(
             validate_provider_name(""),
-            Err(CredentialError::InvalidFormat(_))
+            Err(CredentialError::InvalidProviderName(_))
         ));
     }
 
@@ -682,7 +682,7 @@ mod tests {
         let long = "a".repeat(256);
         assert!(matches!(
             validate_provider_name(&long),
-            Err(CredentialError::InvalidFormat(_))
+            Err(CredentialError::InvalidProviderName(_))
         ));
     }
 
@@ -692,7 +692,7 @@ mod tests {
             assert!(
                 matches!(
                     validate_provider_name(bad),
-                    Err(CredentialError::InvalidFormat(_))
+                    Err(CredentialError::InvalidProviderName(_))
                 ),
                 "expected error for {bad:?}"
             );
@@ -722,7 +722,7 @@ mod tests {
         let result = registry
             .set("test", "key", ApiKind::Messages, "ftp://bad.com", None)
             .await;
-        assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
+        assert!(matches!(result, Err(CredentialError::InvalidBaseUrl(_))));
     }
 
     #[tokio::test]
@@ -746,7 +746,7 @@ mod tests {
         let result = registry
             .set("bad name", "key", ApiKind::Messages, "https://ok.com", None)
             .await;
-        assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
+        assert!(matches!(result, Err(CredentialError::InvalidProviderName(_))));
     }
 
     #[tokio::test]
@@ -754,7 +754,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let registry = ProviderRegistry::load(dir.path().to_path_buf());
         let result = registry.get("").await;
-        assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
+        assert!(matches!(result, Err(CredentialError::InvalidProviderName(_))));
     }
 
     #[tokio::test]
@@ -762,6 +762,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let registry = ProviderRegistry::load(dir.path().to_path_buf());
         let result = registry.remove("bad/name").await;
-        assert!(matches!(result, Err(CredentialError::InvalidFormat(_))));
+        assert!(matches!(result, Err(CredentialError::InvalidProviderName(_))));
     }
 }

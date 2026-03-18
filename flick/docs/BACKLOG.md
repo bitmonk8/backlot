@@ -1,48 +1,12 @@
 # Flick — Backlog
 
-16 items in 4 active clusters, ordered by value (highest first).
+11 items in 3 active clusters, ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
 ---
 
-## 1. Error Type Hygiene (5 items)
-
-Overloaded error variants, wrong variant names, misattributed JSON errors. One sweep through `error.rs` and its consumers.
-
-### L4. `CredentialError::InvalidFormat` overloaded for 6+ distinct failure modes — `provider_registry.rs`, `error.rs`
-
-`InvalidFormat(String)` covers: hex decode failures, key length errors, TOML parse errors, encryption failures, and Windows API errors. Makes programmatic error handling and debugging harder.
-
-- **L** — Fix Risk: Low — Effort: Low
-
-### T25. `FlickError::code()` couples to `ProviderError` internals — `error.rs`
-
-`FlickError::code()` must know about all `ProviderError` variants rather than delegating to `ProviderError::code()`.
-
-- **L** — Fix Risk: Low — Effort: Low
-
-### T76. `ProviderError` missing `InvalidRequest` variant — `error.rs`
-
-`chat_completions::validate_params` uses `ResponseParse` for client-side validation errors (e.g., tools + output_schema mutual exclusion). The root cause is the absence of an `InvalidRequest(String)` (or `ValidationFailed`) variant.
-
-- **L** — Fix Risk: Low — Effort: Low
-
-### T77. `From<serde_json::Error>` maps all JSON errors to `ContextParse` — `error.rs`
-
-Any `serde_json::Error` propagated via `?` in a `FlickError` context becomes `FlickError::ContextParse`, even when unrelated to context parsing. The variant name misleads callers handling JSON errors from non-context paths.
-
-- **L** — Fix Risk: Low — Effort: Low
-
-### T86. `load_config` helper swallows `ConfigError` in expect message — `tests/common/mod.rs`
-
-`.expect("config should parse")` masks the actual `ConfigError` variant and message on test failure.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
----
-
-## 2. Provider — Messages API & Architecture (4 items)
+## 1. Provider — Messages API & Architecture (4 items)
 
 Temperature+thinking guard, system prompt as array (for caching), tool_choice support, provider trait coherence. `messages.rs` and `provider.rs`.
 
@@ -72,7 +36,7 @@ The Messages provider always omits `tool_choice`, relying on the Anthropic defau
 
 ---
 
-## 3. CLI Input Handling (4 items)
+## 2. CLI Input Handling (4 items)
 
 Stdin size limits, provider name/key validation, whitespace-only input messages. All in `main.rs`.
 
@@ -102,7 +66,7 @@ No length cap or control character check on the API key value.
 
 ---
 
-## 4. Test Coverage Gaps (3 items)
+## 3. Test Coverage Gaps (3 items)
 
 Missing tests for context overflow, credential edge cases, destructive mock reads, integration history verification. Independent items but suitable for a single test-writing session.
 

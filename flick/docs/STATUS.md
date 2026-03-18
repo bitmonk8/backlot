@@ -23,9 +23,10 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - CLI commands: `provider add/list`, `model add/list/remove`, `init`, `run`
 - Cache-aware cost computation — `compute_cost` factors in cache creation/read tokens at separate pricing tiers
 - Context serialization robustness — unknown content block fallback, message ordering validation on load, empty-content guard on `push_assistant`, serde defaults for optional fields
-- 280 tests passing (227 lib, 22 bin, 20 runner, 11 integration), zero clippy errors
+- Error type hygiene — `CredentialError` split into specific variants (`InvalidProviderName`, `InvalidBaseUrl`, `InvalidSecretKey`, `TomlParse`), `ProviderError::InvalidRequest` for client-side validation, `ProviderError::code()` delegation, explicit `serde_json::Error` mapping (no blanket `From`)
+- 283 tests passing (230 lib, 22 bin, 20 runner, 11 integration), zero clippy errors
 
 ## Next Work
 
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
-- Backlog items (see `BACKLOG.md` — 16 items in 4 active clusters)
+- Backlog items (see `BACKLOG.md` — 11 items in 3 active clusters)
