@@ -33,7 +33,14 @@ impl MessagesProvider {
     }
 
     #[allow(clippy::unused_self)]
-    fn build_body(&self, params: &RequestParams<'_>) -> serde_json::Value {
+    fn build_body(&self, params: &RequestParams<'_>) -> Result<serde_json::Value, ProviderError> {
+        // Anthropic API rejects requests with both temperature and thinking enabled.
+        if params.temperature.is_some() && params.reasoning.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "temperature and thinking (reasoning) cannot both be set for the Anthropic Messages API".into(),
+            ));
+        }
+
         // Messages API always requires max_tokens.
         // Resolve: explicit → registry → 8192.
         let resolved_max = params.max_tokens.unwrap_or(8192);
@@ -46,8 +53,11 @@ impl MessagesProvider {
             body["temperature"] = serde_json::json!(temp);
         }
 
+        // Array-of-content-blocks format enables prompt caching via cache_control.
         if let Some(system) = params.system_prompt {
-            body["system"] = serde_json::json!(system);
+            body["system"] = serde_json::json!([
+                {"type": "text", "text": system}
+            ]);
         }
 
         let messages: Vec<serde_json::Value> =
@@ -74,6 +84,19 @@ impl MessagesProvider {
             body["tools"] = serde_json::Value::Array(tools);
         }
 
+        if !params.tools.is_empty() {
+            if let Some(ref tc) = params.tool_choice {
+                body["tool_choice"] = match tc {
+                    crate::provider::ToolChoice::Auto => serde_json::json!({"type": "auto"}),
+                    crate::provider::ToolChoice::Any => serde_json::json!({"type": "any"}),
+                    crate::provider::ToolChoice::None => serde_json::json!({"type": "none"}),
+                    crate::provider::ToolChoice::Tool(name) => {
+                        serde_json::json!({"type": "tool", "name": name})
+                    }
+                };
+            }
+        }
+
         if let Some(level) = params.reasoning {
             let budget = anthropic_budget_tokens(level).min(resolved_max.saturating_sub(1));
             if budget > 0 {
@@ -93,7 +116,7 @@ impl MessagesProvider {
             });
         }
 
-        body
+        Ok(body)
     }
 }
 
@@ -104,7 +127,7 @@ impl DynProvider for MessagesProvider {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
-            let body = self.build_body(&params);
+            let body = self.build_body(&params)?;
             let url = format!("{}/v1/messages", self.base_url);
 
             let json = super::http::request_json(|| {
@@ -121,7 +144,7 @@ impl DynProvider for MessagesProvider {
     }
 
     fn build_request(&self, params: RequestParams<'_>) -> Result<serde_json::Value, ProviderError> {
-        Ok(self.build_body(&params))
+        self.build_body(&params)
     }
 }
 
@@ -325,10 +348,11 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
-        let body = provider.build_body(&params);
+        let body = provider.build_body(&params).expect("build_body");
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
         assert_eq!(body["max_tokens"], 1024);
         assert!(body.get("temperature").is_none());
@@ -348,10 +372,11 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
-        let body = provider.build_body(&params);
+        let body = provider.build_body(&params).expect("build_body");
         // No builtin registry; falls back to 8192
         assert_eq!(body["max_tokens"], 8192);
     }
@@ -367,10 +392,11 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
-        let body = provider.build_body(&params);
+        let body = provider.build_body(&params).expect("build_body");
         assert_eq!(body["max_tokens"], 8192);
     }
 
@@ -385,12 +411,16 @@ mod tests {
             system_prompt: Some("Be helpful"),
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
-        let body = provider.build_body(&params);
+        let body = provider.build_body(&params).expect("build_body");
         assert_eq!(body["temperature"], 0.5);
-        assert_eq!(body["system"], "Be helpful");
+        // T54: system prompt is now array-of-content-blocks for cache_control support
+        assert!(body["system"].is_array());
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "Be helpful");
     }
 
     #[test]
@@ -411,10 +441,11 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
-        let body = provider.build_body(&params);
+        let body = provider.build_body(&params).expect("build_body");
         assert!(body["tools"].is_array());
         assert_eq!(body["tools"][0]["name"], "read_file");
     }
@@ -430,10 +461,11 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: Some(crate::model::ReasoningLevel::High),
             output_schema: None,
         };
-        let body = provider.build_body(&params);
+        let body = provider.build_body(&params).expect("build_body");
         assert!(body.get("temperature").is_none());
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 1023);
@@ -541,10 +573,11 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: Some(&schema),
         };
-        let body = provider.build_body(&params);
+        let body = provider.build_body(&params).expect("build_body");
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
         assert_eq!(
@@ -564,10 +597,11 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
-        let body = provider.build_body(&params);
+        let body = provider.build_body(&params).expect("build_body");
         assert!(body.get("output_config").is_none());
     }
 
@@ -596,5 +630,178 @@ mod tests {
         let resp = parse_response(&json).expect("should parse");
         assert!(resp.text.is_none());
         assert!(resp.tool_calls.is_empty());
+    }
+
+    // -- T10: temperature + thinking mutual exclusion --
+
+    #[test]
+    fn build_body_rejects_temperature_with_reasoning() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: Some(0.5),
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: Some(crate::model::ReasoningLevel::High),
+            output_schema: None,
+        };
+        let err = provider
+            .build_body(&params)
+            .expect_err("should reject temperature+reasoning");
+        match err {
+            crate::error::ProviderError::InvalidRequest(msg) => {
+                assert!(msg.contains("temperature"));
+                assert!(msg.contains("thinking"));
+            }
+            other => panic!("expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    // -- T54: system prompt array format --
+
+    #[test]
+    fn build_body_system_prompt_is_content_block_array() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: Some("You are a helpful assistant"),
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        let system = &body["system"];
+        assert!(system.is_array(), "system should be an array");
+        let blocks = system.as_array().expect("system array");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "You are a helpful assistant");
+    }
+
+    // -- T55: tool_choice --
+
+    #[test]
+    fn build_body_tool_choice_auto() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Auto),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["tool_choice"]["type"], "auto");
+    }
+
+    #[test]
+    fn build_body_tool_choice_any() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Any),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["tool_choice"]["type"], "any");
+    }
+
+    #[test]
+    fn build_body_tool_choice_tool() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "read_file".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Tool("read_file".into())),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], "read_file");
+    }
+
+    #[test]
+    fn build_body_tool_choice_none_variant() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::None),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["tool_choice"]["type"], "none");
+    }
+
+    #[test]
+    fn build_body_tool_choice_ignored_when_no_tools() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Auto),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert!(body.get("tool_choice").is_none());
     }
 }

@@ -74,7 +74,18 @@ impl ChatCompletionsProvider {
             let tools: Vec<serde_json::Value> = params.tools.iter().map(convert_tool).collect();
             body["tools"] = serde_json::Value::Array(tools);
 
-            if self.compat.explicit_tool_choice_auto {
+            // Explicit tool_choice from params takes precedence over compat flag.
+            if let Some(ref tc) = params.tool_choice {
+                body["tool_choice"] = match tc {
+                    crate::provider::ToolChoice::Auto => serde_json::json!("auto"),
+                    crate::provider::ToolChoice::Any => serde_json::json!("required"),
+                    crate::provider::ToolChoice::None => serde_json::json!("none"),
+                    crate::provider::ToolChoice::Tool(name) => serde_json::json!({
+                        "type": "function",
+                        "function": {"name": name}
+                    }),
+                };
+            } else if self.compat.explicit_tool_choice_auto {
                 body["tool_choice"] = serde_json::json!("auto");
             }
         }
@@ -494,6 +505,7 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
@@ -516,6 +528,7 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
@@ -535,6 +548,7 @@ mod tests {
             system_prompt: Some("Be helpful"),
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
@@ -568,6 +582,7 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
@@ -587,6 +602,7 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: Some(crate::model::ReasoningLevel::High),
             output_schema: None,
         };
@@ -609,6 +625,7 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: Some(&schema),
         };
@@ -984,6 +1001,7 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
@@ -1009,6 +1027,7 @@ mod tests {
             system_prompt: None,
             messages: &msgs,
             tools: &tools,
+            tool_choice: None,
             reasoning: None,
             output_schema: None,
         };
@@ -1071,5 +1090,136 @@ mod tests {
             messages[0].get("tool_calls").is_none(),
             "user messages must not have tool_calls"
         );
+    }
+
+    // -- T55: tool_choice --
+
+    #[test]
+    fn build_body_tool_choice_auto() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = RequestParams {
+            model: "gpt-4o",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Auto),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params);
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn build_body_tool_choice_any_maps_to_required() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = RequestParams {
+            model: "gpt-4o",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Any),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params);
+        assert_eq!(body["tool_choice"], "required");
+    }
+
+    #[test]
+    fn build_body_tool_choice_none_value() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = RequestParams {
+            model: "gpt-4o",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::None),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params);
+        assert_eq!(body["tool_choice"], "none");
+    }
+
+    #[test]
+    fn build_body_tool_choice_specific_tool() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "read_file".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = RequestParams {
+            model: "gpt-4o",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Tool("read_file".into())),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params);
+        assert_eq!(body["tool_choice"]["type"], "function");
+        assert_eq!(body["tool_choice"]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn build_body_tool_choice_overrides_compat_flag() {
+        let provider = ChatCompletionsProvider::new(
+            "https://api.example.com",
+            "test-key".into(),
+            CompatFlags {
+                explicit_tool_choice_auto: true,
+            },
+            Client::new(),
+        );
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = RequestParams {
+            model: "gpt-4o",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Any),
+            reasoning: None,
+            output_schema: None,
+        };
+        let body = provider.build_body(&params);
+        // Explicit tool_choice should win over compat flag
+        assert_eq!(body["tool_choice"], "required");
     }
 }

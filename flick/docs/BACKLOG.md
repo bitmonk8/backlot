@@ -1,42 +1,12 @@
 # Flick — Backlog
 
-7 items in 2 active clusters, ordered by value (highest first).
+3 items in 1 active cluster, ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
 ---
 
-## 1. Provider — Messages API & Architecture (4 items)
-
-Temperature+thinking guard, system prompt as array (for caching), tool_choice support, provider trait coherence. `messages.rs` and `provider.rs`.
-
-### T10. `build_body` does not enforce temperature + thinking mutual exclusion — `messages.rs`
-
-Anthropic API rejects requests with both `temperature` and thinking enabled. `build_body` does not guard; caller enforcement exists but is not defensive.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T54. System prompt serialised as plain string, blocking prompt caching — `messages.rs`
-
-`body["system"] = json!(system)` produces a JSON string. The Anthropic API also accepts `system` as an array of content blocks, which is required to attach `cache_control` headers for prompt caching.
-
-- **L** — Fix Risk: Low — Effort: Low
-
-### T55. No `tool_choice` configuration surface for Messages provider — `messages.rs`
-
-The Messages provider always omits `tool_choice`, relying on the Anthropic default of `auto`. There is no way to force `{"type": "any"}` or a specific tool.
-
-- **L** — Fix Risk: Low — Effort: Low
-
-### T65. Blanket/manual `DynProvider` coherence trap undocumented — `provider.rs`
-
-`ProviderInstance` has a manual `DynProvider` impl, coexisting with the blanket `impl<T: Provider> DynProvider for T`. If someone later adds `impl Provider for ProviderInstance`, the compiler will reject both impls as conflicting. No comment warns of this constraint.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
----
-
-## 2. Test Coverage Gaps (3 items)
+## 1. Test Coverage Gaps (3 items)
 
 Missing tests for context overflow, credential edge cases, destructive mock reads, integration history verification. Independent items but suitable for a single test-writing session.
 

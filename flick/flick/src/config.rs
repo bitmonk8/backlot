@@ -5,7 +5,7 @@ use crate::ApiKind;
 use crate::error::ConfigError;
 use crate::model::{ReasoningLevel, anthropic_budget_tokens};
 use crate::model_registry::ModelInfo;
-use crate::provider::ToolDefinition;
+use crate::provider::{ToolChoice, ToolDefinition};
 use crate::provider_registry::ProviderInfo;
 
 /// Config string format for `RequestConfig::from_str`.
@@ -37,6 +37,9 @@ pub struct RequestConfig {
     output_schema: Option<OutputSchema>,
 
     #[serde(default)]
+    tool_choice: Option<ToolChoiceConfig>,
+
+    #[serde(default)]
     tools: Vec<ToolConfig>,
 }
 
@@ -50,6 +53,19 @@ pub struct ReasoningConfig {
 #[serde(deny_unknown_fields)]
 pub struct OutputSchema {
     pub schema: serde_json::Value,
+}
+
+/// Tool selection strategy from config.
+///
+/// Valid values for `type`: `"auto"`, `"any"`, `"none"`, `"tool"`.
+/// When `type` is `"tool"`, `name` is required.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolChoiceConfig {
+    #[serde(rename = "type")]
+    pub choice_type: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Per-provider quirk flags. All default to false.
@@ -68,6 +84,19 @@ pub struct ToolConfig {
     description: String,
     #[serde(default)]
     parameters: Option<serde_json::Value>,
+}
+
+impl ToolChoiceConfig {
+    /// Convert to the provider's `ToolChoice` enum.
+    pub fn to_tool_choice(&self) -> ToolChoice {
+        match self.choice_type.as_str() {
+            "any" => ToolChoice::Any,
+            "none" => ToolChoice::None,
+            "tool" => ToolChoice::Tool(self.name.clone().unwrap_or_default()),
+            // "auto" and any unrecognized type (rejected by validate_local)
+            _ => ToolChoice::Auto,
+        }
+    }
 }
 
 impl ToolConfig {
@@ -179,6 +208,10 @@ impl RequestConfig {
         self.output_schema.as_ref()
     }
 
+    pub const fn tool_choice(&self) -> Option<&ToolChoiceConfig> {
+        self.tool_choice.as_ref()
+    }
+
     pub fn tools(&self) -> &[ToolConfig] {
         &self.tools
     }
@@ -202,6 +235,32 @@ impl RequestConfig {
                 return Err(ConfigError::InvalidModelConfig(
                     "temperature must be non-negative and finite".into(),
                 ));
+            }
+        }
+
+        // Validate tool_choice
+        if let Some(tc) = &self.tool_choice {
+            match tc.choice_type.as_str() {
+                "auto" | "any" | "none" => {
+                    if tc.name.is_some() {
+                        return Err(ConfigError::InvalidModelConfig(format!(
+                            "tool_choice type '{}' does not accept a name",
+                            tc.choice_type
+                        )));
+                    }
+                }
+                "tool" => {
+                    if tc.name.as_ref().is_none_or(String::is_empty) {
+                        return Err(ConfigError::InvalidModelConfig(
+                            "tool_choice type 'tool' requires a non-empty name".into(),
+                        ));
+                    }
+                }
+                other => {
+                    return Err(ConfigError::InvalidModelConfig(format!(
+                        "tool_choice type must be auto, any, none, or tool — got '{other}'"
+                    )));
+                }
             }
         }
 
@@ -318,6 +377,7 @@ pub struct RequestConfigBuilder {
     temperature: Option<f32>,
     reasoning: Option<ReasoningConfig>,
     output_schema: Option<OutputSchema>,
+    tool_choice: Option<ToolChoiceConfig>,
     tools: Vec<ToolConfig>,
 }
 
@@ -353,6 +413,12 @@ impl RequestConfigBuilder {
     }
 
     #[must_use]
+    pub fn tool_choice(mut self, choice: ToolChoiceConfig) -> Self {
+        self.tool_choice = Some(choice);
+        self
+    }
+
+    #[must_use]
     pub fn tools(mut self, tools: Vec<ToolConfig>) -> Self {
         self.tools = tools;
         self
@@ -367,6 +433,7 @@ impl RequestConfigBuilder {
             temperature: self.temperature,
             reasoning: self.reasoning,
             output_schema: self.output_schema,
+            tool_choice: self.tool_choice,
             tools: self.tools,
         };
         config.validate_local()?;
@@ -773,5 +840,100 @@ tools:
             "model: test\ntools:\n  - name: my_tool\n    description: a tool\n    timeout: 30\n";
         let result = RequestConfig::parse_yaml(yaml);
         assert!(matches!(result, Err(ConfigError::Parse(msg)) if msg.contains("timeout")));
+    }
+
+    // -- T55: tool_choice config tests --
+
+    #[test]
+    fn tool_choice_auto() {
+        let yaml = "model: test\ntool_choice:\n  type: auto\n";
+        let config = RequestConfig::parse_yaml(yaml).expect("should parse");
+        let tc = config.tool_choice().expect("tool_choice should be Some");
+        assert_eq!(tc.choice_type, "auto");
+        assert!(tc.name.is_none());
+        let resolved = tc.to_tool_choice();
+        assert_eq!(resolved, crate::provider::ToolChoice::Auto);
+    }
+
+    #[test]
+    fn tool_choice_any() {
+        let yaml = "model: test\ntool_choice:\n  type: any\n";
+        let config = RequestConfig::parse_yaml(yaml).expect("should parse");
+        let tc = config.tool_choice().expect("tool_choice should be Some");
+        let resolved = tc.to_tool_choice();
+        assert_eq!(resolved, crate::provider::ToolChoice::Any);
+    }
+
+    #[test]
+    fn tool_choice_none_value() {
+        let yaml = "model: test\ntool_choice:\n  type: none\n";
+        let config = RequestConfig::parse_yaml(yaml).expect("should parse");
+        let tc = config.tool_choice().expect("tool_choice should be Some");
+        let resolved = tc.to_tool_choice();
+        assert_eq!(resolved, crate::provider::ToolChoice::None);
+    }
+
+    #[test]
+    fn tool_choice_specific_tool() {
+        let yaml = "model: test\ntool_choice:\n  type: tool\n  name: read_file\n";
+        let config = RequestConfig::parse_yaml(yaml).expect("should parse");
+        let tc = config.tool_choice().expect("tool_choice should be Some");
+        let resolved = tc.to_tool_choice();
+        assert_eq!(
+            resolved,
+            crate::provider::ToolChoice::Tool("read_file".into())
+        );
+    }
+
+    #[test]
+    fn tool_choice_tool_without_name_rejected() {
+        let yaml = "model: test\ntool_choice:\n  type: tool\n";
+        let result = RequestConfig::parse_yaml(yaml);
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("name"))
+        );
+    }
+
+    #[test]
+    fn tool_choice_invalid_type_rejected() {
+        let yaml = "model: test\ntool_choice:\n  type: foo\n";
+        let result = RequestConfig::parse_yaml(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("foo")));
+    }
+
+    #[test]
+    fn tool_choice_auto_with_name_rejected() {
+        let yaml = "model: test\ntool_choice:\n  type: auto\n  name: read_file\n";
+        let result = RequestConfig::parse_yaml(yaml);
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("does not accept"))
+        );
+    }
+
+    #[test]
+    fn tool_choice_any_with_name_rejected() {
+        let yaml = "model: test\ntool_choice:\n  type: any\n  name: read_file\n";
+        let result = RequestConfig::parse_yaml(yaml);
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("does not accept"))
+        );
+    }
+
+    #[test]
+    fn tool_choice_none_with_name_rejected() {
+        let yaml = "model: test\ntool_choice:\n  type: none\n  name: read_file\n";
+        let result = RequestConfig::parse_yaml(yaml);
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("does not accept"))
+        );
+    }
+
+    #[test]
+    fn tool_choice_tool_with_empty_name_rejected() {
+        let yaml = "model: test\ntool_choice:\n  type: tool\n  name: \"\"\n";
+        let result = RequestConfig::parse_yaml(yaml);
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("name"))
+        );
     }
 }

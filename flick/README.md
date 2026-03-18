@@ -271,6 +271,8 @@ system_prompt: "You are a code assistant."
 temperature: 0.0
 reasoning:
   level: medium
+tool_choice:
+  type: auto
 output_schema:
   schema:
     type: object
@@ -334,6 +336,24 @@ it as `response_format`. When using a Chat Completions provider with both `tools
 includes tools (no schema), and if the model completes without tool calls, a second
 request applies the schema (no tools). Usage from both calls is summed.
 
+### `tool_choice`
+
+Controls how the model selects tools.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | yes | `auto`, `any`, `none`, or `tool` |
+| `name` | string | when type=`tool` | Name of the specific tool to force |
+
+Only valid when `tools` is non-empty. Provider mapping:
+
+| Type | Messages API | Chat Completions |
+|------|-------------|-----------------|
+| `auto` | `{"type": "auto"}` | `"auto"` |
+| `any` | `{"type": "any"}` | `"required"` |
+| `none` | `{"type": "none"}` | `"none"` |
+| `tool` | `{"type": "tool", "name": "..."}` | `{"type": "function", "function": {"name": "..."}}` |
+
 ### `tools`
 
 Declare tool schemas. Flick includes these in the model request but never executes tools — the caller handles execution.
@@ -394,7 +414,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-289 tests (232 lib, 26 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
+311 tests (254 lib, 26 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
 
 ## License
 

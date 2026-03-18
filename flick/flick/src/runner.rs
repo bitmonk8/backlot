@@ -178,6 +178,9 @@ pub fn build_params<'a>(
         system_prompt: config.system_prompt(),
         messages,
         tools: tool_defs,
+        tool_choice: config
+            .tool_choice()
+            .map(super::config::ToolChoiceConfig::to_tool_choice),
         reasoning: config.reasoning().map(|r| r.level),
         output_schema: config.output_schema().map(|o| &o.schema),
     }

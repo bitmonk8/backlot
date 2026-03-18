@@ -9,6 +9,19 @@ use crate::error::ProviderError;
 use crate::model::ReasoningLevel;
 use crate::provider_registry::ProviderInfo;
 
+/// Caller-specified tool selection strategy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolChoice {
+    /// Model decides whether to call tools (default API behavior).
+    Auto,
+    /// Model must call at least one tool.
+    Any,
+    /// Model must not call any tools.
+    None,
+    /// Model must call the named tool.
+    Tool(String),
+}
+
 /// Parameters for a provider request.
 pub struct RequestParams<'a> {
     pub model: &'a str,
@@ -18,6 +31,7 @@ pub struct RequestParams<'a> {
     pub system_prompt: Option<&'a str>,
     pub messages: &'a [Message],
     pub tools: &'a [ToolDefinition],
+    pub tool_choice: Option<ToolChoice>,
     pub reasoning: Option<ReasoningLevel>,
     pub output_schema: Option<&'a serde_json::Value>,
 }
@@ -66,6 +80,10 @@ pub enum ProviderInstance {
     ChatCompletions(chat_completions::ChatCompletionsProvider),
 }
 
+// COHERENCE CONSTRAINT: `ProviderInstance` has a manual `DynProvider` impl below.
+// A blanket `impl<T: Provider> DynProvider for T` exists elsewhere. If you add
+// `impl Provider for ProviderInstance`, the compiler will reject both impls as
+// conflicting (E0119). Keep `ProviderInstance` as a manual delegation enum only.
 impl DynProvider for ProviderInstance {
     fn call_boxed<'a>(
         &'a self,
