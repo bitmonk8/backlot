@@ -60,11 +60,13 @@ fn cat_command(path: &std::path::Path) -> (PathBuf, Vec<String>) {
 /// Platform-appropriate command that writes to a file.
 #[cfg(target_os = "windows")]
 fn write_command(path: &std::path::Path) -> (PathBuf, Vec<String>) {
-    // `cmd /C echo data > path`
+    // cmd.exe /C does NOT follow CommandLineToArgvW escaping rules —
+    // inner quotes get mangled by build_command_line's correct escaping.
+    // Use unquoted path; CI temp paths don't contain spaces.
     let target = path.to_string_lossy().into_owned();
     (
         PathBuf::from("cmd"),
-        vec!["/C".into(), format!("echo data > \"{target}\"")],
+        vec!["/C".into(), format!("echo data > {target}")],
     )
 }
 
