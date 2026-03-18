@@ -24,9 +24,22 @@
 
 ## Next Work
 
-Full project audit completed (see `docs/AUDIT_FINDINGS.md`). All 13 medium and 10 low findings fixed. Audit backlog clear.
+Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 42 findings across 8 categories. Goal: fix all groups.
 
-### Remaining work
+### Audit finding groups (in recommended fix order)
+
+| # | Group | Findings | Severities | Status |
+|---|-------|----------|------------|--------|
+| 1 | Correctness | 9 | 2 critical, 2 high, 5 medium | Not started |
+| 2 | Error Handling | 2 | 1 high, 1 medium | Not started |
+| 3 | Testing | 11 | 4 high, 7 medium | Not started |
+| 4 | Doc-Implementation Mismatch | 5 | 1 high, 3 medium, 1 low | Not started |
+| 5 | Simplification | 7 | 7 medium | Not started |
+| 6 | Separation of Concerns | 3 | 2 medium, 1 low | Not started |
+| 7 | Naming | 4 | 1 medium, 3 low | Not started |
+| 8 | Placement | 1 | 1 low | Not started |
+
+### Other remaining work
 
 - First real-world usage / `lot run` testing
 
