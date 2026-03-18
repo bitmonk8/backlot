@@ -651,10 +651,7 @@ fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
         // Use powershell Start-Sleep instead.
         (
             PathBuf::from("powershell"),
-            vec![
-                "-Command".into(),
-                format!("Start-Sleep -Seconds {seconds}"),
-            ],
+            vec!["-Command".into(), format!("Start-Sleep -Seconds {seconds}")],
         )
     }
 
