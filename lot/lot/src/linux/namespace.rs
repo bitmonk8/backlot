@@ -135,7 +135,7 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     }
 
     // Network-dependent config files
-    if policy.allow_network {
+    if policy.allow_network() {
         if Path::new("/etc/resolv.conf").exists() {
             let dest = format!("{new_root}/etc/resolv.conf");
             bind_mount_file_readonly("/etc/resolv.conf", &dest)?;
@@ -149,7 +149,7 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     }
 
     // Policy-specified read-only paths
-    for path in &policy.read_paths {
+    for path in policy.read_paths() {
         let s = path_to_str(path, "read")?;
         let dest = format!("{new_root}{s}");
         mkdir_p(&dest)?;
@@ -157,7 +157,7 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     }
 
     // Policy-specified read-write paths
-    for path in &policy.write_paths {
+    for path in policy.write_paths() {
         let s = path_to_str(path, "write")?;
         let dest = format!("{new_root}{s}");
         mkdir_p(&dest)?;
@@ -165,7 +165,7 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     }
 
     // Policy-specified exec paths (read-only, but allow exec)
-    for path in &policy.exec_paths {
+    for path in policy.exec_paths() {
         let s = path_to_str(path, "exec")?;
         let dest = format!("{new_root}{s}");
         mkdir_p(&dest)?;
@@ -175,7 +175,7 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     // Deny paths: overmount with empty read-only tmpfs so the subtree
     // appears as an empty directory. Must happen after the parent grant
     // mounts above.
-    for path in &policy.deny_paths {
+    for path in policy.deny_paths() {
         let s = path_to_str(path, "deny")?;
         let dest = format!("{new_root}{s}");
         mkdir_p(&dest)?;

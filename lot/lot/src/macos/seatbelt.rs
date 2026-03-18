@@ -100,13 +100,13 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
         profile.push_str("\"))\n");
     }
     // Also allow metadata on all policy-granted paths
-    for path in &policy.read_paths {
+    for path in policy.read_paths() {
         append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path);
     }
-    for path in &policy.write_paths {
+    for path in policy.write_paths() {
         append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path);
     }
-    for path in &policy.exec_paths {
+    for path in policy.exec_paths() {
         append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path);
     }
 
@@ -127,7 +127,7 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
         "literal",
         program_path,
     );
-    for path in &policy.exec_paths {
+    for path in policy.exec_paths() {
         append_sbpl_rule(&mut profile, "allow", "process-exec", "subpath", path);
         append_sbpl_rule(
             &mut profile,
@@ -150,10 +150,10 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     // Process needs to inspect its own info during startup (dyld, libSystem).
     profile.push_str("(allow process-info* (target self))\n");
 
-    // Unrestricted mach-lookup is an intentional trade-off: narrowing to specific
-    // Mach service names would break most programs because the required services
-    // vary by macOS version and application. This is consistent with Chrome and
-    // Firefox sandbox profiles, which also leave mach-lookup unrestricted.
+    // Unrestricted mach-lookup is an accepted risk (see docs/DESIGN.md):
+    // narrowing to specific Mach service names would break most programs
+    // because the required services vary by macOS version and application.
+    // This is consistent with Chrome and Firefox sandbox profiles.
     profile.push_str("(allow mach-lookup)\n");
 
     // Only allow sending signals to self
@@ -163,24 +163,24 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     profile.push_str("(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n");
 
     // Policy-specified read paths
-    for path in &policy.read_paths {
+    for path in policy.read_paths() {
         append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path);
     }
 
     // Policy-specified write paths get both read and write
-    for path in &policy.write_paths {
+    for path in policy.write_paths() {
         append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path);
         append_sbpl_rule(&mut profile, "allow", "file-write*", "subpath", path);
     }
 
     // Exec paths get read access (needed to load the binary)
-    for path in &policy.exec_paths {
+    for path in policy.exec_paths() {
         append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path);
     }
 
     // Deny rules override grants above. SBPL uses last-match-wins, so these
     // must appear after the allow rules for the denied subtrees.
-    for path in &policy.deny_paths {
+    for path in policy.deny_paths() {
         append_sbpl_rule(&mut profile, "deny", "file-read*", "subpath", path);
         // file-read-metadata is a separate SBPL operation not covered by file-read*
         append_sbpl_rule(&mut profile, "deny", "file-read-metadata", "subpath", path);
@@ -204,7 +204,7 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     }
 
     // Network access
-    if policy.allow_network {
+    if policy.allow_network() {
         profile.push_str("(allow network*)\n");
     }
 
@@ -220,10 +220,10 @@ fn collect_ancestor_dirs(policy: &SandboxPolicy, program_path: &Path) -> Vec<Pat
     let mut ancestors: HashSet<PathBuf> = HashSet::new();
 
     let all_raw_paths = policy
-        .read_paths
+        .read_paths()
         .iter()
-        .chain(policy.write_paths.iter())
-        .chain(policy.exec_paths.iter());
+        .chain(policy.write_paths().iter())
+        .chain(policy.exec_paths().iter());
 
     for raw in all_raw_paths {
         let resolved = resolve_path(raw);
@@ -265,8 +265,11 @@ fn add_ancestors(path: &Path, set: &mut HashSet<PathBuf>) {
 
 /// Escape a path string for use in SBPL rules.
 /// Replaces `"` with `\"` and rejects null bytes.
+/// Returns an error if the path is not valid UTF-8 — `display()` would
+/// silently replace non-UTF-8 bytes with U+FFFD, corrupting the path in
+/// the generated SBPL profile.
 fn escape_sbpl_path(path: &Path) -> std::result::Result<String, &'static str> {
-    let s = path.display().to_string();
+    let s = path.to_str().ok_or("path is not valid UTF-8")?;
     if s.as_bytes().contains(&0) {
         return Err("path contains null byte");
     }
@@ -347,14 +350,14 @@ mod tests {
     use std::path::PathBuf;
 
     fn basic_policy() -> SandboxPolicy {
-        SandboxPolicy {
-            read_paths: vec![PathBuf::from("/tmp/test_read")],
-            write_paths: vec![PathBuf::from("/tmp/test_write")],
-            exec_paths: vec![PathBuf::from("/opt/mybin")],
-            deny_paths: Vec::new(),
-            allow_network: false,
-            limits: ResourceLimits::default(),
-        }
+        SandboxPolicy::new(
+            vec![PathBuf::from("/tmp/test_read")],
+            vec![PathBuf::from("/tmp/test_write")],
+            vec![PathBuf::from("/opt/mybin")],
+            Vec::new(),
+            false,
+            ResourceLimits::default(),
+        )
     }
 
     fn test_program() -> PathBuf {
@@ -449,7 +452,15 @@ mod tests {
     #[test]
     fn profile_with_network() {
         let mut policy = basic_policy();
-        policy.allow_network = true;
+        // Rebuild with network enabled
+        policy = SandboxPolicy::new(
+            policy.read_paths().to_vec(),
+            policy.write_paths().to_vec(),
+            policy.exec_paths().to_vec(),
+            policy.deny_paths().to_vec(),
+            true,
+            policy.limits().clone(),
+        );
         let profile = generate_profile(&policy, &test_program());
         assert!(profile.contains("(allow network*)"));
         // Redundant sub-rules should not be present
@@ -459,14 +470,14 @@ mod tests {
 
     #[test]
     fn profile_empty_paths() {
-        let policy = SandboxPolicy {
-            read_paths: vec![],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
         let profile = generate_profile(&policy, &test_program());
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
@@ -488,14 +499,14 @@ mod tests {
 
     #[test]
     fn ancestor_dirs_basic() {
-        let policy = SandboxPolicy {
-            read_paths: vec![PathBuf::from("/a/b/c/d")],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![PathBuf::from("/a/b/c/d")],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
         // /a, /a/b, /a/b/c — but not "/" and not the path itself
         assert!(ancestors.contains(&PathBuf::from("/a")));
@@ -507,14 +518,14 @@ mod tests {
 
     #[test]
     fn ancestor_dirs_deduplicates() {
-        let policy = SandboxPolicy {
-            read_paths: vec![PathBuf::from("/a/b/c")],
-            write_paths: vec![PathBuf::from("/a/b/d")],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![PathBuf::from("/a/b/c")],
+            vec![PathBuf::from("/a/b/d")],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
         // /a and /a/b appear once each despite shared ancestry
         assert_eq!(
@@ -535,14 +546,14 @@ mod tests {
 
     #[test]
     fn ancestor_dirs_excludes_system_metadata_paths() {
-        let policy = SandboxPolicy {
-            read_paths: vec![PathBuf::from("/usr/local/share/data")],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![PathBuf::from("/usr/local/share/data")],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
         // /usr and /usr/local are in METADATA_SYSTEM_PATHS, so excluded
         assert!(!ancestors.contains(&PathBuf::from("/usr")));
@@ -553,14 +564,14 @@ mod tests {
 
     #[test]
     fn ancestor_dirs_empty_policy() {
-        let policy = SandboxPolicy {
-            read_paths: vec![],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
         // Program path /usr/bin/true still contributes /usr/bin as ancestor
         // (/usr is excluded via METADATA_SYSTEM_PATHS).
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
@@ -581,8 +592,15 @@ mod tests {
 
     #[test]
     fn ancestor_metadata_before_network() {
-        let mut policy = basic_policy();
-        policy.allow_network = true;
+        let bp = basic_policy();
+        let policy = SandboxPolicy::new(
+            bp.read_paths().to_vec(),
+            bp.write_paths().to_vec(),
+            bp.exec_paths().to_vec(),
+            bp.deny_paths().to_vec(),
+            true,
+            bp.limits().clone(),
+        );
         let profile = generate_profile(&policy, &test_program());
         let ancestor_pos = profile.find("(allow file-read-metadata (literal \"/opt\"))");
         let network_pos = profile.find("(allow network*)");

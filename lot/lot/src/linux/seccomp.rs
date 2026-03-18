@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::io;
 
-use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
+use seccompiler::{
+    BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+    SeccompRule, TargetArch,
+};
 
 use crate::SandboxPolicy;
 
@@ -183,12 +186,6 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_epoll_ctl,
             libc::SYS_epoll_pwait,
             libc::SYS_eventfd2,
-            // prctl is allowed broadly: seccomp filters stack (new filters can
-            // only be more restrictive), PR_SET_NO_NEW_PRIVS is already set
-            // before the filter is loaded, and filtering individual prctl ops
-            // via argument rules is possible but fragile across kernel versions.
-            libc::SYS_prctl,
-            libc::SYS_ioctl,
             libc::SYS_memfd_create,
             libc::SYS_flock,
         ],
@@ -205,6 +202,62 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_epoll_wait,
         ],
     );
+
+    // --- prctl (argument-filtered on arg0) ---
+    // Only allow specific prctl operations needed by standard runtimes.
+    {
+        const PR_SET_PDEATHSIG: u64 = 1;
+        const PR_GET_PDEATHSIG: u64 = 2;
+        const PR_SET_NAME: u64 = 15;
+        const PR_GET_NAME: u64 = 16;
+        const PR_SET_TIMERSLACK: u64 = 29;
+        const PR_GET_TIMERSLACK: u64 = 30;
+
+        let allowed_ops = [
+            PR_SET_PDEATHSIG,
+            PR_GET_PDEATHSIG,
+            PR_SET_NAME,
+            PR_GET_NAME,
+            PR_SET_TIMERSLACK,
+            PR_GET_TIMERSLACK,
+        ];
+        let prctl_rules: Vec<SeccompRule> = allowed_ops
+            .iter()
+            .map(|&op| {
+                SeccompRule::new(vec![
+                    SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, op)
+                        .expect("valid prctl condition"),
+                ])
+                .expect("valid prctl rule")
+            })
+            .collect();
+        rules.insert(libc::SYS_prctl, prctl_rules);
+    }
+
+    // --- ioctl (argument-filtered on arg1: request number) ---
+    // Only allow terminal and fd-flag ioctls needed by standard runtimes.
+    // Values from asm-generic/ioctls.h — same on x86_64 and aarch64.
+    {
+        const TCGETS: u64 = 0x5401; // get terminal attributes
+        const TIOCGWINSZ: u64 = 0x5413; // get window size
+        const TIOCGPGRP: u64 = 0x540F; // get process group
+        const FIONREAD: u64 = 0x541B; // bytes available for reading
+        const FIOCLEX: u64 = 0x5451; // set close-on-exec
+        const FIONCLEX: u64 = 0x5450; // clear close-on-exec
+
+        let allowed_reqs = [TCGETS, TIOCGWINSZ, TIOCGPGRP, FIONREAD, FIOCLEX, FIONCLEX];
+        let ioctl_rules: Vec<SeccompRule> = allowed_reqs
+            .iter()
+            .map(|&req| {
+                SeccompRule::new(vec![
+                    SeccompCondition::new(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, req)
+                        .expect("valid ioctl condition"),
+                ])
+                .expect("valid ioctl rule")
+            })
+            .collect();
+        rules.insert(libc::SYS_ioctl, ioctl_rules);
+    }
 
     // --- Exec ---
     allow_syscalls(&mut rules, &[libc::SYS_execve, libc::SYS_execveat]);
@@ -276,7 +329,7 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     allow_syscalls(&mut rules, &[libc::SYS_link, libc::SYS_symlink]);
 
     // --- Network syscalls (conditional) ---
-    if policy.allow_network {
+    if policy.allow_network() {
         allow_syscalls(
             &mut rules,
             &[
@@ -342,14 +395,14 @@ mod tests {
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn build_filter_no_network() {
-        let policy = SandboxPolicy {
-            read_paths: vec![],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: crate::ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            crate::ResourceLimits::default(),
+        );
         let bpf = build_filter(&policy);
         assert!(bpf.is_ok(), "build_filter failed: {:?}", bpf.err());
         assert!(!bpf.unwrap().is_empty());
@@ -358,14 +411,14 @@ mod tests {
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn build_filter_with_network() {
-        let policy = SandboxPolicy {
-            read_paths: vec![],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: true,
-            limits: crate::ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            true,
+            crate::ResourceLimits::default(),
+        );
         let bpf = build_filter(&policy);
         assert!(bpf.is_ok(), "build_filter failed: {:?}", bpf.err());
         assert!(!bpf.unwrap().is_empty());
@@ -374,18 +427,22 @@ mod tests {
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn build_filter_network_produces_larger_program() {
-        let base_policy = SandboxPolicy {
-            read_paths: vec![],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: crate::ResourceLimits::default(),
-        };
-        let net_policy = SandboxPolicy {
-            allow_network: true,
-            ..base_policy.clone()
-        };
+        let base_policy = SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            crate::ResourceLimits::default(),
+        );
+        let net_policy = SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            true,
+            crate::ResourceLimits::default(),
+        );
         let base_bpf = build_filter(&base_policy).unwrap();
         let net_bpf = build_filter(&net_policy).unwrap();
         // Network-enabled filter has more rules, so more BPF instructions
@@ -426,14 +483,14 @@ mod tests {
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn apply_filter_allows_getpid() {
-        let policy = SandboxPolicy {
-            read_paths: vec![],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: crate::ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            crate::ResourceLimits::default(),
+        );
         let bpf = build_filter(&policy).unwrap();
 
         let (read_fd, write_fd_val) = make_pipe();
@@ -482,14 +539,14 @@ mod tests {
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn apply_filter_denies_socket_without_network() {
-        let policy = SandboxPolicy {
-            read_paths: vec![],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: crate::ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            crate::ResourceLimits::default(),
+        );
         let bpf = build_filter(&policy).unwrap();
 
         let (read_fd, write_fd_val) = make_pipe();

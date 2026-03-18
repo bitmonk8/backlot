@@ -135,14 +135,14 @@ fn make_policy(read_paths: Vec<PathBuf>, write_paths: Vec<PathBuf>) -> lot::Sand
         exec_paths.push(PathBuf::from("/usr/bin"));
     }
 
-    lot::SandboxPolicy {
+    lot::SandboxPolicy::new(
         read_paths,
         write_paths,
         exec_paths,
-        deny_paths: Vec::new(),
-        allow_network: false,
-        limits: lot::ResourceLimits::default(),
-    }
+        Vec::new(),
+        false,
+        lot::ResourceLimits::default(),
+    )
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -575,14 +575,14 @@ fn test_deny_path_blocks_access_to_subtree() {
     let allowed_dir_canon = std::fs::canonicalize(&allowed_dir).expect("canonicalize allowed_dir");
     let denied_dir_canon = std::fs::canonicalize(&denied_dir).expect("canonicalize denied_dir");
 
-    let policy = lot::SandboxPolicy {
-        read_paths: vec![allowed_dir_canon],
-        write_paths: vec![],
+    let policy = lot::SandboxPolicy::new(
+        vec![allowed_dir_canon],
+        vec![],
         exec_paths,
-        deny_paths: vec![denied_dir_canon],
-        allow_network: false,
-        limits: lot::ResourceLimits::default(),
-    };
+        vec![denied_dir_canon],
+        false,
+        lot::ResourceLimits::default(),
+    );
 
     // Part 1: reading a file inside the denied subtree must fail.
     let mut cmd = lot::SandboxCommand::new(&program);
@@ -638,4 +638,104 @@ fn test_deny_path_blocks_access_to_subtree() {
         "non-denied file should be readable, but stdout was: {pub_stdout}"
     );
     eprintln!("[diag] PASSED: non-denied sibling remains accessible");
+}
+
+// ── Tokio timeout tests ────────────────────────────────────────────
+
+/// Platform-appropriate long-running command (sleep substitute).
+#[cfg(feature = "tokio")]
+fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
+    #[cfg(target_os = "windows")]
+    {
+        // ping -n <seconds+1> 127.0.0.1 as a sleep substitute
+        (
+            PathBuf::from("ping"),
+            vec!["-n".into(), (seconds + 1).to_string(), "127.0.0.1".into()],
+        )
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        (PathBuf::from("/bin/sleep"), vec![seconds.to_string()])
+    }
+}
+
+#[cfg(feature = "tokio")]
+#[tokio::test]
+async fn test_wait_with_output_timeout_completes_before_timeout() {
+    eprintln!("[diag] === test_wait_with_output_timeout_completes_before_timeout ===");
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let (program, args) = echo_command();
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+
+    let mut cmd = lot::SandboxCommand::new(&program);
+    cmd.args(&args);
+    cmd.stdout(lot::SandboxStdio::Piped);
+    cmd.stderr(lot::SandboxStdio::Piped);
+
+    let child = must_spawn(&policy, &cmd);
+
+    let result = child
+        .wait_with_output_timeout(std::time::Duration::from_secs(10))
+        .await;
+
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("hello"),
+                "expected 'hello' in output, got: {stdout}"
+            );
+            eprintln!("[diag] PASSED: completed before timeout");
+        }
+        Err(e) => panic!("expected success, got: {e:?}"),
+    }
+}
+
+#[cfg(feature = "tokio")]
+#[tokio::test]
+async fn test_wait_with_output_timeout_kills_on_timeout() {
+    eprintln!("[diag] === test_wait_with_output_timeout_kills_on_timeout ===");
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let (program, args) = sleep_command(60);
+
+    #[cfg(target_os = "windows")]
+    let policy = {
+        let p = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+        // Rebuild with network enabled for ping
+        lot::SandboxPolicy::new(
+            p.read_paths().to_vec(),
+            p.write_paths().to_vec(),
+            p.exec_paths().to_vec(),
+            p.deny_paths().to_vec(),
+            true,
+            p.limits().clone(),
+        )
+    };
+    #[cfg(not(target_os = "windows"))]
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+
+    let mut cmd = lot::SandboxCommand::new(&program);
+    cmd.args(&args);
+    cmd.stdout(lot::SandboxStdio::Piped);
+    cmd.stderr(lot::SandboxStdio::Piped);
+
+    let child = must_spawn(&policy, &cmd);
+
+    let result = child
+        .wait_with_output_timeout(std::time::Duration::from_millis(200))
+        .await;
+
+    match result {
+        Err(lot::SandboxError::Timeout(d)) => {
+            assert!(
+                d.as_millis() >= 200,
+                "timeout duration should match requested"
+            );
+            eprintln!("[diag] PASSED: timeout fired and child killed");
+        }
+        other => panic!("expected Timeout error, got: {other:?}"),
+    }
 }

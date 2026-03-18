@@ -24,10 +24,13 @@ lot/                           (workspace root)
 │   │   │   └── seatbelt.rs    — SBPL profile generation, sandbox_init FFI
 │   │   └── windows/
 │   │       ├── mod.rs         — WindowsSandbox: AppContainer + job object
-│   │       ├── appcontainer.rs — Profile lifecycle, capability assembly, ACL management
+│   │       ├── appcontainer.rs — Profile lifecycle, capability assembly, ACL management, process creation
 │   │       ├── job.rs         — Job object creation, resource limits
 │   │       ├── nul_device.rs  — NUL device ACE, prerequisites API
-│   │       └── traverse_acl.rs — Ancestor traverse ACE management
+│   │       ├── traverse_acl.rs — Ancestor traverse ACE management
+│   │       ├── sentinel.rs    — Sentinel file ACL recovery (write, read, restore, cleanup_stale)
+│   │       ├── pipe.rs        — Pipe creation and stdio handle helpers
+│   │       └── cmdline.rs     — Command-line building and argument quoting
 │   └── tests/
 │       └── integration.rs
 ├── lot-cli/                   (CLI binary crate)
@@ -72,7 +75,9 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 **seccomp-BPF** filters syscalls:
 - Allowlist of permitted syscalls.
 - Default action: `EPERM` (not `SIGKILL` — debuggable).
-- Conditional rules: network syscalls gated on policy, `ioctl` restricted.
+- Conditional rules: network syscalls gated on policy.
+- `prctl` filtered by arg0: only `PR_SET_NAME`, `PR_GET_NAME`, `PR_SET_PDEATHSIG`, `PR_GET_PDEATHSIG`, `PR_SET_TIMERSLACK`, `PR_GET_TIMERSLACK` allowed.
+- `ioctl` filtered by arg1: only `TCGETS`, `TIOCGWINSZ`, `TIOCGPGRP`, `FIONREAD`, `FIOCLEX`, `FIONCLEX` allowed.
 
 **cgroups v2** enforces resource limits using the sibling cgroup model (to respect the cgroupv2 "no internal processes" constraint):
 - Memory limit (`memory.max`).

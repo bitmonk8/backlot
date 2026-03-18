@@ -1,6 +1,9 @@
 mod appcontainer;
+mod cmdline;
 mod job;
 pub mod nul_device;
+mod pipe;
+mod sentinel;
 pub mod traverse_acl;
 
 // Shared Win32 constants not exported by `windows-sys` without extra feature flags.
@@ -55,5 +58,5 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 }
 
 pub fn cleanup_stale() -> Result<()> {
-    appcontainer::cleanup_stale()
+    sentinel::cleanup_stale()
 }

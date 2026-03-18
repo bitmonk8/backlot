@@ -1,0 +1,92 @@
+#![allow(unsafe_code)]
+
+use std::io;
+
+use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE, TRUE};
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+use windows_sys::Win32::System::Pipes::CreatePipe;
+
+use crate::command::SandboxStdio;
+
+// ── Pipe helpers ─────────────────────────────────────────────────────
+
+pub struct PipeHandles {
+    pub read: HANDLE,
+    pub write: HANDLE,
+}
+
+pub fn create_pipe() -> io::Result<PipeHandles> {
+    #[allow(clippy::cast_possible_truncation)]
+    let mut sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: TRUE,
+    };
+
+    let mut read_handle: HANDLE = INVALID_HANDLE_VALUE;
+    let mut write_handle: HANDLE = INVALID_HANDLE_VALUE;
+
+    // SAFETY: Creating an anonymous pipe with inheritable handles.
+    // Both handles are inheritable, but PROC_THREAD_ATTRIBUTE_HANDLE_LIST
+    // restricts which handles the child actually inherits.
+    let ret = unsafe { CreatePipe(&raw mut read_handle, &raw mut write_handle, &raw mut sa, 0) };
+    if ret == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(PipeHandles {
+        read: read_handle,
+        write: write_handle,
+    })
+}
+
+pub fn resolve_stdio_input(spec: SandboxStdio) -> io::Result<(HANDLE, Option<HANDLE>)> {
+    match spec {
+        SandboxStdio::Null => Ok((INVALID_HANDLE_VALUE, None)),
+        SandboxStdio::Inherit => {
+            // SAFETY: Querying the current process's stdin handle.
+            let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+            Ok((handle, None))
+        }
+        SandboxStdio::Piped => {
+            let pipe = create_pipe()?;
+            // Child reads from read end, parent writes to write end.
+            Ok((pipe.read, Some(pipe.write)))
+        }
+    }
+}
+
+pub fn resolve_stdio_output(
+    spec: SandboxStdio,
+    std_handle_id: u32,
+) -> io::Result<(HANDLE, Option<HANDLE>)> {
+    match spec {
+        SandboxStdio::Null => Ok((INVALID_HANDLE_VALUE, None)),
+        SandboxStdio::Inherit => {
+            // SAFETY: Querying the current process's stdout/stderr handle.
+            let handle = unsafe { GetStdHandle(std_handle_id) };
+            Ok((handle, None))
+        }
+        SandboxStdio::Piped => {
+            let pipe = create_pipe()?;
+            // Child writes to write end, parent reads from read end.
+            Ok((pipe.write, Some(pipe.read)))
+        }
+    }
+}
+
+pub fn close_handle_if_valid(h: HANDLE) {
+    if h != INVALID_HANDLE_VALUE && !h.is_null() {
+        // SAFETY: Closing a valid handle.
+        unsafe {
+            CloseHandle(h);
+        }
+    }
+}
+
+pub fn close_optional_handle(h: Option<HANDLE>) {
+    if let Some(handle) = h {
+        close_handle_if_valid(handle);
+    }
+}

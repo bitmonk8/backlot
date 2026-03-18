@@ -221,9 +221,23 @@ fn cmd_run(args: &RunArgs) -> ExitCode {
 }
 
 fn exit_code_from_status(status: std::process::ExitStatus) -> ExitCode {
-    status.code().map_or(ExitCode::FAILURE, |code| {
-        ExitCode::from(u8::try_from(code).unwrap_or(1))
-    })
+    #[cfg(windows)]
+    {
+        // Windows exit codes are full 32-bit values; truncating to u8 loses
+        // information (e.g. 0xC0000005 for access violation becomes 1).
+        // std::process::exit() takes i32 which covers the full Win32 range.
+        status.code().map_or(ExitCode::FAILURE, |code| {
+            std::process::exit(code);
+        })
+    }
+
+    #[cfg(unix)]
+    {
+        // Unix exit codes are 8-bit (0-255).
+        status.code().map_or(ExitCode::FAILURE, |code| {
+            ExitCode::from(u8::try_from(code).unwrap_or(1))
+        })
+    }
 }
 
 fn build_policy(config: &SandboxConfig) -> lot::Result<lot::SandboxPolicy> {

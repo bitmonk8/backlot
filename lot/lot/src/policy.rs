@@ -12,19 +12,64 @@ use crate::error::SandboxError;
 /// it) to check these constraints.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
+    read_paths: Vec<PathBuf>,
+    write_paths: Vec<PathBuf>,
+    exec_paths: Vec<PathBuf>,
+    deny_paths: Vec<PathBuf>,
+    allow_network: bool,
+    limits: ResourceLimits,
+}
+
+impl SandboxPolicy {
+    /// Direct constructor. Prefer [`SandboxPolicyBuilder`](crate::SandboxPolicyBuilder) for
+    /// deduplication and canonicalization.
+    pub const fn new(
+        read_paths: Vec<PathBuf>,
+        write_paths: Vec<PathBuf>,
+        exec_paths: Vec<PathBuf>,
+        deny_paths: Vec<PathBuf>,
+        allow_network: bool,
+        limits: ResourceLimits,
+    ) -> Self {
+        Self {
+            read_paths,
+            write_paths,
+            exec_paths,
+            deny_paths,
+            allow_network,
+            limits,
+        }
+    }
+
     /// Paths the child can read (recursive).
-    pub read_paths: Vec<PathBuf>,
+    pub fn read_paths(&self) -> &[PathBuf] {
+        &self.read_paths
+    }
+
     /// Paths the child can read and write (recursive).
-    pub write_paths: Vec<PathBuf>,
+    pub fn write_paths(&self) -> &[PathBuf] {
+        &self.write_paths
+    }
+
     /// Paths the child can execute from (recursive).
-    pub exec_paths: Vec<PathBuf>,
-    /// Subtrees denied all access, overriding any grants. Each entry must be
-    /// a strict child of at least one grant path.
-    pub deny_paths: Vec<PathBuf>,
-    /// Allow outbound network access.
-    pub allow_network: bool,
+    pub fn exec_paths(&self) -> &[PathBuf] {
+        &self.exec_paths
+    }
+
+    /// Subtrees denied all access, overriding any grants.
+    pub fn deny_paths(&self) -> &[PathBuf] {
+        &self.deny_paths
+    }
+
+    /// Whether outbound network access is allowed.
+    pub const fn allow_network(&self) -> bool {
+        self.allow_network
+    }
+
     /// Resource limits.
-    pub limits: ResourceLimits,
+    pub const fn limits(&self) -> &ResourceLimits {
+        &self.limits
+    }
 }
 
 /// Canonicalize a path, mapping IO errors to `InvalidPolicy` with the list name.

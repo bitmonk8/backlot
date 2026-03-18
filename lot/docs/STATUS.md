@@ -14,20 +14,23 @@
 - `SandboxCommand::forward_common_env()`: forwards 17 standard env vars from parent
 - `SandboxedChild::kill_and_cleanup()`: explicit kill + synchronous platform cleanup
 - `SandboxedChild::wait_with_output_timeout()`: async timeout with kill+cleanup (behind `tokio` feature)
-- Windows backend: AppContainer (filesystem/network isolation) + Job Objects (resource limits) + sentinel file ACL recovery + deny ACEs for denied paths
-- Linux backend: user/mount/pid/net/ipc namespaces + seccomp-BPF syscall filtering + cgroups v2 resource limits (sibling cgroup model) + empty tmpfs overmounts for denied paths + `close_range` fd cleanup to prevent ETXTBSY in parallel spawns
+- `SandboxPolicy` fields are private; construction via `SandboxPolicyBuilder`, access via getter methods
+- `SandboxedChild::kill()` and `kill_and_cleanup()` take `&mut self`
+- Windows backend: AppContainer (filesystem/network isolation) + Job Objects (resource limits) + sentinel file ACL recovery + deny ACEs for denied paths. Modules: `appcontainer`, `sentinel`, `pipe`, `cmdline`, `job`, `nul_device`, `traverse_acl`
+- Linux backend: user/mount/pid/net/ipc namespaces + seccomp-BPF syscall filtering (argument-filtered prctl/ioctl) + cgroups v2 resource limits (sibling cgroup model) + empty tmpfs overmounts for denied paths + `close_range` fd cleanup to prevent ETXTBSY in parallel spawns
 - macOS backend: Seatbelt (sandbox_init SBPL profiles) + setrlimit resource limits + process group kill (setsid/killpg) + ancestor directory `file-read-metadata` grants + SBPL deny rules for denied paths
 - CI pipeline: clippy + test on Linux/macOS/Windows with namespace and cgroup setup, `lot setup` in Windows CI
 - Rustdoc on all public API items
 
 ## Next Work
 
-Full project audit completed (see `docs/AUDIT_FINDINGS.md`). Remaining findings: 13 medium, 10 low.
+Full project audit completed (see `docs/AUDIT_FINDINGS.md`). All 13 medium findings fixed. Remaining findings: 10 low.
 
 ### Remaining work
 
-- Fix medium/low audit findings (see `docs/AUDIT_FINDINGS.md`)
+- Fix low audit findings (see `docs/AUDIT_FINDINGS.md`)
 - First real-world usage / `lot run` testing
+- CI: add `--features tokio` test run to cover `wait_with_output_timeout` integration tests
 
 ## CI Status
 

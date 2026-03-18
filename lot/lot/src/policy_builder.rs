@@ -158,14 +158,14 @@ impl SandboxPolicyBuilder {
     /// Returns [`SandboxError::InvalidPolicy`] if the resulting policy fails
     /// validation (e.g. no paths at all, or zero resource limits).
     pub fn build(self) -> crate::Result<SandboxPolicy> {
-        let policy = SandboxPolicy {
-            read_paths: self.read_paths,
-            write_paths: self.write_paths,
-            exec_paths: self.exec_paths,
-            deny_paths: self.deny_paths,
-            allow_network: self.allow_network,
-            limits: self.limits,
-        };
+        let policy = SandboxPolicy::new(
+            self.read_paths,
+            self.write_paths,
+            self.exec_paths,
+            self.deny_paths,
+            self.allow_network,
+            self.limits,
+        );
         policy.validate()?;
         Ok(policy)
     }
@@ -249,9 +249,9 @@ mod tests {
             .read_path(tmp.path())
             .build()
             .expect("build should succeed");
-        assert_eq!(policy.read_paths.len(), 1);
-        assert!(policy.write_paths.is_empty());
-        assert!(!policy.allow_network);
+        assert_eq!(policy.read_paths().len(), 1);
+        assert!(policy.write_paths().is_empty());
+        assert!(!policy.allow_network());
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
             .read_path("/surely/does/not/exist/xyz")
             .build()
             .expect("build should succeed");
-        assert_eq!(policy.read_paths.len(), 1);
+        assert_eq!(policy.read_paths().len(), 1);
     }
 
     #[test]
@@ -278,8 +278,8 @@ mod tests {
             .expect("build should succeed");
 
         // The read child should have been deduplicated away.
-        assert!(policy.read_paths.is_empty());
-        assert_eq!(policy.write_paths.len(), 1);
+        assert!(policy.read_paths().is_empty());
+        assert_eq!(policy.write_paths().len(), 1);
     }
 
     #[test]
@@ -294,8 +294,8 @@ mod tests {
             .build()
             .expect("build should succeed");
 
-        assert!(policy.read_paths.is_empty());
-        assert_eq!(policy.write_paths.len(), 1);
+        assert!(policy.read_paths().is_empty());
+        assert_eq!(policy.write_paths().len(), 1);
     }
 
     #[test]
@@ -306,7 +306,7 @@ mod tests {
             .read_path(tmp.path())
             .build()
             .expect("build should succeed");
-        assert_eq!(policy.read_paths.len(), 1);
+        assert_eq!(policy.read_paths().len(), 1);
     }
 
     #[test]
@@ -317,7 +317,7 @@ mod tests {
             .write_path(tmp.path())
             .build()
             .expect("build should succeed");
-        assert_eq!(policy.write_paths.len(), 1);
+        assert_eq!(policy.write_paths().len(), 1);
     }
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
             .read_path(&child)
             .build()
             .expect("build should succeed");
-        assert_eq!(policy.read_paths.len(), 1);
+        assert_eq!(policy.read_paths().len(), 1);
     }
 
     #[test]
@@ -345,7 +345,7 @@ mod tests {
             .read_path(tmp.path())
             .build()
             .expect("build should succeed");
-        assert_eq!(policy.read_paths.len(), 1);
+        assert_eq!(policy.read_paths().len(), 1);
     }
 
     #[test]
@@ -356,7 +356,7 @@ mod tests {
             .allow_network(true)
             .build()
             .expect("build should succeed");
-        assert!(policy.allow_network);
+        assert!(policy.allow_network());
     }
 
     #[test]
@@ -369,9 +369,9 @@ mod tests {
             .max_cpu_seconds(60)
             .build()
             .expect("build should succeed");
-        assert_eq!(policy.limits.max_memory_bytes, Some(1024 * 1024));
-        assert_eq!(policy.limits.max_processes, Some(10));
-        assert_eq!(policy.limits.max_cpu_seconds, Some(60));
+        assert_eq!(policy.limits().max_memory_bytes, Some(1024 * 1024));
+        assert_eq!(policy.limits().max_processes, Some(10));
+        assert_eq!(policy.limits().max_cpu_seconds, Some(60));
     }
 
     #[test]
@@ -403,7 +403,7 @@ mod tests {
         let temp_canon =
             std::fs::canonicalize(std::env::temp_dir()).expect("temp dir should exist");
         assert!(
-            policy.write_paths.iter().any(|p| p == &temp_canon),
+            policy.write_paths().iter().any(|p| p == &temp_canon),
             "write_paths should contain temp dir"
         );
     }
@@ -422,7 +422,7 @@ mod tests {
             .exec_path(&exec_dir)
             .build()
             .expect("build should succeed");
-        assert_eq!(policy.exec_paths.len(), 1);
+        assert_eq!(policy.exec_paths().len(), 1);
     }
 
     #[test]

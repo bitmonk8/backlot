@@ -26,7 +26,7 @@ pub const fn probe() -> PlatformCapabilities {
 /// # Safety
 /// Must only be called from the forked child before exec.
 unsafe fn apply_resource_limits(policy: &SandboxPolicy) -> io::Result<()> {
-    if let Some(max_mem) = policy.limits.max_memory_bytes {
+    if let Some(max_mem) = policy.limits().max_memory_bytes {
         let rlim = libc::rlimit {
             rlim_cur: max_mem,
             rlim_max: max_mem,
@@ -37,7 +37,7 @@ unsafe fn apply_resource_limits(policy: &SandboxPolicy) -> io::Result<()> {
         }
     }
 
-    if let Some(max_procs) = policy.limits.max_processes {
+    if let Some(max_procs) = policy.limits().max_processes {
         let rlim = libc::rlimit {
             rlim_cur: u64::from(max_procs),
             rlim_max: u64::from(max_procs),
@@ -48,7 +48,7 @@ unsafe fn apply_resource_limits(policy: &SandboxPolicy) -> io::Result<()> {
         }
     }
 
-    if let Some(max_cpu) = policy.limits.max_cpu_seconds {
+    if let Some(max_cpu) = policy.limits().max_cpu_seconds {
         let rlim = libc::rlimit {
             rlim_cur: max_cpu,
             rlim_max: max_cpu,
@@ -111,32 +111,53 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // Close parent's stdio pipe ends
         unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
 
-        // Macro to report error and exit from child
+        // Step constants for error reporting (consistent with Linux helper_bail)
+        const STEP_SETSID: i32 = 1;
+        const STEP_SEATBELT: i32 = 2;
+        const STEP_RLIMIT: i32 = 3;
+        const STEP_DUP2: i32 = 4;
+        const STEP_CHDIR: i32 = 5;
+        const STEP_EXEC: i32 = 6;
+        let _ = STEP_SETSID; // used only for documentation
+
+        // Macro to report error and exit from child.
+        // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
+        // which step failed (consistent with Linux helper_bail protocol).
         macro_rules! child_bail {
-            ($err_fd:expr, $errno:expr) => {{
-                let e = ($errno as i32).to_ne_bytes();
-                // SAFETY: err_fd is valid, e is stack-allocated
-                let _ = unsafe { libc::write($err_fd, e.as_ptr().cast(), 4) };
+            ($err_fd:expr, $step:expr, $errno:expr) => {{
+                let mut buf = [0u8; 8];
+                buf[..4].copy_from_slice(&($step as i32).to_ne_bytes());
+                buf[4..].copy_from_slice(&($errno as i32).to_ne_bytes());
+                // SAFETY: err_fd is valid, buf is stack-allocated
+                let _ = unsafe { libc::write($err_fd, buf.as_ptr().cast(), 8) };
                 unsafe { libc::_exit(1) };
             }};
         }
 
         // Apply seatbelt profile — permanent, inherited by exec'd process
         if let Err(e) = seatbelt::apply_profile(&profile) {
-            child_bail!(err_pipe_wr, e.raw_os_error().unwrap_or(libc::EPERM));
+            child_bail!(
+                err_pipe_wr,
+                STEP_SEATBELT,
+                e.raw_os_error().unwrap_or(libc::EPERM)
+            );
         }
 
         // Apply resource limits
         // SAFETY: single-threaded child, before exec
         if let Err(e) = unsafe { apply_resource_limits(policy) } {
-            child_bail!(err_pipe_wr, e.raw_os_error().unwrap_or(libc::EPERM));
+            child_bail!(
+                err_pipe_wr,
+                STEP_RLIMIT,
+                e.raw_os_error().unwrap_or(libc::EPERM)
+            );
         }
 
         // Set up stdio: dup2 the child fds to 0/1/2
         if child_stdin != 0 {
             // SAFETY: both fds are valid
             if unsafe { libc::dup2(child_stdin, 0) } < 0 {
-                child_bail!(err_pipe_wr, unsafe { *libc::__error() });
+                child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__error() });
             }
             // SAFETY: fd is valid
             unsafe { unix::close_if_not_std(child_stdin) };
@@ -144,7 +165,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         if child_stdout != 1 {
             // SAFETY: both fds are valid
             if unsafe { libc::dup2(child_stdout, 1) } < 0 {
-                child_bail!(err_pipe_wr, unsafe { *libc::__error() });
+                child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__error() });
             }
             // SAFETY: fd is valid
             unsafe { unix::close_if_not_std(child_stdout) };
@@ -152,7 +173,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         if child_stderr != 2 {
             // SAFETY: both fds are valid
             if unsafe { libc::dup2(child_stderr, 2) } < 0 {
-                child_bail!(err_pipe_wr, unsafe { *libc::__error() });
+                child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__error() });
             }
             // SAFETY: fd is valid
             unsafe { unix::close_if_not_std(child_stderr) };
@@ -162,7 +183,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         if let Some(ref cwd) = prefork.cwd {
             // SAFETY: valid CString pointer
             if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
-                child_bail!(err_pipe_wr, unsafe { *libc::__error() });
+                child_bail!(err_pipe_wr, STEP_CHDIR, unsafe { *libc::__error() });
             }
         }
 
@@ -179,7 +200,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         }
 
         // exec failed
-        child_bail!(err_pipe_wr, unsafe { *libc::__error() });
+        child_bail!(err_pipe_wr, STEP_EXEC, unsafe { *libc::__error() });
     }
 
     // === PARENT PROCESS ===
@@ -192,21 +213,32 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         unix::close_if_not_std(child_stderr);
     }
 
-    // Check error pipe: if child wrote an errno, setup failed
-    let mut err_buf = [0u8; 4];
+    // Check error pipe: if child wrote [step:i32, errno:i32], setup failed
+    let mut err_buf = [0u8; 8];
     // SAFETY: err_pipe_rd is valid, err_buf is stack-allocated
-    let n = unsafe { libc::read(err_pipe_rd, err_buf.as_mut_ptr().cast(), 4) };
+    let n = unsafe { libc::read(err_pipe_rd, err_buf.as_mut_ptr().cast(), 8) };
     // SAFETY: valid fd
     unsafe { libc::close(err_pipe_rd) };
 
-    if n == 4 {
-        let errno = i32::from_ne_bytes(err_buf);
+    if n == 8 {
+        let step = i32::from_ne_bytes([err_buf[0], err_buf[1], err_buf[2], err_buf[3]]);
+        let errno = i32::from_ne_bytes([err_buf[4], err_buf[5], err_buf[6], err_buf[7]]);
+        let step_name = match step {
+            1 => "setsid",
+            2 => "seatbelt (sandbox_init)",
+            3 => "resource limits (setrlimit)",
+            4 => "dup2 (stdio)",
+            5 => "chdir",
+            6 => "execve",
+            _ => "unknown",
+        };
         // Reap the child so we don't leak a zombie
         // SAFETY: valid pid
         unsafe { libc::waitpid(child_pid, std::ptr::null_mut(), 0) };
         unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
         return Err(SandboxError::Setup(format!(
-            "child seatbelt setup failed: {}",
+            "child setup failed at step '{}': {}",
+            step_name,
             io::Error::from_raw_os_error(errno)
         )));
     }
@@ -239,7 +271,7 @@ impl MacSandboxedChild {
         self.child_pid as u32
     }
 
-    pub fn kill(&self) -> io::Result<()> {
+    pub fn kill(&mut self) -> io::Result<()> {
         if self.waited.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -412,14 +444,14 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_policy(read_paths: Vec<PathBuf>) -> SandboxPolicy {
-        SandboxPolicy {
+        SandboxPolicy::new(
             read_paths,
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: ResourceLimits::default(),
-        }
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        )
     }
 
     #[test]
@@ -471,14 +503,14 @@ mod tests {
         let test_file = tmp.path().join("test.txt");
         std::fs::write(&test_file, "sandbox_test_content").expect("write test file");
 
-        let policy = SandboxPolicy {
-            read_paths: vec![tmp.path().to_path_buf()],
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![tmp.path().to_path_buf()],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
         let mut cmd = SandboxCommand::new("/bin/cat");
         cmd.arg(test_file.to_str().expect("path to str"));
         cmd.stdout(SandboxStdio::Piped);
@@ -522,14 +554,14 @@ mod tests {
 
     #[test]
     fn generate_profile_produces_valid_sbpl() {
-        let policy = SandboxPolicy {
-            read_paths: vec![PathBuf::from("/tmp/read")],
-            write_paths: vec![PathBuf::from("/tmp/write")],
-            exec_paths: vec![PathBuf::from("/usr/bin")],
-            deny_paths: vec![],
-            allow_network: true,
-            limits: ResourceLimits::default(),
-        };
+        let policy = SandboxPolicy::new(
+            vec![PathBuf::from("/tmp/read")],
+            vec![PathBuf::from("/tmp/write")],
+            vec![PathBuf::from("/usr/bin")],
+            vec![],
+            true,
+            ResourceLimits::default(),
+        );
         let program = std::path::PathBuf::from("/usr/bin/test");
         let profile = seatbelt::generate_profile(&policy, &program);
         assert!(profile.starts_with("(version 1)"));

@@ -141,14 +141,14 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     // Create cgroup before forking so the helper can move itself into it.
     // If the policy requests resource limits and cgroup setup fails, return
     // an error rather than silently dropping the limits.
-    let cgroup_guard = if policy.limits.has_any() {
+    let cgroup_guard = if policy.limits().has_any() {
         if !cgroup::available() {
             return Err(SandboxError::Setup(
                 "resource limits requested but cgroups v2 unavailable".into(),
             ));
         }
         Some(
-            CgroupGuard::new(&policy.limits)
+            CgroupGuard::new(policy.limits())
                 .map_err(|e| SandboxError::Setup(format!("cgroup creation failed: {e}")))?,
         )
     } else {
@@ -235,7 +235,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // so the child inherits the parent's network namespace.
         let mut clone_flags =
             libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWIPC;
-        if !policy.allow_network {
+        if !policy.allow_network() {
             clone_flags |= libc::CLONE_NEWNET;
         }
         // SAFETY: unshare is async-signal-safe in practice; helper is
@@ -508,7 +508,7 @@ impl LinuxSandboxedChild {
         self.helper_pid as u32
     }
 
-    pub fn kill(&self) -> io::Result<()> {
+    pub fn kill(&mut self) -> io::Result<()> {
         if self.waited.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -687,14 +687,14 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_policy(read_paths: Vec<PathBuf>) -> SandboxPolicy {
-        SandboxPolicy {
+        SandboxPolicy::new(
             read_paths,
-            write_paths: vec![],
-            exec_paths: vec![],
-            deny_paths: vec![],
-            allow_network: false,
-            limits: ResourceLimits::default(),
-        }
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        )
     }
 
     #[test]

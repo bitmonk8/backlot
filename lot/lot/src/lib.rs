@@ -183,7 +183,7 @@ impl SandboxedChild {
     }
 
     /// Forcibly terminate the sandboxed process.
-    pub fn kill(&self) -> std::io::Result<()> {
+    pub fn kill(&mut self) -> std::io::Result<()> {
         platform_dispatch!(
             self,
             kill(),
@@ -399,14 +399,14 @@ mod tokio_tests {
     fn spawn_sleep(seconds: u32) -> SandboxedChild {
         #[cfg(unix)]
         {
-            let policy = SandboxPolicy {
-                read_paths: vec![std::path::PathBuf::from("/usr")],
-                write_paths: vec![],
-                exec_paths: vec![],
-                deny_paths: vec![],
-                allow_network: false,
-                limits: crate::policy::ResourceLimits::default(),
-            };
+            let policy = SandboxPolicy::new(
+                vec![std::path::PathBuf::from("/usr")],
+                vec![],
+                vec![],
+                vec![],
+                false,
+                crate::policy::ResourceLimits::default(),
+            );
             let mut cmd = SandboxCommand::new("/bin/sleep");
             cmd.arg(seconds.to_string());
             cmd.stdout(SandboxStdio::Piped);
@@ -421,14 +421,14 @@ mod tokio_tests {
             let system_root =
                 std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
             let system32 = std::path::PathBuf::from(format!("{system_root}\\System32"));
-            let policy = SandboxPolicy {
-                read_paths: vec![],
-                write_paths: vec![],
-                exec_paths: vec![system32],
-                deny_paths: vec![],
-                allow_network: true,
-                limits: crate::policy::ResourceLimits::default(),
-            };
+            let policy = SandboxPolicy::new(
+                vec![],
+                vec![],
+                vec![system32],
+                vec![],
+                true,
+                crate::policy::ResourceLimits::default(),
+            );
             let mut cmd = SandboxCommand::new("ping");
             cmd.args(["-n", &(seconds + 1).to_string(), "127.0.0.1"]);
             cmd.stdout(SandboxStdio::Piped);
@@ -460,14 +460,14 @@ mod tokio_tests {
     async fn fast_child_completes_before_timeout() {
         #[cfg(unix)]
         {
-            let policy = SandboxPolicy {
-                read_paths: vec![std::path::PathBuf::from("/usr")],
-                write_paths: vec![],
-                exec_paths: vec![],
-                deny_paths: vec![],
-                allow_network: false,
-                limits: crate::policy::ResourceLimits::default(),
-            };
+            let policy = SandboxPolicy::new(
+                vec![std::path::PathBuf::from("/usr")],
+                vec![],
+                vec![],
+                vec![],
+                false,
+                crate::policy::ResourceLimits::default(),
+            );
             let mut cmd = SandboxCommand::new("/bin/echo");
             cmd.arg("hello");
             cmd.stdout(SandboxStdio::Piped);
@@ -493,14 +493,14 @@ mod tokio_tests {
             let system_root =
                 std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
             let system32 = std::path::PathBuf::from(format!("{system_root}\\System32"));
-            let policy = SandboxPolicy {
-                read_paths: vec![],
-                write_paths: vec![],
-                exec_paths: vec![system32],
-                deny_paths: vec![],
-                allow_network: false,
-                limits: crate::policy::ResourceLimits::default(),
-            };
+            let policy = SandboxPolicy::new(
+                vec![],
+                vec![],
+                vec![system32],
+                vec![],
+                false,
+                crate::policy::ResourceLimits::default(),
+            );
             let mut cmd = SandboxCommand::new("cmd.exe");
             cmd.args(["/C", "echo hello"]);
             cmd.stdout(SandboxStdio::Piped);
