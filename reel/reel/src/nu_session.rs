@@ -2445,8 +2445,7 @@ mod tests {
         // error, or nu reports an error via is_error.
         match result {
             Err(e) => {
-                let msg = e.to_string();
-                if looks_like_sandbox_denial(&msg) {
+                if looks_like_sandbox_denial(&e) {
                     eprintln!("network blocked (sandbox denial in error): {e}");
                 } else {
                     // On platforms without active sandbox enforcement, errors
@@ -2514,9 +2513,8 @@ mod tests {
                 eprintln!("network request succeeded: {}", out.content);
             }
             Err(e) => {
-                let msg = e.to_string();
                 assert!(
-                    !looks_like_sandbox_denial(&msg),
+                    !looks_like_sandbox_denial(&e),
                     "network should not be sandbox-denied with NETWORK grant: {e}"
                 );
                 // Non-sandbox errors (e.g. timeout) are unexpected with a
