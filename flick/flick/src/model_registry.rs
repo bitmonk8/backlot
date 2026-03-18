@@ -15,6 +15,10 @@ pub struct ModelInfo {
     pub input_per_million: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_per_million: Option<f64>,
 }
 
 /// Registry of named models, stored at `~/.flick/models` (TOML).
@@ -149,6 +153,20 @@ fn validate_model_entry(key: &str, info: &ModelInfo) -> Result<(), ConfigError> 
             )));
         }
     }
+    if let Some(v) = info.cache_creation_per_million {
+        if !v.is_finite() || v < 0.0 {
+            return Err(ConfigError::InvalidModelConfig(format!(
+                "model '{key}': cache_creation_per_million must be non-negative and finite"
+            )));
+        }
+    }
+    if let Some(v) = info.cache_read_per_million {
+        if !v.is_finite() || v < 0.0 {
+            return Err(ConfigError::InvalidModelConfig(format!(
+                "model '{key}': cache_read_per_million must be non-negative and finite"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -188,6 +206,8 @@ name = "claude-haiku-4-5-20251001"
 max_tokens = 8192
 input_per_million = 0.80
 output_per_million = 4.00
+cache_creation_per_million = 1.00
+cache_read_per_million = 0.08
 
 [balanced]
 provider = "anthropic"
@@ -199,6 +219,11 @@ name = "claude-sonnet-4-6"
         assert_eq!(fast.provider, "anthropic");
         assert_eq!(fast.name, "claude-haiku-4-5-20251001");
         assert_eq!(fast.max_tokens, Some(8192));
+        assert_eq!(fast.cache_creation_per_million, Some(1.00));
+        assert_eq!(fast.cache_read_per_million, Some(0.08));
+        let balanced = registry.get("balanced").expect("balanced exists");
+        assert_eq!(balanced.cache_creation_per_million, None);
+        assert_eq!(balanced.cache_read_per_million, None);
     }
 
     #[test]
@@ -254,6 +279,34 @@ input_per_million = -1.0
     }
 
     #[test]
+    fn negative_cache_creation_pricing_rejected() {
+        let toml = r#"
+[bad]
+provider = "anthropic"
+name = "test-model"
+cache_creation_per_million = -1.0
+"#;
+        let result = ModelRegistry::from_toml(toml);
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("cache_creation_per_million"))
+        );
+    }
+
+    #[test]
+    fn negative_cache_read_pricing_rejected() {
+        let toml = r#"
+[bad]
+provider = "anthropic"
+name = "test-model"
+cache_read_per_million = -1.0
+"#;
+        let result = ModelRegistry::from_toml(toml);
+        assert!(
+            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("cache_read_per_million"))
+        );
+    }
+
+    #[test]
     fn empty_registry_is_valid() {
         let registry = ModelRegistry::from_toml("").expect("empty is valid");
         assert!(registry.is_empty());
@@ -289,6 +342,8 @@ name = "a-model"
                     max_tokens: Some(1024),
                     input_per_million: None,
                     output_per_million: None,
+                    cache_creation_per_million: None,
+                    cache_read_per_million: None,
                 },
                 dir.path(),
             )

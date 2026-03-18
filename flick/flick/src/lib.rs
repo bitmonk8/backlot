@@ -201,6 +201,8 @@ mod tests {
             max_tokens: Some(1024),
             input_per_million: None,
             output_per_million: None,
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
         }
     }
 

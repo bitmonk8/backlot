@@ -1,42 +1,12 @@
 # Flick — Backlog
 
-31 items in 7 active clusters, ordered by value (highest first).
+27 items in 6 active clusters, ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
 ---
 
-## 1. Cost & Model Registry (4 items)
-
-Cache token cost, cache pricing tiers, missing model aliases and new models. All in `model.rs` / `config.rs` cost computation. Fixes materially wrong output.
-
-### L6. Cache token cost not computed — `config.rs`
-
-`compute_cost` uses only `input_tokens`/`output_tokens`. Cache tokens (`cache_creation_input_tokens`, `cache_read_input_tokens`) are tracked in `UsageSummary` but not factored into cost. Cost will be inaccurate for cached Anthropic conversations.
-
-- **M** — Fix Risk: Low — Effort: Low
-
-### T72. `ModelInfo` missing cache pricing tiers — `model.rs`
-
-`ModelInfo` has only `input_per_million` / `output_per_million`. Anthropic charges different rates for cache writes (1.25x input) and reads (0.1x input). Without cache pricing fields, fixing L6 (cost inaccuracy) would still compute cache tokens at the wrong rate.
-
-- **L** — Fix Risk: Low — Effort: Low
-
-### T73. `BUILTIN_MODELS` missing short-form model aliases — `model.rs`
-
-Anthropic publishes aliases like `claude-sonnet-4` -> `claude-sonnet-4-20250514`. Users who specify the alias get `resolve_model` returning `None`, yielding zero-cost reporting.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T74. `BUILTIN_MODELS` missing new models — `model.rs`
-
-Models available as of the current knowledge cutoff that are absent: OpenAI `gpt-4.1` and Anthropic `claude-haiku-4`. Users of these models get `cost_usd: 0.0` without a config `pricing` override.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
----
-
-## 2. Security & Credentials (7 items)
+## 1. Security & Credentials (7 items)
 
 Base URL validation, credential zeroization, secret key write atomicity, temp file cleanup. All touch `provider_registry.rs` or its security surface.
 
@@ -84,7 +54,7 @@ Neither the Unix nor Windows path calls `sync_all()` after writing the key file.
 
 ---
 
-## 3. Context & Serialization Robustness (4 items)
+## 2. Context & Serialization Robustness (4 items)
 
 Unknown content block types, empty content vecs, message ordering validation, missing serde defaults. All in `context.rs`.
 
@@ -114,7 +84,7 @@ A serialised message with the `content` key absent fails deserialisation with "m
 
 ---
 
-## 4. Error Type Hygiene (5 items)
+## 3. Error Type Hygiene (5 items)
 
 Overloaded error variants, wrong variant names, misattributed JSON errors. One sweep through `error.rs` and its consumers.
 
@@ -150,7 +120,7 @@ Any `serde_json::Error` propagated via `?` in a `FlickError` context becomes `Fl
 
 ---
 
-## 5. Provider — Messages API & Architecture (4 items)
+## 4. Provider — Messages API & Architecture (4 items)
 
 Temperature+thinking guard, system prompt as array (for caching), tool_choice support, provider trait coherence. `messages.rs` and `provider.rs`.
 
@@ -180,7 +150,7 @@ The Messages provider always omits `tool_choice`, relying on the Anthropic defau
 
 ---
 
-## 6. CLI Input Handling (4 items)
+## 5. CLI Input Handling (4 items)
 
 Stdin size limits, provider name/key validation, whitespace-only input messages. All in `main.rs`.
 
@@ -210,7 +180,7 @@ No length cap or control character check on the API key value.
 
 ---
 
-## 7. Test Coverage Gaps (3 items)
+## 6. Test Coverage Gaps (3 items)
 
 Missing tests for context overflow, credential edge cases, destructive mock reads, integration history verification. Independent items but suitable for a single test-writing session.
 

@@ -178,7 +178,9 @@ async fn cmd_run(
     let client = FlickClient::new(request, &models, &providers).await?;
 
     let pricing_zero = client.model_info().input_per_million.is_none()
-        && client.model_info().output_per_million.is_none();
+        && client.model_info().output_per_million.is_none()
+        && client.model_info().cache_creation_per_million.is_none()
+        && client.model_info().cache_read_per_million.is_none();
     if pricing_zero {
         eprintln!(
             "warning: no pricing info for model '{}'; cost will be reported as 0.0",
@@ -461,12 +463,26 @@ async fn cmd_model_add_core(
         prompter.input("Output price per million tokens (or 'none')", Some("none"))?;
     let output_per_million = parse_optional_price(&output_price)?;
 
+    let cache_creation_price = prompter.input(
+        "Cache creation price per million tokens (or 'none')",
+        Some("none"),
+    )?;
+    let cache_creation_per_million = parse_optional_price(&cache_creation_price)?;
+
+    let cache_read_price = prompter.input(
+        "Cache read price per million tokens (or 'none')",
+        Some("none"),
+    )?;
+    let cache_read_per_million = parse_optional_price(&cache_read_price)?;
+
     let info = ModelInfo {
         provider: provider_name.clone(),
         name: model_id,
         max_tokens,
         input_per_million,
         output_per_million,
+        cache_creation_per_million,
+        cache_read_per_million,
     };
 
     models.set(name, info, flick_dir).await?;
@@ -836,6 +852,8 @@ mod tests {
                     max_tokens: Some(8192),
                     input_per_million: None,
                     output_per_million: None,
+                    cache_creation_per_million: None,
+                    cache_read_per_million: None,
                 },
                 dir.path(),
             )
@@ -902,6 +920,8 @@ mod tests {
             max_tokens: Some(1024),
             input_per_million: None,
             output_per_million: None,
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
         };
         let client = FlickClient::new_with_provider(
             config,
@@ -930,6 +950,8 @@ mod tests {
             max_tokens: Some(1024),
             input_per_million: None,
             output_per_million: None,
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
         };
         let client = FlickClient::new_with_provider(
             config,
@@ -956,6 +978,8 @@ mod tests {
             max_tokens: Some(1024),
             input_per_million: None,
             output_per_million: None,
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
         };
         let client = FlickClient::new_with_provider(
             config,

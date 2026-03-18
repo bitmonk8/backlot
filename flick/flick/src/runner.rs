@@ -79,7 +79,13 @@ pub async fn run(
             + response2.usage.cache_creation_input_tokens;
         let total_cache_read =
             response.usage.cache_read_input_tokens + response2.usage.cache_read_input_tokens;
-        let cost_usd = config.compute_cost(model_info, total_input, total_output);
+        let cost_usd = config.compute_cost(
+            model_info,
+            total_input,
+            total_output,
+            total_cache_creation,
+            total_cache_read,
+        );
 
         return Ok(FlickResult {
             status,
@@ -100,6 +106,8 @@ pub async fn run(
         model_info,
         response.usage.input_tokens,
         response.usage.output_tokens,
+        response.usage.cache_creation_input_tokens,
+        response.usage.cache_read_input_tokens,
     );
 
     Ok(FlickResult {

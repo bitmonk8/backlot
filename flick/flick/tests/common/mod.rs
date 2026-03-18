@@ -234,6 +234,8 @@ pub fn test_model_info() -> ModelInfo {
         max_tokens: Some(1024),
         input_per_million: None,
         output_per_million: None,
+        cache_creation_per_million: None,
+        cache_read_per_million: None,
     }
 }
 
@@ -245,5 +247,7 @@ pub fn test_model_info_with_pricing(input: f64, output: f64) -> ModelInfo {
         max_tokens: Some(1024),
         input_per_million: Some(input),
         output_per_million: Some(output),
+        cache_creation_per_million: None,
+        cache_read_per_million: None,
     }
 }

@@ -86,7 +86,7 @@ flick provider list
 
 ## Model Registry
 
-Models are stored at `~/.flick/models` (TOML). Each entry maps a user-chosen name to a provider reference, model ID, max_tokens, and optional pricing.
+Models are stored at `~/.flick/models` (TOML). Each entry maps a user-chosen name to a provider reference, model ID, max_tokens, and optional pricing (input, output, cache creation, cache read — all per million tokens).
 
 ```sh
 # Add a model
@@ -195,7 +195,7 @@ Lists providers in tab-separated columns (name, API type, base URL), sorted alph
 
 ### `flick model add`
 
-Interactive model onboarding. Prompts for provider, model ID, max_tokens, and pricing. Writes to `~/.flick/models`.
+Interactive model onboarding. Prompts for provider, model ID, max_tokens, and pricing (input, output, cache creation, cache read — all per million tokens). Writes to `~/.flick/models`.
 
 ### `flick model list`
 
@@ -245,7 +245,7 @@ Each invocation writes one JSON object to stdout. The `status` field tells the c
 {"status": "error", "error": {"message": "Rate limit exceeded", "code": "rate_limit"}}
 ```
 
-The `usage` fields `cache_creation_input_tokens` and `cache_read_input_tokens` are omitted when zero.
+The `usage` fields `cache_creation_input_tokens` and `cache_read_input_tokens` are omitted when zero. The `cost_usd` field includes cache token costs when `cache_creation_per_million` and `cache_read_per_million` are configured in the model registry.
 
 ## Invocation Model
 
@@ -394,7 +394,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-250 tests (199 lib, 22 bin, 18 runner, 11 integration). One additional Unix-only test for file permissions.
+255 tests (202 lib, 22 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
 
 ## License
 

@@ -292,10 +292,21 @@ impl RequestConfig {
         model_info: &ModelInfo,
         input_tokens: u64,
         output_tokens: u64,
+        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: u64,
     ) -> f64 {
         let inp = model_info.input_per_million.unwrap_or(0.0);
         let out = model_info.output_per_million.unwrap_or(0.0);
-        (input_tokens as f64).mul_add(inp, output_tokens as f64 * out) / 1_000_000.0
+        let cw = model_info.cache_creation_per_million.unwrap_or(0.0);
+        let cr = model_info.cache_read_per_million.unwrap_or(0.0);
+        ((input_tokens as f64).mul_add(
+            inp,
+            (output_tokens as f64).mul_add(
+                out,
+                (cache_creation_input_tokens as f64)
+                    .mul_add(cw, (cache_read_input_tokens as f64) * cr),
+            ),
+        )) / 1_000_000.0
     }
 }
 
@@ -599,6 +610,8 @@ tools:
             max_tokens: Some(1024),
             input_per_million: None,
             output_per_million: None,
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
         };
         let provider_info = ProviderInfo {
             api: ApiKind::Messages,
@@ -624,6 +637,8 @@ tools:
             max_tokens: Some(64000),
             input_per_million: None,
             output_per_million: None,
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
         };
         let provider_info = ProviderInfo {
             api: ApiKind::Messages,
@@ -647,6 +662,8 @@ tools:
             max_tokens: Some(1024),
             input_per_million: None,
             output_per_million: None,
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
         };
         let provider_info = ProviderInfo {
             api: ApiKind::Messages,
@@ -669,8 +686,10 @@ tools:
             max_tokens: None,
             input_per_million: Some(3.0),
             output_per_million: Some(15.0),
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
         };
-        let cost = config.compute_cost(&model_info, 1_000_000, 1_000_000);
+        let cost = config.compute_cost(&model_info, 1_000_000, 1_000_000, 0, 0);
         assert!((cost - 18.0).abs() < 0.001);
     }
 
@@ -683,9 +702,28 @@ tools:
             max_tokens: None,
             input_per_million: None,
             output_per_million: None,
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
         };
-        let cost = config.compute_cost(&model_info, 1_000_000, 1_000_000);
+        let cost = config.compute_cost(&model_info, 1_000_000, 1_000_000, 0, 0);
         assert!((cost - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn compute_cost_with_cache_pricing() {
+        let config = RequestConfig::parse_yaml("model: test\n").expect("parse");
+        let model_info = ModelInfo {
+            provider: "p".into(),
+            name: "m".into(),
+            max_tokens: None,
+            input_per_million: Some(3.0),
+            output_per_million: Some(15.0),
+            cache_creation_per_million: Some(3.75),
+            cache_read_per_million: Some(0.30),
+        };
+        let cost = config.compute_cost(&model_info, 1_000_000, 1_000_000, 1_000_000, 1_000_000);
+        let expected = 3.0 + 15.0 + 3.75 + 0.30;
+        assert!((cost - expected).abs() < 0.001);
     }
 
     #[test]

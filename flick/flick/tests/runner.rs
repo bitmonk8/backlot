@@ -157,6 +157,8 @@ output_schema:
         max_tokens: Some(2048),
         input_per_million: None,
         output_per_million: None,
+        cache_creation_per_million: None,
+        cache_read_per_million: None,
     };
 
     let messages = vec![flick::context::Message {
@@ -198,7 +200,7 @@ async fn run_cost_in_result() {
         .unwrap();
 
     let usage = result.usage.unwrap();
-    let expected_cost = config.compute_cost(&mi, 1000, 500);
+    let expected_cost = config.compute_cost(&mi, 1000, 500, 0, 0);
     assert!(
         (usage.cost_usd - expected_cost).abs() < 1e-10,
         "cost_usd ({}) should match compute_cost ({})",
@@ -292,6 +294,8 @@ tools:
         max_tokens: Some(4096),
         input_per_million: Some(1.0),
         output_per_million: Some(2.0),
+        cache_creation_per_million: None,
+        cache_read_per_million: None,
     };
 
     let provider = MockProvider::new(vec![text_response("hello", 10, 5)]);
@@ -616,6 +620,86 @@ async fn run_two_step_cost_summed() {
     let usage = result.usage.unwrap();
     assert_eq!(usage.input_tokens, 3000);
     assert_eq!(usage.output_tokens, 800);
-    let expected_cost = config.compute_cost(&mi, 3000, 800);
+    let expected_cost = config.compute_cost(&mi, 3000, 800, 0, 0);
     assert!((usage.cost_usd - expected_cost).abs() < 1e-10);
+}
+
+/// Two-step: cache tokens from both calls are summed and affect cost.
+#[tokio::test]
+async fn run_two_step_cache_cost_summed() {
+    let provider = MockProvider::new(vec![
+        text_response_with_cache("step1", 1000, 500, 200, 300),
+        text_response_with_cache(r#"{"answer":"done"}"#, 2000, 300, 400, 600),
+    ]);
+    let config = test_config_chat_completions_with_schema();
+    let mi = ModelInfo {
+        provider: "test".into(),
+        name: "mock-model".into(),
+        max_tokens: Some(1024),
+        input_per_million: Some(1.0),
+        output_per_million: Some(2.0),
+        cache_creation_per_million: Some(1.25),
+        cache_read_per_million: Some(0.10),
+    };
+    let mut context = Context::default();
+    context.push_user_text("test").unwrap();
+
+    let result = runner::run(
+        &config,
+        &mi,
+        ApiKind::ChatCompletions,
+        &provider,
+        &mut context,
+    )
+    .await
+    .unwrap();
+
+    let usage = result.usage.unwrap();
+    assert_eq!(usage.input_tokens, 3000);
+    assert_eq!(usage.output_tokens, 800);
+    assert_eq!(usage.cache_creation_input_tokens, 600);
+    assert_eq!(usage.cache_read_input_tokens, 900);
+    let expected_cost = config.compute_cost(&mi, 3000, 800, 600, 900);
+    assert!((usage.cost_usd - expected_cost).abs() < 1e-10);
+    assert!(expected_cost > config.compute_cost(&mi, 3000, 800, 0, 0));
+}
+
+/// Cache tokens affect cost when model has cache pricing.
+#[tokio::test]
+async fn run_cache_tokens_affect_cost() {
+    let provider = MockProvider::new(vec![text_response_with_cache(
+        "cached answer",
+        1000,
+        500,
+        2000,
+        3000,
+    )]);
+    let config = test_config();
+    let mi = ModelInfo {
+        provider: "test".into(),
+        name: "mock-model".into(),
+        max_tokens: Some(1024),
+        input_per_million: Some(1.0),
+        output_per_million: Some(2.0),
+        cache_creation_per_million: Some(1.25),
+        cache_read_per_million: Some(0.10),
+    };
+    let mut context = Context::default();
+    context.push_user_text("test").unwrap();
+
+    let result = runner::run(&config, &mi, ApiKind::Messages, &provider, &mut context)
+        .await
+        .unwrap();
+
+    let usage = result.usage.unwrap();
+    let expected_cost = config.compute_cost(&mi, 1000, 500, 2000, 3000);
+    assert!(
+        (usage.cost_usd - expected_cost).abs() < 1e-10,
+        "cost_usd ({}) should match compute_cost ({})",
+        usage.cost_usd,
+        expected_cost
+    );
+    // Verify cache pricing is non-zero contribution
+    let cost_without_cache = config.compute_cost(&mi, 1000, 500, 0, 0);
+    assert!(expected_cost > cost_without_cache);
 }
