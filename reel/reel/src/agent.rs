@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 const MAX_TOOL_ROUNDS: u32 = 50;
+const MAX_TOOL_CALLS: u32 = 200;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -181,13 +182,15 @@ impl Agent {
     }
 
     /// Run an agent session. Dispatches to structured (no tools) or
-    /// tool-loop mode based on whether `request.grant` includes `READ`.
+    /// tool-loop mode based on whether any tools (built-in or custom) are available.
     pub async fn run<T: DeserializeOwned>(
         &self,
         request: &AgentRequestConfig,
         query: &str,
     ) -> anyhow::Result<RunResult<T>> {
-        if request.grant.contains(ToolGrant::READ) {
+        let has_tools =
+            !tools::tool_definitions(request.grant).is_empty() || !request.custom_tools.is_empty();
+        if has_tools {
             self.run_with_tools(request, query).await
         } else {
             self.run_structured(request, query).await
@@ -294,6 +297,10 @@ impl Agent {
 
             let tool_calls = extract_tool_calls(&result)?;
             total_tool_calls += tool_calls.len() as u32;
+            if total_tool_calls > MAX_TOOL_CALLS {
+                nu_session.kill().await;
+                bail!("agent tool loop exceeded {MAX_TOOL_CALLS} tool calls");
+            }
             let mut tool_results = Vec::with_capacity(tool_calls.len());
 
             for (id, name, input) in &tool_calls {
@@ -734,12 +741,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // MAX_TOOL_ROUNDS exceeded
+    // MAX_TOOL_ROUNDS / MAX_TOOL_CALLS exceeded
     // -----------------------------------------------------------------------
 
-    struct AlwaysToolCallProvider;
+    /// Provider that always returns N tool calls per round, never completing.
+    struct RepeatingToolCallProvider {
+        calls_per_round: usize,
+    }
 
-    impl flick::DynProvider for AlwaysToolCallProvider {
+    impl flick::DynProvider for RepeatingToolCallProvider {
         fn call_boxed<'a>(
             &'a self,
             _params: flick::provider::RequestParams<'a>,
@@ -754,15 +764,18 @@ mod tests {
                     + 'a,
             >,
         > {
-            Box::pin(async {
+            let calls: Vec<_> = (0..self.calls_per_round)
+                .map(|i| flick::provider::ToolCallResponse {
+                    call_id: format!("tc_{i}"),
+                    tool_name: "Read".into(),
+                    arguments: r#"{"file_path":"/tmp/x"}"#.into(),
+                })
+                .collect();
+            Box::pin(async move {
                 Ok(flick::provider::ModelResponse {
                     text: None,
                     thinking: Vec::new(),
-                    tool_calls: vec![flick::provider::ToolCallResponse {
-                        call_id: "tc_loop".into(),
-                        tool_name: "Read".into(),
-                        arguments: r#"{"file_path":"/tmp/x"}"#.into(),
-                    }],
+                    tool_calls: calls,
                     usage: flick::provider::UsageResponse::default(),
                 })
             })
@@ -781,7 +794,10 @@ mod tests {
         let agent = Agent::with_injected(
             PathBuf::from("/tmp"),
             Duration::from_secs(60),
-            mock_client_factory(|| Box::new(AlwaysToolCallProvider) as Box<dyn flick::DynProvider>),
+            mock_client_factory(|| {
+                Box::new(RepeatingToolCallProvider { calls_per_round: 1 })
+                    as Box<dyn flick::DynProvider>
+            }),
             Box::new(CountingToolExecutor {
                 call_count: Arc::new(AtomicU32::new(0)),
             }),
@@ -792,8 +808,8 @@ mod tests {
             agent.run(&request, "test").await;
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("exceeded"),
-            "expected 'exceeded' in error, got: {err}"
+            err.to_string().contains("rounds"),
+            "expected 'rounds' in error, got: {err}"
         );
     }
 
@@ -1029,5 +1045,175 @@ mod tests {
             err.to_string().contains("factory broke"),
             "expected 'factory broke' in error, got: {err}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ToolCallsPending in structured mode
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_structured_bails_on_tool_calls_pending() {
+        // Provider returns ToolCallsPending with a tool_use block.
+        let agent = test_agent(
+            mock_client_factory(|| {
+                SingleShotProvider::with_tool_calls(vec![flick::provider::ToolCallResponse {
+                    call_id: "tc_bad".into(),
+                    tool_name: "Read".into(),
+                    arguments: r#"{"file_path":"/tmp/x"}"#.into(),
+                }])
+            }),
+            Box::new(DefaultToolExecutor),
+        );
+        // Empty grant + no custom tools => structured mode.
+        let request = test_request();
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("tool calls in structured-only"),
+            "expected 'tool calls in structured-only' in error, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-tool-call-per-round counting
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_with_tools_counts_multi_tool_rounds() {
+        let tool_calls_counter = Arc::new(AtomicU32::new(0));
+        let agent = test_agent(
+            mock_client_factory(|| {
+                MultiShotProvider::new(vec![
+                    // First response: 3 tool calls in a single round.
+                    flick::provider::ModelResponse {
+                        text: None,
+                        thinking: Vec::new(),
+                        tool_calls: vec![
+                            flick::provider::ToolCallResponse {
+                                call_id: "tc_a".into(),
+                                tool_name: "Read".into(),
+                                arguments: r#"{"file_path":"/tmp/a"}"#.into(),
+                            },
+                            flick::provider::ToolCallResponse {
+                                call_id: "tc_b".into(),
+                                tool_name: "Read".into(),
+                                arguments: r#"{"file_path":"/tmp/b"}"#.into(),
+                            },
+                            flick::provider::ToolCallResponse {
+                                call_id: "tc_c".into(),
+                                tool_name: "Read".into(),
+                                arguments: r#"{"file_path":"/tmp/c"}"#.into(),
+                            },
+                        ],
+                        usage: flick::provider::UsageResponse::default(),
+                    },
+                    // Second response: completion.
+                    flick::provider::ModelResponse {
+                        text: Some(r#"{"done":true}"#.into()),
+                        thinking: Vec::new(),
+                        tool_calls: Vec::new(),
+                        usage: flick::provider::UsageResponse::default(),
+                    },
+                ])
+            }),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&tool_calls_counter),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::READ;
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        assert!(result.is_ok());
+        let r = result.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(tool_calls_counter.load(Ordering::Relaxed), 3);
+        assert_eq!(r.tool_calls, 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Custom-tools-only routes to tool loop, not structured mode
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn custom_tools_only_routes_to_tool_loop() {
+        let handler = MockToolHandler::new("MyTool", "custom result");
+        let call_count = Arc::clone(&handler.call_count);
+
+        let factory = mock_client_factory(|| {
+            MultiShotProvider::new(vec![
+                flick::provider::ModelResponse {
+                    text: None,
+                    thinking: Vec::new(),
+                    tool_calls: vec![flick::provider::ToolCallResponse {
+                        call_id: "tc_custom".into(),
+                        tool_name: "MyTool".into(),
+                        arguments: "{}".into(),
+                    }],
+                    usage: flick::provider::UsageResponse::default(),
+                },
+                flick::provider::ModelResponse {
+                    text: Some(r#"{"ok":true}"#.into()),
+                    thinking: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: flick::provider::UsageResponse::default(),
+                },
+            ])
+        });
+
+        let builtin_calls = Arc::new(AtomicU32::new(0));
+        let agent = test_agent(
+            factory,
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&builtin_calls),
+            }),
+        );
+
+        let mut request = test_request();
+        // No grant — only custom tools. Should still route to tool loop.
+        request.grant = ToolGrant::empty();
+        request.custom_tools = vec![Box::new(handler)];
+
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        assert!(result.is_ok());
+        let r = result.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(r.output["ok"], true);
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+        assert_eq!(builtin_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(r.tool_calls, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // MAX_TOOL_CALLS cap exceeded
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_with_tools_exceeds_max_tool_calls() {
+        // 50 tool calls per round × 5 rounds = 250 > MAX_TOOL_CALLS (200).
+        let tool_calls_counter = Arc::new(AtomicU32::new(0));
+        let agent = Agent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_secs(60),
+            mock_client_factory(|| {
+                Box::new(RepeatingToolCallProvider {
+                    calls_per_round: 50,
+                }) as Box<dyn flick::DynProvider>
+            }),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&tool_calls_counter),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::READ;
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("tool calls"),
+            "expected 'tool calls' in error, got: {err}"
+        );
+        // Should have executed exactly 200 calls (4 rounds × 50) before the 5th round trips the cap (250 > 200).
+        assert_eq!(tool_calls_counter.load(Ordering::Relaxed), 200);
     }
 }

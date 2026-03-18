@@ -2,27 +2,7 @@
 
 Clusters ordered by impact/importance (highest first).
 
-## 1. Agent dispatch and tool-loop semantics (#5, #14, #15, #24)
-
-Contains the only correctness bug (#5) — blocks custom-tool-only consumers. #24 is a design gap allowing unbounded tool calls. All touch `agent.rs` routing/counting logic.
-
-### 5. `Agent::run()` dispatch heuristic uses `ToolGrant::READ` instead of tool availability
-
-`reel/src/agent.rs` — `run()` decides between structured and tool-loop mode based on `ToolGrant::READ`. A consumer with only custom tools (no READ grant) would be routed to structured mode incorrectly. No such consumer exists yet. **Category: Correctness.**
-
-### 24. `MAX_TOOL_ROUNDS` caps rounds, not individual tool calls
-
-`reel/src/agent.rs` — A model sending 5 tool calls per round can execute 250+ calls within 50 rounds. Consider adding a per-session tool call cap. **Category: Design.**
-
-### 14. `ToolCallsPending` in structured mode untested
-
-`reel/src/agent.rs` — `run_structured` bails when the model hallucinates tool calls. No test covers this path. **Category: Testing.**
-
-### 15. Multi-tool-call-per-round counting untested
-
-`reel/src/agent.rs` — `total_tool_calls += tool_calls.len() as u32` accumulates across rounds. No test verifies correct counting when a single round returns multiple tool calls. **Category: Testing.**
-
-## 2. NuSession process lifecycle — spawn, respawn, teardown (#7, #38, #42, #43, #44, #45, #46, #47, #50)
+## 1. NuSession process lifecycle — spawn, respawn, teardown (#7, #38, #42, #43, #44, #45, #46, #47, #50)
 
 #47 is a latent concurrency bug. #42 violates library conventions. The rest are test gaps on the core process management path — the foundation of all tool execution.
 
@@ -62,7 +42,7 @@ Contains the only correctness bug (#5) — blocks custom-tool-only consumers. #2
 
 `reel/src/nu_session.rs` — The recovery phase after timeout (`result2.unwrap()` at line 1302) intermittently fails with `"nu process closed stdout unexpectedly"`. The timeout kills the nu process, and the subsequent `evaluate` call spawns a new one. On Windows CI runners, the respawned process occasionally closes stdout before the test reads the response — likely a timing issue with AppContainer teardown/respawn under load. Passes on retry. Observed on CI run `23235634543` (commit `d5956eb`). **Category: Testing.**
 
-## 3. NuSession portability (#32)
+## 2. NuSession portability (#32)
 
 Binary relocation breaks tool execution entirely — nu starts without custom commands and all tool calls fail.
 
@@ -70,7 +50,7 @@ Binary relocation breaks tool execution entirely — nu starts without custom co
 
 `reel/src/nu_session.rs` — `option_env!("NU_CACHE_DIR")` is resolved at build time. If the binary is relocated, config files path goes stale and `resolve_config_files()` returns `None`, causing nu to start without custom commands (tool calls fail). Binary fallback works but config does not. **Category: Portability.**
 
-## 4. NuSession temp dir and side effects (#3b, #29, #49)
+## 3. NuSession temp dir and side effects (#3b, #29, #49)
 
 #29 leaves artifacts in user project directories — a visible side effect. All concern temp directory creation, visibility, cleanup.
 
@@ -86,7 +66,7 @@ Missing tests: nu seeing overridden `TEMP`/`TMP` env vars, read-only session wri
 
 `reel/src/nu_session.rs` — `policy_test_fixture(grant, cache)` accepts `Option<&Path>` but all callers pass `None`. The `includes_cache_dir_exec` test still constructs dirs manually because it needs a cache dir outside the project root. The parameter is untested. **Category: Testing.**
 
-## 5. NuSession stderr and debuggability (#23)
+## 4. NuSession stderr and debuggability (#23)
 
 Lost errors make debugging hard for all consumers.
 
@@ -94,7 +74,7 @@ Lost errors make debugging hard for all consumers.
 
 `reel/src/nu_session.rs` — `cmd.stderr(SandboxStdio::Null)` silently drops nu stderr. Errors outside JSON-RPC are lost. **Category: Debuggability.**
 
-## 6. Network test reliability (#39)
+## 5. Network test reliability (#39)
 
 Tests can pass for the wrong reason, masking real sandbox regressions.
 
@@ -102,7 +82,7 @@ Tests can pass for the wrong reason, masking real sandbox regressions.
 
 `reel/src/nu_session.rs` — `integration_sandbox_network_denied_without_grant` and `integration_sandbox_network_allowed_with_grant` hit `httpbin.org`. If the host is unreachable, the denial test passes for the wrong reason (cannot distinguish sandbox block from network unavailability) and the allowed test becomes a no-op. Fix: use a local loopback listener instead. **Category: Testing.**
 
-## 7. Test isolation infrastructure (#3g, #3h)
+## 6. Test isolation infrastructure (#3g, #3h)
 
 #3g is a bug that silently defeats test isolation — tests may appear isolated but actually run unsandboxed.
 
@@ -114,7 +94,7 @@ Falls back to `NuSession::new()` when `tmp_sandbox_cache()` returns `None`. Shou
 
 Nothing prevents tests from using `NuSession::new()` directly instead of `isolated_session()`. **Category: Testing.**
 
-## 8. Public API surface (#8, #31)
+## 7. Public API surface (#8, #31)
 
 #31 is a semver hazard — flick internal type changes silently break reel's public API. Matters when external consumers exist.
 
@@ -126,9 +106,17 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/lib.rs` — `pub use nu_session::NuSession` is part of the public API but no consumer uses it directly. Consider removing after API stabilization. **Category: Placement.**
 
-## 9. Agent run result and timeout tests (#6, #13)
+## 8. Agent run result and timeout tests (#6, #13, #53, #54)
 
-Test gaps on `Agent::run()` return value propagation and timeout behavior.
+Test gaps on `Agent::run()` return value propagation, timeout, and tool-call-cap boundary behavior.
+
+### 53. No boundary test for `MAX_TOOL_CALLS` (exactly 200 succeeds)
+
+`reel/src/agent.rs` — The cap check uses `> MAX_TOOL_CALLS` (strictly greater). No test verifies that exactly 200 tool calls succeeds. Would catch off-by-one if `>` changes to `>=`. **Category: Testing.**
+
+### 54. Test name `run_with_tools_counts_multi_tool_rounds` is misleading
+
+`reel/src/agent.rs` — The test verifies multi-call counting within a single round, not across multiple rounds. Rename to `run_with_tools_counts_multi_calls_in_round`. **Category: Naming.**
 
 ### 6. No test for timeout during resume (tool loop) phase
 
@@ -138,7 +126,7 @@ Test gaps on `Agent::run()` return value propagation and timeout behavior.
 
 `reel/src/agent.rs` — `usage` and `response_hash` mapping from `FlickResult` is untested in both `run_structured` and `run_with_tools` paths. All mock providers use `UsageResponse::default()`. Need tests with non-default usage/hash values. **Category: Testing.**
 
-## 10. Tool execution coverage (#40, #41, #26)
+## 9. Tool execution coverage (#40, #41, #26)
 
 #26 is a feature gap (fixed 120s timeout). #40 and #41 are test gaps on the tool execution path.
 
@@ -154,7 +142,7 @@ Test gaps on `Agent::run()` return value propagation and timeout behavior.
 
 `reel/src/tools.rs` — `from_names(&[""])` (empty string element) is not tested. Depending on the implementation, an empty string could be treated as unknown or cause unexpected behavior. **Category: Testing.**
 
-## 11. Nu glob robustness (#28)
+## 10. Nu glob robustness (#28)
 
 Potential hang on pathological input with symlink cycles.
 
@@ -162,7 +150,7 @@ Potential hang on pathological input with symlink cycles.
 
 `reel/build.rs` (REEL_CONFIG_NU) — `reel glob` runs `glob $pattern` with a 1000-result cap but no depth limit. A `**/*` pattern in a deep tree with symlink cycles could hang before the cap is reached. **Category: Robustness.**
 
-## 12. reel-cli fixes (#33, #34, #35)
+## 11. reel-cli fixes (#33, #34, #35)
 
 All in `reel-cli/src/main.rs`. #33 is a correctness issue (benign in practice). #34 and #35 are validation/usability.
 
@@ -178,7 +166,7 @@ All in `reel-cli/src/main.rs`. #33 is a correctness issue (benign in practice). 
 
 `reel-cli/src/main.rs` — Dry run uses `to_string_pretty` and omits the resolved `ToolGrant`; success output uses `to_string` (compact). Inconsistent format and missing diagnostic info. **Category: Usability.**
 
-## 13. Ripgrep resolution tests (#3d, #3e, #3f)
+## 12. Ripgrep resolution tests (#3d, #3e, #3f)
 
 Pure test gaps on a single code path (`resolve_rg_binary`).
 
@@ -194,7 +182,7 @@ No test covers `resolve_rg_binary` returning `None`. **Category: Testing.**
 
 Tested only indirectly through integration tests. **Category: Testing.**
 
-## 14. Custom tool dispatch (#48)
+## 13. Custom tool dispatch (#48)
 
 No practical impact — unsupported scenario, already guarded by `build_request_config`.
 
@@ -202,11 +190,11 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/agent.rs` — `dispatch_tool` previously used linear scan (first match wins). The `HashMap<String, usize>` built via `collect()` keeps the last entry for duplicate keys. No practical impact: duplicate custom tool names are not a supported scenario, and `build_request_config` rejects duplicate names against built-ins. **Category: Testing.**
 
-## 15. Grant model refinements (#51, #52)
+## 14. Grant model refinements (#51, #52)
 
 ### 51. `ToolGrant::READ` understates the flag's scope
 
-`reel/src/tools.rs` — `READ` enables NuShell (arbitrary command execution) and gates the entire tool loop in `agent.rs`. The name suggests read-only access but actually means "enable tools." A name like `TOOLS` would describe both roles. **Category: Naming.**
+`reel/src/tools.rs` — `READ` enables NuShell (arbitrary command execution) and the read-only built-in tools. The name suggests read-only access but actually enables command execution. A name like `TOOLS` would describe the scope better. **Category: Naming.**
 
 ### 52. `WRITE`/`NETWORK` → `READ` implication not enforced at type level
 

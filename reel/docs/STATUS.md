@@ -2,11 +2,11 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 179 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
+**Core agent runtime and tooling implemented. All 185 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
 
 ## What Is Implemented
 
-- **Agent runtime** (`agent.rs`) — `Agent` struct managing single sessions with configurable grants and timeout. Tool loop runs up to 50 rounds, dispatching to built-in or custom handlers via `ToolHandler` trait. Structured vs. tool-loop routing based on `ToolGrant::READ`. Per-session timeout with model resume cancellation on expiry.
+- **Agent runtime** (`agent.rs`) — `Agent` struct managing single sessions with configurable grants and timeout. Tool loop runs up to 50 rounds / 200 total tool calls, dispatching to built-in or custom handlers via `ToolHandler` trait. Structured vs. tool-loop routing based on tool availability (built-in or custom). Per-session timeout with model resume cancellation on expiry.
 - **Built-in tools** (6 total, `tools.rs`) — `Read`, `Write`, `Edit`, `Glob`, `Grep` (all execute as nu custom commands: `reel read`, `reel write`, etc.), `NuShell` (direct evaluation). Read-only tools gated on `ToolGrant::READ`; write tools gated on `ToolGrant::WRITE | ToolGrant::READ`.
 - **NuShell sandbox** (`nu_session.rs`) — `NuSession` managing a persistent `nu --mcp` process (JSON-RPC 2.0). Per-session temp directory under `<project_root>/.reel/tmp/`. Sandbox policy via `lot` (Windows AppContainer, Linux user/mount/pid namespaces, macOS Seatbelt). Grant-based process respawn if grants or project root change between calls. Non-blocking process teardown.
 - **Sandbox re-exports** (`sandbox.rs`) — `reel::sandbox` module re-exporting lot's prerequisite APIs (`grant_appcontainer_prerequisites`, `appcontainer_prerequisites_met`, `is_elevated`, etc.) and types (`SandboxPolicy`, `SandboxError`). Library consumers no longer need a direct lot dependency.
@@ -19,7 +19,8 @@
 - **Test coverage expansion** — `ToolGrant::from_names` unit tests (issue #36), custom `ToolHandler` dispatch tests (issue #1), full tool execution path integration tests (issue #2), CLI `parse_config`/`emit_error` tests (issue #12), sandbox network denial integration tests (issue #37).
 - **Simplification batch** — Policy test helper `policy_test_fixture` deduplicates sandbox policy test setup (issue #3c). `extract_text` uses reverse iterator (issue #10). `dispatch_tool` uses `HashMap<String, usize>` index for O(1) custom tool lookup (issue #11). CLI prerequisite path resolution extracted to `resolve_prerequisite_paths` (issue #17). `build_request_config` is the single public config-building method on `Agent` (issue #18).
 - **Grant model cleanup** — Renamed `ToolGrant::NU` → `ToolGrant::READ`. `WRITE` and `NETWORK` now imply `READ` in `from_names`. Config accepts `"read"` instead of `"nu"`. Closes issue #25.
-- **Test counts** — 179 tests total (168 reel + 11 reel-cli), all pass locally.
+- **Agent dispatch and tool-loop semantics** — `run()` dispatch uses tool availability (built-in + custom) instead of `ToolGrant::READ` (issue #5). Per-session tool call cap `MAX_TOOL_CALLS = 200` (issue #24). Tests for `ToolCallsPending` in structured mode (issue #14), multi-tool-call-per-round counting (issue #15), custom-tools-only routing, and tool call cap exceeded.
+- **Test counts** — 185 tests total (174 reel + 11 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
 ## What Is NOT Implemented
@@ -63,4 +64,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-Remaining candidates: testing gaps (#3b, #3d, #3e, #3f, #3g, #3h, #6, #7, #13, #14, #15, #38, #39, #40, #41, #43, #44, #45, #46), other (#42, #47, #51, #52).
+Remaining candidates: testing gaps (#3b, #3d, #3e, #3f, #3g, #3h, #6, #7, #13, #38, #39, #40, #41, #43, #44, #45, #46, #53), naming (#54), other (#42, #47, #51, #52).

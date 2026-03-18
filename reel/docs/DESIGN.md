@@ -81,14 +81,15 @@ wraps a flick `RequestConfig` (reusable across calls). Query is per-invocation.
 
 ### Dispatch Heuristic
 
-`Agent::run()` routes based on `ToolGrant::READ`:
+`Agent::run()` routes based on tool availability (built-in or custom):
 
-- **READ present** — tool-loop mode (`run_with_tools`): spawns NuSession, injects
-  tool definitions, runs up to 50 rounds.
-- **READ absent** — structured mode (`run_structured`): single flick call, no tools.
+- **Tools available** — tool-loop mode (`run_with_tools`): spawns NuSession, injects
+  tool definitions, runs up to 50 rounds / 200 total tool calls.
+- **No tools** — structured mode (`run_structured`): single flick call, no tools.
 
-Known issue (#5): a consumer with only custom tools (no READ grant) is misrouted
-to structured mode.
+A consumer with only custom tools (no READ grant) is correctly routed to tool-loop
+mode — the heuristic checks `tool_definitions(grant)` and `custom_tools`, not the
+grant flags directly.
 
 ### Tool Loop
 
@@ -96,7 +97,7 @@ to structured mode.
    + custom tool definitions.
 2. `FlickClient::new()` resolves model to provider chain.
 3. `client.run(query, &mut ctx)` — initial model call.
-4. While response contains tool calls and rounds < 50:
+4. While response contains tool calls and rounds < 50 and total tool calls ≤ 200:
    a. For each tool call: dispatch to built-in handler (`execute_tool`) or custom
       `ToolHandler` by name match.
    b. Collect `ToolExecResult` for each call.

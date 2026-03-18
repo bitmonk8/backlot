@@ -2,7 +2,7 @@
 
 Agent session runtime for Rust — tool loop, NuShell sandbox, built-in tool execution.
 
-Reel sits between [flick](../flick) (single-shot LLM call) and [epic](../epic) (task orchestrator). It owns the tool loop: up to 50 rounds of tool-call dispatch, a sandboxed NuShell MCP session via [lot](../lot), and 6 built-in tools. Available as both a Rust library (`reel`) and a thin CLI binary (`reel-cli`, binary name `reel`).
+Reel sits between [flick](../flick) (single-shot LLM call) and [epic](../epic) (task orchestrator). It owns the tool loop: up to 50 rounds / 200 total tool calls of tool-call dispatch, a sandboxed NuShell MCP session via [lot](../lot), and 6 built-in tools. Available as both a Rust library (`reel`) and a thin CLI binary (`reel-cli`, binary name `reel`).
 
 ## Workspace
 
@@ -23,7 +23,7 @@ Reel sits between [flick](../flick) (single-shot LLM call) and [epic](../epic) (
 ## Design principles
 
 - **Dual interface.** Library crate + thin CLI binary. All logic in the library.
-- **Tool-loop agent.** Request-dispatch-response cycles up to 50 rounds. No streaming.
+- **Tool-loop agent.** Request-dispatch-response cycles up to 50 rounds / 200 total tool calls. No streaming.
 - **Sandboxed execution.** All tools run through a NuShell MCP session sandboxed by lot. No unsandboxed fallback.
 - **Grant-based access control.** Bitflags (READ, WRITE, NETWORK) determine tool availability and sandbox policy. WRITE and NETWORK imply READ. Network denied by default.
 - **Eager NuShell spawn.** Process started at session creation (if READ granted), not on first use.
