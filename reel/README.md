@@ -25,8 +25,8 @@ Reel sits between [flick](../flick) (single-shot LLM call) and [epic](../epic) (
 - **Dual interface.** Library crate + thin CLI binary. All logic in the library.
 - **Tool-loop agent.** Request-dispatch-response cycles up to 50 rounds / 200 total tool calls. No streaming.
 - **Sandboxed execution.** All tools run through a NuShell MCP session sandboxed by lot. No unsandboxed fallback.
-- **Grant-based access control.** Bitflags (READ, WRITE, NETWORK) determine tool availability and sandbox policy. WRITE and NETWORK imply READ. Network denied by default.
-- **Eager NuShell spawn.** Process started at session creation (if READ granted), not on first use.
+- **Grant-based access control.** Bitflags (TOOLS, WRITE, NETWORK) determine tool availability and sandbox policy. WRITE and NETWORK imply TOOLS. Network denied by default.
+- **Eager NuShell spawn.** Process started at session creation (if TOOLS granted), not on first use.
 - **Separation of concerns.** Reel handles tool execution. Flick handles LLM calls. Lot handles OS-level sandboxing.
 
 ## Requirements
@@ -56,7 +56,7 @@ flick model add fast
 model: fast
 system_prompt: "You are a code assistant."
 grant:
-  - read
+  - tools
   - write
 ```
 
@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let request = AgentRequestConfig {
         config,
-        grant: ToolGrant::READ | ToolGrant::WRITE,
+        grant: ToolGrant::TOOLS | ToolGrant::WRITE,
         custom_tools: Vec::new(),
     };
 
@@ -197,7 +197,7 @@ reasoning:
 
 # Reel-specific fields
 grant:
-  - read
+  - tools
   - write
   - network
 ```
@@ -209,20 +209,20 @@ grant:
 | `temperature` | float | Sampling temperature (optional) |
 | `reasoning` | object | Reasoning budget: `level` = minimal/low/medium/high (optional) |
 | `output_schema` | object | JSON Schema for structured model output (optional) |
-| `grant` | list | Tool grants: `read`, `write`, `network`. `write` and `network` imply `read`. Omit for structured mode (no tools) |
+| `grant` | list | Tool grants: `tools`, `write`, `network`. `write` and `network` imply `tools`. Omit for structured mode (no tools) |
 
-Reel config is a superset of flick's `RequestConfig`. The CLI strips the `grant` key before passing to flick (which uses `deny_unknown_fields`).
+Reel config is a superset of flick's `RequestConfig`. The CLI strips the `grant` key before passing to flick (which uses `deny_unknown_fields`). Library consumers build `AgentRequestConfig` directly.
 
 ## Built-in tools
 
 | Tool | Grant Required | Description |
 |------|----------------|-------------|
-| Read | READ | Read file contents |
+| Read | TOOLS | Read file contents |
 | Write | WRITE | Create or overwrite a file |
 | Edit | WRITE | Replace exact substring in a file |
-| Glob | READ | Find files by glob pattern (max 1000 results) |
-| Grep | READ | Search file contents by regex (max 64 KiB output) |
-| NuShell | READ | Execute arbitrary NuShell command (timeout: 120s default, 600s max) |
+| Glob | TOOLS | Find files by glob pattern (max 1000 results) |
+| Grep | TOOLS | Search file contents by regex (max 64 KiB output) |
+| NuShell | TOOLS | Execute arbitrary NuShell command (timeout: 120s default, 600s max) |
 
 All tools execute through the NuShell MCP session as custom commands (`reel read`, `reel write`, etc.) or direct evaluation (NuShell tool). All tool output is truncated to 64 KiB.
 
@@ -230,9 +230,9 @@ All tools execute through the NuShell MCP session as custom commands (`reel read
 
 | Flag | Effect |
 |------|--------|
-| `READ` | Enables tool loop and read-only tools (Read, Glob, Grep, NuShell). Without READ, agent runs in structured-output mode (no tools). |
-| `WRITE` | Enables Write and Edit tools. Grants sandbox write access to project root. Implies `READ`. |
-| `NETWORK` | Enables outbound network from sandbox. Denied by default. Implies `READ`. |
+| `TOOLS` | Enables tool loop and read-only tools (Read, Glob, Grep, NuShell). Without TOOLS, agent runs in structured-output mode (no tools). |
+| `WRITE` | Enables Write and Edit tools. Grants sandbox write access to project root. Implies `TOOLS`. |
+| `NETWORK` | Enables outbound network from sandbox. Denied by default. Implies `TOOLS`. |
 
 ## Sandboxing
 

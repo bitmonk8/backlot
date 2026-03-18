@@ -355,13 +355,13 @@ mod tests {
 model: "test-model"
 grant:
   - write
-  - read
+  - tools
   - network
 "#;
         let (config, grant) = parse_config(yaml).unwrap();
         assert_eq!(
             grant,
-            reel::ToolGrant::WRITE | reel::ToolGrant::READ | reel::ToolGrant::NETWORK
+            reel::ToolGrant::WRITE | reel::ToolGrant::TOOLS | reel::ToolGrant::NETWORK
         );
         assert_eq!(config.model(), "test-model");
     }
@@ -442,10 +442,10 @@ grant:
         let yaml = r#"
 model: "test-model"
 grant:
-  - read
+  - tools
 "#;
         let (config, grant) = parse_config(yaml).unwrap();
-        assert_eq!(grant, reel::ToolGrant::READ);
+        assert_eq!(grant, reel::ToolGrant::TOOLS);
         assert_eq!(config.model(), "test-model");
     }
 

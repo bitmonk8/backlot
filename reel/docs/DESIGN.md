@@ -87,7 +87,7 @@ wraps a flick `RequestConfig` (reusable across calls). Query is per-invocation.
   tool definitions, runs up to 50 rounds / 200 total tool calls.
 - **No tools** — structured mode (`run_structured`): single flick call, no tools.
 
-A consumer with only custom tools (no READ grant) is correctly routed to tool-loop
+A consumer with only custom tools (no TOOLS grant) is correctly routed to tool-loop
 mode — the heuristic checks `tool_definitions(grant)` and `custom_tools`, not the
 grant flags directly.
 
@@ -169,10 +169,10 @@ Built by `NuSession` from grant flags:
 
 | Grant | Policy Effect |
 |---|---|
-| READ only | project_root → read_paths, temp dir → write_paths |
-| READ + WRITE | project_root → write_paths, temp dir → write_paths |
-| READ + NETWORK | allow_network = true |
-| Always | platform exec paths, platform lib paths, nu cache dir → exec_paths |
+| TOOLS only | project_root → read_paths, temp dir → write_paths |
+| TOOLS + WRITE | project_root → write_paths, temp dir → write_paths |
+| TOOLS + NETWORK | allow_network = true |
+| Always | platform exec paths, platform lib paths, tool dir → exec_paths |
 
 The lot `SandboxPolicyBuilder` handles auto-canonicalization, deduplication, and
 platform defaults.
@@ -193,16 +193,16 @@ If `evaluate()` is called with different grant flags or project root than the
 running process, the process is killed and respawned with updated sandbox policy.
 A generation counter prevents stale processes from being reused.
 
-### Cache Directory Resolution
+### Tool Directory Resolution
 
-The cache directory is resolved at runtime by `resolve_cache_dir()`:
+The tool directory is resolved at runtime by `resolve_tool_dir()`:
 
 1. **Exe-adjacent** — if `reel_config.nu` exists next to the current executable
    (same directory as the binary), that directory is used. This handles release
    packaging and binary relocation.
 2. **Compile-time `NU_CACHE_DIR`** — the `build.rs`-emitted path, used during
    development when binaries and config live in `target/nu-cache/`.
-3. **None** — no cache directory found; nu starts without custom commands.
+3. **None** — no tool directory found; nu starts without custom commands.
 
 ---
 
@@ -214,22 +214,22 @@ The cache directory is resolved at runtime by `resolve_cache_dir()`:
 bitflags! {
     pub struct ToolGrant: u8 {
         const WRITE   = 0b0000_0001;
-        const READ    = 0b0000_0010;
+        const TOOLS   = 0b0000_0010;
         const NETWORK = 0b0000_0100;
     }
 }
 ```
 
-`ToolGrant::from_names(&["write", "read", "network"])` parses string names.
-`"write"` and `"network"` imply `READ` — callers need not specify `"read"`
+`ToolGrant::from_names(&["write", "tools", "network"])` parses string names.
+`"write"` and `"network"` imply `TOOLS` — callers need not specify `"tools"`
 explicitly. Returns `GrantParseError` on unknown names.
 
 ### Tool Definitions
 
 `tool_definitions(grant)` returns a `Vec<ToolDefinition>` based on grant flags:
 
-- **READ** — Read, Glob, Grep, NuShell
-- **WRITE** (implies READ) — adds Write, Edit
+- **TOOLS** — Read, Glob, Grep, NuShell
+- **WRITE** (implies TOOLS) — adds Write, Edit
 
 Each definition includes name, description, and JSON Schema parameters matching
 the model's tool-calling format.
@@ -297,7 +297,7 @@ Supported platforms: Windows (x86_64, aarch64), Linux (x86_64, aarch64), macOS
 
 Skip env vars: `NU_SKIP_DOWNLOAD=1`, `RG_SKIP_DOWNLOAD=1`.
 
-The runtime resolves `NU_CACHE_DIR` via `resolve_cache_dir()` — see NuShell Session section.
+The runtime resolves `NU_CACHE_DIR` via `resolve_tool_dir()` — see NuShell Session section.
 
 ---
 
@@ -342,7 +342,7 @@ than success output.
 - Custom command execution: `reel read`, `reel write`, `reel edit`, `reel glob`,
   `reel grep`.
 - Full `execute_tool()` path: Read, Write, Glob, NuShell, grant denial.
-- Grant-change respawn (READ→WRITE, READ→NETWORK).
+- Grant-change respawn (TOOLS→WRITE, TOOLS→NETWORK).
 - Project-root-change respawn.
 - Concurrent evaluate (both callers succeed).
 - Kill during evaluate (process discarded, not written back).
@@ -353,7 +353,7 @@ than success output.
 ### Test Isolation
 
 - `isolated_session()` helper creates a `NuSession` with a dedicated temp sandbox
-  cache directory. Panics if `NU_CACHE_DIR` is not set at compile time, ensuring
+  tool directory. Panics if `NU_CACHE_DIR` is not set at compile time, ensuring
   tests never silently fall back to an unsandboxed session.
 - `sandbox_env()` wraps `isolated_session()` with an isolated project directory.
   These two functions are the required entry points for tests that need a

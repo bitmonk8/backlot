@@ -33,14 +33,14 @@ const MAX_NU_TIMEOUT_SECS: u64 = 600;
 bitflags! {
     /// Permission flags controlling which tools an agent call may use.
     ///
-    /// `READ` enables the tool loop and read-only tools (Read, Glob, Grep,
+    /// `TOOLS` enables the tool loop and read-only tools (Read, Glob, Grep,
     /// NuShell). `WRITE` adds mutation tools (Write, Edit) and sandbox write
-    /// access — implies `READ`. `NETWORK` enables outbound network in the
-    /// sandbox — implies `READ`.
+    /// access — implies `TOOLS`. `NETWORK` enables outbound network in the
+    /// sandbox — implies `TOOLS`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ToolGrant: u8 {
         const WRITE   = 0b0000_0001;
-        const READ    = 0b0000_0010;
+        const TOOLS   = 0b0000_0010;
         const NETWORK = 0b0000_0100;
     }
 }
@@ -48,15 +48,15 @@ bitflags! {
 impl ToolGrant {
     /// Parse a list of grant names into a `ToolGrant` bitflag.
     ///
-    /// `"write"` and `"network"` imply `READ` — callers need not specify
-    /// `"read"` explicitly when requesting write or network access.
+    /// `"write"` and `"network"` imply `TOOLS` — callers need not specify
+    /// `"tools"` explicitly when requesting write or network access.
     pub fn from_names(names: &[impl AsRef<str>]) -> Result<Self, GrantParseError> {
         let mut flags = Self::empty();
         for name in names {
             match name.as_ref() {
-                "write" => flags |= Self::WRITE | Self::READ,
-                "read" => flags |= Self::READ,
-                "network" => flags |= Self::NETWORK | Self::READ,
+                "write" => flags |= Self::WRITE | Self::TOOLS,
+                "tools" => flags |= Self::TOOLS,
+                "network" => flags |= Self::NETWORK | Self::TOOLS,
                 other => {
                     return Err(GrantParseError {
                         name: other.to_string(),
@@ -83,8 +83,8 @@ pub struct ToolDefinition {
 pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
     let mut tools = Vec::new();
 
-    // Read-only tools: available when READ is granted
-    if grant.contains(ToolGrant::READ) {
+    // Read-only tools: available when TOOLS is granted
+    if grant.contains(ToolGrant::TOOLS) {
         tools.push(ToolDefinition {
             name: "Read".into(),
             description: "Read the contents of a file. Returns lines with line numbers. For large files, use offset and limit to read specific sections.".into(),
@@ -134,8 +134,8 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
         });
     }
 
-    // Write tools: WRITE implies READ, but guard both for correctness
-    if grant.contains(ToolGrant::WRITE | ToolGrant::READ) {
+    // Write tools: WRITE implies TOOLS, but guard both for correctness
+    if grant.contains(ToolGrant::WRITE | ToolGrant::TOOLS) {
         tools.push(ToolDefinition {
             name: "Write".into(),
             description: "Write content to a file, creating parent directories if necessary. Overwrites existing files.".into(),
@@ -164,8 +164,8 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
         });
     }
 
-    // NuShell tool: available when READ is granted
-    if grant.contains(ToolGrant::READ) {
+    // NuShell tool: available when TOOLS is granted
+    if grant.contains(ToolGrant::TOOLS) {
         tools.push(ToolDefinition {
             name: "NuShell".into(),
             description: "Execute a NuShell command or pipeline and return its output. Uses NuShell syntax (not POSIX sh). Session state (variables, env, cwd) persists across calls within the same task.".into(),
@@ -199,8 +199,8 @@ pub struct ToolExecResult {
 /// Map tool name to the required grant flags.
 fn required_grant(name: &str) -> Option<ToolGrant> {
     match name {
-        "Write" | "Edit" => Some(ToolGrant::WRITE | ToolGrant::READ),
-        "NuShell" | "Read" | "Glob" | "Grep" => Some(ToolGrant::READ),
+        "Write" | "Edit" => Some(ToolGrant::WRITE | ToolGrant::TOOLS),
+        "NuShell" | "Read" | "Glob" | "Grep" => Some(ToolGrant::TOOLS),
         _ => None,
     }
 }
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn read_only_tools() {
-        let tools = tool_definitions(ToolGrant::READ);
+        let tools = tool_definitions(ToolGrant::TOOLS);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Read"));
         assert!(names.contains(&"Glob"));
@@ -618,7 +618,7 @@ mod tests {
 
     #[test]
     fn full_tools() {
-        let grant = ToolGrant::WRITE | ToolGrant::READ;
+        let grant = ToolGrant::WRITE | ToolGrant::TOOLS;
         let tools = tool_definitions(grant);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Read"));
@@ -642,7 +642,7 @@ mod tests {
         let result = exec(
             "Write",
             serde_json::json!({"file_path": "x.txt", "content": "hi"}),
-            ToolGrant::READ, // no WRITE
+            ToolGrant::TOOLS, // no WRITE
         )
         .await;
         assert!(result.is_error);
@@ -654,7 +654,7 @@ mod tests {
         let result = exec(
             "nonexistent_tool",
             serde_json::json!({}),
-            ToolGrant::WRITE | ToolGrant::READ,
+            ToolGrant::WRITE | ToolGrant::TOOLS,
         )
         .await;
         assert!(result.is_error);
@@ -1115,18 +1115,18 @@ mod tests {
 
     #[test]
     fn test_required_grant_names() {
-        assert_eq!(required_grant("Read"), Some(ToolGrant::READ));
-        assert_eq!(required_grant("Glob"), Some(ToolGrant::READ));
-        assert_eq!(required_grant("Grep"), Some(ToolGrant::READ));
+        assert_eq!(required_grant("Read"), Some(ToolGrant::TOOLS));
+        assert_eq!(required_grant("Glob"), Some(ToolGrant::TOOLS));
+        assert_eq!(required_grant("Grep"), Some(ToolGrant::TOOLS));
         assert_eq!(
             required_grant("Write"),
-            Some(ToolGrant::WRITE | ToolGrant::READ)
+            Some(ToolGrant::WRITE | ToolGrant::TOOLS)
         );
         assert_eq!(
             required_grant("Edit"),
-            Some(ToolGrant::WRITE | ToolGrant::READ)
+            Some(ToolGrant::WRITE | ToolGrant::TOOLS)
         );
-        assert_eq!(required_grant("NuShell"), Some(ToolGrant::READ));
+        assert_eq!(required_grant("NuShell"), Some(ToolGrant::TOOLS));
         assert_eq!(required_grant("unknown"), None);
     }
 
@@ -1137,7 +1137,7 @@ mod tests {
         let result = exec(
             "Write",
             serde_json::json!({"file_path": "x.txt", "content": "hi"}),
-            ToolGrant::READ, // READ but no WRITE
+            ToolGrant::TOOLS, // TOOLS but no WRITE
         )
         .await;
         assert!(result.is_error);
@@ -1311,7 +1311,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_nushell_missing_command_param() {
-        let result = exec("NuShell", serde_json::json!({}), ToolGrant::READ).await;
+        let result = exec("NuShell", serde_json::json!({}), ToolGrant::TOOLS).await;
         assert!(result.is_error);
         assert!(result.content.contains("missing"));
     }
@@ -1325,7 +1325,7 @@ mod tests {
             "NuShell",
             serde_json::json!({"command": "echo hello"}),
             &gone,
-            ToolGrant::READ,
+            ToolGrant::TOOLS,
         )
         .await;
         assert!(
@@ -1358,44 +1358,44 @@ mod tests {
     }
 
     #[test]
-    fn from_names_write_implies_read() {
+    fn from_names_write_implies_tools() {
         let grant = ToolGrant::from_names(&["write"]).unwrap();
-        assert_eq!(grant, ToolGrant::WRITE | ToolGrant::READ);
+        assert_eq!(grant, ToolGrant::WRITE | ToolGrant::TOOLS);
     }
 
     #[test]
-    fn from_names_read_only() {
-        let grant = ToolGrant::from_names(&["read"]).unwrap();
-        assert_eq!(grant, ToolGrant::READ);
+    fn from_names_tools_only() {
+        let grant = ToolGrant::from_names(&["tools"]).unwrap();
+        assert_eq!(grant, ToolGrant::TOOLS);
     }
 
     #[test]
-    fn from_names_network_implies_read() {
+    fn from_names_network_implies_tools() {
         let grant = ToolGrant::from_names(&["network"]).unwrap();
-        assert_eq!(grant, ToolGrant::NETWORK | ToolGrant::READ);
+        assert_eq!(grant, ToolGrant::NETWORK | ToolGrant::TOOLS);
     }
 
     #[test]
     fn from_names_combined_flags() {
-        let grant = ToolGrant::from_names(&["write", "read", "network"]).unwrap();
+        let grant = ToolGrant::from_names(&["write", "tools", "network"]).unwrap();
         assert_eq!(
             grant,
-            ToolGrant::WRITE | ToolGrant::READ | ToolGrant::NETWORK
+            ToolGrant::WRITE | ToolGrant::TOOLS | ToolGrant::NETWORK
         );
     }
 
     #[test]
     fn from_names_duplicate_flags_idempotent() {
-        let grant = ToolGrant::from_names(&["write", "write", "read"]).unwrap();
-        assert_eq!(grant, ToolGrant::WRITE | ToolGrant::READ);
+        let grant = ToolGrant::from_names(&["write", "write", "tools"]).unwrap();
+        assert_eq!(grant, ToolGrant::WRITE | ToolGrant::TOOLS);
     }
 
     #[test]
-    fn from_names_write_and_network_imply_read() {
+    fn from_names_write_and_network_imply_tools() {
         let grant = ToolGrant::from_names(&["write", "network"]).unwrap();
         assert_eq!(
             grant,
-            ToolGrant::WRITE | ToolGrant::NETWORK | ToolGrant::READ
+            ToolGrant::WRITE | ToolGrant::NETWORK | ToolGrant::TOOLS
         );
     }
 
@@ -1428,9 +1428,9 @@ mod tests {
     #[test]
     fn from_names_with_string_vec() {
         // Verify it works with Vec<String> (not just &[&str]).
-        let names = vec!["read".to_string(), "write".to_string()];
+        let names = vec!["tools".to_string(), "write".to_string()];
         let grant = ToolGrant::from_names(&names).unwrap();
-        assert_eq!(grant, ToolGrant::READ | ToolGrant::WRITE);
+        assert_eq!(grant, ToolGrant::TOOLS | ToolGrant::WRITE);
     }
 
     #[test]
@@ -1445,7 +1445,7 @@ mod tests {
             let result = exec(
                 name,
                 serde_json::json!({}),
-                ToolGrant::WRITE | ToolGrant::READ,
+                ToolGrant::WRITE | ToolGrant::TOOLS,
             )
             .await;
             assert!(result.is_error, "{name} should be rejected");

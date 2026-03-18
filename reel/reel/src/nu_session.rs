@@ -173,12 +173,12 @@ struct SessionState {
 /// `spawn()` and restarted if the grant or project root changes between calls.
 pub struct NuSession {
     state: Mutex<SessionState>,
-    /// Cache directory containing nu binary, rg binary, and config files.
-    /// Defaults to the value computed by `resolve_cache_dir()`, which first
+    /// Tool directory containing nu binary, rg binary, and config files.
+    /// Defaults to the value computed by `resolve_tool_dir()`, which first
     /// checks next to the current executable, then falls back to the
     /// compile-time `NU_CACHE_DIR`. Tests override this to isolate sandbox
     /// ACL operations per test.
-    cache_dir: Option<PathBuf>,
+    tool_dir: Option<PathBuf>,
 }
 
 /// Write a JSON-RPC message as a single `\n`-terminated line.
@@ -198,30 +198,30 @@ fn send_line(stdin: &StdinHandle, payload: &[u8]) -> Result<(), String> {
 }
 
 impl NuSession {
-    /// Create a new session using the runtime-resolved cache directory.
+    /// Create a new session using the runtime-resolved tool directory.
     ///
     /// **Tests should not call this directly.** Use `isolated_session()` or
     /// `sandbox_env()` instead to ensure each test gets its own isolated
-    /// cache directory. Calling `new()` in tests bypasses sandbox isolation.
+    /// tool directory. Calling `new()` in tests bypasses sandbox isolation.
     pub fn new() -> Self {
         Self {
             state: Mutex::new(SessionState::default()),
-            cache_dir: resolve_cache_dir(),
+            tool_dir: resolve_tool_dir(),
         }
     }
 
-    /// Create a session with an explicit cache directory override.
+    /// Create a session with an explicit tool directory override.
     ///
-    /// Called by `isolated_session()` to give each test its own cache dir,
+    /// Called by `isolated_session()` to give each test its own tool dir,
     /// avoiding concurrent AppContainer ACL conflicts on shared directories.
     ///
     /// **Do not call this directly.** Use `isolated_session()` or
-    /// `sandbox_env()` which handle the cache copy and lifetime management.
+    /// `sandbox_env()` which handle the copy and lifetime management.
     #[cfg(test)]
-    fn with_cache_dir(cache_dir: PathBuf) -> Self {
+    fn with_tool_dir(tool_dir: PathBuf) -> Self {
         Self {
             state: Mutex::new(SessionState::default()),
-            cache_dir: Some(cache_dir),
+            tool_dir: Some(tool_dir),
         }
     }
 
@@ -277,7 +277,7 @@ impl NuSession {
         // concurrent kill() calls keep bumping the generation.
         for _attempt in 0..3 {
             let gen_before = self.state.lock().await.generation;
-            let new_proc = spawn_nu_process(project_root, grant, self.cache_dir.as_deref()).await?;
+            let new_proc = spawn_nu_process(project_root, grant, self.tool_dir.as_deref()).await?;
 
             let mut st = self.state.lock().await;
             if st.generation != gen_before {
@@ -528,24 +528,26 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
 // Process spawning
 // ---------------------------------------------------------------------------
 
-/// Resolve the cache directory at runtime.
+/// Resolve the tool directory at runtime.
+///
+/// The tool directory contains the nu binary, rg binary, and config files.
 ///
 /// Search order:
 /// 1. Directory containing the current executable — if `reel_config.nu` exists
 ///    there, the binary was packaged with config files alongside it.
-/// 2. Compile-time `NU_CACHE_DIR` — the build-time cache directory set by
+/// 2. Compile-time `NU_CACHE_DIR` — the build-time tool directory set by
 ///    `build.rs`. Valid during development; goes stale if the binary is relocated.
-/// 3. `None` — no cache directory found.
-fn resolve_cache_dir() -> Option<PathBuf> {
+/// 3. `None` — no tool directory found.
+fn resolve_tool_dir() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf));
     let compile_time_dir = option_env!("NU_CACHE_DIR").map(Path::new);
-    resolve_cache_dir_from(exe_dir.as_deref(), compile_time_dir)
+    resolve_tool_dir_from(exe_dir.as_deref(), compile_time_dir)
 }
 
-/// Testable inner function for [`resolve_cache_dir`].
-fn resolve_cache_dir_from(
+/// Testable inner function for [`resolve_tool_dir`].
+fn resolve_tool_dir_from(
     exe_dir: Option<&Path>,
     compile_time_dir: Option<&Path>,
 ) -> Option<PathBuf> {
@@ -564,9 +566,9 @@ fn resolve_cache_dir_from(
 
 /// Resolve a binary by name using a standard search order:
 /// 1. Same directory as the current executable (release packaging).
-/// 2. Provided cache directory.
+/// 2. Provided tool directory.
 /// 3. Bare name on PATH.
-fn resolve_cached_binary(binary_name: &str, cache_dir: Option<&Path>) -> OsString {
+fn resolve_tool_binary(binary_name: &str, tool_dir: Option<&Path>) -> OsString {
     // 1. Next to the current executable.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -577,8 +579,8 @@ fn resolve_cached_binary(binary_name: &str, cache_dir: Option<&Path>) -> OsStrin
         }
     }
 
-    // 2. Cache directory (nu and rg share the same directory).
-    if let Some(dir) = cache_dir {
+    // 2. Tool directory (nu and rg share the same directory).
+    if let Some(dir) = tool_dir {
         let candidate = dir.join(binary_name);
         if candidate.exists() {
             return candidate.into_os_string();
@@ -589,8 +591,8 @@ fn resolve_cached_binary(binary_name: &str, cache_dir: Option<&Path>) -> OsStrin
     OsString::from(binary_name)
 }
 
-fn resolve_nu_binary(cache_dir: Option<&Path>) -> OsString {
-    resolve_cached_binary(if cfg!(windows) { "nu.exe" } else { "nu" }, cache_dir)
+fn resolve_nu_binary(tool_dir: Option<&Path>) -> OsString {
+    resolve_tool_binary(if cfg!(windows) { "nu.exe" } else { "nu" }, tool_dir)
 }
 
 /// Resolve the path to the `rg` (ripgrep) binary.
@@ -598,8 +600,8 @@ fn resolve_nu_binary(cache_dir: Option<&Path>) -> OsString {
 /// Returns `Some` only when a validated absolute path exists on disk.
 /// Used by `spawn_nu_process` to set `REEL_RG_PATH`; the nu-side grep
 /// command falls back to bare `rg` when the env var is absent.
-pub fn resolve_rg_binary(cache_dir: Option<&Path>) -> Option<PathBuf> {
-    let resolved = resolve_cached_binary(if cfg!(windows) { "rg.exe" } else { "rg" }, cache_dir);
+pub fn resolve_rg_binary(tool_dir: Option<&Path>) -> Option<PathBuf> {
+    let resolved = resolve_tool_binary(if cfg!(windows) { "rg.exe" } else { "rg" }, tool_dir);
     let path = Path::new(&resolved);
     if path.is_absolute() && path.exists() {
         Some(path.to_path_buf())
@@ -608,12 +610,12 @@ pub fn resolve_rg_binary(cache_dir: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
-/// Resolve config file paths from the cache directory.
+/// Resolve config file paths from the tool directory.
 ///
 /// Returns `(reel_config.nu, reel_env.nu)` as absolute `PathBuf`s, or `None`
-/// if the cache directory is unavailable or files don't exist.
-fn resolve_config_files(cache_dir: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
-    let dir = cache_dir?;
+/// if the tool directory is unavailable or files don't exist.
+fn resolve_config_files(tool_dir: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
+    let dir = tool_dir?;
     let config = dir.join("reel_config.nu");
     let env = dir.join("reel_env.nu");
     if config.exists() && env.exists() {
@@ -627,7 +629,7 @@ fn resolve_config_files(cache_dir: Option<&Path>) -> Option<(PathBuf, PathBuf)> 
 fn build_nu_sandbox_policy(
     project_root: &Path,
     grant: ToolGrant,
-    cache_dir: Option<&Path>,
+    tool_dir: Option<&Path>,
     session_temp_dir: &Path,
 ) -> lot::Result<lot::SandboxPolicy> {
     let mut builder = SandboxPolicyBuilder::new()
@@ -640,11 +642,11 @@ fn build_nu_sandbox_policy(
         builder = builder.read_path(project_root);
     }
 
-    // Grant exec access to the cache directory so nu can read config files
+    // Grant exec access to the tool directory so nu can read config files
     // and execute the rg binary from there. exec_path implies read on all
     // platforms (Linux: MS_RDONLY without MS_NOEXEC, macOS: file-read* +
     // process-exec, Windows: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE).
-    if let Some(dir) = cache_dir {
+    if let Some(dir) = tool_dir {
         builder = builder.exec_path(dir);
     }
 
@@ -655,13 +657,13 @@ fn build_nu_sandbox_policy(
 /// initialization handshake. The entire spawn + handshake runs on a blocking
 /// thread to avoid blocking the async runtime.
 ///
-/// If reel config files exist in the build cache, passes `--config` and
+/// If reel config files exist in the tool directory, passes `--config` and
 /// `--env-config` flags so reel custom commands (`reel read`, etc.) are
 /// available immediately without an evaluate preamble.
 async fn spawn_nu_process(
     project_root: &Path,
     grant: ToolGrant,
-    cache_dir: Option<&Path>,
+    tool_dir: Option<&Path>,
 ) -> Result<NuProcess, String> {
     // Validate project root exists before creating any directories under it.
     if !project_root.exists() {
@@ -682,12 +684,12 @@ async fn spawn_nu_process(
         .map_err(|e| format!("failed to create session temp dir: {e}"))?;
     let temp_parent_cleanup = TempParentCleanup(temp_base);
 
-    let policy = build_nu_sandbox_policy(project_root, grant, cache_dir, session_temp_dir.path())
+    let policy = build_nu_sandbox_policy(project_root, grant, tool_dir, session_temp_dir.path())
         .map_err(|e| format!("sandbox setup failed: {e}"))?;
 
-    let nu_binary = resolve_nu_binary(cache_dir);
-    let config_files = resolve_config_files(cache_dir);
-    let rg_binary = resolve_rg_binary(cache_dir);
+    let nu_binary = resolve_nu_binary(tool_dir);
+    let config_files = resolve_config_files(tool_dir);
+    let rg_binary = resolve_rg_binary(tool_dir);
     let project_root = project_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut cmd = SandboxCommand::new(&nu_binary);
@@ -811,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_write_grant() {
-        let (tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::WRITE | ToolGrant::READ);
+        let (tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::WRITE | ToolGrant::TOOLS);
         let canon = tmp.path().canonicalize().unwrap();
 
         let covered_by_write = policy
@@ -832,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_no_write_grant() {
-        let (tmp, sess_tmp, policy) = policy_test_fixture(ToolGrant::READ);
+        let (tmp, sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS);
         let canon = tmp.path().canonicalize().unwrap();
         let sess_canon = sess_tmp.path().canonicalize().unwrap();
 
@@ -854,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_denies_network_by_default() {
-        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ);
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS);
         assert!(
             !policy.allow_network,
             "network should be denied when NETWORK grant is absent"
@@ -863,7 +865,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_allows_network_with_grant() {
-        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ | ToolGrant::NETWORK);
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS | ToolGrant::NETWORK);
         assert!(
             policy.allow_network,
             "network should be allowed when NETWORK grant is present"
@@ -871,36 +873,36 @@ mod tests {
     }
 
     #[test]
-    fn test_build_nu_sandbox_policy_no_exec_paths_without_cache() {
-        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ);
+    fn test_build_nu_sandbox_policy_no_exec_paths_without_tool_dir() {
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS);
         assert!(
             policy.exec_paths.is_empty(),
-            "exec_paths should be empty when no cache dir provided"
+            "exec_paths should be empty when no tool dir provided"
         );
     }
 
     #[test]
-    fn test_build_nu_sandbox_policy_includes_cache_dir_exec() {
+    fn test_build_nu_sandbox_policy_includes_tool_dir_exec() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        // Cache dir outside test project root (tmp) to avoid exec/read overlap in policy.
-        let cache = tempfile::TempDir::new_in(sandbox_test_base()).unwrap();
+        // Tool dir outside test project root (tmp) to avoid exec/read overlap in policy.
+        let tool = tempfile::TempDir::new_in(sandbox_test_base()).unwrap();
         let policy = build_nu_sandbox_policy(
             tmp.path(),
-            ToolGrant::READ,
-            Some(cache.path()),
+            ToolGrant::TOOLS,
+            Some(tool.path()),
             sess_tmp.path(),
         )
         .unwrap();
 
-        let cache_canon = cache.path().canonicalize().unwrap();
-        let has_cache_exec = policy
+        let tool_canon = tool.path().canonicalize().unwrap();
+        let has_tool_exec = policy
             .exec_paths
             .iter()
-            .any(|p| p == &cache_canon || cache_canon.starts_with(p));
+            .any(|p| p == &tool_canon || tool_canon.starts_with(p));
         assert!(
-            has_cache_exec,
-            "sandbox should grant exec access to provided cache dir"
+            has_tool_exec,
+            "sandbox should grant exec access to provided tool dir"
         );
     }
 
@@ -943,14 +945,14 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_config_files_exist_when_cache_dir_set() {
+    fn test_resolve_config_files_exist_when_tool_dir_set() {
         // When NU_CACHE_DIR is set (normal build), config files should exist
         // because build.rs writes them.
-        let cache_dir = option_env!("NU_CACHE_DIR").map(Path::new);
-        if cache_dir.is_none() {
+        let tool_dir = option_env!("NU_CACHE_DIR").map(Path::new);
+        if tool_dir.is_none() {
             return; // Build didn't set NU_CACHE_DIR — skip.
         }
-        let result = resolve_config_files(cache_dir);
+        let result = resolve_config_files(tool_dir);
         assert!(
             result.is_some(),
             "config files should exist in NU_CACHE_DIR after build"
@@ -963,50 +965,50 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_config_files_none_without_cache() {
+    fn test_resolve_config_files_none_without_tool_dir() {
         assert!(resolve_config_files(None).is_none());
     }
 
     #[test]
-    fn test_resolve_cache_dir_from_prefers_exe_dir() {
+    fn test_resolve_tool_dir_from_prefers_exe_dir() {
         let exe_dir = tempfile::tempdir().unwrap();
         let compile_dir = tempfile::tempdir().unwrap();
         // Put sentinel in both dirs
         std::fs::write(exe_dir.path().join("reel_config.nu"), "").unwrap();
         std::fs::write(compile_dir.path().join("reel_config.nu"), "").unwrap();
-        let result = resolve_cache_dir_from(Some(exe_dir.path()), Some(compile_dir.path()));
+        let result = resolve_tool_dir_from(Some(exe_dir.path()), Some(compile_dir.path()));
         assert_eq!(result.as_deref(), Some(exe_dir.path()));
     }
 
     #[test]
-    fn test_resolve_cache_dir_from_falls_back_to_compile_time() {
+    fn test_resolve_tool_dir_from_falls_back_to_compile_time() {
         let compile_dir = tempfile::tempdir().unwrap();
         std::fs::write(compile_dir.path().join("reel_config.nu"), "").unwrap();
         // exe_dir is None
-        let result = resolve_cache_dir_from(None, Some(compile_dir.path()));
+        let result = resolve_tool_dir_from(None, Some(compile_dir.path()));
         assert_eq!(result.as_deref(), Some(compile_dir.path()));
     }
 
     #[test]
-    fn test_resolve_cache_dir_from_returns_none_when_no_config() {
+    fn test_resolve_tool_dir_from_returns_none_when_no_config() {
         let empty_dir = tempfile::tempdir().unwrap();
-        let result = resolve_cache_dir_from(Some(empty_dir.path()), Some(empty_dir.path()));
+        let result = resolve_tool_dir_from(Some(empty_dir.path()), Some(empty_dir.path()));
         assert_eq!(result, None);
     }
 
     #[test]
-    fn test_resolve_cache_dir_from_returns_none_when_no_dirs() {
-        let result = resolve_cache_dir_from(None, None);
+    fn test_resolve_tool_dir_from_returns_none_when_no_dirs() {
+        let result = resolve_tool_dir_from(None, None);
         assert_eq!(result, None);
     }
 
     #[test]
-    fn test_resolve_cache_dir_from_skips_exe_dir_without_config() {
+    fn test_resolve_tool_dir_from_skips_exe_dir_without_config() {
         let exe_dir = tempfile::tempdir().unwrap();
         let compile_dir = tempfile::tempdir().unwrap();
         // Only compile_dir has the sentinel file; exe_dir exists but lacks it.
         std::fs::write(compile_dir.path().join("reel_config.nu"), "").unwrap();
-        let result = resolve_cache_dir_from(Some(exe_dir.path()), Some(compile_dir.path()));
+        let result = resolve_tool_dir_from(Some(exe_dir.path()), Some(compile_dir.path()));
         assert_eq!(result.as_deref(), Some(compile_dir.path()));
     }
 
@@ -1125,8 +1127,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn bounded_reap_returns_true_on_immediate_exit() {
-        // Simulate a process that has already exited (try_wait errors).
+    fn bounded_reap_returns_true_on_error() {
+        // Simulate a try_wait error (e.g. no child process).
         let result = bounded_reap(
             || Err(io::Error::other("no child")),
             std::time::Duration::from_secs(1),
@@ -1249,43 +1251,42 @@ mod tests {
         tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox test dir")
     }
 
-    /// Create an isolated copy of the build-time nu-cache directory.
+    /// Create an isolated copy of the build-time tool directory.
     ///
-    /// Each sandbox test gets its own cache dir so AppContainer ACL
+    /// Each sandbox test gets its own tool dir so AppContainer ACL
     /// operations on exec_path do not interfere between concurrent tests.
-    fn tmp_sandbox_cache() -> tempfile::TempDir {
+    fn tmp_sandbox_tool_dir() -> tempfile::TempDir {
         #[allow(clippy::option_env_unwrap)] // Intentional: panic at test-time, not compile-time.
         let src = option_env!("NU_CACHE_DIR")
-            .expect("NU_CACHE_DIR not set at compile time — cannot create isolated sandbox cache");
-        let dest =
-            tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox cache dir");
-        for entry in std::fs::read_dir(src).expect("read cache dir") {
+            .expect("NU_CACHE_DIR not set at compile time — cannot create isolated tool dir");
+        let dest = tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox tool dir");
+        for entry in std::fs::read_dir(src).expect("read tool dir") {
             let entry = entry.expect("read dir entry");
             let path = entry.path();
             if path.is_file() {
                 std::fs::copy(&path, dest.path().join(path.file_name().unwrap()))
-                    .expect("copy cache file");
+                    .expect("copy tool file");
             }
         }
         dest
     }
 
-    /// Create a NuSession with an isolated copy of the build-time cache dir.
+    /// Create a NuSession with an isolated copy of the build-time tool dir.
     ///
-    /// Each test gets its own cache dir so concurrent AppContainer profiles
+    /// Each test gets its own tool dir so concurrent AppContainer profiles
     /// do not interfere via ACL grant/restore on a shared directory.
     /// The returned `TempDir` must be held alive for the test duration.
     ///
     /// This is the required entry point for tests that need a `NuSession`.
     /// Do **not** use `NuSession::new()` directly in tests — it bypasses
-    /// sandbox isolation and uses the shared (non-isolated) cache directory.
+    /// sandbox isolation and uses the shared (non-isolated) tool directory.
     fn isolated_session() -> (NuSession, tempfile::TempDir) {
-        let cache = tmp_sandbox_cache();
-        let session = NuSession::with_cache_dir(cache.path().to_path_buf());
-        (session, cache)
+        let tool = tmp_sandbox_tool_dir();
+        let session = NuSession::with_tool_dir(tool.path().to_path_buf());
+        (session, tool)
     }
 
-    /// Sandbox test environment with isolated project and cache directories.
+    /// Sandbox test environment with isolated project and tool directories.
     /// Field order matters: Rust drops fields in declaration order.
     /// `session` must drop first so the nu process is killed before
     /// the TempDirs try to delete nu.exe / rg.exe on Windows.
@@ -1297,15 +1298,15 @@ mod tests {
     struct SandboxTestEnv {
         session: NuSession,
         project: tempfile::TempDir,
-        _cache: tempfile::TempDir,
+        _tool: tempfile::TempDir,
     }
 
     fn sandbox_env() -> SandboxTestEnv {
         let project = tmp_sandbox_project();
-        let (session, cache) = isolated_session();
+        let (session, tool) = isolated_session();
         SandboxTestEnv {
             project,
-            _cache: cache,
+            _tool: tool,
             session,
         }
     }
@@ -1345,18 +1346,18 @@ mod tests {
     async fn integration_spawn_creates_session() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
     }
 
     #[tokio::test]
     async fn integration_spawn_is_idempotent() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
         // Second spawn with same params is a no-op.
-        session.spawn(tmp.path(), ToolGrant::READ).await.unwrap();
+        session.spawn(tmp.path(), ToolGrant::TOOLS).await.unwrap();
     }
 
     #[tokio::test]
@@ -1364,8 +1365,8 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         {
-            let (session, _cache) = isolated_session();
-            try_spawn(&session, tmp.path(), ToolGrant::READ).await;
+            let (session, _tool) = isolated_session();
+            try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
         }
         // No panic or zombie = pass.
     }
@@ -1374,10 +1375,10 @@ mod tests {
     async fn integration_kill_then_evaluate_respawns() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
         session.kill().await;
-        let result = try_eval(&session, "echo 'alive'", 30, tmp.path(), ToolGrant::READ).await;
+        let result = try_eval(&session, "echo 'alive'", 30, tmp.path(), ToolGrant::TOOLS).await;
         let out = result.unwrap();
         assert!(!out.is_error);
     }
@@ -1386,13 +1387,13 @@ mod tests {
     async fn integration_evaluate_simple_echo() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
+        let (session, _tool) = isolated_session();
         let result = try_eval(
             &session,
             "echo 'hello world'",
             30,
             tmp.path(),
-            ToolGrant::READ,
+            ToolGrant::TOOLS,
         )
         .await;
         let out = result.unwrap();
@@ -1404,13 +1405,13 @@ mod tests {
     async fn integration_evaluate_error_command() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
+        let (session, _tool) = isolated_session();
         let result = try_eval(
             &session,
             "error make { msg: 'test error' }",
             30,
             tmp.path(),
-            ToolGrant::READ,
+            ToolGrant::TOOLS,
         )
         .await;
         let out = result.unwrap();
@@ -1422,13 +1423,13 @@ mod tests {
     async fn integration_evaluate_multiple_sequential() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        let result = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        let result = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::TOOLS).await;
         let out1 = result.unwrap();
         assert!(!out1.is_error);
         assert!(out1.content.contains('3'));
         let out2 = session
-            .evaluate("'foo' | str length", 30, tmp.path(), ToolGrant::READ)
+            .evaluate("'foo' | str length", 30, tmp.path(), ToolGrant::TOOLS)
             .await
             .unwrap();
         assert!(!out2.is_error);
@@ -1443,7 +1444,7 @@ mod tests {
         let session = &env.session;
         let test_file = tmp.path().join("test.txt");
         std::fs::write(&test_file, "line one\nline two\n").unwrap();
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
         let cmd = format!("reel read '{}'", nu_path(&test_file));
         let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
@@ -1458,7 +1459,7 @@ mod tests {
         let tmp = &env.project;
         let session = &env.session;
         let test_file = tmp.path().join("written.txt");
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
         let cmd = format!("reel write '{}' 'hello from test'", nu_path(&test_file));
         let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
@@ -1475,7 +1476,7 @@ mod tests {
         let session = &env.session;
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         std::fs::write(tmp.path().join("b.txt"), "").unwrap();
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
         let cmd = format!("reel glob '*.txt' --path '{}'", nu_path(tmp.path()));
         let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
@@ -1492,7 +1493,7 @@ mod tests {
         let session = &env.session;
         let test_file = tmp.path().join("edit_me.txt");
         std::fs::write(&test_file, "old value here").unwrap();
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
         let cmd = format!(
             "reel edit '{}' 'old value' 'new value'",
             nu_path(&test_file)
@@ -1511,7 +1512,7 @@ mod tests {
         let tmp = &env.project;
         let session = &env.session;
         std::fs::write(tmp.path().join("searchable.txt"), "findme in this file\n").unwrap();
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
         let cmd = format!("reel grep 'findme' --path '{}'", nu_path(tmp.path()));
         let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
@@ -1523,8 +1524,8 @@ mod tests {
     async fn integration_timeout_kills_process() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        let result = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        let result = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::TOOLS).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("timed out"), "error: {err}");
@@ -1538,7 +1539,7 @@ mod tests {
             "echo 'recovered'",
             30,
             tmp.path(),
-            ToolGrant::READ,
+            ToolGrant::TOOLS,
         )
         .await;
         let out = result2.unwrap();
@@ -1550,8 +1551,8 @@ mod tests {
     async fn integration_grant_change_respawns() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        let result = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        let result = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::TOOLS).await;
         let out1 = result.unwrap();
         assert!(!out1.is_error);
         // Switch to write grant — triggers respawn.
@@ -1560,7 +1561,7 @@ mod tests {
             "echo 'rw'",
             30,
             tmp.path(),
-            ToolGrant::READ | ToolGrant::WRITE,
+            ToolGrant::TOOLS | ToolGrant::WRITE,
         )
         .await;
         let out2 = result2.unwrap();
@@ -1571,8 +1572,8 @@ mod tests {
     async fn integration_generation_prevents_stale_writeback() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
         let gen_before = {
             let st = session.state.lock().await;
             st.generation
@@ -1597,12 +1598,12 @@ mod tests {
         skip_no_nu!();
         let tmp1 = tmp_sandbox_project();
         let tmp2 = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        let result1 = try_eval(&session, "echo 'root1'", 30, tmp1.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        let result1 = try_eval(&session, "echo 'root1'", 30, tmp1.path(), ToolGrant::TOOLS).await;
         assert!(!result1.unwrap().is_error);
         let gen1 = session.state.lock().await.generation;
         // Switch project root — triggers respawn.
-        let result2 = try_eval(&session, "echo 'root2'", 30, tmp2.path(), ToolGrant::READ).await;
+        let result2 = try_eval(&session, "echo 'root2'", 30, tmp2.path(), ToolGrant::TOOLS).await;
         assert!(!result2.unwrap().is_error);
         let gen2 = session.state.lock().await.generation;
         assert!(gen2 > gen1, "generation should increase on respawn");
@@ -1613,8 +1614,8 @@ mod tests {
         // Adding NETWORK grant triggers respawn (issue #38).
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        let result1 = try_eval(&session, "echo 'no-net'", 30, tmp.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        let result1 = try_eval(&session, "echo 'no-net'", 30, tmp.path(), ToolGrant::TOOLS).await;
         assert!(!result1.unwrap().is_error);
         let gen1 = session.state.lock().await.generation;
         // Switch to NETWORK grant — triggers respawn.
@@ -1623,7 +1624,7 @@ mod tests {
             "echo 'with-net'",
             30,
             tmp.path(),
-            ToolGrant::READ | ToolGrant::NETWORK,
+            ToolGrant::TOOLS | ToolGrant::NETWORK,
         )
         .await;
         assert!(!result2.unwrap().is_error);
@@ -1643,9 +1644,9 @@ mod tests {
         // under concurrent access (issue #44).
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
+        let (session, _tool) = isolated_session();
         let root = tmp.path().to_path_buf();
-        let grant = ToolGrant::READ;
+        let grant = ToolGrant::TOOLS;
         // Pre-spawn so the fast path is available for the first caller.
         try_spawn(&session, &root, grant).await;
 
@@ -1664,12 +1665,12 @@ mod tests {
         // sees the mismatch and discards the process (issue #46).
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _cache) = isolated_session();
-        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
+        let (session, _tool) = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
 
         let root = tmp.path().to_path_buf();
         let (eval_result, ()) = tokio::join!(
-            session.evaluate("sleep 1sec; echo 'done'", 30, &root, ToolGrant::READ),
+            session.evaluate("sleep 1sec; echo 'done'", 30, &root, ToolGrant::TOOLS),
             async {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 session.kill().await;
@@ -1691,8 +1692,8 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         std::fs::write(tmp.path().join("needle.txt"), "haystack\n").unwrap();
-        let (session, _cache) = isolated_session();
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let (session, _tool) = isolated_session();
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
         // Use REEL_RG_PATH (absolute path) instead of bare `^rg`. NuShell's
         // PATH-based command lookup fails under AppContainer on Windows.
         let cmd = format!(
@@ -1712,7 +1713,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // Sandbox policy verification
     //
-    // Each test uses sandbox_env() for isolated project and cache dirs,
+    // Each test uses sandbox_env() for isolated project and tool dirs,
     // eliminating shared state between concurrent tests.
     // -----------------------------------------------------------------------
 
@@ -1726,8 +1727,8 @@ mod tests {
         let session = &env.session;
         // Seed a file so we can also test overwrite prevention.
         std::fs::write(tmp.path().join("existing.txt"), "original").unwrap();
-        // READ without WRITE — sandbox uses read_path for project root.
-        let grant = ToolGrant::READ;
+        // TOOLS without WRITE — sandbox uses read_path for project root.
+        let grant = ToolGrant::TOOLS;
 
         // Attempt 1: create a new file inside the read-only project root.
         let write_cmd = format!(
@@ -1855,7 +1856,7 @@ mod tests {
         let tmp = &env.project;
         let session = &env.session;
         std::fs::write(tmp.path().join("source.txt"), "immutable content").unwrap();
-        let grant = ToolGrant::READ;
+        let grant = ToolGrant::TOOLS;
 
         // Copy to a temp file, modify it, then attempt to write back.
         // This is the pivot attack: use temp dir write access to stage a
@@ -1921,7 +1922,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
 
         let write_cmd = format!(
             "'hello' | save '{}'",
@@ -1960,8 +1961,8 @@ mod tests {
         // binary is present and functional, isolating AppContainer as the
         // cause when rg fails inside the sandbox.
         skip_no_nu!();
-        let cache_dir = option_env!("NU_CACHE_DIR").map(std::path::Path::new);
-        let Some(rg_binary) = resolve_rg_binary(cache_dir) else {
+        let tool_dir = option_env!("NU_CACHE_DIR").map(std::path::Path::new);
+        let Some(rg_binary) = resolve_rg_binary(tool_dir) else {
             eprintln!("skipping: rg binary not found");
             return;
         };
@@ -1995,9 +1996,9 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::READ;
+        let grant = ToolGrant::TOOLS;
 
-        let cache_path = env._cache.path().to_path_buf();
+        let tool_path = env._tool.path().to_path_buf();
 
         // Trigger session spawn (applies sandbox ACLs via lot).
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
@@ -2005,7 +2006,7 @@ mod tests {
 
         // Verify rg binary has the AppContainer ACL (RX) via inheritance.
         let rg_name = if cfg!(windows) { "rg.exe" } else { "rg" };
-        let rg_exe = cache_path.join(rg_name);
+        let rg_exe = tool_path.join(rg_name);
         if cfg!(windows) {
             let output = std::process::Command::new("icacls")
                 .arg(rg_exe.as_os_str())
@@ -2049,19 +2050,19 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::READ;
+        let grant = ToolGrant::TOOLS;
 
-        let cache_path = env._cache.path().to_path_buf();
+        let tool_path = env._tool.path().to_path_buf();
 
         // Trigger session spawn.
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
         let _ = init.unwrap();
 
         let rg_name = if cfg!(windows) { "rg.exe" } else { "rg" };
-        let rg_exe = cache_path.join(rg_name);
+        let rg_exe = tool_path.join(rg_name);
 
-        // Test 1: Can nu stat the rg binary? Use ls on the cache directory.
-        let read_cmd = format!("ls '{}' | length", nu_path(&cache_path));
+        // Test 1: Can nu stat the rg binary? Use ls on the tool directory.
+        let read_cmd = format!("ls '{}' | length", nu_path(&tool_path));
         let read_result = try_eval(session, &read_cmd, 30, tmp.path(), grant).await;
         let read_out = read_result.unwrap();
         eprintln!(
@@ -2142,23 +2143,23 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::READ;
+        let grant = ToolGrant::TOOLS;
 
-        let cache_path = env._cache.path().to_path_buf();
+        let tool_path = env._tool.path().to_path_buf();
 
         // Trigger session spawn (applies sandbox ACLs via lot).
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
         let _ = init.unwrap();
 
         let rg_name = if cfg!(windows) { "rg.exe" } else { "rg" };
-        let rg_exe = cache_path.join(rg_name);
+        let rg_exe = tool_path.join(rg_name);
 
-        // Test 1: Can nu LIST the cache directory (proves directory traversal)?
-        let ls_cmd = format!("ls '{}' | length", nu_path(&cache_path));
+        // Test 1: Can nu LIST the tool directory (proves directory traversal)?
+        let ls_cmd = format!("ls '{}' | length", nu_path(&tool_path));
         let ls_result = try_eval(session, &ls_cmd, 30, tmp.path(), grant).await;
         let ls_out = ls_result.unwrap();
         eprintln!(
-            "ls cache dir: is_error={}, content={}",
+            "ls tool dir: is_error={}, content={}",
             ls_out.is_error, ls_out.content
         );
 
@@ -2207,7 +2208,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
 
         let test_file = tmp.path().join("e2e_read.txt");
         std::fs::write(&test_file, "line1\nline2\nline3\n").unwrap();
@@ -2242,7 +2243,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
 
         try_spawn(session, tmp.path(), grant).await;
 
@@ -2273,7 +2274,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::READ | ToolGrant::WRITE;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
 
         std::fs::write(tmp.path().join("a.rs"), "").unwrap();
         std::fs::write(tmp.path().join("b.rs"), "").unwrap();
@@ -2305,7 +2306,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::READ;
+        let grant = ToolGrant::TOOLS;
 
         try_spawn(session, tmp.path(), grant).await;
 
@@ -2338,7 +2339,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::READ; // no WRITE
+        let grant = ToolGrant::TOOLS; // no WRITE
 
         try_spawn(session, tmp.path(), grant).await;
 
@@ -2433,8 +2434,8 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        // READ only — no NETWORK grant.
-        let grant = ToolGrant::READ;
+        // TOOLS only — no NETWORK grant.
+        let grant = ToolGrant::TOOLS;
 
         try_spawn(session, tmp.path(), grant).await;
 
@@ -2490,8 +2491,8 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        // READ + NETWORK grant.
-        let grant = ToolGrant::READ | ToolGrant::NETWORK;
+        // TOOLS + NETWORK grant.
+        let grant = ToolGrant::TOOLS | ToolGrant::NETWORK;
 
         try_spawn(session, tmp.path(), grant).await;
 

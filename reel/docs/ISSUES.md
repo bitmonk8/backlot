@@ -22,17 +22,13 @@ Lost errors make debugging hard for all consumers.
 
 `reel/src/lib.rs` — `pub use nu_session::NuSession` is part of the public API but no consumer uses it directly. Consider removing after API stabilization. **Category: Placement.**
 
-## 3. Agent run result and timeout tests (#6, #13, #53, #54)
+## 3. Agent run result and timeout tests (#6, #13, #53)
 
 Test gaps on `Agent::run()` return value propagation, timeout, and tool-call-cap boundary behavior.
 
 ### 53. No boundary test for `MAX_TOOL_CALLS` (exactly 200 succeeds)
 
 `reel/src/agent.rs` — The cap check uses `> MAX_TOOL_CALLS` (strictly greater). No test verifies that exactly 200 tool calls succeeds. Would catch off-by-one if `>` changes to `>=`. **Category: Testing.**
-
-### 54. Test name `run_with_tools_counts_multi_tool_rounds` is misleading
-
-`reel/src/agent.rs` — The test verifies multi-call counting within a single round, not across multiple rounds. Rename to `run_with_tools_counts_multi_calls_in_round`. **Category: Naming.**
 
 ### 6. No test for timeout during resume (tool loop) phase
 
@@ -106,17 +102,13 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/agent.rs` — `dispatch_tool` previously used linear scan (first match wins). The `HashMap<String, usize>` built via `collect()` keeps the last entry for duplicate keys. No practical impact: duplicate custom tool names are not a supported scenario, and `build_request_config` rejects duplicate names against built-ins. **Category: Testing.**
 
-## 9. Grant model refinements (#51, #52)
+## 9. Grant model refinements (#52)
 
-### 51. `ToolGrant::READ` understates the flag's scope
+### 52. `WRITE`/`NETWORK` → `TOOLS` implication not enforced at type level
 
-`reel/src/tools.rs` — `READ` enables NuShell (arbitrary command execution) and the read-only built-in tools. The name suggests read-only access but actually enables command execution. A name like `TOOLS` would describe the scope better. **Category: Naming.**
+`reel/src/tools.rs` — The implication (WRITE implies TOOLS, NETWORK implies TOOLS) is enforced only in `from_names`. Library consumers constructing `ToolGrant` directly via bitflags can create bare `WRITE` without `TOOLS`, which silently produces zero tool definitions. `tool_definitions` and `required_grant` defensively check `WRITE | TOOLS` together, duplicating the invariant. Consider a normalizing constructor or custom `BitOr` to enforce at the type level. **Category: Separation of concerns.**
 
-### 52. `WRITE`/`NETWORK` → `READ` implication not enforced at type level
-
-`reel/src/tools.rs` — The implication (WRITE implies READ, NETWORK implies READ) is enforced only in `from_names`. Library consumers constructing `ToolGrant` directly via bitflags can create bare `WRITE` without `READ`, which silently produces zero tool definitions. `tool_definitions` and `required_grant` defensively check `WRITE | READ` together, duplicating the invariant. Consider a normalizing constructor or custom `BitOr` to enforce at the type level. **Category: Separation of concerns.**
-
-## 10. NuSession minor refinements (#55, #56, #57, #58, #59)
+## 10. NuSession minor refinements (#55, #56, #57, #58, #60)
 
 ### 55. `ensure_and_take` inflight registration duplicated 3x
 
@@ -134,21 +126,11 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/nu_session.rs` — All `bounded_reap` tests use `Err(...)` or `Ok(None)`. The `Ok(Some(status))` path (normal exit) is covered by the wildcard arm but has no dedicated test. **Category: Testing.**
 
-### 59. `bounded_reap` test name `bounded_reap_returns_true_on_immediate_exit` misleading
-
-`reel/src/nu_session.rs` — The test passes an `Err` to simulate exit, not an actual `Ok(Some(ExitStatus))`. Name implies a clean exit. **Category: Naming.**
-
 ### 60. Singleton `inflight_child`/`inflight_stdin` fields cannot track concurrent callers
 
 `reel/src/nu_session.rs` — `SessionState` has single `inflight_child` and `inflight_stdin` fields. If two concurrent `evaluate` calls are in Phase 2 (blocking I/O), the second caller's `ensure_and_take` overwrites the first caller's handles. A `kill()` during this window only reaches the second caller's child; the first is unreachable. Not triggered today (agent turns are sequential; the concurrent test runs on single-threaded tokio). Would matter if true multi-threaded concurrent evaluate is ever supported. **Category: Correctness.**
 
-## 11. Cache directory naming (#61)
-
-### 61. `cache_dir` field and `resolve_cache_dir` name understates the directory's role
-
-`reel/src/nu_session.rs` — The `cache_dir` field and `resolve_cache_dir` function resolve the directory containing the nu binary, rg binary, and config files. This is a tool/asset directory, not a cache in the conventional sense. Names like `tool_dir` / `resolve_tool_dir` would better reflect the role. Inherited from the build-system name `nu-cache` / `NU_CACHE_DIR`. A rename would touch the field, function, all callers, tests, and docs. **Category: Naming.**
-
-## 12. Network test helpers (#65, #66, #67)
+## 11. Network test helpers (#65, #66, #67)
 
 ### 65. `looks_like_sandbox_denial` keywords are broad
 

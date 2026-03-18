@@ -730,7 +730,7 @@ mod tests {
             }),
         );
         let mut request = test_request();
-        request.grant = ToolGrant::READ;
+        request.grant = ToolGrant::TOOLS;
         let result: anyhow::Result<RunResult<serde_json::Value>> =
             agent.run(&request, "test").await;
         assert!(result.is_ok());
@@ -803,7 +803,7 @@ mod tests {
             }),
         );
         let mut request = test_request();
-        request.grant = ToolGrant::READ;
+        request.grant = ToolGrant::TOOLS;
         let result: anyhow::Result<RunResult<serde_json::Value>> =
             agent.run(&request, "test").await;
         let err = result.unwrap_err();
@@ -966,7 +966,7 @@ mod tests {
         );
 
         let mut request = test_request();
-        request.grant = ToolGrant::READ;
+        request.grant = ToolGrant::TOOLS;
         request.custom_tools = vec![Box::new(handler)];
 
         let result: anyhow::Result<RunResult<serde_json::Value>> =
@@ -983,7 +983,7 @@ mod tests {
         let handler = MockToolHandler::new("Read", "custom read override");
 
         let mut request = test_request();
-        request.grant = ToolGrant::READ;
+        request.grant = ToolGrant::TOOLS;
         request.custom_tools = vec![Box::new(handler)];
 
         let result = Agent::build_request_config(&request);
@@ -1007,7 +1007,7 @@ mod tests {
         );
 
         let mut request = test_request();
-        request.grant = ToolGrant::READ;
+        request.grant = ToolGrant::TOOLS;
         // No custom tools — "Read" call goes to built-in executor.
         request.custom_tools = Vec::new();
 
@@ -1021,7 +1021,7 @@ mod tests {
     async fn custom_tool_definitions_included_in_config() {
         let handler = MockToolHandler::new("SpecialTool", "result");
         let mut request = test_request();
-        request.grant = ToolGrant::READ;
+        request.grant = ToolGrant::TOOLS;
         request.custom_tools = vec![Box::new(handler)];
 
         let config = Agent::build_request_config(&request).unwrap();
@@ -1080,7 +1080,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn run_with_tools_counts_multi_tool_rounds() {
+    async fn run_with_tools_counts_multi_calls_in_round() {
         let tool_calls_counter = Arc::new(AtomicU32::new(0));
         let agent = test_agent(
             mock_client_factory(|| {
@@ -1122,7 +1122,7 @@ mod tests {
             }),
         );
         let mut request = test_request();
-        request.grant = ToolGrant::READ;
+        request.grant = ToolGrant::TOOLS;
         let result: anyhow::Result<RunResult<serde_json::Value>> =
             agent.run(&request, "test").await;
         assert!(result.is_ok());
@@ -1205,7 +1205,7 @@ mod tests {
             }),
         );
         let mut request = test_request();
-        request.grant = ToolGrant::READ;
+        request.grant = ToolGrant::TOOLS;
         let result: anyhow::Result<RunResult<serde_json::Value>> =
             agent.run(&request, "test").await;
         let err = result.unwrap_err();
