@@ -180,9 +180,12 @@ platform defaults.
 ### Per-session Temp Directory
 
 Each `NuSession` creates `<project_root>/.reel/tmp/<uuid>/` as the session temp
-directory. This is added to write_paths and set as `TEMP`/`TMP` in the nu
-environment. The temp directory is cleaned up when the session is dropped. The
-parent `.reel/tmp/` directory is left behind (known issue #29).
+directory. This keeps the temp dir under the project root so that AppContainer
+ancestor-traversal ACEs (granted by `reel setup`) cover the path on Windows.
+The temp directory is added to write_paths and set as `TEMP`/`TMP` in the nu
+environment. The `SessionTempDir` wrapper cleans up the per-session directory on
+drop, and also removes the empty `.reel/tmp/` and `.reel/` parent directories
+if no other session is using them.
 
 ### Grant-change Respawn
 

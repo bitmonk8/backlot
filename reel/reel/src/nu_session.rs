@@ -90,6 +90,24 @@ struct NuProcess {
     /// Per-session temp directory under `<project_root>/.reel/tmp/`.
     /// Dropped (and cleaned up) when the process is dropped.
     _session_temp_dir: tempfile::TempDir,
+    /// Cleans up the empty `.reel/tmp/` and `.reel/` parents after the
+    /// session temp dir is deleted. Must be declared after `_session_temp_dir`.
+    _temp_parent_cleanup: TempParentCleanup,
+}
+
+/// Cleanup handle that removes the empty `.reel/tmp/` and `.reel/` parent
+/// directories after the session temp dir has been deleted. Must be declared
+/// *after* `_session_temp_dir` in `NuProcess` so it drops second (Rust drops
+/// fields in declaration order).
+struct TempParentCleanup(PathBuf);
+
+impl Drop for TempParentCleanup {
+    fn drop(&mut self) {
+        // Try removing the empty parent chain (.reel/tmp/, then .reel/).
+        // Fails silently if non-empty or if another session still uses it.
+        let _ = std::fs::remove_dir(&self.0);
+        let _ = self.0.parent().map(std::fs::remove_dir);
+    }
 }
 
 impl NuProcess {
@@ -511,13 +529,18 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
 ///    `build.rs`. Valid during development; goes stale if the binary is relocated.
 /// 3. `None` — no cache directory found.
 fn resolve_cache_dir() -> Option<PathBuf> {
-    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
     let compile_time_dir = option_env!("NU_CACHE_DIR").map(Path::new);
     resolve_cache_dir_from(exe_dir.as_deref(), compile_time_dir)
 }
 
 /// Testable inner function for [`resolve_cache_dir`].
-fn resolve_cache_dir_from(exe_dir: Option<&Path>, compile_time_dir: Option<&Path>) -> Option<PathBuf> {
+fn resolve_cache_dir_from(
+    exe_dir: Option<&Path>,
+    compile_time_dir: Option<&Path>,
+) -> Option<PathBuf> {
     if let Some(dir) = exe_dir {
         if dir.join("reel_config.nu").exists() {
             return Some(dir.to_path_buf());
@@ -640,15 +663,16 @@ async fn spawn_nu_process(
         ));
     }
 
-    // Create a per-session temp directory under <project_root>/.reel/tmp/ so
-    // that all ancestor directories match those already granted traverse ACEs
-    // by the consumer's setup command. This avoids the nu_glob ancestor
-    // traversal failures that occur when temp dirs live under system %TEMP%.
+    // Per-session temp directory under <project_root>/.reel/tmp/ so that
+    // all ancestor directories match those already granted traverse ACEs
+    // by the consumer's setup command (required for Windows AppContainer).
+    // TempParentCleanup removes the empty parents on drop.
     let temp_base = project_root.join(".reel").join("tmp");
     std::fs::create_dir_all(&temp_base)
         .map_err(|e| format!("failed to create session temp base: {e}"))?;
     let session_temp_dir = tempfile::TempDir::new_in(&temp_base)
         .map_err(|e| format!("failed to create session temp dir: {e}"))?;
+    let temp_parent_cleanup = TempParentCleanup(temp_base);
 
     let policy = build_nu_sandbox_policy(project_root, grant, cache_dir, session_temp_dir.path())
         .map_err(|e| format!("sandbox setup failed: {e}"))?;
@@ -675,8 +699,8 @@ async fn spawn_nu_process(
         cmd.stdin(SandboxStdio::Piped);
         // Override TEMP/TMP before forward_common_env — explicit env takes
         // precedence over forwarded values. This redirects nu's temp I/O to
-        // the per-session dir under the project root, avoiding ancestor
-        // traversal failures in AppContainer.
+        // the per-session dir under the project root, keeping it within the
+        // sandbox write policy.
         cmd.env("TEMP", session_temp_dir.path());
         cmd.env("TMP", session_temp_dir.path());
         cmd.forward_common_env();
@@ -705,6 +729,7 @@ async fn spawn_nu_process(
             project_root,
             child_handle,
             _session_temp_dir: session_temp_dir,
+            _temp_parent_cleanup: temp_parent_cleanup,
         };
 
         // MCP initialization handshake.
@@ -769,18 +794,16 @@ mod tests {
     /// Returns `(project_tmp, session_tmp, policy)`.
     fn policy_test_fixture(
         grant: ToolGrant,
-        cache: Option<&Path>,
     ) -> (tempfile::TempDir, tempfile::TempDir, lot::SandboxPolicy) {
         let tmp = tempfile::TempDir::new().unwrap();
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), grant, cache, sess_tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(tmp.path(), grant, None, sess_tmp.path()).unwrap();
         (tmp, sess_tmp, policy)
     }
 
     #[test]
     fn test_build_nu_sandbox_policy_write_grant() {
-        let (tmp, _sess_tmp, policy) =
-            policy_test_fixture(ToolGrant::WRITE | ToolGrant::READ, None);
+        let (tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::WRITE | ToolGrant::READ);
         let canon = tmp.path().canonicalize().unwrap();
 
         let covered_by_write = policy
@@ -801,7 +824,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_no_write_grant() {
-        let (tmp, sess_tmp, policy) = policy_test_fixture(ToolGrant::READ, None);
+        let (tmp, sess_tmp, policy) = policy_test_fixture(ToolGrant::READ);
         let canon = tmp.path().canonicalize().unwrap();
         let sess_canon = sess_tmp.path().canonicalize().unwrap();
 
@@ -823,7 +846,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_denies_network_by_default() {
-        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ, None);
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ);
         assert!(
             !policy.allow_network,
             "network should be denied when NETWORK grant is absent"
@@ -832,8 +855,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_allows_network_with_grant() {
-        let (_tmp, _sess_tmp, policy) =
-            policy_test_fixture(ToolGrant::READ | ToolGrant::NETWORK, None);
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ | ToolGrant::NETWORK);
         assert!(
             policy.allow_network,
             "network should be allowed when NETWORK grant is present"
@@ -842,7 +864,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_no_exec_paths_without_cache() {
-        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ, None);
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ);
         assert!(
             policy.exec_paths.is_empty(),
             "exec_paths should be empty when no cache dir provided"
@@ -871,6 +893,44 @@ mod tests {
         assert!(
             has_cache_exec,
             "sandbox should grant exec access to provided cache dir"
+        );
+    }
+
+    #[test]
+    fn test_temp_parent_cleanup_removes_empty_parents() {
+        // TempParentCleanup should remove the empty .reel/tmp/ and .reel/
+        // parent directories when dropped after the TempDir.
+        let project = tempfile::TempDir::new().unwrap();
+        let temp_base = project.path().join(".reel").join("tmp");
+        std::fs::create_dir_all(&temp_base).unwrap();
+        let inner = tempfile::TempDir::new_in(&temp_base).unwrap();
+        let cleanup = TempParentCleanup(temp_base);
+        assert!(project.path().join(".reel").join("tmp").exists());
+        // Drop the TempDir first (matches NuProcess field order), then cleanup.
+        drop(inner);
+        drop(cleanup);
+        assert!(
+            !project.path().join(".reel").exists(),
+            ".reel/ should be cleaned up after temp dir and cleanup are dropped"
+        );
+    }
+
+    #[test]
+    fn test_temp_parent_cleanup_preserves_nonempty_parent() {
+        // When another session still has a temp dir under .reel/tmp/,
+        // TempParentCleanup should NOT remove the parent.
+        let project = tempfile::TempDir::new().unwrap();
+        let temp_base = project.path().join(".reel").join("tmp");
+        std::fs::create_dir_all(&temp_base).unwrap();
+        let inner1 = tempfile::TempDir::new_in(&temp_base).unwrap();
+        let _inner2 = tempfile::TempDir::new_in(&temp_base).unwrap();
+        let cleanup1 = TempParentCleanup(temp_base);
+        drop(inner1);
+        drop(cleanup1);
+        // .reel/tmp/ should still exist because _inner2 is still alive.
+        assert!(
+            project.path().join(".reel").join("tmp").exists(),
+            ".reel/tmp/ should be preserved while a sibling session exists"
         );
     }
 
