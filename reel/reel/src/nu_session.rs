@@ -98,6 +98,26 @@ impl NuProcess {
     }
 }
 
+/// Poll `try_wait` in a loop until the child exits or the timeout is reached.
+/// Returns `true` if the child exited (or `try_wait` errored), `false` on timeout.
+fn bounded_reap(
+    mut try_wait: impl FnMut() -> io::Result<Option<std::process::ExitStatus>>,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match try_wait() {
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => return true,
+        }
+    }
+}
+
 impl Drop for NuProcess {
     fn drop(&mut self) {
         let mut guard = self
@@ -110,17 +130,7 @@ impl Drop for NuProcess {
             // handles before _session_temp_dir is dropped (on Windows, open
             // handles prevent directory deletion). If kill() failed silently,
             // we must not block forever.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while matches!(child.try_wait(), Ok(None)) {
-                if std::time::Instant::now() >= deadline {
-                    eprintln!(
-                        "warning: nu process did not exit within 5s after kill, \
-                         abandoning wait"
-                    );
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
+            bounded_reap(|| child.try_wait(), std::time::Duration::from_secs(5));
         }
     }
 }
@@ -192,45 +202,83 @@ impl NuSession {
     /// If a process already exists but was spawned with different grant or
     /// project_root, kills the old one and spawns a replacement.
     pub async fn spawn(&self, project_root: &Path, grant: ToolGrant) -> Result<(), String> {
-        self.ensure_process(project_root, grant).await
+        let (proc, generation) = self.ensure_and_take(project_root, grant).await?;
+        // Put the process back — spawn() warms the process, doesn't consume it.
+        let mut st = self.state.lock().await;
+        st.inflight_child = None;
+        st.inflight_stdin = None;
+        if st.generation == generation {
+            st.process = Some(proc);
+        }
+        // else: kill() fired during spawn — discard (NuProcess::Drop kills it).
+        Ok(())
     }
 
-    /// Ensure a compatible process is running, spawning one if needed.
+    /// Ensure a compatible process exists, take it out of state, and register
+    /// inflight handles — all under a single lock cycle when possible.
     ///
-    /// Releases the async mutex before the potentially-blocking
-    /// `spawn_nu_process` call so `kill()` is not blocked. On
-    /// re-acquisition, re-checks both compatibility and generation to
-    /// discard the new process if another caller won the race or
-    /// `kill()` fired during the spawn.
-    async fn ensure_process(&self, project_root: &Path, grant: ToolGrant) -> Result<(), String> {
-        let (needs_spawn, gen_before) = {
-            let st = self.state.lock().await;
-            let needs = st
+    /// Returns the process and the generation at take-time. The fast path
+    /// takes an existing compatible process under one lock. The slow path
+    /// releases the lock to spawn, then re-acquires to install and take.
+    async fn ensure_and_take(
+        &self,
+        project_root: &Path,
+        grant: ToolGrant,
+    ) -> Result<(NuProcess, u64), String> {
+        // Fast path: compatible process already exists — take under one lock.
+        //
+        // Two-step check: borrow to test compatibility, then take. The borrow
+        // is released before take() so there is no aliasing. The process
+        // cannot disappear between check and take because we hold the lock.
+        {
+            let mut st = self.state.lock().await;
+            let dominated = st
                 .process
                 .as_ref()
-                .is_none_or(|p| !p.is_compatible(project_root, grant));
-            (needs, st.generation)
-        };
-        if !needs_spawn {
-            return Ok(());
+                .is_some_and(|p| p.is_compatible(project_root, grant));
+            if dominated {
+                if let Some(proc) = st.process.take() {
+                    st.inflight_child = Some(Arc::clone(&proc.child_handle));
+                    st.inflight_stdin = Some(Arc::clone(&proc.stdin));
+                    return Ok((proc, st.generation));
+                }
+            }
         }
-        let proc = spawn_nu_process(project_root, grant, self.cache_dir.as_deref()).await?;
-        let mut st = self.state.lock().await;
-        // Discard if kill() fired while we were outside the lock.
-        if st.generation != gen_before {
-            return Ok(()); // proc dropped, NuProcess::Drop kills it
-        }
-        // Re-check: another caller may have installed a compatible process.
-        let still_needs = st
-            .process
-            .as_ref()
-            .is_none_or(|p| !p.is_compatible(project_root, grant));
-        if still_needs {
+        // Slow path: spawn a new process outside the lock.
+        // Bounded to 3 retries to prevent unbounded process spawning if
+        // concurrent kill() calls keep bumping the generation.
+        for _attempt in 0..3 {
+            let gen_before = self.state.lock().await.generation;
+            let new_proc = spawn_nu_process(project_root, grant, self.cache_dir.as_deref()).await?;
+
+            let mut st = self.state.lock().await;
+            if st.generation != gen_before {
+                // State changed during spawn (kill or concurrent spawner).
+                // Check if a compatible process is now available.
+                let compatible = st
+                    .process
+                    .as_ref()
+                    .is_some_and(|p| p.is_compatible(project_root, grant));
+                if compatible {
+                    // new_proc dropped after st (lock released first).
+                    if let Some(proc) = st.process.take() {
+                        st.inflight_child = Some(Arc::clone(&proc.child_handle));
+                        st.inflight_stdin = Some(Arc::clone(&proc.stdin));
+                        return Ok((proc, st.generation));
+                    }
+                }
+                // No compatible process available — retry.
+                // new_proc dropped after st (lock released first).
+                continue;
+            }
+            // Install: drop old process (if any), take new one directly.
+            st.process = None;
             st.generation += 1;
-            drop(st.process.replace(proc));
+            st.inflight_child = Some(Arc::clone(&new_proc.child_handle));
+            st.inflight_stdin = Some(Arc::clone(&new_proc.stdin));
+            return Ok((new_proc, st.generation));
         }
-        // else: proc dropped here, NuProcess::Drop kills it
-        Ok(())
+        Err("failed to acquire nu process after 3 attempts (session state kept changing)".into())
     }
 
     /// Execute a `NuShell` command via the MCP `evaluate` tool.
@@ -309,21 +357,8 @@ impl NuSession {
         project_root: &Path,
         grant: ToolGrant,
     ) -> Result<NuOutput, String> {
-        // Phase 1: Ensure a compatible process is running.
-        self.ensure_process(project_root, grant).await?;
-
-        // Phase 1b: Take the process out and register inflight handles.
-        let (proc, generation_at_start) = {
-            let mut st = self.state.lock().await;
-            let proc = st
-                .process
-                .take()
-                .ok_or("internal: process unavailable after spawn")?;
-            st.inflight_child = Some(Arc::clone(&proc.child_handle));
-            st.inflight_stdin = Some(Arc::clone(&proc.stdin));
-            let generation = st.generation;
-            (proc, generation)
-        };
+        // Phase 1: Atomically ensure a compatible process and take it out.
+        let (proc, generation_at_start) = self.ensure_and_take(project_root, grant).await?;
         // Lock released — blocking I/O below does not hold the async mutex,
         // allowing timeout + kill() to work. kill() can reach the child via
         // inflight_child and close stdin via inflight_stdin to unblock the
@@ -944,6 +979,51 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // bounded_reap tests (issue #43)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bounded_reap_returns_true_on_immediate_exit() {
+        // Simulate a process that has already exited (try_wait errors).
+        let result = bounded_reap(
+            || Err(io::Error::other("no child")),
+            std::time::Duration::from_secs(1),
+        );
+        assert!(result);
+    }
+
+    #[test]
+    fn bounded_reap_returns_false_on_timeout() {
+        let result = bounded_reap(
+            || Ok(None), // never exits
+            std::time::Duration::from_millis(200),
+        );
+        assert!(!result);
+    }
+
+    #[test]
+    fn bounded_reap_returns_true_after_delayed_exit() {
+        let start = std::time::Instant::now();
+        let mut calls = 0u32;
+        let result = bounded_reap(
+            || {
+                calls += 1;
+                if calls >= 3 {
+                    // Simulate exit after a few polls.
+                    Err(io::Error::other("exited"))
+                } else {
+                    Ok(None)
+                }
+            },
+            std::time::Duration::from_secs(5),
+        );
+        assert!(result);
+        assert!(calls >= 3);
+        // Should have taken at least ~100ms (2 sleeps of 50ms).
+        assert!(start.elapsed() >= std::time::Duration::from_millis(80));
+    }
+
+    // -----------------------------------------------------------------------
     // Generation-based session invalidation tests
     // -----------------------------------------------------------------------
 
@@ -1298,6 +1378,10 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("timed out"), "error: {err}");
+        // Small delay so Windows can tear down the killed AppContainer
+        // process before respawn (issue #50: flaky on Windows CI).
+        #[cfg(target_os = "windows")]
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         // Session recovers after timeout.
         let result2 = try_eval(
             &session,
@@ -1351,6 +1435,105 @@ mod tests {
         assert!(gen_after > gen_before);
         let st = session.state.lock().await;
         assert!(st.process.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Respawn trigger tests (issues #7, #38, #45)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_project_root_change_respawns() {
+        // Changing project root between evaluations triggers respawn (issue #7).
+        skip_no_nu!();
+        let tmp1 = tmp_sandbox_project();
+        let tmp2 = tmp_sandbox_project();
+        let (session, _cache) = isolated_session();
+        let result1 = try_eval(&session, "echo 'root1'", 30, tmp1.path(), ToolGrant::READ).await;
+        assert!(!result1.unwrap().is_error);
+        let gen1 = session.state.lock().await.generation;
+        // Switch project root — triggers respawn.
+        let result2 = try_eval(&session, "echo 'root2'", 30, tmp2.path(), ToolGrant::READ).await;
+        assert!(!result2.unwrap().is_error);
+        let gen2 = session.state.lock().await.generation;
+        assert!(gen2 > gen1, "generation should increase on respawn");
+    }
+
+    #[tokio::test]
+    async fn integration_network_grant_change_respawns() {
+        // Adding NETWORK grant triggers respawn (issue #38).
+        skip_no_nu!();
+        let tmp = tmp_sandbox_project();
+        let (session, _cache) = isolated_session();
+        let result1 = try_eval(&session, "echo 'no-net'", 30, tmp.path(), ToolGrant::READ).await;
+        assert!(!result1.unwrap().is_error);
+        let gen1 = session.state.lock().await.generation;
+        // Switch to NETWORK grant — triggers respawn.
+        let result2 = try_eval(
+            &session,
+            "echo 'with-net'",
+            30,
+            tmp.path(),
+            ToolGrant::READ | ToolGrant::NETWORK,
+        )
+        .await;
+        assert!(!result2.unwrap().is_error);
+        let gen2 = session.state.lock().await.generation;
+        assert!(gen2 > gen1, "generation should increase on respawn");
+    }
+
+    // -----------------------------------------------------------------------
+    // Concurrent and generation-mismatch tests (issues #44, #46)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_concurrent_evaluate_both_succeed() {
+        // Two concurrent evaluations where the first takes the pre-spawned
+        // process (fast path) and the second spawns a new one (slow path).
+        // Both must succeed. Exercises the ensure_and_take fast/slow paths
+        // under concurrent access (issue #44).
+        skip_no_nu!();
+        let tmp = tmp_sandbox_project();
+        let (session, _cache) = isolated_session();
+        let root = tmp.path().to_path_buf();
+        let grant = ToolGrant::READ;
+        // Pre-spawn so the fast path is available for the first caller.
+        try_spawn(&session, &root, grant).await;
+
+        let (r1, r2) = tokio::join!(
+            session.evaluate("echo 'a'", 30, &root, grant),
+            session.evaluate("echo 'b'", 30, &root, grant),
+        );
+
+        assert!(!r1.unwrap().is_error);
+        assert!(!r2.unwrap().is_error);
+    }
+
+    #[tokio::test]
+    async fn integration_kill_during_evaluate_discards_process() {
+        // kill() during Phase 2 (blocking I/O) bumps generation. Phase 3
+        // sees the mismatch and discards the process (issue #46).
+        skip_no_nu!();
+        let tmp = tmp_sandbox_project();
+        let (session, _cache) = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
+
+        let root = tmp.path().to_path_buf();
+        let (eval_result, ()) = tokio::join!(
+            session.evaluate("sleep 1sec; echo 'done'", 30, &root, ToolGrant::READ),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                session.kill().await;
+            }
+        );
+
+        // The evaluate may succeed or fail depending on timing. Either way,
+        // the process should have been discarded (not written back to state).
+        let _ = eval_result;
+        let st = session.state.lock().await;
+        assert!(
+            st.process.is_none(),
+            "process should be discarded after kill during evaluate"
+        );
     }
 
     #[tokio::test]

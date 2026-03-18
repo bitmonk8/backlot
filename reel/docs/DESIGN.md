@@ -146,20 +146,22 @@ project root, constructs a `SandboxCommand` for `nu --mcp`, and calls
 
 **Evaluate.** `evaluate()` → `evaluate_inner()`:
 
-1. `ensure_process()`: if no process or parameters changed (different
-   project_root/grant), spawn/respawn.
-2. Take process from mutex.
-3. Send JSON-RPC `tools/call` request with tool name + arguments.
-4. Read response lines, skip non-matching IDs (up to 64 lines).
-5. Parse MCP `ToolResult` → `NuOutput`.
-6. Put process back (or discard if generation changed during evaluate).
+1. `ensure_and_take()`: ensures a compatible process exists and takes it out of
+   state. Fast path checks and takes under one lock. Slow path releases the lock
+   to spawn, re-acquires to install and take.
+2. Send JSON-RPC `tools/call` request with tool name + arguments (blocking I/O
+   on `spawn_blocking` thread — async mutex released during I/O).
+3. Read response lines, skip non-matching IDs (up to 64 lines).
+4. Parse MCP `ToolResult` → `NuOutput`.
+5. Put process back (or discard if generation changed during evaluate).
 
 **Kill.** `kill()` increments generation, closes stdin handle, kills child via
 `SandboxedChild::kill()`.
 
-**Drop.** `NuProcess::drop` calls `child.kill()`, then polls `try_wait()` for up
-to 5 seconds to reap the child (ensures handles are released before temp dir
-cleanup on Windows). Abandons if the process does not exit within the deadline.
+**Drop.** `NuProcess::drop` calls `child.kill()`, then `bounded_reap()` polls
+`try_wait()` for up to 5 seconds to reap the child (ensures handles are released
+before temp dir cleanup on Windows). Abandons silently if the process does not
+exit within the deadline. `bounded_reap` is a standalone testable function.
 
 ### Sandbox Policy
 
@@ -327,7 +329,10 @@ than success output.
 - Custom command execution: `reel read`, `reel write`, `reel edit`, `reel glob`,
   `reel grep`.
 - Full `execute_tool()` path: Read, Write, Glob, NuShell, grant denial.
-- Grant-change respawn.
+- Grant-change respawn (READ→WRITE, READ→NETWORK).
+- Project-root-change respawn.
+- Concurrent evaluate (both callers succeed).
+- Kill during evaluate (process discarded, not written back).
 - Network denial/allowance under sandbox.
 - Agent tool loop with mock providers: timeout, custom tool dispatch, structured
   mode.
