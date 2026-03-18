@@ -43,7 +43,7 @@ struct RunArgs {
     #[arg(long)]
     project_root: Option<PathBuf>,
 
-    /// Per-tool-call timeout in seconds (default: 120).
+    /// Agent timeout in seconds, applied per model call (default: 120).
     #[arg(long, default_value_t = 120)]
     timeout: u64,
 
