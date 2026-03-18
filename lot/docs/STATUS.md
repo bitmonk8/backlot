@@ -24,20 +24,16 @@
 
 ## Next Work
 
-Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 42 findings across 8 categories. Goal: fix all groups.
+Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 41 findings ordered by severity. Goal: fix all.
 
-### Audit finding groups (in recommended fix order)
+### Audit findings by severity
 
-| # | Group | Findings | Severities | Status |
-|---|-------|----------|------------|--------|
-| 1 | Correctness | 9 | 2 critical, 2 high, 5 medium | Not started |
-| 2 | Error Handling | 2 | 1 high, 1 medium | Not started |
-| 3 | Testing | 11 | 4 high, 7 medium | Not started |
-| 4 | Doc-Implementation Mismatch | 5 | 1 high, 3 medium, 1 low | Not started |
-| 5 | Simplification | 7 | 7 medium | Not started |
-| 6 | Separation of Concerns | 3 | 2 medium, 1 low | Not started |
-| 7 | Naming | 4 | 1 medium, 3 low | Not started |
-| 8 | Placement | 1 | 1 low | Not started |
+| Severity | Count | IDs | Status |
+|----------|-------|-----|--------|
+| Critical | 2 | C1–C2 | Not started |
+| High | 8 | H1–H8 | Not started |
+| Medium | 25 | M1–M25 | Not started |
+| Low | 6 | L1–L6 | Not started |
 
 ### Other remaining work
 
