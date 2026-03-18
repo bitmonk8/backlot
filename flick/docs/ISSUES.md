@@ -57,3 +57,48 @@ Four nearly identical blocks validate pricing fields with the same `!v.is_finite
 **Category:** Testing
 
 `load_secret_key` has error paths for invalid hex and wrong-length keys, but no test covers reading a corrupt `.secret_key` file. Could be tested by writing invalid content to the key file path before calling `get()`.
+
+---
+
+## 7. `#[serde(untagged)]` on `ContentBlock::Unknown` silently swallows malformed known types
+
+**File:** `flick/src/context.rs:29-59`
+**Category:** Correctness
+
+If a known type (e.g. `{"type":"text","text":42}`) has the right `type` tag but invalid field types, serde fails to match the tagged variant and silently falls through to `Unknown(Value)`. Fixing requires a custom `Deserialize` impl — high effort, low practical likelihood since provider responses are well-typed.
+
+---
+
+## 8. `push_*` methods don't enforce message alternation
+
+**File:** `flick/src/context.rs:109-173`
+**Category:** Correctness
+
+`push_user_text`, `push_assistant`, and `push_tool_results` don't check `self.messages.last()` to prevent consecutive same-role messages. `validate_message_order` only runs on `load_from_file`. Existing callers enforce correct ordering, but the methods themselves are not defensive.
+
+---
+
+## 9. `#[serde(default)]` allows empty-content assistant messages to load
+
+**File:** `flick/src/context.rs:15-20`
+**Category:** Correctness
+
+A serialized assistant message with missing `content` key deserializes to `content: vec![]`, which `push_assistant` would reject but `load_from_file` accepts. Intentionally lenient on load, but inconsistent.
+
+---
+
+## 10. `validate_message_order` doesn't check `ToolUse` in user messages
+
+**File:** `flick/src/context.rs:84-104`
+**Category:** Correctness
+
+Checks `ToolResult` blocks are only in user messages but doesn't check the symmetric constraint: `ToolUse` blocks should only appear in assistant messages. Only affects hand-edited context files.
+
+---
+
+## 11. Missing error code tests for `InvalidAssistantContent` and `InvalidMessageOrder`
+
+**File:** `flick/src/error.rs:57-58`
+**Category:** Testing
+
+The `code()` method maps these new variants to string codes, but no test verifies the mapping.

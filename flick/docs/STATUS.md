@@ -22,9 +22,10 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - Config validation: `deny_unknown_fields` on all structs, reasoning+output_schema mutual exclusion, empty tool description/non-object parameters rejected, whitespace-only query early rejection
 - CLI commands: `provider add/list`, `model add/list/remove`, `init`, `run`
 - Cache-aware cost computation — `compute_cost` factors in cache creation/read tokens at separate pricing tiers
-- 265 tests passing (212 lib, 22 bin, 20 runner, 11 integration), zero clippy errors
+- Context serialization robustness — unknown content block fallback, message ordering validation on load, empty-content guard on `push_assistant`, serde defaults for optional fields
+- 280 tests passing (227 lib, 22 bin, 20 runner, 11 integration), zero clippy errors
 
 ## Next Work
 
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
-- Backlog items (see `BACKLOG.md` — 20 items in 5 active clusters)
+- Backlog items (see `BACKLOG.md` — 16 items in 4 active clusters)

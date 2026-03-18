@@ -1,42 +1,12 @@
 # Flick — Backlog
 
-20 items in 5 active clusters, ordered by value (highest first).
+16 items in 4 active clusters, ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
 ---
 
-## 1. Context & Serialization Robustness (4 items)
-
-Unknown content block types, empty content vecs, message ordering validation, missing serde defaults. All in `context.rs`.
-
-### L7. `ContentBlock` has no unknown-variant fallback — `context.rs:29-55`
-
-Deserialization of an unknown `type` field (e.g., `{"type":"image"}`) produces a hard error. If a future provider or persisted context file contains an unfamiliar content block type, `Context::load_from_file` fails entirely.
-
-- **M** — Fix Risk: Low — Effort: Low
-
-### T24. `push_assistant` accepts empty content vec — `context.rs`
-
-Caller guards against this, but the method itself does not validate. Empty assistant message would violate API constraints.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T75. `load_from_file` does not validate message ordering — `context.rs`
-
-Deserialised contexts bypass all push-method invariants. A persisted file could contain two consecutive `Assistant` messages, misplaced `ToolResult` blocks, or an assistant-first sequence. The API would reject the malformed history with an opaque error rather than a clear validation message.
-
-- **L** — Fix Risk: Medium — Effort: Low
-
-### T78. `Message.content` missing `#[serde(default)]` — `context.rs`
-
-A serialised message with the `content` key absent fails deserialisation with "missing field". Externally produced or hand-edited context files may omit it.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
----
-
-## 2. Error Type Hygiene (5 items)
+## 1. Error Type Hygiene (5 items)
 
 Overloaded error variants, wrong variant names, misattributed JSON errors. One sweep through `error.rs` and its consumers.
 
@@ -72,7 +42,7 @@ Any `serde_json::Error` propagated via `?` in a `FlickError` context becomes `Fl
 
 ---
 
-## 3. Provider — Messages API & Architecture (4 items)
+## 2. Provider — Messages API & Architecture (4 items)
 
 Temperature+thinking guard, system prompt as array (for caching), tool_choice support, provider trait coherence. `messages.rs` and `provider.rs`.
 
@@ -102,7 +72,7 @@ The Messages provider always omits `tool_choice`, relying on the Anthropic defau
 
 ---
 
-## 4. CLI Input Handling (4 items)
+## 3. CLI Input Handling (4 items)
 
 Stdin size limits, provider name/key validation, whitespace-only input messages. All in `main.rs`.
 
@@ -132,7 +102,7 @@ No length cap or control character check on the API key value.
 
 ---
 
-## 5. Test Coverage Gaps (3 items)
+## 4. Test Coverage Gaps (3 items)
 
 Missing tests for context overflow, credential edge cases, destructive mock reads, integration history verification. Independent items but suitable for a single test-writing session.
 

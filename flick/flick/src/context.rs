@@ -15,6 +15,7 @@ pub struct Context {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
+    #[serde(default)]
     pub content: Vec<ContentBlock>,
 }
 
@@ -51,13 +52,58 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// Captures any content block type not yet modeled (e.g. "image").
+    /// Preserves the raw JSON so round-tripping doesn't lose data.
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 impl Context {
     pub async fn load_from_file(path: &std::path::Path) -> Result<Self, crate::error::FlickError> {
         let data = tokio::fs::read_to_string(path).await?;
         let ctx: Self = serde_json::from_str(&data)?;
+        Self::validate_message_order(&ctx.messages)?;
         Ok(ctx)
+    }
+
+    /// Validates that the message sequence is well-formed for the API:
+    /// - First message must be User (if any exist)
+    /// - No two consecutive messages with the same role
+    /// - `ToolResult` blocks only appear in User messages
+    fn validate_message_order(messages: &[Message]) -> Result<(), crate::error::FlickError> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        if messages[0].role != Role::User {
+            return Err(crate::error::FlickError::InvalidMessageOrder(
+                "first message must have role \"user\"".into(),
+            ));
+        }
+
+        for (i, msg) in messages.iter().enumerate() {
+            if i > 0 && msg.role == messages[i - 1].role {
+                return Err(crate::error::FlickError::InvalidMessageOrder(format!(
+                    "consecutive {:?} messages at index {} and {}",
+                    msg.role,
+                    i - 1,
+                    i
+                )));
+            }
+
+            if msg.role != Role::User
+                && msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            {
+                return Err(crate::error::FlickError::InvalidMessageOrder(format!(
+                    "ToolResult block in non-user message at index {i}"
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn push_user_text(
@@ -83,6 +129,11 @@ impl Context {
         if self.messages.len() >= MAX_CONTEXT_MESSAGES {
             return Err(crate::error::FlickError::ContextOverflow(
                 MAX_CONTEXT_MESSAGES,
+            ));
+        }
+        if content.is_empty() {
+            return Err(crate::error::FlickError::InvalidAssistantContent(
+                "push_assistant called with empty content".into(),
             ));
         }
         self.messages.push(Message {
@@ -541,6 +592,194 @@ mod tests {
         assert!(matches!(
             &ctx.messages[0].content[0],
             ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc_1"
+        ));
+    }
+
+    // --- L7: Unknown content block variant ---
+
+    #[test]
+    fn unknown_content_block_deserializes() {
+        let json = r#"{"type":"image","source":{"url":"https://example.com/img.png"}}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
+        match &block {
+            ContentBlock::Unknown(v) => {
+                assert_eq!(v["type"], "image");
+                assert_eq!(v["source"]["url"], "https://example.com/img.png");
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_content_block_round_trips() {
+        let json = r#"{"type":"image","source":{"url":"https://example.com/img.png"}}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
+        let serialized = serde_json::to_string(&block).expect("serialize");
+        let value: serde_json::Value = serde_json::from_str(&serialized).expect("re-parse");
+        assert_eq!(value["type"], "image");
+    }
+
+    #[test]
+    fn context_with_unknown_block_round_trips() {
+        let json = r#"{"messages":[{"role":"user","content":[{"type":"image","url":"x"}]}]}"#;
+        let ctx: Context = serde_json::from_str(json).expect("deserialize");
+        assert!(matches!(
+            &ctx.messages[0].content[0],
+            ContentBlock::Unknown(_)
+        ));
+        let reserialized = serde_json::to_string(&ctx).expect("serialize");
+        let restored: Context = serde_json::from_str(&reserialized).expect("deserialize again");
+        assert!(matches!(
+            &restored.messages[0].content[0],
+            ContentBlock::Unknown(_)
+        ));
+    }
+
+    // --- T24: push_assistant rejects empty content ---
+
+    #[test]
+    fn push_assistant_rejects_empty_content() {
+        let mut ctx = Context::default();
+        let result = ctx.push_assistant(vec![]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::InvalidAssistantContent(_))
+        ));
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    // --- T75: load_from_file validates message ordering ---
+
+    #[tokio::test]
+    async fn load_rejects_assistant_first() {
+        let json = r#"{"messages":[{"role":"assistant","content":[{"type":"text","text":"hi"}]}]}"#;
+        let f = write_temp_file(json.as_bytes());
+        let err = Context::load_from_file(f.path()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::FlickError::InvalidMessageOrder(_)
+        ));
+        assert!(err.to_string().contains("first message"));
+    }
+
+    #[tokio::test]
+    async fn load_rejects_consecutive_same_role() {
+        let json = r#"{"messages":[
+            {"role":"user","content":[{"type":"text","text":"a"}]},
+            {"role":"user","content":[{"type":"text","text":"b"}]}
+        ]}"#;
+        let f = write_temp_file(json.as_bytes());
+        let err = Context::load_from_file(f.path()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::FlickError::InvalidMessageOrder(_)
+        ));
+        assert!(err.to_string().contains("consecutive"));
+    }
+
+    #[tokio::test]
+    async fn load_rejects_tool_result_in_assistant_message() {
+        let json = r#"{"messages":[
+            {"role":"user","content":[{"type":"text","text":"q"}]},
+            {"role":"assistant","content":[{"type":"tool_result","tool_use_id":"x","content":"y"}]}
+        ]}"#;
+        let f = write_temp_file(json.as_bytes());
+        let err = Context::load_from_file(f.path()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::FlickError::InvalidMessageOrder(_)
+        ));
+        assert!(err.to_string().contains("ToolResult"));
+    }
+
+    #[tokio::test]
+    async fn load_accepts_valid_alternating_messages() {
+        let json = r#"{"messages":[
+            {"role":"user","content":[{"type":"text","text":"q"}]},
+            {"role":"assistant","content":[{"type":"text","text":"a"}]},
+            {"role":"user","content":[{"type":"text","text":"q2"}]}
+        ]}"#;
+        let f = write_temp_file(json.as_bytes());
+        let ctx = Context::load_from_file(f.path()).await.unwrap();
+        assert_eq!(ctx.messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn load_accepts_empty_messages() {
+        let json = r#"{"messages":[]}"#;
+        let f = write_temp_file(json.as_bytes());
+        let ctx = Context::load_from_file(f.path()).await.unwrap();
+        assert!(ctx.messages.is_empty());
+    }
+
+    // --- T78: missing content key defaults to empty vec ---
+
+    #[test]
+    fn message_missing_content_defaults_empty() {
+        let json = r#"{"role":"user"}"#;
+        let msg: Message = serde_json::from_str(json).expect("deserialize");
+        assert!(msg.content.is_empty());
+    }
+
+    // --- Known types must not fall into Unknown ---
+
+    #[test]
+    fn deserialize_text_block_is_not_unknown() {
+        let json = r#"{"type":"text","text":"hi"}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
+        assert!(
+            matches!(block, ContentBlock::Text { ref text } if text == "hi"),
+            "expected Text, got {block:?}"
+        );
+    }
+
+    #[test]
+    fn deserialize_tool_use_block_is_not_unknown() {
+        let json = r#"{"type":"tool_use","id":"c1","name":"run","input":{}}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
+        assert!(
+            matches!(block, ContentBlock::ToolUse { ref name, .. } if name == "run"),
+            "expected ToolUse, got {block:?}"
+        );
+    }
+
+    #[test]
+    fn deserialize_tool_result_block_is_not_unknown() {
+        let json = r#"{"type":"tool_result","tool_use_id":"c1","content":"ok"}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
+        assert!(
+            matches!(block, ContentBlock::ToolResult { ref tool_use_id, .. } if tool_use_id == "c1"),
+            "expected ToolResult, got {block:?}"
+        );
+    }
+
+    // --- push_assistant happy path with prior user message ---
+
+    #[test]
+    fn push_assistant_after_user_appends_correctly() {
+        let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
+        ctx.push_assistant(vec![
+            ContentBlock::Text {
+                text: "answer".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "search".into(),
+                input: serde_json::json!({"q": "rust"}),
+            },
+        ])
+        .unwrap();
+        assert_eq!(ctx.messages.len(), 2);
+        assert_eq!(ctx.messages[1].role, Role::Assistant);
+        assert_eq!(ctx.messages[1].content.len(), 2);
+        match &ctx.messages[1].content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "answer"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert!(matches!(
+            &ctx.messages[1].content[1],
+            ContentBlock::ToolUse { name, .. } if name == "search"
         ));
     }
 }

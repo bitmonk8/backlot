@@ -221,6 +221,8 @@ fn convert_message(msg: &Message) -> serde_json::Value {
                 "content": content,
                 "is_error": is_error,
             })),
+            // Pass through unknown block types as-is for forward compatibility.
+            ContentBlock::Unknown(value) => Some(value.clone()),
         })
         .collect();
     serde_json::json!({"role": role, "content": content})
@@ -567,6 +569,21 @@ mod tests {
         };
         let body = provider.build_body(&params);
         assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn convert_message_unknown_block_passes_through_raw_json() {
+        let raw = serde_json::json!({"type": "image", "url": "x"});
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Unknown(raw.clone())],
+        };
+        let json = convert_message(&msg);
+        let content = json["content"].as_array().expect("content array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["url"], "x");
+        assert_eq!(content[0], raw);
     }
 
     #[test]

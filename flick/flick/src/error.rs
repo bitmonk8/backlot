@@ -20,6 +20,12 @@ pub enum FlickError {
     #[error("context message limit exceeded ({0})")]
     ContextOverflow(usize),
 
+    #[error("invalid assistant content: {0}")]
+    InvalidAssistantContent(String),
+
+    #[error("invalid message ordering: {0}")]
+    InvalidMessageOrder(String),
+
     #[error("no query provided (use --query or pipe to stdin)")]
     NoQuery,
 
@@ -48,6 +54,8 @@ impl FlickError {
             Self::InvalidArguments(_) => "invalid_arguments",
             Self::InvalidToolResults(_) => "invalid_tool_results",
             Self::ContextOverflow(_) => "context_overflow",
+            Self::InvalidAssistantContent(_) => "invalid_assistant_content",
+            Self::InvalidMessageOrder(_) => "invalid_message_order",
             Self::NoQuery => "no_query",
             Self::ContextParse(_) => "context_parse_error",
             Self::Io(_) => "io_error",
