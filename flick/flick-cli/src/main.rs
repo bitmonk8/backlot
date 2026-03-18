@@ -341,6 +341,7 @@ async fn cmd_provider_add_core(
 ) -> Result<(), FlickError> {
     let provider_name = provider_name.trim();
     if provider_name.is_empty()
+        || provider_name.len() > 255
         || provider_name == "."
         || provider_name == ".."
         || provider_name.contains(std::path::MAIN_SEPARATOR)
@@ -359,6 +360,16 @@ async fn cmd_provider_add_core(
         return Err(FlickError::Io(std::io::Error::other(
             "setup aborted: no key provided",
         )));
+    }
+    if key.trim().len() > 4096 {
+        return Err(FlickError::InvalidArguments(
+            "API key exceeds 4096 byte limit".into(),
+        ));
+    }
+    if key.trim().bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return Err(FlickError::InvalidArguments(
+            "API key contains control characters".into(),
+        ));
     }
 
     let api = if provider_name.contains("anthropic") {
@@ -701,6 +712,9 @@ fn parse_optional_price(input: &str) -> Result<Option<f64>, FlickError> {
     Ok(Some(v))
 }
 
+/// 10 MiB cap — LLM APIs reject larger payloads anyway.
+const STDIN_MAX_BYTES: usize = 10 * 1024 * 1024;
+
 async fn read_stdin() -> Result<String, FlickError> {
     tokio::task::spawn_blocking(|| {
         use std::io::{IsTerminal, Read};
@@ -708,7 +722,18 @@ async fn read_stdin() -> Result<String, FlickError> {
             return Err(FlickError::NoQuery);
         }
         let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf)?;
+        std::io::stdin()
+            .take(STDIN_MAX_BYTES as u64 + 1)
+            .read_to_string(&mut buf)?;
+        if buf.len() > STDIN_MAX_BYTES {
+            return Err(FlickError::StdinTooLarge(STDIN_MAX_BYTES));
+        }
+        if buf.trim().is_empty() {
+            if buf.is_empty() {
+                return Err(FlickError::NoQuery);
+            }
+            return Err(FlickError::WhitespaceOnlyStdin);
+        }
         Ok(buf.trim().to_string())
     })
     .await
@@ -809,6 +834,55 @@ mod tests {
 
         let result = cmd_provider_add_core("test", &mock, &registry).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_add_long_name_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let mock = MockPrompter::new();
+        let long_name = "a".repeat(256);
+
+        let result = cmd_provider_add_core(&long_name, &mock, &registry).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_add_max_length_name_accepted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let mock = MockPrompter::new()
+            .with_passwords(vec!["test-key".into()])
+            .with_selects(vec![0]) // chat_completions
+            .with_inputs(vec!["https://api.openai.com".into()]);
+        let name_255 = "a".repeat(255);
+
+        cmd_provider_add_core(&name_255, &mock, &registry)
+            .await
+            .expect("255-char name should be accepted");
+    }
+
+    #[tokio::test]
+    async fn provider_add_key_with_control_chars_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let mock = MockPrompter::new().with_passwords(vec!["key\x01bad".into()]);
+
+        let result = cmd_provider_add_core("test", &mock, &registry).await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("control characters"));
+    }
+
+    #[tokio::test]
+    async fn provider_add_key_too_long_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let long_key = "k".repeat(4097);
+        let mock = MockPrompter::new().with_passwords(vec![long_key]);
+
+        let result = cmd_provider_add_core("test", &mock, &registry).await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("4096"));
     }
 
     // -- provider list tests --

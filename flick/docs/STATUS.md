@@ -20,13 +20,14 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - Shared test doubles in `flick/src/test_support.rs` behind `testing` feature
 - `clap` gated behind optional `cli` feature flag
 - Config validation: `deny_unknown_fields` on all structs, reasoning+output_schema mutual exclusion, empty tool description/non-object parameters rejected, whitespace-only query early rejection
+- CLI input hardening — stdin capped at 10 MiB, provider name length validated (max 255), API key content validated (no control chars, max 4096), whitespace-only stdin produces distinct error
 - CLI commands: `provider add/list`, `model add/list/remove`, `init`, `run`
 - Cache-aware cost computation — `compute_cost` factors in cache creation/read tokens at separate pricing tiers
 - Context serialization robustness — unknown content block fallback, message ordering validation on load, empty-content guard on `push_assistant`, serde defaults for optional fields
 - Error type hygiene — `CredentialError` split into specific variants (`InvalidProviderName`, `InvalidBaseUrl`, `InvalidSecretKey`, `TomlParse`), `ProviderError::InvalidRequest` for client-side validation, `ProviderError::code()` delegation, explicit `serde_json::Error` mapping (no blanket `From`)
-- 283 tests passing (230 lib, 22 bin, 20 runner, 11 integration), zero clippy errors
+- 289 tests passing (232 lib, 26 bin, 20 runner, 11 integration), zero clippy errors
 
 ## Next Work
 
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
-- Backlog items (see `BACKLOG.md` — 11 items in 3 active clusters)
+- Backlog items (see `BACKLOG.md` — 7 items in 2 active clusters)

@@ -29,6 +29,12 @@ pub enum FlickError {
     #[error("no query provided (use --query or pipe to stdin)")]
     NoQuery,
 
+    #[error("stdin contained only whitespace (provide a non-empty query)")]
+    WhitespaceOnlyStdin,
+
+    #[error("stdin input exceeds {0} byte limit")]
+    StdinTooLarge(usize),
+
     #[error("context parse error: {0}")]
     ContextParse(serde_json::Error),
 
@@ -51,6 +57,8 @@ impl FlickError {
             Self::InvalidAssistantContent(_) => "invalid_assistant_content",
             Self::InvalidMessageOrder(_) => "invalid_message_order",
             Self::NoQuery => "no_query",
+            Self::WhitespaceOnlyStdin => "whitespace_only_stdin",
+            Self::StdinTooLarge(_) => "stdin_too_large",
             Self::ContextParse(_) => "context_parse_error",
             Self::Io(_) => "io_error",
             Self::ToolResultParse(_) => "tool_result_parse_error",
@@ -303,6 +311,25 @@ mod tests {
                 .to_string()
                 .contains("empty")
         );
+        assert!(
+            FlickError::WhitespaceOnlyStdin
+                .to_string()
+                .contains("whitespace")
+        );
+        assert!(FlickError::StdinTooLarge(100).to_string().contains("100"));
+    }
+
+    #[test]
+    fn code_whitespace_only_stdin() {
+        assert_eq!(
+            FlickError::WhitespaceOnlyStdin.code(),
+            "whitespace_only_stdin"
+        );
+    }
+
+    #[test]
+    fn code_stdin_too_large() {
+        assert_eq!(FlickError::StdinTooLarge(100).code(), "stdin_too_large");
     }
 
     #[test]

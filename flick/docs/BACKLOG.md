@@ -1,6 +1,6 @@
 # Flick — Backlog
 
-11 items in 3 active clusters, ordered by value (highest first).
+7 items in 2 active clusters, ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
@@ -36,37 +36,7 @@ The Messages provider always omits `tool_choice`, relying on the Anthropic defau
 
 ---
 
-## 2. CLI Input Handling (4 items)
-
-Stdin size limits, provider name/key validation, whitespace-only input messages. All in `main.rs`.
-
-### T1. `read_stdin` accepts unlimited input size — `main.rs`
-
-`read_to_string` reads all of stdin with no size cap. A multi-gigabyte pipe causes OOM before the LLM API rejects it.
-
-- **M** — Fix Risk: Low — Effort: Trivial
-
-### T2. `cmd_setup_core` does not validate provider name length — `main.rs`
-
-Extremely long provider name passes validation but fails at OS level with an unhelpful error. Add `|| provider_name.len() > 255`.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T3. `cmd_setup_core` does not validate API key content — `main.rs`
-
-No length cap or control character check on the API key value.
-
-- **L** — Fix Risk: None — Effort: Trivial
-
-### T40. Whitespace-only stdin produces misleading `no_query` error — `main.rs`
-
-`read_stdin` trims the input to an empty string, which hits the `NoQuery` path. The error message "use --query or pipe to stdin" is misleading when the user *did* pipe to stdin (but sent only whitespace).
-
-- **L** — Fix Risk: None — Effort: Trivial
-
----
-
-## 3. Test Coverage Gaps (3 items)
+## 2. Test Coverage Gaps (3 items)
 
 Missing tests for context overflow, credential edge cases, destructive mock reads, integration history verification. Independent items but suitable for a single test-writing session.
 
