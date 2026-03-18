@@ -135,7 +135,16 @@ fn parse_config(text: &str) -> Result<(reel::RequestConfig, reel::ToolGrant), St
 // Commands
 // ---------------------------------------------------------------------------
 
+fn validate_timeout(timeout: u64) -> Result<(), String> {
+    if timeout == 0 {
+        return Err("timeout must be at least 1 second".into());
+    }
+    Ok(())
+}
+
 async fn cmd_run(args: RunArgs) -> Result<(), String> {
+    validate_timeout(args.timeout)?;
+
     // Load and parse config.
     let config_text = tokio::fs::read_to_string(&args.config)
         .await
@@ -156,6 +165,7 @@ async fn cmd_run(args: RunArgs) -> Result<(), String> {
             "model": effective.model(),
             "system_prompt": effective.system_prompt(),
             "temperature": effective.temperature(),
+            "grant": grant.to_names(),
             "tools": effective.tools().iter().map(|t| {
                 serde_json::json!({
                     "name": t.name(),
@@ -164,8 +174,7 @@ async fn cmd_run(args: RunArgs) -> Result<(), String> {
                 })
             }).collect::<Vec<_>>(),
         });
-        let json =
-            serde_json::to_string_pretty(&dry_output).map_err(|e| format!("serialize: {e}"))?;
+        let json = serde_json::to_string(&dry_output).map_err(|e| format!("serialize: {e}"))?;
         println!("{json}");
         return Ok(());
     }
@@ -177,11 +186,15 @@ async fn cmd_run(args: RunArgs) -> Result<(), String> {
             if std::io::stdin().is_terminal() {
                 eprintln!("Reading query from stdin (Ctrl+D to submit)...");
             }
-            let mut buf = String::new();
-            std::io::stdin()
-                .read_to_string(&mut buf)
-                .map_err(|e| format!("failed to read stdin: {e}"))?;
-            buf
+            tokio::task::spawn_blocking(|| {
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .map_err(|e| format!("failed to read stdin: {e}"))?;
+                Ok::<_, String>(buf)
+            })
+            .await
+            .map_err(|e| format!("stdin read task failed: {e}"))??
         }
     };
 
@@ -499,5 +512,47 @@ grant: []
         assert_eq!(parsed["usage"]["input_tokens"], 100);
         assert_eq!(parsed["tool_calls"], 3);
         assert_eq!(parsed["response_hash"], "abc123");
+    }
+
+    // -----------------------------------------------------------------------
+    // timeout validation tests (issue #34)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_timeout_zero_rejected() {
+        let err = validate_timeout(0).unwrap_err();
+        assert!(
+            err.contains("at least 1 second"),
+            "expected at-least-1 error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_timeout_one_accepted() {
+        assert!(validate_timeout(1).is_ok());
+    }
+
+    #[test]
+    fn validate_timeout_large_accepted() {
+        assert!(validate_timeout(3600).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // dry-run grant info tests (issue #35)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dry_run_output_includes_grant() {
+        let grant = reel::ToolGrant::TOOLS | reel::ToolGrant::WRITE;
+        let dry_output = serde_json::json!({
+            "model": "test-model",
+            "grant": grant.to_names(),
+            "tools": [],
+        });
+        let json = serde_json::to_string(&dry_output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["grant"], serde_json::json!(["tools", "write"]));
+        // Verify compact format (no newlines).
+        assert!(!json.contains('\n'), "expected compact JSON, got: {json}");
     }
 }

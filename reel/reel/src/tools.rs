@@ -66,6 +66,23 @@ impl ToolGrant {
         }
         Ok(flags)
     }
+
+    /// Return the canonical grant names for the active flags.
+    ///
+    /// The order is deterministic: `["tools", "write", "network"]`.
+    pub fn to_names(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.contains(Self::TOOLS) {
+            names.push("tools");
+        }
+        if self.contains(Self::WRITE) {
+            names.push("write");
+        }
+        if self.contains(Self::NETWORK) {
+            names.push("network");
+        }
+        names
+    }
 }
 
 /// A tool definition describing a tool's name, description, and JSON Schema parameters.
@@ -1431,6 +1448,25 @@ mod tests {
         let names = vec!["tools".to_string(), "write".to_string()];
         let grant = ToolGrant::from_names(&names).unwrap();
         assert_eq!(grant, ToolGrant::TOOLS | ToolGrant::WRITE);
+    }
+
+    // -- ToolGrant::to_names tests --
+
+    #[test]
+    fn to_names_empty() {
+        assert!(ToolGrant::empty().to_names().is_empty());
+    }
+
+    #[test]
+    fn to_names_all_flags() {
+        let names = (ToolGrant::TOOLS | ToolGrant::WRITE | ToolGrant::NETWORK).to_names();
+        assert_eq!(names, vec!["tools", "write", "network"]);
+    }
+
+    #[test]
+    fn to_names_tools_only() {
+        let names = ToolGrant::TOOLS.to_names();
+        assert_eq!(names, vec!["tools"]);
     }
 
     #[test]

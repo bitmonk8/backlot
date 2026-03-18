@@ -62,23 +62,7 @@ Potential hang on pathological input with symlink cycles.
 
 `reel/build.rs` (REEL_CONFIG_NU) — `reel glob` runs `glob $pattern` with a 1000-result cap but no depth limit. A `**/*` pattern in a deep tree with symlink cycles could hang before the cap is reached. **Category: Robustness.**
 
-## 6. reel-cli fixes (#33, #34, #35)
-
-All in `reel-cli/src/main.rs`. #33 is a correctness issue (benign in practice). #34 and #35 are validation/usability.
-
-### 33. reel-cli blocking stdin read on single-threaded async runtime
-
-`reel-cli/src/main.rs` — `std::io::stdin().read_to_string()` blocks the `current_thread` tokio runtime. Works in practice since it runs before any async work, but should use `spawn_blocking` or async IO. **Category: Correctness.**
-
-### 34. reel-cli `--timeout 0` accepted without validation
-
-`reel-cli/src/main.rs` — No lower bound on timeout value. `Duration::from_secs(0)` causes instant timeout on every operation. **Category: Validation.**
-
-### 35. reel-cli dry run output omits grant info and uses different JSON format
-
-`reel-cli/src/main.rs` — Dry run uses `to_string_pretty` and omits the resolved `ToolGrant`; success output uses `to_string` (compact). Inconsistent format and missing diagnostic info. **Category: Usability.**
-
-## 7. Ripgrep resolution tests (#3d, #3e, #3f)
+## 6. Ripgrep resolution tests (#3d, #3e, #3f)
 
 Pure test gaps on a single code path (`resolve_rg_binary`).
 
@@ -94,7 +78,7 @@ No test covers `resolve_rg_binary` returning `None`. **Category: Testing.**
 
 Tested only indirectly through integration tests. **Category: Testing.**
 
-## 8. Custom tool dispatch (#48)
+## 7. Custom tool dispatch (#48)
 
 No practical impact — unsupported scenario, already guarded by `build_request_config`.
 
@@ -102,13 +86,13 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/agent.rs` — `dispatch_tool` previously used linear scan (first match wins). The `HashMap<String, usize>` built via `collect()` keeps the last entry for duplicate keys. No practical impact: duplicate custom tool names are not a supported scenario, and `build_request_config` rejects duplicate names against built-ins. **Category: Testing.**
 
-## 9. Grant model refinements (#52)
+## 8. Grant model refinements (#52)
 
 ### 52. `WRITE`/`NETWORK` → `TOOLS` implication not enforced at type level
 
 `reel/src/tools.rs` — The implication (WRITE implies TOOLS, NETWORK implies TOOLS) is enforced only in `from_names`. Library consumers constructing `ToolGrant` directly via bitflags can create bare `WRITE` without `TOOLS`, which silently produces zero tool definitions. `tool_definitions` and `required_grant` defensively check `WRITE | TOOLS` together, duplicating the invariant. Consider a normalizing constructor or custom `BitOr` to enforce at the type level. **Category: Separation of concerns.**
 
-## 10. NuSession minor refinements (#55, #56, #57, #58, #60)
+## 9. NuSession minor refinements (#55, #56, #57, #58, #60)
 
 ### 55. `ensure_and_take` inflight registration duplicated 3x
 
@@ -130,7 +114,7 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/nu_session.rs` — `SessionState` has single `inflight_child` and `inflight_stdin` fields. If two concurrent `evaluate` calls are in Phase 2 (blocking I/O), the second caller's `ensure_and_take` overwrites the first caller's handles. A `kill()` during this window only reaches the second caller's child; the first is unreachable. Not triggered today (agent turns are sequential; the concurrent test runs on single-threaded tokio). Would matter if true multi-threaded concurrent evaluate is ever supported. **Category: Correctness.**
 
-## 11. Network test helpers (#65, #66, #67)
+## 10. Network test helpers (#65, #66, #67)
 
 ### 65. `looks_like_sandbox_denial` keywords are broad
 
@@ -143,3 +127,13 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 ### 67. `http_responding_listener` name does not convey side effects
 
 `reel/src/nu_session.rs` — The function spawns a background thread and returns a port number, but the name suggests it returns a listener. A name like `spawn_http_responder` would better convey the fire-and-forget nature. **Category: Naming.**
+
+## 11. CLI test coverage gaps (#68, #69)
+
+### 68. `dry_run_output_includes_grant` tests serde round-trip, not production path
+
+`reel-cli/src/main.rs` — The test constructs a `serde_json::json!` value inline and round-trips it through serde, rather than invoking the actual dry-run code path. A regression in `cmd_run`'s dry-run branch would not be caught. Needs test infrastructure to invoke `cmd_run` with a config file. **Category: Testing.**
+
+### 69. No test guards against new `ToolGrant` variants omitted from `to_names`
+
+`reel/src/tools.rs` — If a new `ToolGrant` variant is added but `to_names` is not updated, no test catches the omission. A test asserting `ToolGrant::all().to_names().len()` equals the expected variant count would guard against this. **Category: Testing.**

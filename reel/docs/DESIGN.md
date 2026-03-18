@@ -319,12 +319,14 @@ deserialization.
 ### Output
 
 - **Success** — compact JSON to stdout (`serde_json::to_string`).
-- **Dry run** — pretty-printed JSON to stdout (`to_string_pretty`).
+- **Dry run** — compact JSON to stdout (`serde_json::to_string`), includes resolved grant names.
 - **Error** — JSON to stdout with `status: "Error"`, exit code 1.
 - **Human messages** — stderr only.
 
-Known issue (#35): dry run output omits grant info and uses different JSON format
-than success output.
+### Input Handling
+
+- `--timeout 0` is rejected (`timeout must be at least 1 second`).
+- Stdin read uses `tokio::task::spawn_blocking` to avoid blocking the async runtime.
 
 ---
 

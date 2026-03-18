@@ -140,8 +140,8 @@ reel setup [OPTIONS]
 | `--config <path>` | Path to reel config file (YAML) (required) |
 | `--query <text>` | Query text; reads from stdin if omitted |
 | `--project-root <path>` | Working directory for tool execution (default: cwd) |
-| `--timeout <seconds>` | Agent timeout in seconds — applied per model call (default: 120) |
-| `--dry-run` | Build the request and print it without calling the model |
+| `--timeout <seconds>` | Agent timeout in seconds — applied per model call (default: 120, minimum: 1) |
+| `--dry-run` | Build the request and print it without calling the model (includes resolved grant names) |
 
 When `--query` is omitted and stdin is a TTY, prints `Reading query from stdin (Ctrl+D to submit)...` to stderr.
 
@@ -257,7 +257,7 @@ On Windows, `reel setup` must be run once (as administrator) before sandboxed ex
 cargo test
 ```
 
-199 tests (188 reel + 11 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
+206 tests (191 reel + 15 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
 
 ## Dependencies
 

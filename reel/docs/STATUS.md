@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 199 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
+**Core agent runtime and tooling implemented. All 206 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
 
 ## What Is Implemented
 
@@ -26,7 +26,8 @@
 - **Test isolation hardening** — `isolated_session()` and `tmp_sandbox_tool_dir()` now panic instead of silently falling back to unsandboxed `NuSession::new()` when `NU_CACHE_DIR` is not set at compile time (issue #3g). Doc comments on `NuSession::new()`, `NuSession::with_tool_dir()`, `isolated_session()`, and `SandboxTestEnv` warn against direct construction in tests (issue #3h). Network integration tests replaced external `httpbin.org` dependency with local loopback `TcpListener` for deterministic sandbox denial/allowance verification (issue #39).
 - **Network test robustness** — `looks_like_sandbox_denial` shared helper with expanded keyword list covering macOS Seatbelt, Windows AppContainer, and Linux seccomp/namespace denial wording (issue #63). Allowed-network test uses `http_responding_listener` that sends a real HTTP 200 response, ensuring the `Ok` path is exercised and the sandbox-denial assertion is tested (issue #62). Denied-network test verifies sandbox-specific error wording on platforms with active enforcement, logs a warning otherwise (issue #64).
 - **Naming cleanup batch** — Renamed `ToolGrant::READ` → `ToolGrant::TOOLS` (issue #51). Renamed `cache_dir`/`resolve_cache_dir`/`with_cache_dir` → `tool_dir`/`resolve_tool_dir`/`with_tool_dir` (issue #61). Renamed misleading test `run_with_tools_counts_multi_tool_rounds` → `run_with_tools_counts_multi_calls_in_round` (issue #54). Renamed misleading test `bounded_reap_returns_true_on_immediate_exit` → `bounded_reap_returns_true_on_error` (issue #59).
-- **Test counts** — 199 tests total (188 reel + 11 reel-cli), all pass locally.
+- **CLI fixes batch** — Blocking stdin read wrapped in `spawn_blocking` (issue #33). `--timeout 0` rejected with validation error (issue #34). Dry-run output uses compact JSON and includes resolved grant names (issue #35).
+- **Test counts** — 206 tests total (191 reel + 15 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
 ## What Is NOT Implemented
@@ -71,9 +72,6 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 ## Work Candidates
 
 Ordered by planned execution. Clusters group tightly-related issues for single-PR batches.
-
-### Batch 1: reel-cli fixes (#33, #34, #35)
-All in `reel-cli/src/main.rs`. #33: blocking stdin read on async runtime. #34: `--timeout 0` accepted without validation. #35: dry-run output inconsistency.
 
 ### Batch 2: Tool execution coverage (#40, #41)
 Test additions only. #40: missing Edit/Grep end-to-end tests via `execute_tool()`. #41: `from_names` empty-string element untested.
