@@ -142,6 +142,10 @@ Nothing prevents tests from using `NuSession::new()` directly instead of `isolat
 
 `reel/src/agent.rs` — `dispatch_tool` previously used linear scan (first match wins). The `HashMap<String, usize>` built via `collect()` keeps the last entry for duplicate keys. No practical impact: duplicate custom tool names are not a supported scenario, and `build_request_config` rejects duplicate names against built-ins. **Category: Testing.**
 
+### 50. `integration_timeout_kills_process` flaky on Windows CI
+
+`reel/src/nu_session.rs` — The recovery phase after timeout (`result2.unwrap()` at line 1302) intermittently fails with `"nu process closed stdout unexpectedly"`. The timeout kills the nu process, and the subsequent `evaluate` call spawns a new one. On Windows CI runners, the respawned process occasionally closes stdout before the test reads the response — likely a timing issue with AppContainer teardown/respawn under load. Passes on retry. Observed on CI run `23235634543` (commit `d5956eb`). **Category: Testing.**
+
 ### 49. `policy_test_fixture` cache parameter has no `Some(...)` caller
 
 `reel/src/nu_session.rs` — `policy_test_fixture(grant, cache)` accepts `Option<&Path>` but all callers pass `None`. The `includes_cache_dir_exec` test still constructs dirs manually because it needs a cache dir outside the project root. The parameter is untested. **Category: Testing.**
