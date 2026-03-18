@@ -352,8 +352,15 @@ than success output.
 
 ### Test Isolation
 
-- `isolated_session()` helper creates a `NuSession` with dedicated temp sandbox
-  cache.
+- `isolated_session()` helper creates a `NuSession` with a dedicated temp sandbox
+  cache directory. Panics if `NU_CACHE_DIR` is not set at compile time, ensuring
+  tests never silently fall back to an unsandboxed session.
+- `sandbox_env()` wraps `isolated_session()` with an isolated project directory.
+  These two functions are the required entry points for tests that need a
+  `NuSession` -- direct use of `NuSession::new()` in tests bypasses isolation.
+- Network sandbox tests use a local loopback `TcpListener` on an ephemeral port
+  instead of external hosts, making denial/allowance verification deterministic
+  regardless of internet connectivity.
 - `skip_no_nu!()` macro skips integration tests when nu binary is unavailable.
 - Mock `ClientFactory` and `ToolExecutor` for agent-level tests without real
   providers.

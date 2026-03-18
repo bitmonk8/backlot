@@ -198,6 +198,11 @@ fn send_line(stdin: &StdinHandle, payload: &[u8]) -> Result<(), String> {
 }
 
 impl NuSession {
+    /// Create a new session using the runtime-resolved cache directory.
+    ///
+    /// **Tests should not call this directly.** Use `isolated_session()` or
+    /// `sandbox_env()` instead to ensure each test gets its own isolated
+    /// cache directory. Calling `new()` in tests bypasses sandbox isolation.
     pub fn new() -> Self {
         Self {
             state: Mutex::new(SessionState::default()),
@@ -207,8 +212,11 @@ impl NuSession {
 
     /// Create a session with an explicit cache directory override.
     ///
-    /// Used by tests to isolate each sandbox test's exec_path, avoiding
-    /// concurrent AppContainer ACL conflicts on shared directories.
+    /// Called by `isolated_session()` to give each test its own cache dir,
+    /// avoiding concurrent AppContainer ACL conflicts on shared directories.
+    ///
+    /// **Do not call this directly.** Use `isolated_session()` or
+    /// `sandbox_env()` which handle the cache copy and lifetime management.
     #[cfg(test)]
     fn with_cache_dir(cache_dir: PathBuf) -> Self {
         Self {
@@ -1245,8 +1253,9 @@ mod tests {
     ///
     /// Each sandbox test gets its own cache dir so AppContainer ACL
     /// operations on exec_path do not interfere between concurrent tests.
-    fn tmp_sandbox_cache() -> Option<tempfile::TempDir> {
-        let src = option_env!("NU_CACHE_DIR")?;
+    fn tmp_sandbox_cache() -> tempfile::TempDir {
+        let src = option_env!("NU_CACHE_DIR")
+            .expect("NU_CACHE_DIR not set at compile time — cannot create isolated sandbox cache");
         let dest =
             tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox cache dir");
         for entry in std::fs::read_dir(src).expect("read cache dir") {
@@ -1257,20 +1266,21 @@ mod tests {
                     .expect("copy cache file");
             }
         }
-        Some(dest)
+        dest
     }
 
     /// Create a NuSession with an isolated copy of the build-time cache dir.
     ///
     /// Each test gets its own cache dir so concurrent AppContainer profiles
     /// do not interfere via ACL grant/restore on a shared directory.
-    /// The returned `Option<TempDir>` must be held alive for the test duration.
-    fn isolated_session() -> (NuSession, Option<tempfile::TempDir>) {
+    /// The returned `TempDir` must be held alive for the test duration.
+    ///
+    /// This is the required entry point for tests that need a `NuSession`.
+    /// Do **not** use `NuSession::new()` directly in tests — it bypasses
+    /// sandbox isolation and uses the shared (non-isolated) cache directory.
+    fn isolated_session() -> (NuSession, tempfile::TempDir) {
         let cache = tmp_sandbox_cache();
-        let session = match &cache {
-            Some(c) => NuSession::with_cache_dir(c.path().to_path_buf()),
-            None => NuSession::new(),
-        };
+        let session = NuSession::with_cache_dir(cache.path().to_path_buf());
         (session, cache)
     }
 
@@ -1278,10 +1288,15 @@ mod tests {
     /// Field order matters: Rust drops fields in declaration order.
     /// `session` must drop first so the nu process is killed before
     /// the TempDirs try to delete nu.exe / rg.exe on Windows.
+    ///
+    /// This is the required entry point for tests that need a sandbox
+    /// environment (session + project directory). Do **not** construct
+    /// `NuSession` directly in tests — use `sandbox_env()` or
+    /// `isolated_session()` to ensure proper isolation.
     struct SandboxTestEnv {
         session: NuSession,
         project: tempfile::TempDir,
-        _cache: Option<tempfile::TempDir>,
+        _cache: tempfile::TempDir,
     }
 
     fn sandbox_env() -> SandboxTestEnv {
@@ -1981,13 +1996,7 @@ mod tests {
         let session = &env.session;
         let grant = ToolGrant::READ;
 
-        let cache_path = match &env._cache {
-            Some(c) => c.path().to_path_buf(),
-            None => {
-                eprintln!("SKIP: no NU_CACHE_DIR available");
-                return;
-            }
-        };
+        let cache_path = env._cache.path().to_path_buf();
 
         // Trigger session spawn (applies sandbox ACLs via lot).
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
@@ -2041,13 +2050,7 @@ mod tests {
         let session = &env.session;
         let grant = ToolGrant::READ;
 
-        let cache_path = match &env._cache {
-            Some(c) => c.path().to_path_buf(),
-            None => {
-                eprintln!("SKIP: no NU_CACHE_DIR available");
-                return;
-            }
-        };
+        let cache_path = env._cache.path().to_path_buf();
 
         // Trigger session spawn.
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
@@ -2140,13 +2143,7 @@ mod tests {
         let session = &env.session;
         let grant = ToolGrant::READ;
 
-        let cache_path = match &env._cache {
-            Some(c) => c.path().to_path_buf(),
-            None => {
-                eprintln!("SKIP: no NU_CACHE_DIR available");
-                return;
-            }
-        };
+        let cache_path = env._cache.path().to_path_buf();
 
         // Trigger session spawn (applies sandbox ACLs via lot).
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
@@ -2359,13 +2356,27 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Sandbox network denial integration test (issue #37)
+    // Sandbox network denial integration test (issue #37, #39)
+    //
+    // Uses a local loopback TCP listener instead of an external host so the
+    // tests are deterministic regardless of internet connectivity.
     // -----------------------------------------------------------------------
+
+    /// Bind a TCP listener on an ephemeral loopback port and return it with
+    /// the port number.  The listener must be held alive for the test duration.
+    fn loopback_listener() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let port = listener.local_addr().expect("local addr").port();
+        (listener, port)
+    }
 
     #[tokio::test]
     async fn integration_sandbox_network_denied_without_grant() {
         // Without NETWORK grant, the sandbox should block outbound network access.
+        // A local loopback listener ensures the port is open — any failure is
+        // due to sandbox denial, not network unavailability.
         skip_no_nu!();
+        let (_listener, port) = loopback_listener();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2374,17 +2385,8 @@ mod tests {
 
         try_spawn(session, tmp.path(), grant).await;
 
-        // Attempt an outbound HTTP request. This should fail because the
-        // sandbox denies network access without the NETWORK grant.
-        // Use `http get` which is nu's built-in HTTP client.
-        let result = try_eval(
-            session,
-            "http get 'http://httpbin.org/get'",
-            15,
-            tmp.path(),
-            grant,
-        )
-        .await;
+        let cmd = format!("http get 'http://127.0.0.1:{port}/test'");
+        let result = try_eval(session, &cmd, 15, tmp.path(), grant).await;
 
         // The network operation should fail — either the evaluate returns an
         // error, or nu reports an error via is_error.
@@ -2407,8 +2409,12 @@ mod tests {
     #[tokio::test]
     async fn integration_sandbox_network_allowed_with_grant() {
         // With NETWORK grant, the sandbox should allow outbound network access.
-        // This test serves as the positive control for the denial test above.
+        // A local loopback listener accepts connections so the test does not
+        // depend on external hosts.  The listener does not speak HTTP, so nu's
+        // `http get` will reach the listener but get a parse/connection error —
+        // the important property is the absence of a sandbox denial.
         skip_no_nu!();
+        let (_listener, port) = loopback_listener();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2417,40 +2423,37 @@ mod tests {
 
         try_spawn(session, tmp.path(), grant).await;
 
-        // Attempt an outbound HTTP request. With NETWORK granted, this should
-        // succeed (assuming the test environment has internet access).
-        let result = try_eval(
-            session,
-            "http get 'http://httpbin.org/get' | get url",
-            30,
-            tmp.path(),
-            grant,
-        )
-        .await;
+        let cmd = format!("http get 'http://127.0.0.1:{port}/test'");
+        let result = try_eval(session, &cmd, 15, tmp.path(), grant).await;
 
-        // If the test environment has no internet, this test may fail — that's
-        // acceptable. The key property is that the sandbox does NOT block it.
         match result {
             Ok(out) => {
                 if out.is_error {
-                    // Check if it's a sandbox denial vs. a network connectivity issue.
-                    let is_sandbox_denial = out.content.contains("denied")
-                        || out.content.contains("Permission")
-                        || out.content.contains("not allowed");
+                    // The listener does not speak HTTP, so nu may report a
+                    // connection-reset or parse error.  That is fine — the key
+                    // property is it is NOT a sandbox denial.
+                    let lower = out.content.to_lowercase();
+                    let is_sandbox_denial = lower.contains("denied")
+                        || lower.contains("permission")
+                        || lower.contains("not allowed");
                     assert!(
                         !is_sandbox_denial,
                         "network should not be sandbox-denied with NETWORK grant: {}",
                         out.content
                     );
                     eprintln!(
-                        "NOTE: network request failed (likely no internet): {}",
+                        "network reached listener (non-HTTP error expected): {}",
                         out.content
                     );
+                } else {
+                    eprintln!("network request succeeded: {}", out.content);
                 }
             }
             Err(e) => {
-                // Timeout may occur if there's no internet — that's not a sandbox issue.
-                eprintln!("NOTE: network request failed (likely no internet): {e}");
+                // Timeout or evaluate-level error — not necessarily a sandbox
+                // denial. Accept it (the denied test above is the definitive
+                // check for sandbox blocking).
+                eprintln!("NOTE: network request error (not sandbox denial): {e}");
             }
         }
     }
