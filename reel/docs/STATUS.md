@@ -68,4 +68,25 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-Remaining candidates: testing gaps (#3d, #3e, #3f, #6, #13, #40, #41, #53, #56, #57, #58, #62, #63, #64), naming (#54, #59, #61), simplification (#55), correctness (#60), other (#51, #52).
+Ordered by planned execution. Clusters group tightly-related issues for single-PR batches.
+
+### Batch 1: Network test robustness (#62, #63, #64)
+Tests currently provide false confidence. #62: allowed-network test never exercises its assertion. #63: fragile string-matching heuristic for sandbox denial. #64: denied test accepts any error as proof of blocking.
+
+### Batch 2: Naming (#54, #59, #61, #51)
+Mechanical renames, no behavioral change. #54: misleading agent test name. #59: misleading bounded_reap test name. #61: `cache_dir`/`resolve_cache_dir` understates directory role. #51: `ToolGrant::READ` understates scope.
+
+### Batch 3: reel-cli fixes (#33, #34, #35)
+All in `reel-cli/src/main.rs`. #33: blocking stdin read on async runtime. #34: `--timeout 0` accepted without validation. #35: dry-run output inconsistency.
+
+### Batch 4: Tool execution coverage (#40, #41)
+Test additions only. #40: missing Edit/Grep end-to-end tests via `execute_tool()`. #41: `from_names` empty-string element untested.
+
+### Batch 5: Ripgrep resolution tests (#3d, #3e, #3f)
+Three test gaps on `resolve_rg_binary`. Very contained.
+
+### Batch 6: Agent test gaps (#53, #6, #13)
+#53: boundary test for exactly 200 tool calls. #6: timeout during resume phase. #13: `RunResult` field propagation.
+
+### Remaining (unscheduled)
+NuSession stderr capture (#23), public API surface (#31, #8), NuSession internals (#55, #56, #57, #58, #60), grant model (#52).
