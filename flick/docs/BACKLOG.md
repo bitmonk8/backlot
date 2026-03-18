@@ -1,24 +1,12 @@
 # Flick — Backlog
 
-31 items in 7 active clusters (2 resolved), ordered by value (highest first).
+31 items in 7 active clusters, ordered by value (highest first).
 
 Original IDs (L*n*, T*n*) preserved for traceability. Severity markers: **M** = medium, **L** = low.
 
 ---
 
-## ~~1. Config Validation & Error Quality~~ — RESOLVED
-
-All 7 items fixed: `deny_unknown_fields` on all config structs (L1), reasoning + output_schema mutual exclusion (L23), empty tool description rejected (T4), `override_reasoning` uses `Option::replace()` (T42), CLI warning for unknown models (T43), tool parameters must be JSON object (T44), empty `--query ""` rejected before I/O (T45).
-
----
-
-## ~~2. Provider Correctness — Chat Completions~~ — RESOLVED
-
-All 8 items fixed: OpenAI refusal field handling (L5), thinking-only messages produce empty vec instead of empty content (T14), redundant content-type headers removed (T17), user-role ToolUse blocks guarded with debug_assert (T56), `"strict": true` on tool function definitions (T57), removed double "Error:" prefix on tool results (T59), empty messages array rejected early (T60), HTTP 408 classified as retryable (T63).
-
----
-
-## 3. Cost & Model Registry (4 items)
+## 1. Cost & Model Registry (4 items)
 
 Cache token cost, cache pricing tiers, missing model aliases and new models. All in `model.rs` / `config.rs` cost computation. Fixes materially wrong output.
 
@@ -48,7 +36,7 @@ Models available as of the current knowledge cutoff that are absent: OpenAI `gpt
 
 ---
 
-## 4. Security & Credentials (7 items)
+## 2. Security & Credentials (7 items)
 
 Base URL validation, credential zeroization, secret key write atomicity, temp file cleanup. All touch `provider_registry.rs` or its security surface.
 
@@ -96,7 +84,7 @@ Neither the Unix nor Windows path calls `sync_all()` after writing the key file.
 
 ---
 
-## 5. Context & Serialization Robustness (4 items)
+## 3. Context & Serialization Robustness (4 items)
 
 Unknown content block types, empty content vecs, message ordering validation, missing serde defaults. All in `context.rs`.
 
@@ -126,7 +114,7 @@ A serialised message with the `content` key absent fails deserialisation with "m
 
 ---
 
-## 6. Error Type Hygiene (5 items)
+## 4. Error Type Hygiene (5 items)
 
 Overloaded error variants, wrong variant names, misattributed JSON errors. One sweep through `error.rs` and its consumers.
 
@@ -162,7 +150,7 @@ Any `serde_json::Error` propagated via `?` in a `FlickError` context becomes `Fl
 
 ---
 
-## 7. Provider — Messages API & Architecture (4 items)
+## 5. Provider — Messages API & Architecture (4 items)
 
 Temperature+thinking guard, system prompt as array (for caching), tool_choice support, provider trait coherence. `messages.rs` and `provider.rs`.
 
@@ -192,7 +180,7 @@ The Messages provider always omits `tool_choice`, relying on the Anthropic defau
 
 ---
 
-## 8. CLI Input Handling (4 items)
+## 6. CLI Input Handling (4 items)
 
 Stdin size limits, provider name/key validation, whitespace-only input messages. All in `main.rs`.
 
@@ -222,7 +210,7 @@ No length cap or control character check on the API key value.
 
 ---
 
-## 9. Test Coverage Gaps (3 items)
+## 7. Test Coverage Gaps (3 items)
 
 Missing tests for context overflow, credential edge cases, destructive mock reads, integration history verification. Independent items but suitable for a single test-writing session.
 
