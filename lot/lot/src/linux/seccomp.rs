@@ -47,43 +47,52 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     let mut rules: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
 
     // --- Process lifecycle ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_exit,
-        libc::SYS_exit_group,
-        libc::SYS_wait4,
-        libc::SYS_waitid,
-        libc::SYS_clone,
-        libc::SYS_clone3,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_exit,
+            libc::SYS_exit_group,
+            libc::SYS_wait4,
+            libc::SYS_waitid,
+            libc::SYS_clone,
+            libc::SYS_clone3,
+        ],
+    );
 
     // --- Memory management ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_brk,
-        libc::SYS_mmap,
-        libc::SYS_munmap,
-        libc::SYS_mprotect,
-        libc::SYS_mremap,
-        libc::SYS_madvise,
-        libc::SYS_msync,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_brk,
+            libc::SYS_mmap,
+            libc::SYS_munmap,
+            libc::SYS_mprotect,
+            libc::SYS_mremap,
+            libc::SYS_madvise,
+            libc::SYS_msync,
+        ],
+    );
 
     // --- File I/O on already-open FDs ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_read,
-        libc::SYS_write,
-        libc::SYS_readv,
-        libc::SYS_writev,
-        libc::SYS_pread64,
-        libc::SYS_pwrite64,
-        libc::SYS_lseek,
-        libc::SYS_close,
-        libc::SYS_dup,
-        libc::SYS_dup3,
-        libc::SYS_fcntl,
-        libc::SYS_fstat,
-        libc::SYS_newfstatat,
-        libc::SYS_statx,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_read,
+            libc::SYS_write,
+            libc::SYS_readv,
+            libc::SYS_writev,
+            libc::SYS_pread64,
+            libc::SYS_pwrite64,
+            libc::SYS_lseek,
+            libc::SYS_close,
+            libc::SYS_dup,
+            libc::SYS_dup3,
+            libc::SYS_fcntl,
+            libc::SYS_fstat,
+            libc::SYS_newfstatat,
+            libc::SYS_statx,
+        ],
+    );
     #[cfg(target_arch = "x86_64")]
     allow_syscalls(&mut rules, &[libc::SYS_dup2]);
 
@@ -93,88 +102,109 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     allow_syscalls(&mut rules, &[libc::SYS_open]);
 
     // --- Directory ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_getdents64,
-        libc::SYS_getcwd,
-        libc::SYS_chdir,
-        libc::SYS_fchdir,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_getdents64,
+            libc::SYS_getcwd,
+            libc::SYS_chdir,
+            libc::SYS_fchdir,
+        ],
+    );
     #[cfg(target_arch = "x86_64")]
     allow_syscalls(&mut rules, &[libc::SYS_getdents]);
 
     // --- Process info ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_getpid,
-        libc::SYS_getppid,
-        libc::SYS_gettid,
-        libc::SYS_getuid,
-        libc::SYS_getgid,
-        libc::SYS_geteuid,
-        libc::SYS_getegid,
-        libc::SYS_getresuid,
-        libc::SYS_getresgid,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_getpid,
+            libc::SYS_getppid,
+            libc::SYS_gettid,
+            libc::SYS_getuid,
+            libc::SYS_getgid,
+            libc::SYS_geteuid,
+            libc::SYS_getegid,
+            libc::SYS_getresuid,
+            libc::SYS_getresgid,
+        ],
+    );
 
     // --- Signals ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_rt_sigaction,
-        libc::SYS_rt_sigprocmask,
-        libc::SYS_rt_sigreturn,
-        libc::SYS_sigaltstack,
-        libc::SYS_tgkill,
-        libc::SYS_tkill,
-        libc::SYS_kill,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_rt_sigaction,
+            libc::SYS_rt_sigprocmask,
+            libc::SYS_rt_sigreturn,
+            libc::SYS_sigaltstack,
+            libc::SYS_tgkill,
+            libc::SYS_tkill,
+            libc::SYS_kill,
+        ],
+    );
 
     // --- Time ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_clock_gettime,
-        libc::SYS_clock_getres,
-        libc::SYS_clock_nanosleep,
-        libc::SYS_gettimeofday,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_clock_gettime,
+            libc::SYS_clock_getres,
+            libc::SYS_clock_nanosleep,
+            libc::SYS_gettimeofday,
+        ],
+    );
     #[cfg(target_arch = "x86_64")]
     allow_syscalls(&mut rules, &[libc::SYS_nanosleep]);
 
     // --- Scheduling ---
-    allow_syscalls(&mut rules, &[libc::SYS_sched_yield, libc::SYS_sched_getaffinity]);
+    allow_syscalls(
+        &mut rules,
+        &[libc::SYS_sched_yield, libc::SYS_sched_getaffinity],
+    );
 
     // --- System info ---
     allow_syscalls(&mut rules, &[libc::SYS_uname, libc::SYS_sysinfo]);
 
     // --- Misc ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_set_tid_address,
-        libc::SYS_set_robust_list,
-        libc::SYS_futex,
-        libc::SYS_rseq,
-        libc::SYS_getrandom,
-        libc::SYS_pipe2,
-        libc::SYS_socketpair, // local IPC only (e.g., tokio signal handler)
-        libc::SYS_ppoll,
-        libc::SYS_pselect6,
-        libc::SYS_epoll_create1,
-        libc::SYS_epoll_ctl,
-        libc::SYS_epoll_pwait,
-        libc::SYS_eventfd2,
-        // prctl is allowed broadly: seccomp filters stack (new filters can
-        // only be more restrictive), PR_SET_NO_NEW_PRIVS is already set
-        // before the filter is loaded, and filtering individual prctl ops
-        // via argument rules is possible but fragile across kernel versions.
-        libc::SYS_prctl,
-        libc::SYS_ioctl,
-        libc::SYS_memfd_create,
-        libc::SYS_flock,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_set_tid_address,
+            libc::SYS_set_robust_list,
+            libc::SYS_futex,
+            libc::SYS_rseq,
+            libc::SYS_getrandom,
+            libc::SYS_pipe2,
+            libc::SYS_socketpair, // local IPC only (e.g., tokio signal handler)
+            libc::SYS_ppoll,
+            libc::SYS_pselect6,
+            libc::SYS_epoll_create1,
+            libc::SYS_epoll_ctl,
+            libc::SYS_epoll_pwait,
+            libc::SYS_eventfd2,
+            // prctl is allowed broadly: seccomp filters stack (new filters can
+            // only be more restrictive), PR_SET_NO_NEW_PRIVS is already set
+            // before the filter is loaded, and filtering individual prctl ops
+            // via argument rules is possible but fragile across kernel versions.
+            libc::SYS_prctl,
+            libc::SYS_ioctl,
+            libc::SYS_memfd_create,
+            libc::SYS_flock,
+        ],
+    );
     // x86_64 has legacy variants absent on aarch64
     #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[
-        libc::SYS_arch_prctl,
-        libc::SYS_pipe,
-        libc::SYS_poll,
-        libc::SYS_select,
-        libc::SYS_epoll_wait,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_arch_prctl,
+            libc::SYS_pipe,
+            libc::SYS_poll,
+            libc::SYS_select,
+            libc::SYS_epoll_wait,
+        ],
+    );
 
     // --- Exec ---
     allow_syscalls(&mut rules, &[libc::SYS_execve, libc::SYS_execveat]);
@@ -187,48 +217,56 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     // --- Stat / readlink ---
     allow_syscalls(&mut rules, &[libc::SYS_readlinkat]);
     #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[
-        libc::SYS_stat,
-        libc::SYS_lstat,
-        libc::SYS_readlink,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[libc::SYS_stat, libc::SYS_lstat, libc::SYS_readlink],
+    );
 
     // --- Directory ops ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_mkdirat,
-        libc::SYS_unlinkat,
-        libc::SYS_renameat,
-        libc::SYS_renameat2,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_mkdirat,
+            libc::SYS_unlinkat,
+            libc::SYS_renameat,
+            libc::SYS_renameat2,
+        ],
+    );
     #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[
-        libc::SYS_mkdir,
-        libc::SYS_rmdir,
-        libc::SYS_unlink,
-        libc::SYS_rename,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_mkdir,
+            libc::SYS_rmdir,
+            libc::SYS_unlink,
+            libc::SYS_rename,
+        ],
+    );
 
     // --- File metadata ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_fchmod,
-        libc::SYS_fchmodat,
-        libc::SYS_fchown,
-        libc::SYS_fchownat,
-        libc::SYS_utimensat,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_fchmod,
+            libc::SYS_fchmodat,
+            libc::SYS_fchown,
+            libc::SYS_fchownat,
+            libc::SYS_utimensat,
+        ],
+    );
     #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[
-        libc::SYS_chmod,
-        libc::SYS_chown,
-    ]);
+    allow_syscalls(&mut rules, &[libc::SYS_chmod, libc::SYS_chown]);
 
     // --- Write ops ---
-    allow_syscalls(&mut rules, &[
-        libc::SYS_ftruncate,
-        libc::SYS_fallocate,
-        libc::SYS_fsync,
-        libc::SYS_fdatasync,
-    ]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_ftruncate,
+            libc::SYS_fallocate,
+            libc::SYS_fsync,
+            libc::SYS_fdatasync,
+        ],
+    );
     #[cfg(target_arch = "x86_64")]
     allow_syscalls(&mut rules, &[libc::SYS_truncate]);
 
@@ -239,25 +277,28 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
 
     // --- Network syscalls (conditional) ---
     if policy.allow_network {
-        allow_syscalls(&mut rules, &[
-            libc::SYS_socket,
-            libc::SYS_bind,
-            libc::SYS_listen,
-            libc::SYS_accept,
-            libc::SYS_accept4,
-            libc::SYS_connect,
-            libc::SYS_sendto,
-            libc::SYS_recvfrom,
-            libc::SYS_sendmsg,
-            libc::SYS_recvmsg,
-            libc::SYS_shutdown,
-            libc::SYS_getsockname,
-            libc::SYS_getpeername,
-            libc::SYS_setsockopt,
-            libc::SYS_getsockopt,
-            libc::SYS_sendmmsg,
-            libc::SYS_recvmmsg,
-        ]);
+        allow_syscalls(
+            &mut rules,
+            &[
+                libc::SYS_socket,
+                libc::SYS_bind,
+                libc::SYS_listen,
+                libc::SYS_accept,
+                libc::SYS_accept4,
+                libc::SYS_connect,
+                libc::SYS_sendto,
+                libc::SYS_recvfrom,
+                libc::SYS_sendmsg,
+                libc::SYS_recvmsg,
+                libc::SYS_shutdown,
+                libc::SYS_getsockname,
+                libc::SYS_getpeername,
+                libc::SYS_setsockopt,
+                libc::SYS_getsockopt,
+                libc::SYS_sendmmsg,
+                libc::SYS_recvmmsg,
+            ],
+        );
     }
 
     #[cfg(target_arch = "x86_64")]

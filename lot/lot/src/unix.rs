@@ -170,11 +170,14 @@ pub fn setup_stdio_pipes(
             })?;
             (w, Some(r))
         }
-        SandboxStdio::Null => (open_dev_null(libc::O_WRONLY).map_err(|e| {
-            unsafe { close_if_not_std(child_stdin) };
-            close_parent_pipes(parent_stdin, None, None);
-            e
-        })?, None),
+        SandboxStdio::Null => (
+            open_dev_null(libc::O_WRONLY).map_err(|e| {
+                unsafe { close_if_not_std(child_stdin) };
+                close_parent_pipes(parent_stdin, None, None);
+                e
+            })?,
+            None,
+        ),
         SandboxStdio::Inherit => (1, None),
     };
 
@@ -190,12 +193,15 @@ pub fn setup_stdio_pipes(
             })?;
             (w, Some(r))
         }
-        SandboxStdio::Null => (open_dev_null(libc::O_WRONLY).map_err(|e| {
-            unsafe { close_if_not_std(child_stdin) };
-            unsafe { close_if_not_std(child_stdout) };
-            close_parent_pipes(parent_stdin, parent_stdout, None);
-            e
-        })?, None),
+        SandboxStdio::Null => (
+            open_dev_null(libc::O_WRONLY).map_err(|e| {
+                unsafe { close_if_not_std(child_stdin) };
+                unsafe { close_if_not_std(child_stdout) };
+                close_parent_pipes(parent_stdin, parent_stdout, None);
+                e
+            })?,
+            None,
+        ),
         SandboxStdio::Inherit => (2, None),
     };
 
