@@ -647,10 +647,14 @@ fn test_deny_path_blocks_access_to_subtree() {
 fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
-        // ping -n <seconds+1> 127.0.0.1 as a sleep substitute
+        // ping requires ICMP raw sockets which AppContainer blocks.
+        // Use powershell Start-Sleep instead.
         (
-            PathBuf::from("ping"),
-            vec!["-n".into(), (seconds + 1).to_string(), "127.0.0.1".into()],
+            PathBuf::from("powershell"),
+            vec![
+                "-Command".into(),
+                format!("Start-Sleep -Seconds {seconds}"),
+            ],
         )
     }
 
@@ -701,20 +705,6 @@ async fn test_wait_with_output_timeout_kills_on_timeout() {
     let tmp = TempDir::new().expect("create temp dir");
     let (program, args) = sleep_command(60);
 
-    #[cfg(target_os = "windows")]
-    let policy = {
-        let p = make_policy(vec![tmp.path().to_path_buf()], vec![]);
-        // Rebuild with network enabled for ping
-        lot::SandboxPolicy::new(
-            p.read_paths().to_vec(),
-            p.write_paths().to_vec(),
-            p.exec_paths().to_vec(),
-            p.deny_paths().to_vec(),
-            true,
-            p.limits().clone(),
-        )
-    };
-    #[cfg(not(target_os = "windows"))]
     let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
 
     let mut cmd = lot::SandboxCommand::new(&program);

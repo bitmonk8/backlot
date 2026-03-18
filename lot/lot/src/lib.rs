@@ -416,8 +416,8 @@ mod tokio_tests {
 
         #[cfg(windows)]
         {
-            // On Windows, use ping -n <seconds+1> 127.0.0.1 as a sleep substitute.
-            // timeout.exe requires console input and doesn't work in piped mode.
+            // On Windows, use `powershell Start-Sleep` as a sleep substitute.
+            // ping requires ICMP raw sockets which AppContainer blocks.
             // No exec_paths needed — AppContainer inherits access to system binaries.
             let tmp = std::env::temp_dir();
             let policy = SandboxPolicy::new(
@@ -425,11 +425,11 @@ mod tokio_tests {
                 vec![],
                 vec![],
                 vec![],
-                true,
+                false,
                 crate::policy::ResourceLimits::default(),
             );
-            let mut cmd = SandboxCommand::new("ping");
-            cmd.args(["-n", &(seconds + 1).to_string(), "127.0.0.1"]);
+            let mut cmd = SandboxCommand::new("powershell");
+            cmd.args(["-Command", &format!("Start-Sleep -Seconds {seconds}")]);
             cmd.stdout(SandboxStdio::Piped);
             cmd.stderr(SandboxStdio::Piped);
             spawn(&policy, &cmd).expect("spawn_sleep must succeed")
