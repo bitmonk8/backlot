@@ -34,6 +34,11 @@ impl SandboxCommand {
     ///
     /// Stdin defaults to [`SandboxStdio::Null`], stdout and stderr to
     /// [`SandboxStdio::Piped`].
+    ///
+    /// The asymmetry is intentional: Null stdin prevents the child from
+    /// hanging on a blocking read when no input is provided. Piped
+    /// stdout/stderr is the most useful default because callers typically
+    /// want to capture the child's output.
     pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
         Self {
             program: program.as_ref().to_owned(),

@@ -22,6 +22,7 @@ use windows_sys::Win32::Security::{
     SID_AND_ATTRIBUTES, SID_IDENTIFIER_AUTHORITY, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
@@ -66,13 +67,15 @@ pub const fn available() -> bool {
 use super::{path_to_wide, to_wide};
 
 fn unique_profile_name() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     // SAFETY: Side-effect-free queries returning process ID and tick count.
     let pid = unsafe { GetCurrentProcessId() };
     let tick = unsafe { GetTickCount64() };
-    format!("lot-{pid}-{tick}-{seq}")
+    let mut qpc: i64 = 0;
+    // SAFETY: QueryPerformanceCounter always succeeds on Windows XP+.
+    unsafe {
+        QueryPerformanceCounter(&raw mut qpc);
+    }
+    format!("lot-{pid}-{tick}-{qpc}")
 }
 
 fn hresult_to_io(hr: HRESULT) -> io::Error {
@@ -925,7 +928,11 @@ fn create_sandboxed_process(
         )
     };
 
-    // Close child-side pipe handles — the child inherited them.
+    // Close child-side pipe handles in the parent after CreateProcessW.
+    // The child inherited these handles via PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
+    // Only Piped streams have parent-owned child handles; Null and Inherit
+    // handles are either system-owned (NUL device) or the parent's own
+    // console handles, which must not be closed here.
     if command.stdin == SandboxStdio::Piped {
         close_handle_if_valid(child_stdin);
     }

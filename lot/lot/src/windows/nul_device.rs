@@ -2,9 +2,7 @@
 
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE, HANDLE, LocalFree,
-};
+use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
     GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SDDL_REVISION_1, SE_FILE_OBJECT, SetEntriesInAclW,
@@ -12,10 +10,8 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACL, AllocateAndInitializeSid, DACL_SECURITY_INFORMATION, FreeSid, GetSecurityDescriptorDacl,
-    GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SID_IDENTIFIER_AUTHORITY, TOKEN_ELEVATION,
-    TOKEN_QUERY, TokenElevation,
+    PSECURITY_DESCRIPTOR, PSID, SID_IDENTIFIER_AUTHORITY,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::error::SandboxError;
 
@@ -167,38 +163,7 @@ fn sddl_has_ac_allow(sddl: &str) -> bool {
         .any(|ace| ace.starts_with("A;") && ace.contains(";;;AC)"))
 }
 
-/// Check whether the current process is elevated (running as administrator).
-pub fn is_elevated() -> bool {
-    let mut token: HANDLE = std::ptr::null_mut();
-
-    // SAFETY: Opening the current process token for query access.
-    let ret = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) };
-    if ret == FALSE {
-        return false;
-    }
-
-    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-    let mut return_len: u32 = 0;
-
-    // SAFETY: Querying token elevation status. Buffer is correctly sized.
-    #[allow(clippy::cast_possible_truncation)]
-    let ret = unsafe {
-        GetTokenInformation(
-            token,
-            TokenElevation,
-            (&raw mut elevation).cast(),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &raw mut return_len,
-        )
-    };
-
-    // SAFETY: Token handle from OpenProcessToken.
-    unsafe {
-        CloseHandle(token);
-    }
-
-    ret != FALSE && elevation.TokenIsElevated != 0
-}
+pub use super::elevation::is_elevated;
 
 /// Grant ALL APPLICATION PACKAGES (`S-1-15-2-1`) read/write access to `\\.\NUL`.
 fn grant_nul_device() -> crate::Result<()> {

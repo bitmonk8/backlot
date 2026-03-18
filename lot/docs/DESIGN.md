@@ -29,6 +29,7 @@ lot/                           (workspace root)
 │   │       ├── nul_device.rs  — NUL device ACE, prerequisites API
 │   │       ├── traverse_acl.rs — Ancestor traverse ACE management
 │   │       ├── sentinel.rs    — Sentinel file ACL recovery (write, read, restore, cleanup_stale)
+│   │       ├── elevation.rs   — is_elevated() check (UAC token inspection)
 │   │       ├── pipe.rs        — Pipe creation and stdio handle helpers
 │   │       └── cmdline.rs     — Command-line building and argument quoting
 │   └── tests/

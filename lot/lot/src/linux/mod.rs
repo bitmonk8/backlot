@@ -242,9 +242,10 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // single-threaded so CLONE_NEWUSER is permitted.
         let rc = unsafe { libc::unshare(clone_flags) };
         if rc != 0 {
-            helper_bail!(err_pipe_wr, STEP_UNSHARE, unsafe {
-                *libc::__errno_location()
-            });
+            // Capture errno immediately — subsequent calls could clobber it.
+            // SAFETY: errno access has no preconditions.
+            let saved_errno = unsafe { *libc::__errno_location() };
+            helper_bail!(err_pipe_wr, STEP_UNSHARE, saved_errno);
         }
 
         // Set up UID/GID mapping — must happen before mount namespace setup.
@@ -284,9 +285,8 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             // SAFETY: open() with a valid CString path
             let fd = unsafe { libc::open(procs_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
             if fd < 0 {
-                helper_bail!(err_pipe_wr, STEP_CGROUP, unsafe {
-                    *libc::__errno_location()
-                });
+                let saved_errno = unsafe { *libc::__errno_location() };
+                helper_bail!(err_pipe_wr, STEP_CGROUP, saved_errno);
             }
             // SAFETY: fd is valid, pid_bytes points into stack-allocated buf
             let written = unsafe { libc::write(fd, pid_bytes.as_ptr().cast(), pid_bytes.len()) };
@@ -304,9 +304,8 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // SAFETY: standard fork, helper is single-threaded
         let inner_pid = unsafe { libc::fork() };
         if inner_pid < 0 {
-            helper_bail!(err_pipe_wr, STEP_FORK_INNER, unsafe {
-                *libc::__errno_location()
-            });
+            let saved_errno = unsafe { *libc::__errno_location() };
+            helper_bail!(err_pipe_wr, STEP_FORK_INNER, saved_errno);
         }
 
         if inner_pid == 0 {
@@ -373,9 +372,8 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             if let Some(ref cwd) = prefork.base.cwd {
                 // SAFETY: valid CString pointer
                 if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
-                    helper_bail!(err_pipe_wr, STEP_CHDIR, unsafe {
-                        *libc::__errno_location()
-                    });
+                    let saved_errno = unsafe { *libc::__errno_location() };
+                    helper_bail!(err_pipe_wr, STEP_CHDIR, saved_errno);
                 }
             }
 

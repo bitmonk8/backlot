@@ -105,7 +105,11 @@ impl CgroupGuard {
             io::Error::new(io::ErrorKind::InvalidInput, "current cgroup has no parent")
         })?;
 
-        // Use monotonic clock nanoseconds as a unique suffix instead of a static counter.
+        // SAFETY: getpid has no preconditions
+        let pid = unsafe { libc::getpid() };
+
+        // Use monotonic clock nanoseconds for uniqueness. On collision
+        // (EEXIST), retry with an incremented suffix.
         let mut ts = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -113,12 +117,29 @@ impl CgroupGuard {
         // SAFETY: ts is a valid timespec on the stack; CLOCK_MONOTONIC is always available.
         unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
         let nanos = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
-        // SAFETY: getpid has no preconditions
-        let pid = unsafe { libc::getpid() };
-        let dir_name = format!("lot-sandbox-{pid}-{nanos}");
-        let path = parent.join(dir_name);
 
-        fs::create_dir(&path)?;
+        let base_name = format!("lot-sandbox-{pid}-{nanos}");
+        let mut path = parent.join(&base_name);
+        let mut created = false;
+        for attempt in 0u32..=16 {
+            if attempt > 0 {
+                path = parent.join(format!("{base_name}-{attempt}"));
+            }
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    created = true;
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if !created {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("cgroup dir exhausted 17 name attempts: {}", path.display()),
+            ));
+        }
 
         // Write memory limit
         if let Some(bytes) = limits.max_memory_bytes {

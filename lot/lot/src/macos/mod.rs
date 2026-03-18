@@ -23,6 +23,10 @@ pub const fn probe() -> PlatformCapabilities {
 
 /// Apply resource limits via setrlimit.
 ///
+/// Limitation: RLIMIT_AS is a soft limit — processes can bypass it with
+/// MAP_NORESERVE (lazy-commit mappings that don't count against the address
+/// space limit). macOS has no kernel-enforced memory cgroup equivalent.
+///
 /// # Safety
 /// Must only be called from the forked child before exec.
 unsafe fn apply_resource_limits(policy: &SandboxPolicy) -> io::Result<()> {
@@ -94,14 +98,12 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     if child_pid == 0 {
         // === CHILD PROCESS (single-threaded after fork) ===
 
-        // Step constants for error reporting (consistent with Linux helper_bail)
-        const STEP_SETSID: i32 = 1;
+        // Step constants for error reporting via child_bail protocol
         const STEP_SEATBELT: i32 = 2;
         const STEP_RLIMIT: i32 = 3;
         const STEP_DUP2: i32 = 4;
         const STEP_CHDIR: i32 = 5;
         const STEP_EXEC: i32 = 6;
-        let _ = STEP_SETSID; // used only for documentation
 
         // Start a new session so the child becomes its own process group leader.
         // This lets the parent killpg() all descendants, not just the direct child.
@@ -122,7 +124,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
         // Macro to report error and exit from child.
         // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
-        // which step failed (consistent with Linux helper_bail protocol).
+        // which step failed.
         macro_rules! child_bail {
             ($err_fd:expr, $step:expr, $errno:expr) => {{
                 let mut buf = [0u8; 8];

@@ -42,9 +42,9 @@ The public entry point has no test — not even a smoke test verifying it return
 **Category:** Testing
 **File:** `lot/src/windows/nul_device.rs`
 
-## Windows: `is_elevated()` placement
+## Windows: `is_elevated()` re-export path
 
-`is_elevated()` is a general process-privilege query with no NUL-device dependency. Could live in a more appropriate module.
+`is_elevated()` was extracted to `elevation.rs` but is still re-exported through `nul_device.rs`. The re-export should be in `mod.rs` or `lib.rs` directly. Coupled to the nul_device.rs mixed-responsibilities issue below.
 
 **Category:** Separation of concerns
 **File:** `lot/src/windows/nul_device.rs`
@@ -301,3 +301,31 @@ Both create an empty file as a mount point using the same `open(O_CREAT | O_WRON
 
 **Category:** Simplification
 **File:** `lot/src/linux/namespace.rs`
+
+## QPC uniqueness weaker than atomic counter for concurrent profile names
+
+`unique_profile_name()` replaced `AtomicU64` with `QueryPerformanceCounter`. QPC does not guarantee distinct values for concurrent calls from different threads. The `create_profile` retry on `ERROR_ALREADY_EXISTS` mitigates this, but the race window exists. Revisit if collisions are observed.
+
+**Category:** Correctness
+**File:** `lot/src/windows/appcontainer.rs`
+
+## `policy.rs` validate() canonicalization loop duplicated 4 times
+
+The `for p in &self.X_paths { match canon(...) { ... } }` block is copy-pasted for read, write, exec, and deny paths. A helper function `canon_collect(paths, label, errors) -> Vec<PathBuf>` would eliminate the duplication. The `if let Err(InvalidPolicy(msg))` pattern is also repeated 8 times for overlap/coverage/limits checks.
+
+**Category:** Simplification
+**File:** `lot/src/policy.rs`
+
+## No test for multi-error accumulation in `validate()`
+
+`validate()` now collects all errors and joins with `"; "`. No test verifies that multiple simultaneous violations produce a combined error message.
+
+**Category:** Testing
+**File:** `lot/src/policy.rs`
+
+## Prerequisite API remains in `nul_device.rs`
+
+`grant_appcontainer_prerequisites`, `appcontainer_prerequisites_met`, and their `_for_policy` variants orchestrate both NUL device and traverse ACL grants. They belong in a dedicated `prerequisites.rs` module. `allocate_app_packages_sid()` is also in `nul_device.rs` but used by `traverse_acl.rs`. Coupled to the `is_elevated` re-export path issue.
+
+**Category:** Separation of concerns
+**File:** `lot/src/windows/nul_device.rs`

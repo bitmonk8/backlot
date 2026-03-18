@@ -1,5 +1,6 @@
 mod appcontainer;
 mod cmdline;
+pub mod elevation;
 mod job;
 pub mod nul_device;
 mod pipe;
@@ -7,6 +8,7 @@ mod sentinel;
 pub mod traverse_acl;
 
 // Shared Win32 constants not exported by `windows-sys` without extra feature flags.
+// https://learn.microsoft.com/en-us/windows/win32/fileio/file-access-rights-constants
 pub const FILE_GENERIC_READ: u32 = 0x0012_0089;
 pub const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
 pub const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;

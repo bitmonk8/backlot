@@ -229,45 +229,76 @@ impl SandboxPolicy {
 
     /// Validate the policy before applying it.
     ///
-    /// Returns [`SandboxError::InvalidPolicy`] if any path does not exist, if
-    /// grant paths overlap across or within sets, if deny paths are not strict
-    /// children of grant paths, if a grant path is nested under a deny path,
-    /// or if resource limits are zero.
+    /// Returns [`SandboxError::InvalidPolicy`] containing all validation
+    /// errors (not just the first) if any path does not exist, if grant paths
+    /// overlap across or within sets, if deny paths are not strict children of
+    /// grant paths, if a grant path is nested under a deny path, or if
+    /// resource limits are zero.
     /// Called automatically by [`spawn()`](crate::spawn).
     pub fn validate(&self) -> Result<(), SandboxError> {
+        let mut errors: Vec<String> = Vec::new();
+
         if self.read_paths.is_empty() && self.write_paths.is_empty() && self.exec_paths.is_empty() {
-            return Err(SandboxError::InvalidPolicy(
-                "policy must specify at least one path".into(),
-            ));
+            errors.push("policy must specify at least one path".into());
         }
 
         // Canonicalize all paths. This also validates existence.
-        let read_canon: Vec<PathBuf> = self
-            .read_paths
-            .iter()
-            .map(|p| canon(p, "read_paths"))
-            .collect::<Result<_, _>>()?;
-        let write_canon: Vec<PathBuf> = self
-            .write_paths
-            .iter()
-            .map(|p| canon(p, "write_paths"))
-            .collect::<Result<_, _>>()?;
-        let exec_canon: Vec<PathBuf> = self
-            .exec_paths
-            .iter()
-            .map(|p| canon(p, "exec_paths"))
-            .collect::<Result<_, _>>()?;
-        let deny_canon: Vec<PathBuf> = self
-            .deny_paths
-            .iter()
-            .map(|p| canon(p, "deny_paths"))
-            .collect::<Result<_, _>>()?;
+        // Collect canonicalization errors but continue with successfully
+        // canonicalized paths so subsequent checks can still run.
+        let mut read_canon: Vec<PathBuf> = Vec::new();
+        for p in &self.read_paths {
+            match canon(p, "read_paths") {
+                Ok(c) => read_canon.push(c),
+                Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        let mut write_canon: Vec<PathBuf> = Vec::new();
+        for p in &self.write_paths {
+            match canon(p, "write_paths") {
+                Ok(c) => write_canon.push(c),
+                Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        let mut exec_canon: Vec<PathBuf> = Vec::new();
+        for p in &self.exec_paths {
+            match canon(p, "exec_paths") {
+                Ok(c) => exec_canon.push(c),
+                Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        let mut deny_canon: Vec<PathBuf> = Vec::new();
+        for p in &self.deny_paths {
+            match canon(p, "deny_paths") {
+                Ok(c) => deny_canon.push(c),
+                Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
 
         // Check for intra-set overlaps.
-        check_intra_overlap(&read_canon, "read_paths")?;
-        check_intra_overlap(&write_canon, "write_paths")?;
-        check_intra_overlap(&exec_canon, "exec_paths")?;
-        check_intra_overlap(&deny_canon, "deny_paths")?;
+        if let Err(SandboxError::InvalidPolicy(msg)) =
+            check_intra_overlap(&read_canon, "read_paths")
+        {
+            errors.push(msg);
+        }
+        if let Err(SandboxError::InvalidPolicy(msg)) =
+            check_intra_overlap(&write_canon, "write_paths")
+        {
+            errors.push(msg);
+        }
+        if let Err(SandboxError::InvalidPolicy(msg)) =
+            check_intra_overlap(&exec_canon, "exec_paths")
+        {
+            errors.push(msg);
+        }
+        if let Err(SandboxError::InvalidPolicy(msg)) =
+            check_intra_overlap(&deny_canon, "deny_paths")
+        {
+            errors.push(msg);
+        }
 
         // Check for cross-set overlaps (exact match + parent/child).
         //
@@ -275,17 +306,39 @@ impl SandboxPolicy {
         // permissions to a specific subdirectory while the parent remains
         // read-only. The reverse (read child under write parent) is redundant
         // and rejected.
-        check_cross_overlap_directional(&read_canon, "read_paths", &write_canon, "write_paths")?;
-        check_cross_overlap(&read_canon, "read_paths", &exec_canon, "exec_paths")?;
-        check_cross_overlap(&write_canon, "write_paths", &exec_canon, "exec_paths")?;
+        if let Err(SandboxError::InvalidPolicy(msg)) =
+            check_cross_overlap_directional(&read_canon, "read_paths", &write_canon, "write_paths")
+        {
+            errors.push(msg);
+        }
+        if let Err(SandboxError::InvalidPolicy(msg)) =
+            check_cross_overlap(&read_canon, "read_paths", &exec_canon, "exec_paths")
+        {
+            errors.push(msg);
+        }
+        if let Err(SandboxError::InvalidPolicy(msg)) =
+            check_cross_overlap(&write_canon, "write_paths", &exec_canon, "exec_paths")
+        {
+            errors.push(msg);
+        }
 
         // Each deny path must be a strict child of at least one grant path.
         // Exact matches are rejected — callers should remove the grant instead.
-        check_deny_coverage(&deny_canon, &read_canon, &write_canon, &exec_canon)?;
+        if let Err(SandboxError::InvalidPolicy(msg)) =
+            check_deny_coverage(&deny_canon, &read_canon, &write_canon, &exec_canon)
+        {
+            errors.push(msg);
+        }
 
-        self.limits.validate()?;
+        if let Err(SandboxError::InvalidPolicy(msg)) = self.limits.validate() {
+            errors.push(msg);
+        }
 
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(SandboxError::InvalidPolicy(errors.join("; ")))
+        }
     }
 }
 
