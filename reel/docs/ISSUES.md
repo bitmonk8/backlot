@@ -2,17 +2,13 @@
 
 Clusters ordered by impact/importance (highest first).
 
-## 1. Agent dispatch and tool-loop semantics (#5, #14, #15, #24, #25)
+## 1. Agent dispatch and tool-loop semantics (#5, #14, #15, #24)
 
 Contains the only correctness bug (#5) — blocks custom-tool-only consumers. #24 is a design gap allowing unbounded tool calls. All touch `agent.rs` routing/counting logic.
 
-### 5. `Agent::run()` dispatch heuristic uses `ToolGrant::NU` instead of tool availability
+### 5. `Agent::run()` dispatch heuristic uses `ToolGrant::READ` instead of tool availability
 
-`reel/src/agent.rs` — `run()` decides between structured and tool-loop mode based on `ToolGrant::NU`. A consumer with only custom tools (no NU grant) would be routed to structured mode incorrectly. No such consumer exists yet. **Category: Correctness.**
-
-### 25. `WRITE` without `NU` is accepted but meaningless
-
-`reel/src/agent.rs` — `ToolGrant::WRITE` without `ToolGrant::NU` produces empty tool list and routes to structured mode. No write capability. **Category: API clarity.**
+`reel/src/agent.rs` — `run()` decides between structured and tool-loop mode based on `ToolGrant::READ`. A consumer with only custom tools (no READ grant) would be routed to structured mode incorrectly. No such consumer exists yet. **Category: Correctness.**
 
 ### 24. `MAX_TOOL_ROUNDS` caps rounds, not individual tool calls
 
@@ -44,7 +40,7 @@ Contains the only correctness bug (#5) — blocks custom-tool-only consumers. #2
 
 ### 38. Grant-change respawn test does not cover NETWORK flag
 
-`reel/src/nu_session.rs` — `integration_grant_change_respawns` only tests `NU` → `NU | WRITE`. No coverage for `NETWORK` flag change triggering respawn. Mechanism works via full bitflags comparison, so regression is unlikely. **Category: Testing.**
+`reel/src/nu_session.rs` — `integration_grant_change_respawns` only tests `READ` → `READ | WRITE`. No coverage for `NETWORK` flag change triggering respawn. Mechanism works via full bitflags comparison, so regression is unlikely. **Category: Testing.**
 
 ### 45. `spawn()` respawn on parameter mismatch untested
 
@@ -205,3 +201,13 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 ### 48. Duplicate custom tool names: HashMap changes first-match to last-match semantics
 
 `reel/src/agent.rs` — `dispatch_tool` previously used linear scan (first match wins). The `HashMap<String, usize>` built via `collect()` keeps the last entry for duplicate keys. No practical impact: duplicate custom tool names are not a supported scenario, and `build_request_config` rejects duplicate names against built-ins. **Category: Testing.**
+
+## 15. Grant model refinements (#51, #52)
+
+### 51. `ToolGrant::READ` understates the flag's scope
+
+`reel/src/tools.rs` — `READ` enables NuShell (arbitrary command execution) and gates the entire tool loop in `agent.rs`. The name suggests read-only access but actually means "enable tools." A name like `TOOLS` would describe both roles. **Category: Naming.**
+
+### 52. `WRITE`/`NETWORK` → `READ` implication not enforced at type level
+
+`reel/src/tools.rs` — The implication (WRITE implies READ, NETWORK implies READ) is enforced only in `from_names`. Library consumers constructing `ToolGrant` directly via bitflags can create bare `WRITE` without `READ`, which silently produces zero tool definitions. `tool_definitions` and `required_grant` defensively check `WRITE | READ` together, duplicating the invariant. Consider a normalizing constructor or custom `BitOr` to enforce at the type level. **Category: Separation of concerns.**

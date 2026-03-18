@@ -6,8 +6,8 @@
 
 ## What Is Implemented
 
-- **Agent runtime** (`agent.rs`) — `Agent` struct managing single sessions with configurable grants and timeout. Tool loop runs up to 50 rounds, dispatching to built-in or custom handlers via `ToolHandler` trait. Structured vs. tool-loop routing based on `ToolGrant::NU`. Per-session timeout with model resume cancellation on expiry.
-- **Built-in tools** (6 total, `tools.rs`) — `Read`, `Write`, `Edit`, `Glob`, `Grep` (all execute as nu custom commands: `reel read`, `reel write`, etc.), `NuShell` (direct evaluation). Read-only tools gated on `ToolGrant::NU`; write tools gated on `ToolGrant::WRITE | ToolGrant::NU`.
+- **Agent runtime** (`agent.rs`) — `Agent` struct managing single sessions with configurable grants and timeout. Tool loop runs up to 50 rounds, dispatching to built-in or custom handlers via `ToolHandler` trait. Structured vs. tool-loop routing based on `ToolGrant::READ`. Per-session timeout with model resume cancellation on expiry.
+- **Built-in tools** (6 total, `tools.rs`) — `Read`, `Write`, `Edit`, `Glob`, `Grep` (all execute as nu custom commands: `reel read`, `reel write`, etc.), `NuShell` (direct evaluation). Read-only tools gated on `ToolGrant::READ`; write tools gated on `ToolGrant::WRITE | ToolGrant::READ`.
 - **NuShell sandbox** (`nu_session.rs`) — `NuSession` managing a persistent `nu --mcp` process (JSON-RPC 2.0). Per-session temp directory under `<project_root>/.reel/tmp/`. Sandbox policy via `lot` (Windows AppContainer, Linux user/mount/pid namespaces, macOS Seatbelt). Grant-based process respawn if grants or project root change between calls. Non-blocking process teardown.
 - **Sandbox re-exports** (`sandbox.rs`) — `reel::sandbox` module re-exporting lot's prerequisite APIs (`grant_appcontainer_prerequisites`, `appcontainer_prerequisites_met`, `is_elevated`, etc.) and types (`SandboxPolicy`, `SandboxError`). Library consumers no longer need a direct lot dependency.
 - **CLI binary** (`reel-cli`) — `reel run` (execute agent query with YAML config, stdin, dry-run) and `reel setup` (Windows AppContainer ACL prerequisites). Single-pass YAML config parsing: parse as `Value`, pop `grant` key, pass remainder to flick. Uses `reel::sandbox` for all platform prerequisite checks.
@@ -18,6 +18,7 @@
 - **Typed error types** — `GrantParseError` struct for `ToolGrant::from_names`. Re-exported from `reel::GrantParseError` (closes issue #30).
 - **Test coverage expansion** — `ToolGrant::from_names` unit tests (issue #36), custom `ToolHandler` dispatch tests (issue #1), full tool execution path integration tests (issue #2), CLI `parse_config`/`emit_error` tests (issue #12), sandbox network denial integration tests (issue #37).
 - **Simplification batch** — Policy test helper `policy_test_fixture` deduplicates sandbox policy test setup (issue #3c). `extract_text` uses reverse iterator (issue #10). `dispatch_tool` uses `HashMap<String, usize>` index for O(1) custom tool lookup (issue #11). CLI prerequisite path resolution extracted to `resolve_prerequisite_paths` (issue #17). `build_request_config` is the single public config-building method on `Agent` (issue #18).
+- **Grant model cleanup** — Renamed `ToolGrant::NU` → `ToolGrant::READ`. `WRITE` and `NETWORK` now imply `READ` in `from_names`. Config accepts `"read"` instead of `"nu"`. Closes issue #25.
 - **Test counts** — 179 tests total (168 reel + 11 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
@@ -35,7 +36,7 @@ All 6 built-in tools execute through a shared NuShell session (custom commands o
 
 ### Grant-based tool availability
 
-Bitflags (`WRITE`, `NU`, `NETWORK`) determine tool list and sandbox policy. Binary decision — no per-tool grants. Network access denied by default; requires explicit `NETWORK` grant.
+Bitflags (`READ`, `WRITE`, `NETWORK`) determine tool list and sandbox policy. Binary decision — no per-tool grants. `WRITE` and `NETWORK` imply `READ`. Network access denied by default; requires explicit `NETWORK` grant.
 
 ### Tool loop over streaming
 
@@ -43,7 +44,7 @@ Request-dispatch-response cycles up to 50 rounds. No streaming of partial model 
 
 ### Eager NuShell spawn
 
-Process started at session creation (if NU granted), not on first use. Avoids startup cost during tool calls.
+Process started at session creation (if READ granted), not on first use. Avoids startup cost during tool calls.
 
 ### Dual-crate architecture
 
@@ -62,4 +63,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-Remaining candidates: testing gaps (#3b, #3d, #3e, #3f, #3g, #3h, #6, #7, #13, #14, #15, #38, #39, #40, #41, #43, #44, #45, #46), other (#42, #47).
+Remaining candidates: testing gaps (#3b, #3d, #3e, #3f, #3g, #3h, #6, #7, #13, #14, #15, #38, #39, #40, #41, #43, #44, #45, #46), other (#42, #47, #51, #52).

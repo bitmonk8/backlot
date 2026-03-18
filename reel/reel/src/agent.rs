@@ -181,13 +181,13 @@ impl Agent {
     }
 
     /// Run an agent session. Dispatches to structured (no tools) or
-    /// tool-loop mode based on whether `request.grant` includes `NU`.
+    /// tool-loop mode based on whether `request.grant` includes `READ`.
     pub async fn run<T: DeserializeOwned>(
         &self,
         request: &AgentRequestConfig,
         query: &str,
     ) -> anyhow::Result<RunResult<T>> {
-        if request.grant.contains(ToolGrant::NU) {
+        if request.grant.contains(ToolGrant::READ) {
             self.run_with_tools(request, query).await
         } else {
             self.run_structured(request, query).await
@@ -723,7 +723,7 @@ mod tests {
             }),
         );
         let mut request = test_request();
-        request.grant = ToolGrant::NU;
+        request.grant = ToolGrant::READ;
         let result: anyhow::Result<RunResult<serde_json::Value>> =
             agent.run(&request, "test").await;
         assert!(result.is_ok());
@@ -787,7 +787,7 @@ mod tests {
             }),
         );
         let mut request = test_request();
-        request.grant = ToolGrant::NU;
+        request.grant = ToolGrant::READ;
         let result: anyhow::Result<RunResult<serde_json::Value>> =
             agent.run(&request, "test").await;
         let err = result.unwrap_err();
@@ -950,7 +950,7 @@ mod tests {
         );
 
         let mut request = test_request();
-        request.grant = ToolGrant::NU;
+        request.grant = ToolGrant::READ;
         request.custom_tools = vec![Box::new(handler)];
 
         let result: anyhow::Result<RunResult<serde_json::Value>> =
@@ -967,7 +967,7 @@ mod tests {
         let handler = MockToolHandler::new("Read", "custom read override");
 
         let mut request = test_request();
-        request.grant = ToolGrant::NU;
+        request.grant = ToolGrant::READ;
         request.custom_tools = vec![Box::new(handler)];
 
         let result = Agent::build_request_config(&request);
@@ -991,7 +991,7 @@ mod tests {
         );
 
         let mut request = test_request();
-        request.grant = ToolGrant::NU;
+        request.grant = ToolGrant::READ;
         // No custom tools — "Read" call goes to built-in executor.
         request.custom_tools = Vec::new();
 
@@ -1005,7 +1005,7 @@ mod tests {
     async fn custom_tool_definitions_included_in_config() {
         let handler = MockToolHandler::new("SpecialTool", "result");
         let mut request = test_request();
-        request.grant = ToolGrant::NU;
+        request.grant = ToolGrant::READ;
         request.custom_tools = vec![Box::new(handler)];
 
         let config = Agent::build_request_config(&request).unwrap();

@@ -713,7 +713,8 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_write_grant() {
-        let (tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::WRITE | ToolGrant::NU, None);
+        let (tmp, _sess_tmp, policy) =
+            policy_test_fixture(ToolGrant::WRITE | ToolGrant::READ, None);
         let canon = tmp.path().canonicalize().unwrap();
 
         let covered_by_write = policy
@@ -734,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_no_write_grant() {
-        let (tmp, sess_tmp, policy) = policy_test_fixture(ToolGrant::NU, None);
+        let (tmp, sess_tmp, policy) = policy_test_fixture(ToolGrant::READ, None);
         let canon = tmp.path().canonicalize().unwrap();
         let sess_canon = sess_tmp.path().canonicalize().unwrap();
 
@@ -756,7 +757,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_denies_network_by_default() {
-        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::NU, None);
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ, None);
         assert!(
             !policy.allow_network,
             "network should be denied when NETWORK grant is absent"
@@ -766,7 +767,7 @@ mod tests {
     #[test]
     fn test_build_nu_sandbox_policy_allows_network_with_grant() {
         let (_tmp, _sess_tmp, policy) =
-            policy_test_fixture(ToolGrant::NU | ToolGrant::NETWORK, None);
+            policy_test_fixture(ToolGrant::READ | ToolGrant::NETWORK, None);
         assert!(
             policy.allow_network,
             "network should be allowed when NETWORK grant is present"
@@ -775,7 +776,7 @@ mod tests {
 
     #[test]
     fn test_build_nu_sandbox_policy_no_exec_paths_without_cache() {
-        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::NU, None);
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::READ, None);
         assert!(
             policy.exec_paths.is_empty(),
             "exec_paths should be empty when no cache dir provided"
@@ -790,7 +791,7 @@ mod tests {
         let cache = tempfile::TempDir::new_in(sandbox_test_base()).unwrap();
         let policy = build_nu_sandbox_policy(
             tmp.path(),
-            ToolGrant::NU,
+            ToolGrant::READ,
             Some(cache.path()),
             sess_tmp.path(),
         )
@@ -1115,7 +1116,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
-        try_spawn(&session, tmp.path(), ToolGrant::NU).await;
+        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
     }
 
     #[tokio::test]
@@ -1123,9 +1124,9 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
-        try_spawn(&session, tmp.path(), ToolGrant::NU).await;
+        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
         // Second spawn with same params is a no-op.
-        session.spawn(tmp.path(), ToolGrant::NU).await.unwrap();
+        session.spawn(tmp.path(), ToolGrant::READ).await.unwrap();
     }
 
     #[tokio::test]
@@ -1134,7 +1135,7 @@ mod tests {
         let tmp = tmp_sandbox_project();
         {
             let (session, _cache) = isolated_session();
-            try_spawn(&session, tmp.path(), ToolGrant::NU).await;
+            try_spawn(&session, tmp.path(), ToolGrant::READ).await;
         }
         // No panic or zombie = pass.
     }
@@ -1144,9 +1145,9 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
-        try_spawn(&session, tmp.path(), ToolGrant::NU).await;
+        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
         session.kill().await;
-        let result = try_eval(&session, "echo 'alive'", 30, tmp.path(), ToolGrant::NU).await;
+        let result = try_eval(&session, "echo 'alive'", 30, tmp.path(), ToolGrant::READ).await;
         let out = result.unwrap();
         assert!(!out.is_error);
     }
@@ -1161,7 +1162,7 @@ mod tests {
             "echo 'hello world'",
             30,
             tmp.path(),
-            ToolGrant::NU,
+            ToolGrant::READ,
         )
         .await;
         let out = result.unwrap();
@@ -1179,7 +1180,7 @@ mod tests {
             "error make { msg: 'test error' }",
             30,
             tmp.path(),
-            ToolGrant::NU,
+            ToolGrant::READ,
         )
         .await;
         let out = result.unwrap();
@@ -1192,12 +1193,12 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
-        let result = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::NU).await;
+        let result = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::READ).await;
         let out1 = result.unwrap();
         assert!(!out1.is_error);
         assert!(out1.content.contains('3'));
         let out2 = session
-            .evaluate("'foo' | str length", 30, tmp.path(), ToolGrant::NU)
+            .evaluate("'foo' | str length", 30, tmp.path(), ToolGrant::READ)
             .await
             .unwrap();
         assert!(!out2.is_error);
@@ -1212,7 +1213,7 @@ mod tests {
         let session = &env.session;
         let test_file = tmp.path().join("test.txt");
         std::fs::write(&test_file, "line one\nline two\n").unwrap();
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
         let cmd = format!("reel read '{}'", nu_path(&test_file));
         let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
@@ -1227,7 +1228,7 @@ mod tests {
         let tmp = &env.project;
         let session = &env.session;
         let test_file = tmp.path().join("written.txt");
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
         let cmd = format!("reel write '{}' 'hello from test'", nu_path(&test_file));
         let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
@@ -1244,7 +1245,7 @@ mod tests {
         let session = &env.session;
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         std::fs::write(tmp.path().join("b.txt"), "").unwrap();
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
         let cmd = format!("reel glob '*.txt' --path '{}'", nu_path(tmp.path()));
         let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
@@ -1261,7 +1262,7 @@ mod tests {
         let session = &env.session;
         let test_file = tmp.path().join("edit_me.txt");
         std::fs::write(&test_file, "old value here").unwrap();
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
         let cmd = format!(
             "reel edit '{}' 'old value' 'new value'",
             nu_path(&test_file)
@@ -1280,7 +1281,7 @@ mod tests {
         let tmp = &env.project;
         let session = &env.session;
         std::fs::write(tmp.path().join("searchable.txt"), "findme in this file\n").unwrap();
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
         let cmd = format!("reel grep 'findme' --path '{}'", nu_path(tmp.path()));
         let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
         let out = result.unwrap();
@@ -1293,12 +1294,19 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
-        let result = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::NU).await;
+        let result = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::READ).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("timed out"), "error: {err}");
         // Session recovers after timeout.
-        let result2 = try_eval(&session, "echo 'recovered'", 30, tmp.path(), ToolGrant::NU).await;
+        let result2 = try_eval(
+            &session,
+            "echo 'recovered'",
+            30,
+            tmp.path(),
+            ToolGrant::READ,
+        )
+        .await;
         let out = result2.unwrap();
         assert!(!out.is_error);
         assert!(out.content.contains("recovered"));
@@ -1309,7 +1317,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
-        let result = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::NU).await;
+        let result = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::READ).await;
         let out1 = result.unwrap();
         assert!(!out1.is_error);
         // Switch to write grant — triggers respawn.
@@ -1318,7 +1326,7 @@ mod tests {
             "echo 'rw'",
             30,
             tmp.path(),
-            ToolGrant::NU | ToolGrant::WRITE,
+            ToolGrant::READ | ToolGrant::WRITE,
         )
         .await;
         let out2 = result2.unwrap();
@@ -1330,7 +1338,7 @@ mod tests {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _cache) = isolated_session();
-        try_spawn(&session, tmp.path(), ToolGrant::NU).await;
+        try_spawn(&session, tmp.path(), ToolGrant::READ).await;
         let gen_before = {
             let st = session.state.lock().await;
             st.generation
@@ -1351,7 +1359,7 @@ mod tests {
         let tmp = tmp_sandbox_project();
         std::fs::write(tmp.path().join("needle.txt"), "haystack\n").unwrap();
         let (session, _cache) = isolated_session();
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
         // Use REEL_RG_PATH (absolute path) instead of bare `^rg`. NuShell's
         // PATH-based command lookup fails under AppContainer on Windows.
         let cmd = format!(
@@ -1385,8 +1393,8 @@ mod tests {
         let session = &env.session;
         // Seed a file so we can also test overwrite prevention.
         std::fs::write(tmp.path().join("existing.txt"), "original").unwrap();
-        // NU without WRITE — sandbox uses read_path for project root.
-        let grant = ToolGrant::NU;
+        // READ without WRITE — sandbox uses read_path for project root.
+        let grant = ToolGrant::READ;
 
         // Attempt 1: create a new file inside the read-only project root.
         let write_cmd = format!(
@@ -1514,7 +1522,7 @@ mod tests {
         let tmp = &env.project;
         let session = &env.session;
         std::fs::write(tmp.path().join("source.txt"), "immutable content").unwrap();
-        let grant = ToolGrant::NU;
+        let grant = ToolGrant::READ;
 
         // Copy to a temp file, modify it, then attempt to write back.
         // This is the pivot attack: use temp dir write access to stage a
@@ -1580,7 +1588,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
 
         let write_cmd = format!(
             "'hello' | save '{}'",
@@ -1654,7 +1662,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::NU;
+        let grant = ToolGrant::READ;
 
         let cache_path = match &env._cache {
             Some(c) => c.path().to_path_buf(),
@@ -1714,7 +1722,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::NU;
+        let grant = ToolGrant::READ;
 
         let cache_path = match &env._cache {
             Some(c) => c.path().to_path_buf(),
@@ -1813,7 +1821,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::NU;
+        let grant = ToolGrant::READ;
 
         let cache_path = match &env._cache {
             Some(c) => c.path().to_path_buf(),
@@ -1884,7 +1892,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
 
         let test_file = tmp.path().join("e2e_read.txt");
         std::fs::write(&test_file, "line1\nline2\nline3\n").unwrap();
@@ -1919,7 +1927,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
 
         try_spawn(session, tmp.path(), grant).await;
 
@@ -1950,7 +1958,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::NU | ToolGrant::WRITE;
+        let grant = ToolGrant::READ | ToolGrant::WRITE;
 
         std::fs::write(tmp.path().join("a.rs"), "").unwrap();
         std::fs::write(tmp.path().join("b.rs"), "").unwrap();
@@ -1982,7 +1990,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::NU;
+        let grant = ToolGrant::READ;
 
         try_spawn(session, tmp.path(), grant).await;
 
@@ -2015,7 +2023,7 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        let grant = ToolGrant::NU; // no WRITE
+        let grant = ToolGrant::READ; // no WRITE
 
         try_spawn(session, tmp.path(), grant).await;
 
@@ -2044,8 +2052,8 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        // NU only — no NETWORK grant.
-        let grant = ToolGrant::NU;
+        // READ only — no NETWORK grant.
+        let grant = ToolGrant::READ;
 
         try_spawn(session, tmp.path(), grant).await;
 
@@ -2087,8 +2095,8 @@ mod tests {
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
-        // NU + NETWORK grant.
-        let grant = ToolGrant::NU | ToolGrant::NETWORK;
+        // READ + NETWORK grant.
+        let grant = ToolGrant::READ | ToolGrant::NETWORK;
 
         try_spawn(session, tmp.path(), grant).await;
 

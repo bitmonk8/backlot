@@ -81,13 +81,13 @@ wraps a flick `RequestConfig` (reusable across calls). Query is per-invocation.
 
 ### Dispatch Heuristic
 
-`Agent::run()` routes based on `ToolGrant::NU`:
+`Agent::run()` routes based on `ToolGrant::READ`:
 
-- **NU present** — tool-loop mode (`run_with_tools`): spawns NuSession, injects
+- **READ present** — tool-loop mode (`run_with_tools`): spawns NuSession, injects
   tool definitions, runs up to 50 rounds.
-- **NU absent** — structured mode (`run_structured`): single flick call, no tools.
+- **READ absent** — structured mode (`run_structured`): single flick call, no tools.
 
-Known issue (#5): a consumer with only custom tools (no NU grant) is misrouted
+Known issue (#5): a consumer with only custom tools (no READ grant) is misrouted
 to structured mode.
 
 ### Tool Loop
@@ -166,9 +166,9 @@ Built by `NuSession` from grant flags:
 
 | Grant | Policy Effect |
 |---|---|
-| NU only | project_root → read_paths, temp dir → write_paths |
-| NU + WRITE | project_root → write_paths, temp dir → write_paths |
-| NU + NETWORK | allow_network = true |
+| READ only | project_root → read_paths, temp dir → write_paths |
+| READ + WRITE | project_root → write_paths, temp dir → write_paths |
+| READ + NETWORK | allow_network = true |
 | Always | platform exec paths, platform lib paths, nu cache dir → exec_paths |
 
 The lot `SandboxPolicyBuilder` handles auto-canonicalization, deduplication, and
@@ -197,21 +197,22 @@ A generation counter prevents stale processes from being reused.
 bitflags! {
     pub struct ToolGrant: u8 {
         const WRITE   = 0b0000_0001;
-        const NU      = 0b0000_0010;
+        const READ    = 0b0000_0010;
         const NETWORK = 0b0000_0100;
     }
 }
 ```
 
-`ToolGrant::from_names(&["write", "nu", "network"])` parses string names.
-Returns `GrantParseError` on unknown names.
+`ToolGrant::from_names(&["write", "read", "network"])` parses string names.
+`"write"` and `"network"` imply `READ` — callers need not specify `"read"`
+explicitly. Returns `GrantParseError` on unknown names.
 
 ### Tool Definitions
 
 `tool_definitions(grant)` returns a `Vec<ToolDefinition>` based on grant flags:
 
-- **NU** — Read, Glob, Grep, NuShell
-- **NU + WRITE** — adds Write, Edit
+- **READ** — Read, Glob, Grep, NuShell
+- **WRITE** (implies READ) — adds Write, Edit
 
 Each definition includes name, description, and JSON Schema parameters matching
 the model's tool-calling format.
