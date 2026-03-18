@@ -690,7 +690,10 @@ mod tests {
     fn validate_provider_name_invalid_chars() {
         for bad in &["has space", "has.dot", "slash/bad", "colon:bad", "a@b"] {
             assert!(
-                matches!(validate_provider_name(bad), Err(CredentialError::InvalidFormat(_))),
+                matches!(
+                    validate_provider_name(bad),
+                    Err(CredentialError::InvalidFormat(_))
+                ),
                 "expected error for {bad:?}"
             );
         }
@@ -699,7 +702,10 @@ mod tests {
     #[test]
     fn validate_provider_name_valid() {
         for good in &["anthropic", "open-ai", "my_provider", "A1-b2_c3"] {
-            assert!(validate_provider_name(good).is_ok(), "expected ok for {good:?}");
+            assert!(
+                validate_provider_name(good).is_ok(),
+                "expected ok for {good:?}"
+            );
         }
     }
 
