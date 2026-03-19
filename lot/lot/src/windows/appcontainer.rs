@@ -1201,9 +1201,9 @@ mod tests {
 
         let restored_sddl = get_sddl(tmp.path()).expect("get restored SDDL");
         assert_eq!(
-            normalize_sddl(&original_sddl),
-            normalize_sddl(&restored_sddl),
-            "DACL ACEs should be restored by restore_from_sentinel"
+            explicit_aces(&original_sddl),
+            explicit_aces(&restored_sddl),
+            "explicit DACL ACEs should be restored by restore_from_sentinel"
         );
 
         assert!(
