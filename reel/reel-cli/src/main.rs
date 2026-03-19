@@ -572,6 +572,15 @@ grant: []
             !tools.is_empty(),
             "expected tool definitions in dry-run output"
         );
+        // Verify specific tool names are present.
+        let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        // With TOOLS | WRITE grant, all 6 built-in tools should be present.
+        for expected in ["Read", "Write", "Edit", "Glob", "Grep", "NuShell"] {
+            assert!(
+                tool_names.contains(&expected),
+                "expected tool '{expected}' in dry-run output, got: {tool_names:?}"
+            );
+        }
         // Verify model propagated.
         assert_eq!(parsed["model"], "test-model");
     }

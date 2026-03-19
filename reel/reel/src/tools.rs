@@ -124,7 +124,8 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
                 "properties": {
                     "file_path": { "type": "string", "description": "Absolute or project-relative file path" },
                     "offset": { "type": "integer", "description": "Line number to start reading from (1-based). Omit to start from the beginning." },
-                    "limit": { "type": "integer", "description": "Maximum number of lines to return. Omit to read up to the default cap." }
+                    "limit": { "type": "integer", "description": "Maximum number of lines to return. Omit to read up to the default cap." },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
                 },
                 "required": ["file_path"]
             }),
@@ -136,7 +137,9 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Glob pattern (e.g. **/*.rs, src/**/*.ts)" },
-                    "path": { "type": "string", "description": "Directory to search in. Defaults to project root." }
+                    "path": { "type": "string", "description": "Directory to search in. Defaults to project root." },
+                    "depth": { "type": "integer", "description": "Max directory traversal depth. Default: 20." },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
                 },
                 "required": ["pattern"]
             }),
@@ -158,7 +161,8 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
                     "context_before": { "type": "integer", "description": "Number of lines to show before each match. Only applies to 'content' output mode." },
                     "context": { "type": "integer", "description": "Number of lines to show before and after each match. Only applies to 'content' output mode." },
                     "multiline": { "type": "boolean", "description": "Enable multiline matching (pattern can span lines). Default: false." },
-                    "head_limit": { "type": "integer", "description": "Limit output to first N lines/entries." }
+                    "head_limit": { "type": "integer", "description": "Limit output to first N lines/entries." },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
                 },
                 "required": ["pattern"]
             }),
@@ -174,7 +178,8 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "file_path": { "type": "string", "description": "File path to write to" },
-                    "content": { "type": "string", "description": "Content to write" }
+                    "content": { "type": "string", "description": "Content to write" },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
                 },
                 "required": ["file_path", "content"]
             }),
@@ -188,7 +193,8 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
                     "file_path": { "type": "string", "description": "File path to edit" },
                     "old_string": { "type": "string", "description": "Exact text to find and replace" },
                     "new_string": { "type": "string", "description": "Replacement text" },
-                    "replace_all": { "type": "boolean", "description": "Replace all occurrences instead of requiring uniqueness. Default: false." }
+                    "replace_all": { "type": "boolean", "description": "Replace all occurrences instead of requiring uniqueness. Default: false." },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
                 },
                 "required": ["file_path", "old_string", "new_string"]
             }),
@@ -325,6 +331,9 @@ fn translate_glob(input: &JsonValue) -> Result<String, String> {
     let mut cmd = format!("reel glob {}", quote_nu(pattern));
     if let Some(path) = get_str_opt(input, "path") {
         let _ = write!(cmd, " --path {}", quote_nu(path));
+    }
+    if let Some(depth) = input.get("depth").and_then(JsonValue::as_u64) {
+        let _ = write!(cmd, " --depth {depth}");
     }
     Ok(cmd)
 }
@@ -478,6 +487,15 @@ fn get_str_opt<'a>(input: &'a JsonValue, key: &str) -> Option<&'a str> {
     input.get(key).and_then(JsonValue::as_str)
 }
 
+/// Extract timeout from tool input, clamping to [`DEFAULT_NU_TIMEOUT_SECS`, `MAX_NU_TIMEOUT_SECS`].
+fn parse_timeout(input: &JsonValue) -> u64 {
+    input
+        .get("timeout")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(DEFAULT_NU_TIMEOUT_SECS)
+        .min(MAX_NU_TIMEOUT_SECS)
+}
+
 /// Execute a tool call, checking grants and dispatching to the implementation.
 ///
 /// All tools route through the nu session. File tools (Read, Write, Edit, Glob,
@@ -529,10 +547,13 @@ pub async fn execute_tool(
         }
     };
 
+    // Allow model-provided timeout override for file tools (same logic as NuShell tool).
+    let timeout_secs = parse_timeout(input);
+
     // Execute via nu session, then format+truncate successful output.
     // Empty output is valid (Glob/Grep with no matches), so don't replace it.
     let result = nu_session
-        .evaluate(&nu_command, DEFAULT_NU_TIMEOUT_SECS, project_root, grant)
+        .evaluate(&nu_command, timeout_secs, project_root, grant)
         .await
         .map(|out| {
             if out.is_error {
@@ -571,11 +592,7 @@ async fn tool_nu(
     nu_session: &NuSession,
 ) -> Result<NuOutput, String> {
     let command = get_str(input, "command")?;
-    let timeout_secs = input
-        .get("timeout")
-        .and_then(JsonValue::as_u64)
-        .unwrap_or(DEFAULT_NU_TIMEOUT_SECS)
-        .min(MAX_NU_TIMEOUT_SECS);
+    let timeout_secs = parse_timeout(input);
 
     let mut result = nu_session
         .evaluate(command, timeout_secs, project_root, grant)
@@ -946,6 +963,23 @@ mod tests {
         let input = serde_json::json!({"pattern": "*.txt", "path": "src"});
         let cmd = translate_tool_call("Glob", &input).unwrap();
         assert_eq!(cmd, "reel glob '*.txt' --path 'src' | to json -r");
+    }
+
+    #[test]
+    fn test_translate_glob_with_depth() {
+        let input = serde_json::json!({"pattern": "**/*.rs", "depth": 5});
+        let cmd = translate_tool_call("Glob", &input).unwrap();
+        assert_eq!(cmd, "reel glob '**/*.rs' --depth 5 | to json -r");
+    }
+
+    #[test]
+    fn test_translate_glob_with_path_and_depth() {
+        let input = serde_json::json!({"pattern": "*.txt", "path": "src", "depth": 10});
+        let cmd = translate_tool_call("Glob", &input).unwrap();
+        assert_eq!(
+            cmd,
+            "reel glob '*.txt' --path 'src' --depth 10 | to json -r"
+        );
     }
 
     #[test]

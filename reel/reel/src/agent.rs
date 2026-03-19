@@ -1449,19 +1449,76 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn duplicate_custom_tool_names_uses_last_match() {
+    fn duplicate_custom_tool_names_last_wins_in_index() {
+        // Production builds the index in run_with_tools as:
+        //   handlers.iter().enumerate().map(|(i, h)| (h.definition().name, i)).collect()
         // HashMap::collect keeps the last entry for duplicate keys.
-        // This documents the current (academic) behavior -- duplicate
-        // custom tool names are already rejected by build_request_config.
+        // Note: build_request_config rejects duplicate tool names before this
+        // code runs, so this documents defense-in-depth behavior.
         let handlers: Vec<Box<dyn ToolHandler>> = vec![
             Box::new(MockToolHandler::new("Dup", "first")),
             Box::new(MockToolHandler::new("Dup", "second")),
         ];
+        // Use the exact same expression as production code.
         let index: HashMap<String, usize> = handlers
             .iter()
             .enumerate()
             .map(|(i, h)| (h.definition().name, i))
             .collect();
         assert_eq!(index["Dup"], 1, "HashMap should keep last entry");
+    }
+
+    // -----------------------------------------------------------------------
+    // MAX_TOOL_CALLS cap crossed mid-round (#75)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_with_tools_cap_crossed_mid_round() {
+        // 150 calls in round 1 + 51 in round 2 = 201 > MAX_TOOL_CALLS (200).
+        // Unlike the 67-calls/round test, the cap is crossed mid-batch (not at
+        // a round boundary), verifying the `>` check inside the loop body.
+        let tool_calls_counter = Arc::new(AtomicU32::new(0));
+        let agent = Agent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_secs(60),
+            mock_client_factory(|| {
+                MultiShotProvider::new(vec![
+                    // Round 1: 150 tool calls
+                    tool_call_response(
+                        (0..150)
+                            .map(|i| flick::provider::ToolCallResponse {
+                                call_id: format!("tc_r1_{i}"),
+                                tool_name: "Read".into(),
+                                arguments: r#"{"file_path":"/tmp/x"}"#.into(),
+                            })
+                            .collect(),
+                    ),
+                    // Round 2: 51 tool calls — total becomes 201 > 200, bail before executing
+                    tool_call_response(
+                        (0..51)
+                            .map(|i| flick::provider::ToolCallResponse {
+                                call_id: format!("tc_r2_{i}"),
+                                tool_name: "Read".into(),
+                                arguments: r#"{"file_path":"/tmp/x"}"#.into(),
+                            })
+                            .collect(),
+                    ),
+                ])
+            }),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&tool_calls_counter),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::TOOLS;
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("tool calls"),
+            "expected 'tool calls' in error, got: {err}"
+        );
+        // Round 1's 150 were executed; round 2's 51 tripped the cap before execution.
+        assert_eq!(tool_calls_counter.load(Ordering::Relaxed), 150);
     }
 }

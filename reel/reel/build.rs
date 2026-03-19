@@ -409,13 +409,17 @@ def "reel edit" [
     }
 }
 
-# Find files by pattern, return list<string>, 1000 result cap
+# Find files by pattern, return list<string>, 1000 result cap.
+# Default depth limit of 20 prevents runaway traversal in deep trees
+# with symlink cycles (nu's glob follows symlinks by default).
 def "reel glob" [
     pattern: string
     --path: string   # directory to search in
+    --depth: int     # max traversal depth (default: 20)
 ] {
     let dir = if ($path | is-empty) { "." } else { $path }
-    do { cd $dir; glob $pattern } | take 1000
+    let max_depth = if ($depth | is-empty) { 20 } else { $depth }
+    do { cd $dir; glob $pattern --depth $max_depth } | take 1000
 }
 
 # Search file contents via rg, return structured record.

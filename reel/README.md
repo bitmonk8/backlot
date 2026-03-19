@@ -220,11 +220,11 @@ Reel config is a superset of flick's `RequestConfig`. The CLI strips the `grant`
 | Read | TOOLS | Read file contents |
 | Write | WRITE | Create or overwrite a file |
 | Edit | WRITE | Replace exact substring in a file |
-| Glob | TOOLS | Find files by glob pattern (max 1000 results) |
+| Glob | TOOLS | Find files by glob pattern (max 1000 results, depth limit: 20 default) |
 | Grep | TOOLS | Search file contents by regex (max 64 KiB output) |
-| NuShell | TOOLS | Execute arbitrary NuShell command (timeout: 120s default, 600s max) |
+| NuShell | TOOLS | Execute arbitrary NuShell command |
 
-All tools execute through the NuShell MCP session as custom commands (`reel read`, `reel write`, etc.) or direct evaluation (NuShell tool). All tool output is truncated to 64 KiB.
+All tools execute through the NuShell MCP session as custom commands (`reel read`, `reel write`, etc.) or direct evaluation (NuShell tool). All tool output is truncated to 64 KiB. All tools accept an optional `timeout` parameter (default: 120s, max: 600s).
 
 ## Grant flags
 
@@ -257,7 +257,7 @@ On Windows, `reel setup` must be run once (as administrator) before sandboxed ex
 cargo test
 ```
 
-216 tests (201 reel + 15 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
+231 tests (216 reel + 15 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
 
 ## Dependencies
 

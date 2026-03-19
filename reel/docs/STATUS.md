@@ -35,7 +35,10 @@
 - **ToolGrant normalization** — `ToolGrant::normalize()` enforces WRITE-implies-TOOLS and NETWORK-implies-TOOLS at the type level. Called at `tool_definitions()` entry point so bare `ToolGrant::WRITE` produces correct tool definitions. `to_names()` coverage guard test catches future flag additions (issues #52, #69).
 - **Agent test consolidation** — `SlowProvider` and `FastThenSlowProvider` consolidated into `DelayProvider` with configurable `fast_calls` count (issue #71). `text_response()` and `tool_call_response()` helpers eliminate repeated `ModelResponse` boilerplate (issue #72). Boundary test for exactly 201 (MAX_TOOL_CALLS + 1) tool calls verifies `>` vs `>=` semantics (issue #73). Duplicate custom tool name HashMap semantics documented with test (issue #48).
 - **Test infrastructure cleanup** — `resolve_rg_binary_with_compile_time_tool_dir` converted from silent skip to unconditional assertions (issue #70). Regression assertions for removed sandbox denial keywords added (issue #74). CLI dry-run test exercises `build_dry_run_output` helper extracted from `cmd_run` (issue #68).
-- **Test counts** — 228 tests total (213 reel + 15 reel-cli), all pass locally.
+- **Test coverage gaps batch** — Mid-round tool call cap boundary test verifies `>` check when cumulative count crosses 200 within a round (issue #75). CLI dry-run test asserts specific tool names (Read, Write, Edit, Glob, Grep, NuShell) not just non-empty (issue #76). Duplicate custom tool name test renamed and documented as defense-in-depth using production index construction path (issue #77).
+- **Public API cleanup** — Removed `pub use nu_session::NuSession` re-export from lib.rs (no external consumer, still accessible via `reel::nu_session::NuSession`) (issue #8). Marked `test_support` module `#[doc(hidden)]` with unstable-API warning (issue #31).
+- **Tool robustness** — All file tools (Read, Write, Edit, Glob, Grep) now accept an optional `timeout` parameter (default 120s, max 600s), matching the existing NuShell tool behavior (issue #26). `reel glob` has a default depth limit of 20 preventing runaway traversal in deep trees with symlink cycles; model can override via `depth` parameter (issue #28).
+- **Test counts** — 231 tests total (216 reel + 15 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
 ## What Is NOT Implemented
@@ -80,4 +83,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 ## Work Candidates
 
 ### Remaining (unscheduled)
-NuSession stderr capture (#23), public API surface (#31, #8), tool timeout (#26), glob robustness (#28).
+NuSession stderr capture (#23).

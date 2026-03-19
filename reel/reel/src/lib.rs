@@ -12,7 +12,6 @@ pub mod tools;
 
 // Re-export public API types.
 pub use agent::{Agent, AgentEnvironment, AgentRequestConfig, RunResult, ToolHandler, Usage};
-pub use nu_session::NuSession;
 /// Describes a tool's name, description, and JSON Schema parameters as seen
 /// by the model.
 pub use tools::ToolDefinition;
@@ -26,6 +25,9 @@ pub use flick::ToolConfig;
 pub use flick::{ConfigFormat, ModelInfo, ModelRegistry, ProviderRegistry, RequestConfig};
 
 #[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+// Unstable test support re-exports. These types come from flick and may
+// change without a reel version bump. Not part of reel's stable public API.
 pub mod test_support {
     pub use flick::test_support::{MultiShotProvider, SingleShotProvider};
     pub use flick::{ApiKind, DynProvider, error, provider};
