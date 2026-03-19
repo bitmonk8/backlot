@@ -127,7 +127,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // leader, which cannot happen after fork (fresh PID != parent SID).
         // SAFETY: setsid() is async-signal-safe per POSIX, safe to call after fork.
         if unsafe { libc::setsid() } < 0 {
-            child_bail!(err_pipe_wr, STEP_SETSID, unsafe { *libc::__error() });
+            child_bail!(err_pipe_wr, STEP_SETSID, *libc::__error());
         }
 
         // Close parent's end of error pipe
@@ -160,7 +160,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         if child_stdin != 0 {
             // SAFETY: both fds are valid
             if unsafe { libc::dup2(child_stdin, 0) } < 0 {
-                child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__error() });
+                child_bail!(err_pipe_wr, STEP_DUP2, *libc::__error());
             }
             // SAFETY: fd is valid
             unsafe { unix::close_if_not_std(child_stdin) };
@@ -168,7 +168,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         if child_stdout != 1 {
             // SAFETY: both fds are valid
             if unsafe { libc::dup2(child_stdout, 1) } < 0 {
-                child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__error() });
+                child_bail!(err_pipe_wr, STEP_DUP2, *libc::__error());
             }
             // SAFETY: fd is valid
             unsafe { unix::close_if_not_std(child_stdout) };
@@ -176,7 +176,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         if child_stderr != 2 {
             // SAFETY: both fds are valid
             if unsafe { libc::dup2(child_stderr, 2) } < 0 {
-                child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__error() });
+                child_bail!(err_pipe_wr, STEP_DUP2, *libc::__error());
             }
             // SAFETY: fd is valid
             unsafe { unix::close_if_not_std(child_stderr) };
@@ -186,7 +186,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         if let Some(ref cwd) = prefork.cwd {
             // SAFETY: valid CString pointer
             if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
-                child_bail!(err_pipe_wr, STEP_CHDIR, unsafe { *libc::__error() });
+                child_bail!(err_pipe_wr, STEP_CHDIR, *libc::__error());
             }
         }
 
@@ -203,7 +203,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         }
 
         // exec failed
-        child_bail!(err_pipe_wr, STEP_EXEC, unsafe { *libc::__error() });
+        child_bail!(err_pipe_wr, STEP_EXEC, *libc::__error());
     }
 
     // === PARENT PROCESS ===

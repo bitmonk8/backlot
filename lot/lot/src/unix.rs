@@ -373,6 +373,7 @@ pub unsafe fn child_bail(err_fd: i32, step: i32, errno: i32) -> ! {
 /// How to send SIGKILL to the sandboxed process tree. Linux kills the
 /// helper by PID (inner child dies via `PR_SET_PDEATHSIG`). macOS kills
 /// the process group (child called `setsid`).
+#[allow(dead_code)] // Each variant is only used on one platform
 pub enum KillStyle {
     /// `libc::kill(pid, SIGKILL)` — used on Linux where the helper PID
     /// is the target.

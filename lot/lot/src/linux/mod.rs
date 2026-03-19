@@ -326,21 +326,21 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             if child_stdin != 0 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stdin, 0) } < 0 {
-                    child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
+                    child_bail!(err_pipe_wr, STEP_DUP2, *libc::__errno_location());
                 }
                 unsafe { unix::close_if_not_std(child_stdin) };
             }
             if child_stdout != 1 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stdout, 1) } < 0 {
-                    child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
+                    child_bail!(err_pipe_wr, STEP_DUP2, *libc::__errno_location());
                 }
                 unsafe { unix::close_if_not_std(child_stdout) };
             }
             if child_stderr != 2 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stderr, 2) } < 0 {
-                    child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
+                    child_bail!(err_pipe_wr, STEP_DUP2, *libc::__errno_location());
                 }
                 unsafe { unix::close_if_not_std(child_stderr) };
             }
@@ -407,7 +407,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             }
 
             // exec failed — report errno via error pipe, then exit
-            child_bail!(err_pipe_wr, STEP_EXEC, unsafe { *libc::__errno_location() });
+            child_bail!(err_pipe_wr, STEP_EXEC, *libc::__errno_location());
         }
 
         // === HELPER continues (inner_pid > 0) ===
