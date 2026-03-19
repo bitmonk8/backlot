@@ -21,8 +21,9 @@ use windows_sys::Win32::Security::Authorization::{
     TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR,
-    SetFileSecurityW, SetSecurityDescriptorDacl,
+    ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, SE_DACL_AUTO_INHERITED,
+    SECURITY_DESCRIPTOR, SetFileSecurityW, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl,
 };
 
 use super::acl_helpers::{
@@ -187,6 +188,25 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
     if ret == FALSE {
         return Err(SandboxError::Setup(format!(
             "SetSecurityDescriptorDacl failed for {}",
+            path.display(),
+        )));
+    }
+
+    // Mark the DACL as auto-inherited so that SetNamedSecurityInfoW on
+    // child objects correctly re-derives inherited ACEs from this directory.
+    // Without this flag the DACL is treated as "legacy" and children may
+    // lose their inherited ACEs when their DACLs are re-evaluated.
+    // SAFETY: Setting a control bit on a valid, initialized security descriptor.
+    let ret = unsafe {
+        SetSecurityDescriptorControl(
+            (&raw mut sd).cast(),
+            SE_DACL_AUTO_INHERITED,
+            SE_DACL_AUTO_INHERITED,
+        )
+    };
+    if ret == FALSE {
+        return Err(SandboxError::Setup(format!(
+            "SetSecurityDescriptorControl failed for {}",
             path.display(),
         )));
     }
