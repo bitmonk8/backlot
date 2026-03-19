@@ -4,79 +4,6 @@ Issues grouped by code area, ordered by impact. Issues within a group touch over
 
 ---
 
-## 1. Env/Path Validation (`lib.rs` → `env_check.rs`, `policy.rs`)
-
-All these issues involve the path containment/validation functions in `lib.rs`. The extraction to `env_check.rs` is the anchor — the correctness fixes, deduplication, and naming fixes are best done as part of that extraction. This group ranks second because `path_contains` canonicalization fallback is security-relevant: incorrect path containment checks could allow access to paths outside the sandbox policy. The `is_parent_of`/`path_contains` duplication across `lib.rs` and `policy.rs` risks divergent behavior in policy validation vs runtime checks.
-
-### Extract env validation logic to `env_check.rs`
-
-~192 lines of env/path validation (`check_env_coverage`, `platform_implicit_read_paths`, `policy_covers_path`, `path_contains`, `normalize_lexical`, `is_accessible`, `effective_env`) accreted in `lib.rs`. Unrelated to the public API facade.
-
-**Fix:** Extract to `env_check.rs` module. Includes:
-- Rename `check_env_coverage` to `validate_env_accessibility`
-- Rename `path_is_under` to `path_contains`
-- Extract `effective_env` closure to a standalone function (enables direct unit testing)
-- Pre-canonicalize paths once upfront instead of per-iteration O(P*G) re-canonicalization
-- `platform_implicit_read_paths` moves with `#[cfg]` blocks intact
-**File:** `lot/src/lib.rs`
-
-### `path_contains` partial canonicalization fallback
-
-When `canonicalize` succeeds for one path but fails for the other, the function falls through to lexical comparison on the original (non-canonicalized) inputs. If the successful path involved symlink resolution, the lexical comparison operates on mismatched representations.
-
-**Fix:** Use the canonicalized result when available for each path independently before lexical comparison.
-**File:** `lot/src/lib.rs` (moving to `env_check.rs`)
-
-### `normalize_lexical` accepts relative paths without enforcement
-
-`out.pop()` on `ParentDir` can silently discard `..` components for relative paths (e.g., `../../foo` normalizes to `foo`). All current callers pass absolute paths.
-
-**Fix:** Add `debug_assert!(path.is_absolute())`.
-**File:** `lot/src/lib.rs` (moving to `env_check.rs`)
-
-### `is_accessible` and `policy_covers_path` are near-duplicates
-
-Both iterate a slice calling `path_contains`. `is_accessible` checks two slices (grant + implicit); `policy_covers_path` checks one.
-
-**Fix:** Unify. `is_accessible` can call `policy_covers_path` on combined slices or accept multiple slices.
-**File:** `lot/src/lib.rs` (moving to `env_check.rs`)
-
-### `path_contains` duplicates `is_parent_of` in `policy.rs`
-
-Different semantics: `is_parent_of` excludes equal paths, `path_contains` includes them and adds canonicalization + lexical fallback. Overlap exists.
-
-**Fix:** Unify into one function with an `include_equal` parameter, or have `is_parent_of` call `path_contains` with a flag.
-**Files:** `lot/src/lib.rs`, `lot/src/policy.rs`
-
-### `grant` variable → `grant_paths`
-
-In `check_env_coverage`, `grant` holds the union of read+write+exec paths but the name doesn't convey this.
-
-**File:** `lot/src/lib.rs` (moving to `env_check.rs`)
-
-### `kill_by_pid` has platform implementation in facade
-
-Contains `#[cfg(unix)]`/`#[cfg(windows)]` blocks with raw syscalls in `lib.rs`.
-
-**Fix:** Delegate to platform modules, matching the `probe()`/`spawn()` dispatch pattern.
-**File:** `lot/src/lib.rs`
-
-### Tests: No consistency test between Unix default PATH and `platform_implicit_read_paths`
-
-The default PATH and implicit read paths are defined independently. If they diverge, `validate_env_accessibility` would reject valid empty-env configurations.
-
-**Fix:** Add test asserting default PATH entries are a subset of `platform_implicit_read_paths`.
-**File:** `lot/src/lib.rs` (moving to `env_check.rs`)
-
-### Tests: Unix `spawn_sleep` test may fail on some distros
-
-The test grants only `/usr` as a read_path and runs `/bin/sleep`. On distros where `/bin` is not a symlink to `/usr/bin`, the binary is not accessible.
-
-**Fix:** Add `/bin` to read_paths.
-**File:** `lot/src/lib.rs`
-
----
-
 ## 2. Unix: SandboxedChild Lifecycle (`linux/mod.rs`, `macos/mod.rs`, `unix.rs`)
 
 All these issues involve the wait/kill/drop lifecycle shared between Linux and macOS. The deduplication issue is the anchor — extracting shared code to `unix.rs` naturally addresses the `child_bail!` macro, `try_wait` ordering, `Drop` consistency, and `setup_stdio_pipes` cleanup in one pass. This group ranks third because `try_wait` ordering is a correctness issue (albeit low-probability), and the ~160-line duplication means every future lifecycle change must be applied twice.
@@ -304,3 +231,62 @@ The structured fields `missing_paths` and `nul_device_missing` are used in the `
 
 **Fix:** Optional. Tradeoff between structured data and simplicity.
 **File:** `lot/src/error.rs`
+
+---
+
+## 10. Env/Path Module Structure (`env_check.rs`, `policy.rs`)
+
+Issues deferred from the env/path validation extraction. These are naming, placement, and test coverage refinements.
+
+### `path_contains` naming ambiguity
+
+`path_contains(parent, child)` could be read as substring containment. `any_path_contains` inherits the same ambiguity. `is_accessible_precanonicalized` embeds implementation detail in its name.
+
+**Fix:** Rename to `is_descendant_or_equal`, `any_ancestor_of`, `is_dir_accessible` or similar.
+**Files:** `lot/src/env_check.rs`
+
+### Module name `env_check` covers general path utilities
+
+`path_contains`, `normalize_lexical`, `canonicalize_existing_prefix` are general path utilities placed in `env_check.rs`. They have no inherent connection to environment variable checking.
+
+**Fix:** Extract to a shared `path_util.rs` module. Have both `env_check.rs` and `policy.rs` import from it. `is_parent_of` in `policy.rs` could also delegate to the shared utility.
+**Files:** `lot/src/env_check.rs`, `lot/src/policy.rs`
+
+### `platform_implicit_read_paths` encodes platform knowledge in cross-platform module
+
+Per-OS path lists gated by `#[cfg]` blocks belong in the respective platform modules.
+
+**Fix:** Move lists to platform modules, expose via a dispatched function.
+**Files:** `lot/src/env_check.rs`, `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`, `lot/src/windows/mod.rs`
+
+### `canonicalize_existing_prefix` has no direct test
+
+Non-trivial logic (iteratively popping path components, reversing, re-appending). The symlink-resolution behavior is untested.
+
+**Fix:** Add test with a symlink where an ancestor resolves differently. Add test for full-fallback branch (no ancestor exists).
+**File:** `lot/src/env_check.rs`
+
+### `is_accessible_precanonicalized` has no direct test
+
+Tested indirectly through integration. A unit test with pre-canonicalized arrays would isolate the logic.
+
+**File:** `lot/src/env_check.rs`
+
+### No test for `path_contains` with actual symlinks
+
+The doc comment mentions `/var` → `/private/var` on macOS but no test exercises this.
+
+**Fix:** Add macOS-specific test using `/var/tmp`.
+**File:** `lot/src/env_check.rs`
+
+### Reverse partial canonicalization (parent fails, child succeeds) untested
+
+When `canon_parent` fails but `canon_child` succeeds, the fallback logic is untested.
+
+**File:** `lot/src/env_check.rs`
+
+### `kill_by_pid` on all platforms has no tests
+
+The guard logic (rejecting PID 0, preventing self-kill) is untested. Best-effort functions, but guard correctness matters.
+
+**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`, `lot/src/windows/mod.rs`

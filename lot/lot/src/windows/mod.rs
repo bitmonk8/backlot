@@ -64,3 +64,24 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 pub fn cleanup_stale() -> Result<()> {
     sentinel::cleanup_stale()
 }
+
+/// Send a terminate signal to a process by raw PID. Best-effort; the
+/// process may have already exited. The Job Object (KILL_ON_JOB_CLOSE)
+/// handles descendant cleanup when the SandboxedChild is dropped.
+#[cfg(feature = "tokio")]
+#[allow(unsafe_code)]
+pub fn kill_by_pid(pid: u32) {
+    // SAFETY: Opening a process handle by PID and terminating it.
+    // The handle is closed immediately after.
+    unsafe {
+        let h = windows_sys::Win32::System::Threading::OpenProcess(
+            windows_sys::Win32::System::Threading::PROCESS_TERMINATE,
+            0,
+            pid,
+        );
+        if !h.is_null() {
+            windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
+            windows_sys::Win32::Foundation::CloseHandle(h);
+        }
+    }
+}

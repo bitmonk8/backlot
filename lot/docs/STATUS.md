@@ -24,7 +24,8 @@
 
 ## Completed Improvements
 
-- Windows ACL infrastructure: RAII wrappers (`OwnedHandle`, `OwnedSid`, `OwnedSecurityDescriptor`, `OwnedAcl`), shared `modify_dacl` primitive, unified ACE-check via direct iteration, TOCTOU fix in `grant_traverse`, `ELEVATION_REQUIRED_MARKER` moved to `acl_helpers.rs`, prerequisites API extracted to `prerequisites.rs`, `deny_access` renamed to `deny_all_file_access`, additional tests for `compute_ancestors` edge cases, null-DACL ACE-check test, and prerequisites error path test
+- `env_check.rs` module: extracted env/path validation from `lib.rs` with pre-canonicalization, fixed partial canonicalization fallback, delegated `kill_by_pid` to platform modules
+- Windows ACL infrastructure: RAII wrappers, shared DACL primitives, unified ACE checks, TOCTOU fix, prerequisites API extraction
 
 ## Next Work
 

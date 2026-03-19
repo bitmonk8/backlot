@@ -426,6 +426,22 @@ impl MacSandboxedChild {
     }
 }
 
+/// Send SIGKILL to the process group by raw PID. Best-effort; the
+/// process may have already exited.
+#[cfg(feature = "tokio")]
+#[allow(unsafe_code)]
+pub fn kill_by_pid(pid: u32) {
+    let Some(pid_i32) = i32::try_from(pid).ok().filter(|&p| p > 0) else {
+        return;
+    };
+    // macOS children call setsid(), so PGID == PID — negate to kill
+    // the entire process group.
+    // SAFETY: Sending SIGKILL to a valid negated PGID.
+    unsafe {
+        libc::kill(-pid_i32, libc::SIGKILL);
+    }
+}
+
 impl Drop for MacSandboxedChild {
     fn drop(&mut self) {
         self.close_fds();

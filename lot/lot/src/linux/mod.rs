@@ -667,6 +667,21 @@ impl LinuxSandboxedChild {
     }
 }
 
+/// Send SIGKILL to the helper process by raw PID. Best-effort; the
+/// process may have already exited. Killing the helper collapses the
+/// PID namespace (inner child has PR_SET_PDEATHSIG).
+#[cfg(feature = "tokio")]
+#[allow(unsafe_code)]
+pub fn kill_by_pid(pid: u32) {
+    let Some(pid_i32) = i32::try_from(pid).ok().filter(|&p| p > 0) else {
+        return;
+    };
+    // SAFETY: Sending SIGKILL to a valid pid.
+    unsafe {
+        libc::kill(pid_i32, libc::SIGKILL);
+    }
+}
+
 impl Drop for LinuxSandboxedChild {
     fn drop(&mut self) {
         self.close_fds();
