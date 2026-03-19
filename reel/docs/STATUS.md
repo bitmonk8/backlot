@@ -38,7 +38,8 @@
 - **Test coverage gaps batch** — Mid-round tool call cap boundary test verifies `>` check when cumulative count crosses 200 within a round (issue #75). CLI dry-run test asserts specific tool names (Read, Write, Edit, Glob, Grep, NuShell) not just non-empty (issue #76). Duplicate custom tool name test renamed and documented as defense-in-depth using production index construction path (issue #77).
 - **Public API cleanup** — Removed `pub use nu_session::NuSession` re-export from lib.rs (no external consumer, still accessible via `reel::nu_session::NuSession`) (issue #8). Marked `test_support` module `#[doc(hidden)]` with unstable-API warning (issue #31).
 - **Tool robustness** — All file tools (Read, Write, Edit, Glob, Grep) now accept an optional `timeout` parameter (default 120s, max 600s), matching the existing NuShell tool behavior (issue #26). `reel glob` has a default depth limit of 20 preventing runaway traversal in deep trees with symlink cycles; model can override via `depth` parameter (issue #28).
-- **Test counts** — 231 tests total (216 reel + 15 reel-cli), all pass locally.
+- **Timeout schema deduplication** — Extracted `with_timeout()` helper in `tools.rs`, replacing 6 identical inline timeout JSON property fragments (issue #78). Added `parse_timeout` unit tests covering default, valid, clamped, zero, non-integer, and boundary values (issue #79).
+- **Test counts** — 242 tests total (227 reel + 15 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
 ## What Is NOT Implemented
@@ -84,3 +85,5 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ### Remaining (unscheduled)
 NuSession stderr capture (#23).
+parse_timeout allows zero timeout (#80).
+Timeout test coverage gaps (#81).
