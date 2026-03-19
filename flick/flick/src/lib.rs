@@ -1,14 +1,17 @@
 pub mod config;
 pub mod context;
+mod crypto;
 pub mod error;
 pub mod history;
 pub mod model;
 pub mod model_list;
 pub mod model_registry;
+mod platform;
 pub mod provider;
 pub mod provider_registry;
 pub mod result;
 pub mod runner;
+pub mod validation;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
@@ -80,7 +83,7 @@ impl FlickClient {
             .map_err(FlickError::Credential)?;
 
         // Validate request against resolved model/provider
-        request.validate_resolved(&model_info, &provider_info)?;
+        validation::validate_resolved_from_provider_info(&request, &model_info, &provider_info)?;
 
         let api_kind = provider_info.api;
 

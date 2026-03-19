@@ -1,9 +1,9 @@
 use reqwest::Client;
 
-use crate::config::CompatFlags;
 use crate::context::{ContentBlock, Message, Role};
 use crate::error::ProviderError;
 use crate::model::openai_reasoning_effort;
+use crate::provider_registry::CompatFlags;
 use std::pin::Pin;
 
 use crate::provider::{
@@ -364,13 +364,18 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
 
     // Usage
     let usage_obj = &json["usage"];
-    let (input_tokens, output_tokens) =
+    let (raw_input_tokens, output_tokens) =
         extract_token_pair(usage_obj, "prompt_tokens", "completion_tokens").unwrap_or((0, 0));
     let cached = usage_obj
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+
+    // OpenAI includes cached tokens within prompt_tokens. Subtract them so
+    // compute_cost does not charge cached tokens at both the input rate and
+    // the cache-read rate.
+    let input_tokens = raw_input_tokens.saturating_sub(cached);
 
     Ok(ModelResponse {
         text,
@@ -767,6 +772,8 @@ mod tests {
         });
         let resp = parse_response(&json).expect("should parse");
         assert_eq!(resp.usage.cache_read_input_tokens, 40);
+        // input_tokens should be prompt_tokens minus cached_tokens
+        assert_eq!(resp.usage.input_tokens, 60);
     }
 
     #[test]
@@ -1091,8 +1098,6 @@ mod tests {
             "user messages must not have tool_calls"
         );
     }
-
-    // -- T55: tool_choice --
 
     #[test]
     fn build_body_tool_choice_auto() {

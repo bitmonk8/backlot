@@ -80,10 +80,6 @@ pub enum ProviderInstance {
     ChatCompletions(chat_completions::ChatCompletionsProvider),
 }
 
-// COHERENCE CONSTRAINT: `ProviderInstance` has a manual `DynProvider` impl below.
-// A blanket `impl<T: Provider> DynProvider for T` exists elsewhere. If you add
-// `impl Provider for ProviderInstance`, the compiler will reject both impls as
-// conflicting (E0119). Keep `ProviderInstance` as a manual delegation enum only.
 impl DynProvider for ProviderInstance {
     fn call_boxed<'a>(
         &'a self,
@@ -155,7 +151,7 @@ pub(crate) mod test_helpers {
 mod tests {
     use super::*;
     use crate::ApiKind;
-    use crate::config::CompatFlags;
+    use crate::provider_registry::CompatFlags;
 
     #[test]
     fn create_provider_messages_variant() {

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 
 /// Maximum messages in a context before push methods refuse to add more.
@@ -26,7 +26,7 @@ pub enum Role {
     Assistant,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -58,12 +58,107 @@ pub enum ContentBlock {
     Unknown(serde_json::Value),
 }
 
+/// Custom deserializer that tries tagged variants first and only falls back
+/// to `Unknown` for genuinely unrecognized type tags. If a known type tag
+/// (`text`, `thinking`, `tool_use`, `tool_result`) has invalid field types,
+/// the error is surfaced instead of silently swallowing it into `Unknown`.
+impl<'de> Deserialize<'de> for ContentBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let type_tag = value.get("type").and_then(|t| t.as_str());
+        match type_tag {
+            Some("text") => {
+                let text = value.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
+                    serde::de::Error::custom("text block missing or invalid 'text' field")
+                })?;
+                Ok(Self::Text {
+                    text: text.to_owned(),
+                })
+            }
+            Some("thinking") => {
+                let text = value.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
+                    serde::de::Error::custom("thinking block missing or invalid 'text' field")
+                })?;
+                let signature = value
+                    .get("signature")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                Ok(Self::Thinking {
+                    text: text.to_owned(),
+                    signature,
+                })
+            }
+            Some("tool_use") => {
+                let id = value.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+                    serde::de::Error::custom("tool_use block missing or invalid 'id' field")
+                })?;
+                let name = value.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                    serde::de::Error::custom("tool_use block missing or invalid 'name' field")
+                })?;
+                let input = value.get("input").cloned().ok_or_else(|| {
+                    serde::de::Error::custom("tool_use block missing 'input' field")
+                })?;
+                Ok(Self::ToolUse {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    input,
+                })
+            }
+            Some("tool_result") => {
+                let tool_use_id = value
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        serde::de::Error::custom(
+                            "tool_result block missing or invalid 'tool_use_id' field",
+                        )
+                    })?;
+                let content = value
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        serde::de::Error::custom(
+                            "tool_result block missing or invalid 'content' field",
+                        )
+                    })?;
+                let is_error = value
+                    .get("is_error")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                Ok(Self::ToolResult {
+                    tool_use_id: tool_use_id.to_owned(),
+                    content: content.to_owned(),
+                    is_error,
+                })
+            }
+            _ => {
+                // Unrecognized or missing type tag: preserve as Unknown.
+                Ok(Self::Unknown(value))
+            }
+        }
+    }
+}
+
 impl Context {
+    fn check_capacity(&self) -> Result<(), crate::error::FlickError> {
+        if self.messages.len() >= MAX_CONTEXT_MESSAGES {
+            return Err(crate::error::FlickError::ContextOverflow(
+                MAX_CONTEXT_MESSAGES,
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn load_from_file(path: &std::path::Path) -> Result<Self, crate::error::FlickError> {
         let data = tokio::fs::read_to_string(path).await?;
         let ctx: Self =
             serde_json::from_str(&data).map_err(crate::error::FlickError::ContextParse)?;
-        Self::validate_message_order(&ctx.messages)?;
+        Self::validate_message_structure(&ctx.messages)?;
+        Self::validate_assistant_content(&ctx.messages)?;
         Ok(ctx)
     }
 
@@ -71,7 +166,7 @@ impl Context {
     /// - First message must be User (if any exist)
     /// - No two consecutive messages with the same role
     /// - `ToolResult` blocks only appear in User messages
-    fn validate_message_order(messages: &[Message]) -> Result<(), crate::error::FlickError> {
+    fn validate_message_structure(messages: &[Message]) -> Result<(), crate::error::FlickError> {
         if messages.is_empty() {
             return Ok(());
         }
@@ -102,8 +197,31 @@ impl Context {
                     "ToolResult block in non-user message at index {i}"
                 )));
             }
+
+            if msg.role != Role::Assistant
+                && msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            {
+                return Err(crate::error::FlickError::InvalidMessageOrder(format!(
+                    "ToolUse block in non-assistant message at index {i}"
+                )));
+            }
         }
 
+        Ok(())
+    }
+
+    /// Validates that assistant messages have non-empty content.
+    fn validate_assistant_content(messages: &[Message]) -> Result<(), crate::error::FlickError> {
+        for (i, msg) in messages.iter().enumerate() {
+            if msg.role == Role::Assistant && msg.content.is_empty() {
+                return Err(crate::error::FlickError::InvalidAssistantContent(format!(
+                    "assistant message at index {i} has empty content"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -111,9 +229,10 @@ impl Context {
         &mut self,
         text: impl Into<String>,
     ) -> Result<(), crate::error::FlickError> {
-        if self.messages.len() >= MAX_CONTEXT_MESSAGES {
-            return Err(crate::error::FlickError::ContextOverflow(
-                MAX_CONTEXT_MESSAGES,
+        self.check_capacity()?;
+        if self.messages.last().is_some_and(|m| m.role == Role::User) {
+            return Err(crate::error::FlickError::InvalidMessageOrder(
+                "cannot push user message after another user message".into(),
             ));
         }
         self.messages.push(Message {
@@ -127,14 +246,25 @@ impl Context {
         &mut self,
         content: Vec<ContentBlock>,
     ) -> Result<(), crate::error::FlickError> {
-        if self.messages.len() >= MAX_CONTEXT_MESSAGES {
-            return Err(crate::error::FlickError::ContextOverflow(
-                MAX_CONTEXT_MESSAGES,
-            ));
-        }
+        self.check_capacity()?;
         if content.is_empty() {
             return Err(crate::error::FlickError::InvalidAssistantContent(
                 "push_assistant called with empty content".into(),
+            ));
+        }
+        if self.messages.is_empty() {
+            return Err(crate::error::FlickError::InvalidMessageOrder(
+                "cannot push assistant message on empty context (first message must be user)"
+                    .into(),
+            ));
+        }
+        if self
+            .messages
+            .last()
+            .is_some_and(|m| m.role == Role::Assistant)
+        {
+            return Err(crate::error::FlickError::InvalidMessageOrder(
+                "cannot push assistant message after another assistant message".into(),
             ));
         }
         self.messages.push(Message {
@@ -148,11 +278,7 @@ impl Context {
         &mut self,
         results: Vec<ContentBlock>,
     ) -> Result<(), crate::error::FlickError> {
-        if self.messages.len() >= MAX_CONTEXT_MESSAGES {
-            return Err(crate::error::FlickError::ContextOverflow(
-                MAX_CONTEXT_MESSAGES,
-            ));
-        }
+        self.check_capacity()?;
         if results.is_empty() {
             return Err(crate::error::FlickError::InvalidToolResults(
                 "push_tool_results called with empty results".into(),
@@ -164,6 +290,16 @@ impl Context {
         {
             return Err(crate::error::FlickError::InvalidToolResults(
                 "push_tool_results called with non-ToolResult blocks".into(),
+            ));
+        }
+        if self.messages.is_empty() {
+            return Err(crate::error::FlickError::InvalidMessageOrder(
+                "cannot push tool results on empty context (first message must be user)".into(),
+            ));
+        }
+        if self.messages.last().is_some_and(|m| m.role == Role::User) {
+            return Err(crate::error::FlickError::InvalidMessageOrder(
+                "cannot push tool results (user message) after another user message".into(),
             ));
         }
         self.messages.push(Message {
@@ -247,25 +383,61 @@ mod tests {
     #[test]
     fn push_assistant_adds_message() {
         let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
         ctx.push_assistant(vec![ContentBlock::Text {
             text: "reply".into(),
         }])
         .unwrap();
-        assert_eq!(ctx.messages.len(), 1);
-        assert_eq!(ctx.messages[0].role, Role::Assistant);
+        assert_eq!(ctx.messages.len(), 2);
+        assert_eq!(ctx.messages[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn push_assistant_rejects_on_empty_context() {
+        let mut ctx = Context::default();
+        let result = ctx.push_assistant(vec![ContentBlock::Text {
+            text: "reply".into(),
+        }]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::InvalidMessageOrder(_))
+        ));
+        assert!(result.unwrap_err().to_string().contains("empty context"));
+    }
+
+    #[test]
+    fn push_tool_results_rejects_on_empty_context() {
+        let mut ctx = Context::default();
+        let result = ctx.push_tool_results(vec![ContentBlock::ToolResult {
+            tool_use_id: "id1".into(),
+            content: "output".into(),
+            is_error: false,
+        }]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::InvalidMessageOrder(_))
+        ));
+        assert!(result.unwrap_err().to_string().contains("empty context"));
     }
 
     #[test]
     fn push_tool_results_adds_user_message() {
         let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
+        ctx.push_assistant(vec![ContentBlock::ToolUse {
+            id: "id1".into(),
+            name: "tool".into(),
+            input: serde_json::json!({}),
+        }])
+        .unwrap();
         ctx.push_tool_results(vec![ContentBlock::ToolResult {
             tool_use_id: "id1".into(),
             content: "output".into(),
             is_error: false,
         }])
         .unwrap();
-        assert_eq!(ctx.messages.len(), 1);
-        assert_eq!(ctx.messages[0].role, Role::User);
+        assert_eq!(ctx.messages.len(), 3);
+        assert_eq!(ctx.messages[2].role, Role::User);
     }
 
     #[test]
@@ -305,6 +477,7 @@ mod tests {
     #[test]
     fn serde_round_trip_with_tool_use() {
         let mut ctx = Context::default();
+        ctx.push_user_text("do something").unwrap();
         ctx.push_assistant(vec![
             ContentBlock::Text {
                 text: "calling tool".into(),
@@ -324,18 +497,19 @@ mod tests {
         .unwrap();
         let json = serde_json::to_string(&ctx).expect("serialize");
         let restored: Context = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.messages.len(), 2);
+        assert_eq!(restored.messages.len(), 3);
         assert!(
-            matches!(&restored.messages[0].content[1], ContentBlock::ToolUse { name, .. } if name == "read_file")
+            matches!(&restored.messages[1].content[1], ContentBlock::ToolUse { name, .. } if name == "read_file")
         );
         assert!(
-            matches!(&restored.messages[1].content[0], ContentBlock::ToolResult { content, is_error, .. } if content == "file contents" && !is_error)
+            matches!(&restored.messages[2].content[0], ContentBlock::ToolResult { content, is_error, .. } if content == "file contents" && !is_error)
         );
     }
 
     #[test]
     fn serde_round_trip_thinking_empty_signature() {
         let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
         ctx.push_assistant(vec![ContentBlock::Thinking {
             text: "reasoning".into(),
             signature: String::new(),
@@ -343,7 +517,7 @@ mod tests {
         .unwrap();
         let json = serde_json::to_string(&ctx).expect("serialize");
         let restored: Context = serde_json::from_str(&json).expect("deserialize");
-        match &restored.messages[0].content[0] {
+        match &restored.messages[1].content[0] {
             ContentBlock::Thinking { text, signature } => {
                 assert_eq!(text, "reasoning");
                 assert!(signature.is_empty());
@@ -416,8 +590,8 @@ mod tests {
     #[test]
     fn push_rejects_at_max_context_messages() {
         let mut ctx = Context::default();
-        // Fill to MAX_CONTEXT_MESSAGES - 1 (1023 messages)
-        for i in 0..1023 {
+        // Fill to MAX_CONTEXT_MESSAGES (1024 messages), alternating user/assistant
+        for i in 0..1024 {
             if i % 2 == 0 {
                 ctx.push_user_text(format!("msg {i}")).unwrap();
             } else {
@@ -427,12 +601,11 @@ mod tests {
                 .unwrap();
             }
         }
-        assert_eq!(ctx.messages.len(), 1023);
-        // Push #1024 succeeds (len goes from 1023 to 1024)
-        ctx.push_user_text("last valid").unwrap();
         assert_eq!(ctx.messages.len(), 1024);
         // Push #1025 is rejected (len == MAX_CONTEXT_MESSAGES)
-        let result = ctx.push_user_text("overflow");
+        let result = ctx.push_assistant(vec![ContentBlock::Text {
+            text: "overflow".into(),
+        }]);
         assert!(matches!(
             result,
             Err(crate::error::FlickError::ContextOverflow(1024))
@@ -442,6 +615,13 @@ mod tests {
     #[test]
     fn push_tool_results_rejects_empty_vec() {
         let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
+        ctx.push_assistant(vec![ContentBlock::ToolUse {
+            id: "id1".into(),
+            name: "tool".into(),
+            input: serde_json::json!({}),
+        }])
+        .unwrap();
         let result = ctx.push_tool_results(vec![]);
         assert!(matches!(
             result,
@@ -453,6 +633,13 @@ mod tests {
     #[test]
     fn push_tool_results_rejects_non_tool_result_blocks() {
         let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
+        ctx.push_assistant(vec![ContentBlock::ToolUse {
+            id: "id1".into(),
+            name: "tool".into(),
+            input: serde_json::json!({}),
+        }])
+        .unwrap();
         let result = ctx.push_tool_results(vec![ContentBlock::Text {
             text: "hello".into(),
         }]);
@@ -588,16 +775,21 @@ mod tests {
         let f = write_temp_file(json);
         let results = load_tool_results(f.path()).await.unwrap();
         let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
+        ctx.push_assistant(vec![ContentBlock::ToolUse {
+            id: "tc_1".into(),
+            name: "tool".into(),
+            input: serde_json::json!({}),
+        }])
+        .unwrap();
         ctx.push_tool_results(results).unwrap();
-        assert_eq!(ctx.messages.len(), 1);
-        assert_eq!(ctx.messages[0].role, Role::User);
+        assert_eq!(ctx.messages.len(), 3);
+        assert_eq!(ctx.messages[2].role, Role::User);
         assert!(matches!(
-            &ctx.messages[0].content[0],
+            &ctx.messages[2].content[0],
             ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc_1"
         ));
     }
-
-    // --- L7: Unknown content block variant ---
 
     #[test]
     fn unknown_content_block_deserializes() {
@@ -637,11 +829,10 @@ mod tests {
         ));
     }
 
-    // --- T24: push_assistant rejects empty content ---
-
     #[test]
     fn push_assistant_rejects_empty_content() {
         let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
         let result = ctx.push_assistant(vec![]);
         assert!(matches!(
             result,
@@ -649,8 +840,6 @@ mod tests {
         ));
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
-
-    // --- T75: load_from_file validates message ordering ---
 
     #[tokio::test]
     async fn load_rejects_assistant_first() {
@@ -713,8 +902,6 @@ mod tests {
         let ctx = Context::load_from_file(f.path()).await.unwrap();
         assert!(ctx.messages.is_empty());
     }
-
-    // --- T78: missing content key defaults to empty vec ---
 
     #[test]
     fn message_missing_content_defaults_empty() {
@@ -783,5 +970,83 @@ mod tests {
             &ctx.messages[1].content[1],
             ContentBlock::ToolUse { name, .. } if name == "search"
         ));
+    }
+
+    #[test]
+    fn malformed_known_type_errors_instead_of_unknown() {
+        // "text" type but text field is a number instead of string
+        let json = r#"{"type":"text","text":42}"#;
+        let result = serde_json::from_str::<ContentBlock>(json);
+        assert!(
+            result.is_err(),
+            "malformed known type should error, not become Unknown"
+        );
+    }
+
+    #[test]
+    fn push_user_text_rejects_consecutive_user() {
+        let mut ctx = Context::default();
+        ctx.push_user_text("first").unwrap();
+        let result = ctx.push_user_text("second");
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::InvalidMessageOrder(_))
+        ));
+    }
+
+    #[test]
+    fn push_assistant_rejects_consecutive_assistant() {
+        let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
+        ctx.push_assistant(vec![ContentBlock::Text { text: "a".into() }])
+            .unwrap();
+        let result = ctx.push_assistant(vec![ContentBlock::Text { text: "b".into() }]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::InvalidMessageOrder(_))
+        ));
+    }
+
+    #[test]
+    fn push_tool_results_rejects_after_user() {
+        let mut ctx = Context::default();
+        ctx.push_user_text("question").unwrap();
+        let result = ctx.push_tool_results(vec![ContentBlock::ToolResult {
+            tool_use_id: "id".into(),
+            content: "out".into(),
+            is_error: false,
+        }]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FlickError::InvalidMessageOrder(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn load_rejects_empty_assistant_content() {
+        let json = r#"{"messages":[
+            {"role":"user","content":[{"type":"text","text":"q"}]},
+            {"role":"assistant"}
+        ]}"#;
+        let f = write_temp_file(json.as_bytes());
+        let err = Context::load_from_file(f.path()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::FlickError::InvalidAssistantContent(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn load_rejects_tool_use_in_user_message() {
+        let json = r#"{"messages":[
+            {"role":"user","content":[{"type":"tool_use","id":"c1","name":"run","input":{}}]}
+        ]}"#;
+        let f = write_temp_file(json.as_bytes());
+        let err = Context::load_from_file(f.path()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::FlickError::InvalidMessageOrder(_)
+        ));
+        assert!(err.to_string().contains("ToolUse"));
     }
 }

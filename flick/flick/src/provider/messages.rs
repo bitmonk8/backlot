@@ -377,7 +377,7 @@ mod tests {
             output_schema: None,
         };
         let body = provider.build_body(&params).expect("build_body");
-        // No builtin registry; falls back to 8192
+        // Provider falls back to 8192 when max_tokens is None
         assert_eq!(body["max_tokens"], 8192);
     }
 
@@ -417,7 +417,7 @@ mod tests {
         };
         let body = provider.build_body(&params).expect("build_body");
         assert_eq!(body["temperature"], 0.5);
-        // T54: system prompt is now array-of-content-blocks for cache_control support
+        // system prompt is array-of-content-blocks for cache_control support
         assert!(body["system"].is_array());
         assert_eq!(body["system"][0]["type"], "text");
         assert_eq!(body["system"][0]["text"], "Be helpful");
@@ -484,6 +484,7 @@ mod tests {
         assert_eq!(resp.text.as_deref(), Some("Hello world"));
         assert!(resp.tool_calls.is_empty());
         assert!(resp.thinking.is_empty());
+        // No cache_read tokens, so input_tokens stays at 100
         assert_eq!(resp.usage.input_tokens, 100);
         assert_eq!(resp.usage.output_tokens, 50);
     }
@@ -536,6 +537,7 @@ mod tests {
             "stop_reason": "end_turn"
         });
         let resp = parse_response(&json).expect("should parse");
+        assert_eq!(resp.usage.input_tokens, 100);
         assert_eq!(resp.usage.cache_creation_input_tokens, 30);
         assert_eq!(resp.usage.cache_read_input_tokens, 20);
     }
@@ -632,8 +634,6 @@ mod tests {
         assert!(resp.tool_calls.is_empty());
     }
 
-    // -- T10: temperature + thinking mutual exclusion --
-
     #[test]
     fn build_body_rejects_temperature_with_reasoning() {
         let provider = make_provider();
@@ -661,8 +661,6 @@ mod tests {
         }
     }
 
-    // -- T54: system prompt array format --
-
     #[test]
     fn build_body_system_prompt_is_content_block_array() {
         let provider = make_provider();
@@ -686,8 +684,6 @@ mod tests {
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "You are a helpful assistant");
     }
-
-    // -- T55: tool_choice --
 
     #[test]
     fn build_body_tool_choice_auto() {

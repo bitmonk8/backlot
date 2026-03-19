@@ -200,7 +200,7 @@ async fn run_cost_in_result() {
         .unwrap();
 
     let usage = result.usage.unwrap();
-    let expected_cost = config.compute_cost(&mi, 1000, 500, 0, 0);
+    let expected_cost = mi.compute_cost(1000, 500, 0, 0);
     assert!(
         (usage.cost_usd - expected_cost).abs() < 1e-10,
         "cost_usd ({}) should match compute_cost ({})",
@@ -507,6 +507,16 @@ async fn run_two_step_structured_output() {
     assert!(captured[0].output_schema.is_none());
     assert!(captured[1].tools.is_empty());
     assert!(captured[1].output_schema.is_some());
+
+    // Context should have user + final assistant (second-step content).
+    assert_eq!(context.messages.len(), 2);
+    assert_eq!(context.messages[0].role, flick::context::Role::User);
+    assert_eq!(context.messages[1].role, flick::context::Role::Assistant);
+    // The assistant message should contain the second-step content, not the first.
+    assert!(matches!(
+        &context.messages[1].content[0],
+        ContentBlock::Text { text } if text == r#"{"answer":"42"}"#
+    ));
 }
 
 /// Two-step: when the first call returns tool calls, skip the second call.
@@ -620,7 +630,7 @@ async fn run_two_step_cost_summed() {
     let usage = result.usage.unwrap();
     assert_eq!(usage.input_tokens, 3000);
     assert_eq!(usage.output_tokens, 800);
-    let expected_cost = config.compute_cost(&mi, 3000, 800, 0, 0);
+    let expected_cost = mi.compute_cost(3000, 800, 0, 0);
     assert!((usage.cost_usd - expected_cost).abs() < 1e-10);
 }
 
@@ -659,9 +669,9 @@ async fn run_two_step_cache_cost_summed() {
     assert_eq!(usage.output_tokens, 800);
     assert_eq!(usage.cache_creation_input_tokens, 600);
     assert_eq!(usage.cache_read_input_tokens, 900);
-    let expected_cost = config.compute_cost(&mi, 3000, 800, 600, 900);
+    let expected_cost = mi.compute_cost(3000, 800, 600, 900);
     assert!((usage.cost_usd - expected_cost).abs() < 1e-10);
-    assert!(expected_cost > config.compute_cost(&mi, 3000, 800, 0, 0));
+    assert!(expected_cost > mi.compute_cost(3000, 800, 0, 0));
 }
 
 /// Cache tokens affect cost when model has cache pricing.
@@ -692,7 +702,7 @@ async fn run_cache_tokens_affect_cost() {
         .unwrap();
 
     let usage = result.usage.unwrap();
-    let expected_cost = config.compute_cost(&mi, 1000, 500, 2000, 3000);
+    let expected_cost = mi.compute_cost(1000, 500, 2000, 3000);
     assert!(
         (usage.cost_usd - expected_cost).abs() < 1e-10,
         "cost_usd ({}) should match compute_cost ({})",
@@ -700,6 +710,6 @@ async fn run_cache_tokens_affect_cost() {
         expected_cost
     );
     // Verify cache pricing is non-zero contribution
-    let cost_without_cache = config.compute_cost(&mi, 1000, 500, 0, 0);
+    let cost_without_cache = mi.compute_cost(1000, 500, 0, 0);
     assert!(expected_cost > cost_without_cache);
 }

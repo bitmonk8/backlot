@@ -179,6 +179,12 @@ async fn end_to_end_context_persistence() {
     .await
     .expect("first turn");
 
+    // Verify first-turn provider received exactly one user message
+    let captured1 = provider1.captured_params();
+    assert_eq!(captured1.len(), 1);
+    assert_eq!(captured1[0].messages.len(), 1);
+    assert_eq!(captured1[0].messages[0].role, flick::context::Role::User);
+
     let json = serde_json::to_string(&context).expect("serialize context");
     let mut context2: Context = serde_json::from_str(&json).expect("deserialize context");
     assert_eq!(context2.messages.len(), 2);

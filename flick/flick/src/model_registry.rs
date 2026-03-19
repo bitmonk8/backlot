@@ -21,6 +21,28 @@ pub struct ModelInfo {
     pub cache_read_per_million: Option<f64>,
 }
 
+impl ModelInfo {
+    /// Compute cost in USD from token counts and model pricing.
+    #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
+    pub fn compute_cost(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: u64,
+    ) -> f64 {
+        let inp = self.input_per_million.unwrap_or(0.0);
+        let out = self.output_per_million.unwrap_or(0.0);
+        let cw = self.cache_creation_per_million.unwrap_or(0.0);
+        let cr = self.cache_read_per_million.unwrap_or(0.0);
+        (input_tokens as f64 * inp
+            + output_tokens as f64 * out
+            + cache_creation_input_tokens as f64 * cw
+            + cache_read_input_tokens as f64 * cr)
+            / 1_000_000.0
+    }
+}
+
 /// Registry of named models, stored at `~/.flick/models` (TOML).
 ///
 /// Purely user-defined — no builtin models.
@@ -121,6 +143,17 @@ impl ModelRegistry {
     }
 }
 
+fn validate_pricing_field(key: &str, field: &str, value: Option<f64>) -> Result<(), ConfigError> {
+    if let Some(v) = value {
+        if !v.is_finite() || v < 0.0 {
+            return Err(ConfigError::InvalidModelConfig(format!(
+                "model '{key}': {field} must be non-negative and finite"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_model_entry(key: &str, info: &ModelInfo) -> Result<(), ConfigError> {
     if info.name.is_empty() {
         return Err(ConfigError::InvalidModelConfig(format!(
@@ -139,34 +172,14 @@ fn validate_model_entry(key: &str, info: &ModelInfo) -> Result<(), ConfigError> 
             )));
         }
     }
-    if let Some(v) = info.input_per_million {
-        if !v.is_finite() || v < 0.0 {
-            return Err(ConfigError::InvalidModelConfig(format!(
-                "model '{key}': input_per_million must be non-negative and finite"
-            )));
-        }
-    }
-    if let Some(v) = info.output_per_million {
-        if !v.is_finite() || v < 0.0 {
-            return Err(ConfigError::InvalidModelConfig(format!(
-                "model '{key}': output_per_million must be non-negative and finite"
-            )));
-        }
-    }
-    if let Some(v) = info.cache_creation_per_million {
-        if !v.is_finite() || v < 0.0 {
-            return Err(ConfigError::InvalidModelConfig(format!(
-                "model '{key}': cache_creation_per_million must be non-negative and finite"
-            )));
-        }
-    }
-    if let Some(v) = info.cache_read_per_million {
-        if !v.is_finite() || v < 0.0 {
-            return Err(ConfigError::InvalidModelConfig(format!(
-                "model '{key}': cache_read_per_million must be non-negative and finite"
-            )));
-        }
-    }
+    validate_pricing_field(key, "input_per_million", info.input_per_million)?;
+    validate_pricing_field(key, "output_per_million", info.output_per_million)?;
+    validate_pricing_field(
+        key,
+        "cache_creation_per_million",
+        info.cache_creation_per_million,
+    )?;
+    validate_pricing_field(key, "cache_read_per_million", info.cache_read_per_million)?;
     Ok(())
 }
 
@@ -327,6 +340,126 @@ name = "a-model"
         let entries = registry.list();
         assert_eq!(entries[0].0, "alpha");
         assert_eq!(entries[1].0, "zebra");
+    }
+
+    #[test]
+    fn compute_cost_basic() {
+        let model_info = ModelInfo {
+            provider: "p".into(),
+            name: "m".into(),
+            max_tokens: None,
+            input_per_million: Some(3.0),
+            output_per_million: Some(15.0),
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
+        };
+        let cost = model_info.compute_cost(1_000_000, 1_000_000, 0, 0);
+        assert!((cost - 18.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn compute_cost_no_pricing() {
+        let model_info = ModelInfo {
+            provider: "p".into(),
+            name: "m".into(),
+            max_tokens: None,
+            input_per_million: None,
+            output_per_million: None,
+            cache_creation_per_million: None,
+            cache_read_per_million: None,
+        };
+        let cost = model_info.compute_cost(1_000_000, 1_000_000, 0, 0);
+        assert!((cost - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn compute_cost_with_cache_pricing() {
+        let model_info = ModelInfo {
+            provider: "p".into(),
+            name: "m".into(),
+            max_tokens: None,
+            input_per_million: Some(3.0),
+            output_per_million: Some(15.0),
+            cache_creation_per_million: Some(3.75),
+            cache_read_per_million: Some(0.30),
+        };
+        let cost = model_info.compute_cost(1_000_000, 1_000_000, 1_000_000, 1_000_000);
+        let expected = 3.0 + 15.0 + 3.75 + 0.30;
+        assert!((cost - expected).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn validate_registries_passes_when_providers_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider_registry =
+            crate::provider_registry::ProviderRegistry::load(dir.path().to_path_buf());
+        provider_registry
+            .set(
+                "my_provider",
+                "key",
+                crate::ApiKind::Messages,
+                "https://example.com",
+                None,
+            )
+            .await
+            .expect("set provider");
+
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my_model".to_string(),
+            ModelInfo {
+                provider: "my_provider".into(),
+                name: "test-model".into(),
+                max_tokens: None,
+                input_per_million: None,
+                output_per_million: None,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+            },
+        );
+        let model_registry = ModelRegistry::from_map(models).expect("build registry");
+
+        validate_registries(&model_registry, &provider_registry)
+            .await
+            .expect("validation should pass");
+    }
+
+    #[tokio::test]
+    async fn validate_registries_fails_when_provider_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider_registry =
+            crate::provider_registry::ProviderRegistry::load(dir.path().to_path_buf());
+        // Create a provider with a different name than what the model references
+        provider_registry
+            .set(
+                "other_provider",
+                "key",
+                crate::ApiKind::Messages,
+                "https://example.com",
+                None,
+            )
+            .await
+            .expect("set provider");
+
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my_model".to_string(),
+            ModelInfo {
+                provider: "nonexistent_provider".into(),
+                name: "test-model".into(),
+                max_tokens: None,
+                input_per_million: None,
+                output_per_million: None,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+            },
+        );
+        let model_registry = ModelRegistry::from_map(models).expect("build registry");
+
+        let result = validate_registries(&model_registry, &provider_registry).await;
+        assert!(
+            matches!(result, Err(ConfigError::UnknownProvider(msg)) if msg.contains("nonexistent_provider"))
+        );
     }
 
     #[tokio::test]

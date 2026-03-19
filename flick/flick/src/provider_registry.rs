@@ -3,17 +3,20 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::ApiKind;
-use crate::config::CompatFlags;
+use crate::crypto::{decrypt, encrypt};
 use crate::error::CredentialError;
 
-use chacha20poly1305::aead::rand_core::RngCore;
-use chacha20poly1305::aead::{Aead, KeyInit, OsRng, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use zeroize::Zeroizing;
+/// Per-provider quirk flags. All default to false.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatFlags {
+    #[serde(default)]
+    pub explicit_tool_choice_auto: bool,
+}
 
-const NONCE_LEN: usize = 12;
-const AUTH_TAG_LEN: usize = 16; // Poly1305 authentication tag
-const PREFIX: &str = "enc3:";
+use chacha20poly1305::aead::OsRng;
+use chacha20poly1305::aead::rand_core::RngCore;
+use zeroize::Zeroizing;
 
 /// Serialized form for a single provider entry in the TOML file.
 #[derive(Debug, Serialize, Deserialize)]
@@ -26,6 +29,7 @@ struct StoredProvider {
 }
 
 /// Provider info returned by `get()` — contains decrypted key + metadata.
+#[derive(Debug)]
 pub struct ProviderInfo {
     pub api: ApiKind,
     pub base_url: String,
@@ -119,11 +123,15 @@ impl ProviderRegistry {
         compat: Option<CompatFlags>,
     ) -> Result<(), CredentialError> {
         validate_provider_name(name)?;
-        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        let parsed = url::Url::parse(base_url)
+            .map_err(|e| CredentialError::InvalidBaseUrl(format!("invalid base_url: {e}")))?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
             return Err(CredentialError::InvalidBaseUrl(
-                "base_url must start with http:// or https://".into(),
+                "base_url must use http:// or https:// scheme".into(),
             ));
         }
+        // No explicit host check needed: url::Url::parse enforces that
+        // http/https URLs contain a non-empty host (returns EmptyHost error).
         let key = self.load_or_create_secret_key().await?;
         let encrypted = encrypt(&key, api_key, name)?;
 
@@ -192,64 +200,19 @@ impl ProviderRegistry {
         let path = self.secret_key_path();
         let hex_key = Zeroizing::new(hex::encode(*key));
 
-        #[cfg(unix)]
-        {
-            use tokio::io::AsyncWriteExt;
-            let file_result = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-                .await;
-            match file_result {
-                Ok(mut file) => {
-                    if let Err(e) = file.write_all(hex_key.as_bytes()).await {
-                        drop(file);
-                        let _ = tokio::fs::remove_file(&path).await;
-                        return Err(CredentialError::Io(e));
-                    }
-                    if let Err(e) = file.sync_all().await {
-                        drop(file);
-                        let _ = tokio::fs::remove_file(&path).await;
-                        return Err(CredentialError::Io(e));
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return self.load_secret_key().await;
-                }
-                Err(e) => return Err(CredentialError::Io(e)),
+        match write_new_secret_key_file(&path, &hex_key).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return self.load_secret_key().await;
             }
+            Err(e) => return Err(CredentialError::Io(e)),
         }
+
         #[cfg(windows)]
         {
-            use tokio::io::AsyncWriteExt;
-            let file_result = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .await;
-            match file_result {
-                Ok(mut file) => {
-                    if let Err(e) = file.write_all(hex_key.as_bytes()).await {
-                        drop(file);
-                        let _ = tokio::fs::remove_file(&path).await;
-                        return Err(CredentialError::Io(e));
-                    }
-                    if let Err(e) = file.sync_all().await {
-                        drop(file);
-                        let _ = tokio::fs::remove_file(&path).await;
-                        return Err(CredentialError::Io(e));
-                    }
-                    drop(file);
-                    if let Err(e) = restrict_windows_permissions(&path) {
-                        let _ = tokio::fs::remove_file(&path).await;
-                        return Err(e);
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return self.load_secret_key().await;
-                }
-                Err(e) => return Err(CredentialError::Io(e)),
+            if let Err(e) = crate::platform::restrict_windows_permissions(&path) {
+                let _ = tokio::fs::remove_file(&path).await;
+                return Err(e);
             }
         }
 
@@ -286,7 +249,7 @@ impl ProviderRegistry {
         }
         #[cfg(windows)]
         {
-            if let Err(e) = restrict_windows_permissions(&tmp_path) {
+            if let Err(e) = crate::platform::restrict_windows_permissions(&tmp_path) {
                 let _ = tokio::fs::remove_file(&tmp_path).await;
                 return Err(e);
             }
@@ -297,6 +260,46 @@ impl ProviderRegistry {
         }
         Ok(())
     }
+}
+
+/// Write a new secret key file atomically. Uses `create_new` to avoid races.
+/// On Unix, sets mode 0o600 before writing. Cleans up on write/sync failure.
+async fn write_new_secret_key_file(
+    path: &std::path::Path,
+    hex_key: &str,
+) -> Result<(), std::io::Error> {
+    use tokio::io::AsyncWriteExt;
+
+    #[cfg(unix)]
+    let file_result = {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .await
+    };
+    #[cfg(windows)]
+    let file_result = {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+    };
+
+    let mut file = file_result?;
+    if let Err(e) = file.write_all(hex_key.as_bytes()).await {
+        drop(file);
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(e);
+    }
+    if let Err(e) = file.sync_all().await {
+        drop(file);
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(e);
+    }
+    Ok(())
 }
 
 pub fn flick_dir() -> Result<PathBuf, CredentialError> {
@@ -316,220 +319,10 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     }
 }
 
-#[cfg(windows)]
-#[allow(unsafe_code, clippy::too_many_lines)]
-fn restrict_windows_permissions(path: &std::path::Path) -> Result<(), CredentialError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Foundation::{
-        CloseHandle, ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree, WIN32_ERROR,
-    };
-    use windows::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW,
-        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
-    };
-    use windows::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, GetTokenInformation, NO_INHERITANCE,
-        OBJECT_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY,
-        TOKEN_USER, TokenUser,
-    };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::core::PCWSTR;
-
-    struct HandleGuard(HANDLE);
-    impl Drop for HandleGuard {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = CloseHandle(self.0);
-            }
-        }
-    }
-
-    struct AclGuard(*mut ACL);
-    impl Drop for AclGuard {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe {
-                    let _ = LocalFree(Some(HLOCAL(self.0.cast())));
-                }
-            }
-        }
-    }
-
-    fn win32_err(context: &str, code: WIN32_ERROR) -> CredentialError {
-        CredentialError::InvalidFormat(format!("{context}: error code {}", code.0))
-    }
-
-    let token = {
-        let mut h = HANDLE::default();
-        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut h) }
-            .map_err(|e| CredentialError::InvalidFormat(format!("OpenProcessToken: {e}")))?;
-        h
-    };
-    let _token_guard = HandleGuard(token);
-
-    let mut needed = 0u32;
-    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &raw mut needed) };
-
-    if needed == 0 {
-        return Err(CredentialError::InvalidFormat(
-            "GetTokenInformation probe returned size 0".into(),
-        ));
-    }
-
-    let align_len = (needed as usize).div_ceil(std::mem::size_of::<u64>());
-    let mut aligned: Vec<u64> = vec![0u64; align_len];
-    let buffer: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(aligned.as_mut_ptr().cast(), needed as usize) };
-    unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            Some(buffer.as_mut_ptr().cast()),
-            needed,
-            &raw mut needed,
-        )
-    }
-    .map_err(|e| CredentialError::InvalidFormat(format!("GetTokenInformation: {e}")))?;
-
-    let user_sid: PSID = unsafe { (*aligned.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-
-    let ea = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: 0x001F_01FF,
-        grfAccessMode: SET_ACCESS,
-        grfInheritance: NO_INHERITANCE,
-        Trustee: TRUSTEE_W {
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: TRUSTEE_IS_USER,
-            ptstrName: windows::core::PWSTR(user_sid.0.cast()),
-            ..Default::default()
-        },
-    };
-
-    let mut acl_ptr = std::ptr::null_mut::<ACL>();
-    let result = unsafe { SetEntriesInAclW(Some(&[ea]), None, &raw mut acl_ptr) };
-    if result != ERROR_SUCCESS {
-        return Err(win32_err("SetEntriesInAclW", result));
-    }
-    let _acl_guard = AclGuard(acl_ptr);
-
-    let path_wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let sec_info: OBJECT_SECURITY_INFORMATION =
-        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
-
-    let result = unsafe {
-        SetNamedSecurityInfoW(
-            PCWSTR(path_wide.as_ptr()),
-            SE_FILE_OBJECT,
-            sec_info,
-            None,
-            None,
-            Some(acl_ptr),
-            None,
-        )
-    };
-    if result != ERROR_SUCCESS {
-        return Err(win32_err("SetNamedSecurityInfoW", result));
-    }
-
-    Ok(())
-}
-
-fn encrypt(key: &[u8; 32], plaintext: &str, provider: &str) -> Result<String, CredentialError> {
-    let cipher = ChaCha20Poly1305::new(key.into());
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(
-            nonce,
-            Payload {
-                msg: plaintext.as_bytes(),
-                aad: provider.as_bytes(),
-            },
-        )
-        .map_err(|_| CredentialError::EncryptionFailed)?;
-
-    let mut combined = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-    combined.extend_from_slice(&nonce_bytes);
-    combined.extend_from_slice(&ciphertext);
-    Ok(format!("{PREFIX}{}", hex::encode(combined)))
-}
-
-fn decrypt(key: &[u8; 32], value: &str, provider: &str) -> Result<String, CredentialError> {
-    let hex_str = value
-        .strip_prefix(PREFIX)
-        .ok_or_else(|| CredentialError::InvalidFormat(format!("missing {PREFIX} prefix")))?;
-    let combined =
-        hex::decode(hex_str).map_err(|_| CredentialError::InvalidFormat("bad hex".into()))?;
-    if combined.len() < NONCE_LEN + AUTH_TAG_LEN {
-        return Err(CredentialError::InvalidFormat("too short".into()));
-    }
-    let (nonce_bytes, ciphertext) = combined.split_at(NONCE_LEN);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let cipher = ChaCha20Poly1305::new(key.into());
-    let plaintext = cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: ciphertext,
-                aad: provider.as_bytes(),
-            },
-        )
-        .map_err(|_| CredentialError::DecryptionFailed(provider.to_string()))?;
-    String::from_utf8(plaintext)
-        .map_err(|_| CredentialError::DecryptionFailed(provider.to_string()))
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn encrypt_decrypt_round_trip() {
-        let key = [42u8; 32];
-        let plaintext = "sk-test-api-key-12345";
-        let encrypted = encrypt(&key, plaintext, "test").expect("encryption should succeed");
-        assert!(encrypted.starts_with(PREFIX));
-        let decrypted = decrypt(&key, &encrypted, "test").expect("decryption should succeed");
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
-    fn decrypt_wrong_key_fails() {
-        let key1 = [1u8; 32];
-        let key2 = [2u8; 32];
-        let encrypted = encrypt(&key1, "secret", "test").expect("encryption should succeed");
-        let result = decrypt(&key2, &encrypted, "test");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn decrypt_bad_prefix_fails() {
-        let key = [42u8; 32];
-        let result = decrypt(&key, "notencrypted", "test");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn decrypt_too_short_fails() {
-        let key = [42u8; 32];
-        let result = decrypt(&key, "enc3:aabb", "test");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn decrypt_aad_mismatch_fails() {
-        let key = [42u8; 32];
-        let encrypted = encrypt(&key, "secret", "anthropic").expect("encrypt");
-        let result = decrypt(&key, &encrypted, "openai");
-        assert!(matches!(result, Err(CredentialError::DecryptionFailed(_))));
-    }
 
     #[tokio::test]
     async fn set_then_get_round_trip() {
@@ -638,7 +431,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let registry = ProviderRegistry::load(dir.path().to_path_buf());
         let result = registry.get("anthropic").await;
-        assert!(matches!(result, Err(CredentialError::NoSecretKey(_))));
+        assert!(
+            matches!(result, Err(CredentialError::NoSecretKey(_))),
+            "expected NoSecretKey, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -656,7 +452,69 @@ mod tests {
             .await
             .expect("set");
         let result = registry.get("nonexistent").await;
-        assert!(matches!(result, Err(CredentialError::NotFound(_))));
+        assert!(
+            matches!(result, Err(CredentialError::NotFound(_))),
+            "expected NotFound, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_with_corrupt_secret_key_invalid_hex() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let key_path = dir.path().join(".secret_key");
+        tokio::fs::write(&key_path, "not-valid-hex!!")
+            .await
+            .expect("write corrupt key");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let result = registry.get("test").await;
+        assert!(
+            matches!(result, Err(CredentialError::InvalidSecretKey(_))),
+            "expected InvalidSecretKey for bad hex, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_with_corrupt_secret_key_wrong_length() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let key_path = dir.path().join(".secret_key");
+        // Valid hex but only 16 bytes (32 hex chars) instead of 32 bytes (64 hex chars)
+        tokio::fs::write(&key_path, "aabbccdd00112233aabbccdd00112233")
+            .await
+            .expect("write short key");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let result = registry.get("test").await;
+        assert!(
+            matches!(result, Err(CredentialError::InvalidSecretKey(_))),
+            "expected InvalidSecretKey for wrong length, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_rejects_degenerate_url_no_host() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let result = registry
+            .set("test", "key", ApiKind::Messages, "https://", None)
+            .await;
+        assert!(
+            matches!(result, Err(CredentialError::InvalidBaseUrl(_))),
+            "expected InvalidBaseUrl for no-host URL, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn url_crate_rejects_hostless_http_https() {
+        // Document the invariant we rely on: url::Url::parse rejects
+        // http/https URLs that lack a host, so no separate host check
+        // is needed in set().
+        for input in ["https://", "http://"] {
+            let err = url::Url::parse(input).expect_err("should reject hostless URL");
+            assert_eq!(
+                err,
+                url::ParseError::EmptyHost,
+                "expected EmptyHost for {input:?}, got {err:?}"
+            );
+        }
     }
 
     #[test]

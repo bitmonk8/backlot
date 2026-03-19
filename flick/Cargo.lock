@@ -344,6 +344,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "url",
  "windows",
  "wiremock",
  "xxhash-rust",

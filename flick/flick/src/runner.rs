@@ -60,50 +60,10 @@ pub async fn run(
     // Two-step: if the first call completed (no tool calls), make a second
     // call with schema and no tools to get structured output.
     if needs_two_step && status == ResultStatus::Complete {
-        if !blocks.is_empty() {
-            context.messages.pop();
-        }
-
-        let empty_tools: Vec<ToolDefinition> = Vec::new();
-        let params2 = build_params(config, model_info, &context.messages, &empty_tools);
-        let response2 = provider.call_boxed(params2).await?;
-        let blocks2 = build_content(&response2)?;
-
-        if !blocks2.is_empty() {
-            context.push_assistant(blocks2.clone())?;
-        }
-
-        let total_input = response.usage.input_tokens + response2.usage.input_tokens;
-        let total_output = response.usage.output_tokens + response2.usage.output_tokens;
-        let total_cache_creation = response.usage.cache_creation_input_tokens
-            + response2.usage.cache_creation_input_tokens;
-        let total_cache_read =
-            response.usage.cache_read_input_tokens + response2.usage.cache_read_input_tokens;
-        let cost_usd = config.compute_cost(
-            model_info,
-            total_input,
-            total_output,
-            total_cache_creation,
-            total_cache_read,
-        );
-
-        return Ok(FlickResult {
-            status,
-            content: blocks2,
-            usage: Some(UsageSummary {
-                input_tokens: total_input,
-                output_tokens: total_output,
-                cache_creation_input_tokens: total_cache_creation,
-                cache_read_input_tokens: total_cache_read,
-                cost_usd,
-            }),
-            context_hash: None,
-            error: None,
-        });
+        return run_second_step(config, model_info, provider, context, &response, &blocks).await;
     }
 
-    let cost_usd = config.compute_cost(
-        model_info,
+    let cost_usd = model_info.compute_cost(
         response.usage.input_tokens,
         response.usage.output_tokens,
         response.usage.cache_creation_input_tokens,
@@ -118,6 +78,73 @@ pub async fn run(
             output_tokens: response.usage.output_tokens,
             cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
             cache_read_input_tokens: response.usage.cache_read_input_tokens,
+            cost_usd,
+        }),
+        context_hash: None,
+        error: None,
+    })
+}
+
+/// Second step of the two-step structured output path. Pops the first
+/// assistant message, calls the provider with the schema, and restores
+/// the saved message on any error.
+async fn run_second_step(
+    config: &RequestConfig,
+    model_info: &ModelInfo,
+    provider: &dyn DynProvider,
+    context: &mut Context,
+    first_response: &ModelResponse,
+    first_blocks: &[ContentBlock],
+) -> Result<FlickResult, FlickError> {
+    let saved = if first_blocks.is_empty() {
+        None
+    } else {
+        context.messages.pop()
+    };
+
+    let empty_tools: Vec<ToolDefinition> = Vec::new();
+    let result: Result<(ModelResponse, Vec<ContentBlock>), FlickError> = async {
+        let params2 = build_params(config, model_info, &context.messages, &empty_tools);
+        let response2 = provider.call_boxed(params2).await?;
+        let blocks2 = build_content(&response2)?;
+        if !blocks2.is_empty() {
+            context.push_assistant(blocks2.clone())?;
+        }
+        Ok((response2, blocks2))
+    }
+    .await;
+
+    let (response2, blocks2) = match result {
+        Ok(pair) => pair,
+        Err(e) => {
+            if let Some(msg) = saved {
+                context.messages.push(msg);
+            }
+            return Err(e);
+        }
+    };
+
+    let total_input = first_response.usage.input_tokens + response2.usage.input_tokens;
+    let total_output = first_response.usage.output_tokens + response2.usage.output_tokens;
+    let total_cache_creation = first_response.usage.cache_creation_input_tokens
+        + response2.usage.cache_creation_input_tokens;
+    let total_cache_read =
+        first_response.usage.cache_read_input_tokens + response2.usage.cache_read_input_tokens;
+    let cost_usd = model_info.compute_cost(
+        total_input,
+        total_output,
+        total_cache_creation,
+        total_cache_read,
+    );
+
+    Ok(FlickResult {
+        status: ResultStatus::Complete,
+        content: blocks2,
+        usage: Some(UsageSummary {
+            input_tokens: total_input,
+            output_tokens: total_output,
+            cache_creation_input_tokens: total_cache_creation,
+            cache_read_input_tokens: total_cache_read,
             cost_usd,
         }),
         context_hash: None,

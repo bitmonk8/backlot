@@ -428,6 +428,18 @@ mod tests {
     }
 
     #[test]
+    fn code_invalid_assistant_content() {
+        let e = FlickError::InvalidAssistantContent("empty".into());
+        assert_eq!(e.code(), "invalid_assistant_content");
+    }
+
+    #[test]
+    fn code_invalid_message_order() {
+        let e = FlickError::InvalidMessageOrder("bad order".into());
+        assert_eq!(e.code(), "invalid_message_order");
+    }
+
+    #[test]
     fn from_conversions() {
         let ce: FlickError = CredentialError::NotFound("x".into()).into();
         assert!(matches!(ce, FlickError::Credential(_)));

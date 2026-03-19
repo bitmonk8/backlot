@@ -1,12 +1,9 @@
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::ApiKind;
 use crate::error::ConfigError;
-use crate::model::{ReasoningLevel, anthropic_budget_tokens};
-use crate::model_registry::ModelInfo;
+use crate::model::ReasoningLevel;
 use crate::provider::{ToolChoice, ToolDefinition};
-use crate::provider_registry::ProviderInfo;
 
 /// Config string format for `RequestConfig::from_str`.
 #[derive(Debug, Clone, Copy)]
@@ -68,22 +65,14 @@ pub struct ToolChoiceConfig {
     pub name: Option<String>,
 }
 
-/// Per-provider quirk flags. All default to false.
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompatFlags {
-    #[serde(default)]
-    pub explicit_tool_choice_auto: bool,
-}
-
 /// A tool definition from the tools list in config.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolConfig {
     name: String,
     description: String,
-    #[serde(default)]
-    parameters: Option<serde_json::Value>,
+    #[serde(default, alias = "parameters")]
+    input_schema: Option<serde_json::Value>,
 }
 
 impl ToolChoiceConfig {
@@ -104,12 +93,12 @@ impl ToolConfig {
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
-        parameters: Option<serde_json::Value>,
+        input_schema: Option<serde_json::Value>,
     ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
-            parameters,
+            input_schema,
         }
     }
 
@@ -121,8 +110,8 @@ impl ToolConfig {
         &self.description
     }
 
-    pub const fn parameters(&self) -> Option<&serde_json::Value> {
-        self.parameters.as_ref()
+    pub const fn input_schema(&self) -> Option<&serde_json::Value> {
+        self.input_schema.as_ref()
     }
 
     /// Convert to the provider's `ToolDefinition` type.
@@ -130,7 +119,7 @@ impl ToolConfig {
         ToolDefinition {
             name: self.name.clone(),
             description: self.description.clone(),
-            input_schema: self.parameters.clone(),
+            input_schema: self.input_schema.clone(),
         }
     }
 }
@@ -278,10 +267,10 @@ impl RequestConfig {
                     tool.name
                 )));
             }
-            if let Some(params) = &tool.parameters {
-                if !params.is_object() {
+            if let Some(schema) = &tool.input_schema {
+                if !schema.is_object() {
                     return Err(ConfigError::InvalidToolConfig(format!(
-                        "tool '{}': parameters must be a JSON object",
+                        "tool '{}': input_schema must be a JSON object",
                         tool.name
                     )));
                 }
@@ -295,77 +284,6 @@ impl RequestConfig {
         }
 
         Ok(())
-    }
-
-    /// Full validation against resolved model/provider info.
-    /// Called by `FlickClient::new()`.
-    pub(crate) fn validate_resolved(
-        &self,
-        model_info: &ModelInfo,
-        provider_info: &ProviderInfo,
-    ) -> Result<(), ConfigError> {
-        // Per-provider temperature ceiling
-        if let Some(temp) = self.temperature {
-            let max_temp = match provider_info.api {
-                ApiKind::Messages => 1.0,
-                ApiKind::ChatCompletions => 2.0,
-            };
-            if temp > max_temp {
-                return Err(ConfigError::InvalidModelConfig(format!(
-                    "temperature {temp} exceeds maximum {max_temp} for this provider"
-                )));
-            }
-        }
-
-        // Reasoning + output_schema mutual exclusion (Messages API)
-        if self.reasoning.is_some()
-            && self.output_schema.is_some()
-            && provider_info.api == ApiKind::Messages
-        {
-            return Err(ConfigError::InvalidModelConfig(
-                "reasoning and output_schema cannot be used together (Anthropic API limitation)"
-                    .into(),
-            ));
-        }
-
-        // Anthropic budget_tokens < max_tokens constraint
-        if let Some(reasoning) = &self.reasoning {
-            if provider_info.api == ApiKind::Messages {
-                let budget = anthropic_budget_tokens(reasoning.level);
-                let effective_max = model_info.max_tokens.unwrap_or(8192);
-                if budget >= effective_max {
-                    return Err(ConfigError::InvalidModelConfig(format!(
-                        "reasoning budget_tokens ({budget}) must be less than max_tokens ({effective_max})",
-                    )));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Compute cost in USD from token counts and model pricing.
-    #[allow(clippy::cast_precision_loss)]
-    pub fn compute_cost(
-        &self,
-        model_info: &ModelInfo,
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_creation_input_tokens: u64,
-        cache_read_input_tokens: u64,
-    ) -> f64 {
-        let inp = model_info.input_per_million.unwrap_or(0.0);
-        let out = model_info.output_per_million.unwrap_or(0.0);
-        let cw = model_info.cache_creation_per_million.unwrap_or(0.0);
-        let cr = model_info.cache_read_per_million.unwrap_or(0.0);
-        ((input_tokens as f64).mul_add(
-            inp,
-            (output_tokens as f64).mul_add(
-                out,
-                (cache_creation_input_tokens as f64)
-                    .mul_add(cw, (cache_read_input_tokens as f64) * cr),
-            ),
-        )) / 1_000_000.0
     }
 }
 
@@ -560,7 +478,7 @@ mod tests {
         let yaml = "model: test\ntools:\n  - name: my_tool\n    description: a tool\n    parameters: \"not an object\"\n";
         let result = RequestConfig::parse_yaml(yaml);
         assert!(
-            matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("parameters") && msg.contains("object"))
+            matches!(result, Err(ConfigError::InvalidToolConfig(msg)) if msg.contains("input_schema") && msg.contains("object"))
         );
     }
 
@@ -612,9 +530,9 @@ tools:
         let config = RequestConfig::parse_yaml(yaml).expect("should parse");
         assert_eq!(config.tools().len(), 2);
         assert_eq!(config.tools()[0].name(), "read_file");
-        assert!(config.tools()[0].parameters().is_some());
+        assert!(config.tools()[0].input_schema().is_some());
         assert_eq!(config.tools()[1].name(), "grep_project");
-        assert!(config.tools()[1].parameters().is_none());
+        assert!(config.tools()[1].input_schema().is_none());
     }
 
     #[test]
@@ -669,136 +587,11 @@ tools:
     }
 
     #[test]
-    fn validate_resolved_temperature_ceiling_messages() {
-        let config = RequestConfig::parse_yaml("model: test\ntemperature: 1.5\n").expect("parse");
-        let model_info = ModelInfo {
-            provider: "p".into(),
-            name: "m".into(),
-            max_tokens: Some(1024),
-            input_per_million: None,
-            output_per_million: None,
-            cache_creation_per_million: None,
-            cache_read_per_million: None,
-        };
-        let provider_info = ProviderInfo {
-            api: ApiKind::Messages,
-            base_url: String::new(),
-            key: String::new(),
-            compat: None,
-        };
-        let result = config.validate_resolved(&model_info, &provider_info);
-        assert!(
-            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("temperature"))
-        );
-    }
-
-    #[test]
-    fn validate_resolved_reasoning_output_schema_rejected_messages() {
-        let config = RequestConfig::parse_yaml(
-            "model: test\nreasoning:\n  level: medium\noutput_schema:\n  schema:\n    type: object\n",
-        )
-        .expect("parse");
-        let model_info = ModelInfo {
-            provider: "p".into(),
-            name: "m".into(),
-            max_tokens: Some(64000),
-            input_per_million: None,
-            output_per_million: None,
-            cache_creation_per_million: None,
-            cache_read_per_million: None,
-        };
-        let provider_info = ProviderInfo {
-            api: ApiKind::Messages,
-            base_url: String::new(),
-            key: String::new(),
-            compat: None,
-        };
-        let result = config.validate_resolved(&model_info, &provider_info);
-        assert!(
-            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("reasoning") && msg.contains("output_schema"))
-        );
-    }
-
-    #[test]
-    fn validate_resolved_budget_tokens_exceed_max() {
-        let config =
-            RequestConfig::parse_yaml("model: test\nreasoning:\n  level: high\n").expect("parse");
-        let model_info = ModelInfo {
-            provider: "p".into(),
-            name: "m".into(),
-            max_tokens: Some(1024),
-            input_per_million: None,
-            output_per_million: None,
-            cache_creation_per_million: None,
-            cache_read_per_million: None,
-        };
-        let provider_info = ProviderInfo {
-            api: ApiKind::Messages,
-            base_url: String::new(),
-            key: String::new(),
-            compat: None,
-        };
-        let result = config.validate_resolved(&model_info, &provider_info);
-        assert!(
-            matches!(result, Err(ConfigError::InvalidModelConfig(msg)) if msg.contains("budget_tokens"))
-        );
-    }
-
-    #[test]
-    fn compute_cost_basic() {
-        let config = RequestConfig::parse_yaml("model: test\n").expect("parse");
-        let model_info = ModelInfo {
-            provider: "p".into(),
-            name: "m".into(),
-            max_tokens: None,
-            input_per_million: Some(3.0),
-            output_per_million: Some(15.0),
-            cache_creation_per_million: None,
-            cache_read_per_million: None,
-        };
-        let cost = config.compute_cost(&model_info, 1_000_000, 1_000_000, 0, 0);
-        assert!((cost - 18.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn compute_cost_no_pricing() {
-        let config = RequestConfig::parse_yaml("model: test\n").expect("parse");
-        let model_info = ModelInfo {
-            provider: "p".into(),
-            name: "m".into(),
-            max_tokens: None,
-            input_per_million: None,
-            output_per_million: None,
-            cache_creation_per_million: None,
-            cache_read_per_million: None,
-        };
-        let cost = config.compute_cost(&model_info, 1_000_000, 1_000_000, 0, 0);
-        assert!((cost - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn compute_cost_with_cache_pricing() {
-        let config = RequestConfig::parse_yaml("model: test\n").expect("parse");
-        let model_info = ModelInfo {
-            provider: "p".into(),
-            name: "m".into(),
-            max_tokens: None,
-            input_per_million: Some(3.0),
-            output_per_million: Some(15.0),
-            cache_creation_per_million: Some(3.75),
-            cache_read_per_million: Some(0.30),
-        };
-        let cost = config.compute_cost(&model_info, 1_000_000, 1_000_000, 1_000_000, 1_000_000);
-        let expected = 3.0 + 15.0 + 3.75 + 0.30;
-        assert!((cost - expected).abs() < 0.001);
-    }
-
-    #[test]
     fn tool_config_to_definition() {
         let tool = ToolConfig {
             name: "test_tool".into(),
             description: "A test tool".into(),
-            parameters: Some(serde_json::json!({
+            input_schema: Some(serde_json::json!({
                 "type": "object",
                 "properties": { "arg": {"type": "string"} },
                 "required": ["arg"]
@@ -841,8 +634,6 @@ tools:
         let result = RequestConfig::parse_yaml(yaml);
         assert!(matches!(result, Err(ConfigError::Parse(msg)) if msg.contains("timeout")));
     }
-
-    // -- T55: tool_choice config tests --
 
     #[test]
     fn tool_choice_auto() {

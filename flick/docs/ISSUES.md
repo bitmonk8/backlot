@@ -4,132 +4,117 @@ Issues identified during review but deferred for later resolution.
 
 ---
 
-## 1. Double-counting cached tokens for Chat Completions providers
+## 1. `validate_resolved_from_provider_info` adapter could be inlined
 
-**File:** `flick/src/config.rs` (compute_cost), `flick/src/provider/chat_completions.rs`
-**Category:** Correctness
+**File:** `flick/src/validation.rs`
+**Category:** Simplification
 
-OpenAI-compatible providers include cached tokens within `prompt_tokens` (i.e., `input_tokens` already contains the cached subset). `compute_cost` then charges cached tokens at both the input rate and the cache-read rate. No impact today because no Chat Completions model has `cache_creation_per_million` or `cache_read_per_million` set, but will over-report cost if a user configures cache pricing for an OpenAI-compatible model.
-
-**Fix:** Either subtract cache tokens from `input_tokens` in the Chat Completions response parser, or make `compute_cost` provider-aware.
+Thin wrapper that unpacks `ProviderInfo` fields and forwards to `validate_resolved`. Called from one site. The caller could call `validate_resolved` directly.
 
 ---
 
-## 2. `compute_cost` is a method on `RequestConfig` but uses no `self` fields
+## 2. `validate_assistant_content` could fold into `validate_message_structure`
 
-**File:** `flick/src/config.rs:288-310`
+**File:** `flick/src/context.rs`
+**Category:** Simplification
+
+`validate_assistant_content` iterates all messages a second time to check one condition (empty assistant content). Could be merged into the existing `validate_message_structure` loop.
+
+---
+
+## 3. `CompatFlags` placement in provider_registry
+
+**File:** `flick/src/provider_registry.rs`
 **Category:** Separation of concerns
 
-`compute_cost` takes `&self` but reads only `ModelInfo` fields and token count arguments. Should be a method on `ModelInfo` or a free function. Moving it is a refactor that touches every caller and test.
+`CompatFlags` describes provider behavioral quirks consumed by validation and providers, not registry-specific. Could move to a shared types module.
 
 ---
 
-## 3. Nested `mul_add` in `compute_cost` is harder to read than a simple sum
+## 4. `flick_dir()` and `home_dir()` in provider_registry
 
-**File:** `flick/src/config.rs:297-310`
+**File:** `flick/src/provider_registry.rs`
+**Category:** Separation of concerns
+
+General path utilities unrelated to provider credential management. Other modules needing the flick directory must import from provider_registry.
+
+---
+
+## 5. `validate_resolved` naming
+
+**File:** `flick/src/validation.rs`
+**Category:** Naming
+
+`validate_resolved` is vague. A name like `validate_config_against_provider` would communicate what is validated and against what.
+
+---
+
+## 6. `platform.rs` module name is broad
+
+**File:** `flick/src/platform.rs`
+**Category:** Naming
+
+Currently contains only one Windows ACL function. `permissions.rs` or `fs_permissions.rs` would be more precise.
+
+---
+
+## 7. `crypto.rs` `provider` parameter name
+
+**File:** `flick/src/crypto.rs`
+**Category:** Naming
+
+The `provider` parameter in `encrypt`/`decrypt` serves as AAD (additional authenticated data). The name is domain-specific rather than describing its cryptographic role.
+
+---
+
+## 8. `validation.rs` missing branch coverage
+
+**File:** `flick/src/validation.rs`
+**Category:** Testing
+
+Missing tests for: ChatCompletions temperature > 2.0, reasoning+output_schema allowed on ChatCompletions, budget_tokens skipped on ChatCompletions, happy path.
+
+---
+
+## 9. `crypto.rs` missing invalid hex test
+
+**File:** `flick/src/crypto.rs`
+**Category:** Testing
+
+`decrypt` has an error path for `hex::decode` failure but no test covers it.
+
+---
+
+## 10. `platform.rs` has zero test coverage
+
+**File:** `flick/src/platform.rs`
+**Category:** Testing
+
+`restrict_windows_permissions` has no tests. A smoke test on Windows would catch regressions.
+
+---
+
+## 11. FlickResult construction duplicated in runner
+
+**File:** `flick/src/runner.rs`
 **Category:** Simplification
 
-The nested `mul_add` chain could be replaced with a plain `a*b + c*d + ...` expression. Not a hot path; readability matters more than FMA precision here.
+Two-step and single-step paths both construct `FlickResult` with `UsageSummary` in near-identical fashion.
 
 ---
 
-## 4. Repeated pricing validation blocks in `validate_model_entry`
+## 12. `_ = compat` dead parameter in validate_resolved
 
-**File:** `flick/src/model_registry.rs:138-169`
+**File:** `flick/src/validation.rs`
 **Category:** Simplification
 
-Four nearly identical blocks validate pricing fields with the same `!v.is_finite() || v < 0.0` check. A helper function would reduce duplication.
+`validate_resolved` accepts `Option<&CompatFlags>` that is immediately discarded. Reserved for future use but adds noise to call sites.
 
 ---
 
-## 5. Base URL validation allows degenerate URLs
+## 13. `input_tokens` semantics differ between providers
 
-**File:** `flick/src/provider_registry.rs:122-126`
-**Category:** Testing
-
-`set()` checks that `base_url` starts with `http://` or `https://` but does not validate the URL is well-formed beyond that. Degenerate values like `"https://"` (no host) pass validation but would fail at reqwest request time. Stricter parsing (e.g., `url::Url::parse`) would catch these earlier.
-
----
-
-## 6. No test coverage for corrupt secret key file
-
-**File:** `flick/src/provider_registry.rs:163-181`
-**Category:** Testing
-
-`load_secret_key` has error paths for invalid hex and wrong-length keys, but no test covers reading a corrupt `.secret_key` file. Could be tested by writing invalid content to the key file path before calling `get()`.
-
----
-
-## 7. `#[serde(untagged)]` on `ContentBlock::Unknown` silently swallows malformed known types
-
-**File:** `flick/src/context.rs:29-59`
+**File:** `flick/src/provider/chat_completions.rs`, `flick/src/provider/messages.rs`
 **Category:** Correctness
 
-If a known type (e.g. `{"type":"text","text":42}`) has the right `type` tag but invalid field types, serde fails to match the tagged variant and silently falls through to `Unknown(Value)`. Fixing requires a custom `Deserialize` impl — high effort, low practical likelihood since provider responses are well-typed.
-
----
-
-## 8. `push_*` methods don't enforce message alternation
-
-**File:** `flick/src/context.rs:109-173`
-**Category:** Correctness
-
-`push_user_text`, `push_assistant`, and `push_tool_results` don't check `self.messages.last()` to prevent consecutive same-role messages. `validate_message_order` only runs on `load_from_file`. Existing callers enforce correct ordering, but the methods themselves are not defensive.
-
----
-
-## 9. `#[serde(default)]` allows empty-content assistant messages to load
-
-**File:** `flick/src/context.rs:15-20`
-**Category:** Correctness
-
-A serialized assistant message with missing `content` key deserializes to `content: vec![]`, which `push_assistant` would reject but `load_from_file` accepts. Intentionally lenient on load, but inconsistent.
-
----
-
-## 10. `validate_message_order` doesn't check `ToolUse` in user messages
-
-**File:** `flick/src/context.rs:84-104`
-**Category:** Correctness
-
-Checks `ToolResult` blocks are only in user messages but doesn't check the symmetric constraint: `ToolUse` blocks should only appear in assistant messages. Only affects hand-edited context files.
-
----
-
-## 11. Missing error code tests for `InvalidAssistantContent` and `InvalidMessageOrder`
-
-**File:** `flick/src/error.rs:57-58`
-**Category:** Testing
-
-The `code()` method maps these new variants to string codes, but no test verifies the mapping.
-
----
-
-## 12. Flaky test `history::tests::record_with_resume_hash` on ubuntu-latest CI
-
-**File:** `flick/src/history.rs:183-208`
-**Category:** Testing
-
-`record_with_resume_hash` intermittently fails on ubuntu-latest CI runners. The test writes to a tempdir via `tokio::fs` async append, then reads back and asserts the line contains `"resume_hash":"somehash"`. Passes consistently on macOS, Windows, and local ubuntu. Likely a filesystem timing issue with async I/O on CI ephemeral runners. Observed 2026-03-18 (CI run 23239580696).
-
-**Fix:** Either add an explicit `file.flush().await` / `file.shutdown().await` before reading back, or switch the test to synchronous I/O since it only writes one line.
-
----
-
-## 13. Integration tests don't verify first-turn provider receives only one user message
-
-**File:** `flick/tests/integration.rs` (`end_to_end_context_persistence`, `end_to_end_context_file_loading`)
-**Category:** Testing
-
-The second-turn provider's `captured_params()` is checked to confirm full history was transmitted, but the first-turn provider is not checked to confirm it received exactly one user message (no stale context leaking in).
-
-**Fix:** Add `captured_params()` assertion on the first-turn provider in both tests.
-
----
-
-## 14. `assert!(matches!(...))` gives no diagnostic on failure in provider_registry tests
-
-**File:** `flick/src/provider_registry.rs` (`get_before_any_set_returns_no_secret_key`, `get_not_found`)
-**Category:** Testing
-
-Using `assert!(matches!(result, Err(...)))` prints only "assertion failed: false" on failure with no detail about the actual value. Adding a format string or using `assert!(matches!(...), "expected X, got {result:?}")` would improve diagnostics.
+Chat Completions reports non-cached input tokens (prompt_tokens minus cached_tokens). Messages API reports total input tokens as-is. Both are correct for their respective APIs and cost computation works correctly, but `UsageSummary.input_tokens` has different semantics across providers for reporting purposes.

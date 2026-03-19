@@ -362,7 +362,7 @@ Declare tool schemas. Flick includes these in the model request but never execut
 |-------|------|----------|-------------|
 | `name` | string | yes | Tool name (must be unique) |
 | `description` | string | yes | Description sent to the model |
-| `parameters` | JSON value | no | JSON Schema for tool parameters |
+| `input_schema` | JSON value | no | JSON Schema for tool parameters (alias: `parameters`) |
 
 ## Context Resumption
 
@@ -414,7 +414,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-312 tests (255 lib, 26 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
+329 tests (272 lib, 26 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
 
 ## License
 
