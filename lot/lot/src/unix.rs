@@ -143,13 +143,35 @@ pub fn make_pipe() -> io::Result<(i32, i32)> {
     Ok((r, w))
 }
 
-/// Set up stdio for the child process. Creates pipes as needed.
+/// Pipe file descriptors for child and parent sides of stdio.
+pub struct StdioPipes {
+    pub child_stdin: i32,
+    pub child_stdout: i32,
+    pub child_stderr: i32,
+    pub parent_stdin: Option<i32>,
+    pub parent_stdout: Option<i32>,
+    pub parent_stderr: Option<i32>,
+}
+
+/// Close child fds (if not stdin/stdout/stderr) and parent pipe fds on error.
 ///
-/// Returns `(child_stdin_rd, child_stdout_wr, child_stderr_wr,
-///           parent_stdin_wr, parent_stdout_rd, parent_stderr_rd)`.
-pub fn setup_stdio_pipes(
-    command: &SandboxCommand,
-) -> io::Result<(i32, i32, i32, Option<i32>, Option<i32>, Option<i32>)> {
+/// # Safety
+/// Each fd in `child_fds` must be valid or a standard fd (0/1/2).
+unsafe fn cleanup_stdio_fds(child_fds: &[i32], parent_fds: &[Option<i32>]) {
+    for &fd in child_fds {
+        // SAFETY: caller guarantees fds are valid
+        unsafe { close_if_not_std(fd) };
+    }
+    for fd in parent_fds.iter().copied() {
+        if let Some(f) = fd {
+            // SAFETY: fd is a valid pipe fd from make_pipe()
+            unsafe { libc::close(f) };
+        }
+    }
+}
+
+/// Set up stdio for the child process. Creates pipes as needed.
+pub fn setup_stdio_pipes(command: &SandboxCommand) -> io::Result<StdioPipes> {
     let (child_stdin, parent_stdin) = match command.stdin {
         SandboxStdio::Piped => {
             let (r, w) = make_pipe()?;
@@ -162,17 +184,14 @@ pub fn setup_stdio_pipes(
     let (child_stdout, parent_stdout) = match command.stdout {
         SandboxStdio::Piped => {
             let (r, w) = make_pipe().inspect_err(|_| {
-                // Clean up stdin fds before propagating error
                 // SAFETY: fds are valid from the successful stdin step above
-                unsafe { close_if_not_std(child_stdin) };
-                close_parent_pipes(parent_stdin, None, None);
+                unsafe { cleanup_stdio_fds(&[child_stdin], &[parent_stdin]) };
             })?;
             (w, Some(r))
         }
         SandboxStdio::Null => (
             open_dev_null(libc::O_WRONLY).inspect_err(|_| {
-                unsafe { close_if_not_std(child_stdin) };
-                close_parent_pipes(parent_stdin, None, None);
+                unsafe { cleanup_stdio_fds(&[child_stdin], &[parent_stdin]) };
             })?,
             None,
         ),
@@ -182,33 +201,32 @@ pub fn setup_stdio_pipes(
     let (child_stderr, parent_stderr) = match command.stderr {
         SandboxStdio::Piped => {
             let (r, w) = make_pipe().inspect_err(|_| {
-                // Clean up stdin+stdout fds before propagating error
                 // SAFETY: fds are valid from successful steps above
-                unsafe { close_if_not_std(child_stdin) };
-                unsafe { close_if_not_std(child_stdout) };
-                close_parent_pipes(parent_stdin, parent_stdout, None);
+                unsafe {
+                    cleanup_stdio_fds(&[child_stdin, child_stdout], &[parent_stdin, parent_stdout])
+                };
             })?;
             (w, Some(r))
         }
         SandboxStdio::Null => (
             open_dev_null(libc::O_WRONLY).inspect_err(|_| {
-                unsafe { close_if_not_std(child_stdin) };
-                unsafe { close_if_not_std(child_stdout) };
-                close_parent_pipes(parent_stdin, parent_stdout, None);
+                unsafe {
+                    cleanup_stdio_fds(&[child_stdin, child_stdout], &[parent_stdin, parent_stdout])
+                };
             })?,
             None,
         ),
         SandboxStdio::Inherit => (2, None),
     };
 
-    Ok((
+    Ok(StdioPipes {
         child_stdin,
         child_stdout,
         child_stderr,
         parent_stdin,
         parent_stdout,
         parent_stderr,
-    ))
+    })
 }
 
 /// Close an fd if it's not one of the standard fds (0, 1, 2).
@@ -258,7 +276,7 @@ pub fn read_two_fds(fd1: Option<i32>, fd2: Option<i32>) -> io::Result<(Vec<u8>, 
                 revents: 0,
             },
         ];
-        let mut idx_map = [0u8; 2]; // 1 or 2
+        let mut fd_buffer_id = [0u8; 2]; // 1 or 2
         let mut nfds = 0usize;
 
         if let Some(fd) = active1 {
@@ -267,7 +285,7 @@ pub fn read_two_fds(fd1: Option<i32>, fd2: Option<i32>) -> io::Result<(Vec<u8>, 
                 events: libc::POLLIN,
                 revents: 0,
             };
-            idx_map[nfds] = 1;
+            fd_buffer_id[nfds] = 1;
             nfds += 1;
         }
         if let Some(fd) = active2 {
@@ -276,7 +294,7 @@ pub fn read_two_fds(fd1: Option<i32>, fd2: Option<i32>) -> io::Result<(Vec<u8>, 
                 events: libc::POLLIN,
                 revents: 0,
             };
-            idx_map[nfds] = 2;
+            fd_buffer_id[nfds] = 2;
             nfds += 1;
         }
 
@@ -308,14 +326,14 @@ pub fn read_two_fds(fd1: Option<i32>, fd2: Option<i32>) -> io::Result<(Vec<u8>, 
                     // EOF — close this fd
                     // SAFETY: fd is valid
                     unsafe { libc::close(pfd.fd) };
-                    if idx_map[i] == 1 {
+                    if fd_buffer_id[i] == 1 {
                         active1 = None;
                     } else {
                         active2 = None;
                     }
                 } else {
                     let data = &tmp[..n as usize];
-                    if idx_map[i] == 1 {
+                    if fd_buffer_id[i] == 1 {
                         buf1.extend_from_slice(data);
                     } else {
                         buf2.extend_from_slice(data);

@@ -350,3 +350,40 @@ The cmdline.rs tests added for H6 cover spaces, quotes, backslashes, and empty a
 
 **Category:** Testing
 **File:** `lot/tests/integration.rs`
+
+## Windows: `must_spawn` panics poison `TEST_LOCK`, cascading all appcontainer tests
+
+The appcontainer unit tests use `must_spawn()` which calls `.expect()` on `spawn()`. When prerequisites are not met (e.g., `lot setup` not run as administrator), `spawn()` returns `PrerequisitesNotMet` and `must_spawn` panics. This poisons the `TEST_LOCK` mutex, causing all subsequent tests to fail with `PoisonError` — masking the real issue.
+
+Fix: change `must_spawn` to skip tests on `PrerequisitesNotMet` (return early / use the `try_spawn` pattern from `integration.rs`) instead of panicking. Alternatively, use `.unwrap_or_else()` on the mutex lock to recover from poisoning.
+
+**Category:** Testing
+**File:** `lot/src/windows/appcontainer.rs`
+
+## Windows: `appcontainer.rs` has parallel ACL code path duplicating `acl_helpers`
+
+`appcontainer.rs` has its own `apply_ace`/`grant_access`/`deny_access`/`protect_dacl` stack (~160 lines) that is structurally identical to `acl_helpers::apply_dacl`. These are two independent implementations of "modify a DACL entry for a SID on a filesystem path." The `appcontainer.rs` functions handle per-path grant/deny ACEs with SDDL backup for sentinel rollback, which makes them slightly different from the simpler `apply_dacl`, but the core DACL read-modify-write pattern is duplicated.
+
+**Category:** Separation of concerns
+**Files:** `lot/src/windows/appcontainer.rs`, `lot/src/windows/acl_helpers.rs`
+
+## Windows: `create_sandboxed_process` takes 9 arguments including 6 pipe handles
+
+The function passes child and parent pipe handles individually. A struct grouping the 3 child + 3 parent handles would reduce argument count and eliminate the `close_all_pipes` closure repeated 3 times.
+
+**Category:** Simplification
+**File:** `lot/src/windows/appcontainer.rs`
+
+## Windows: `ELEVATION_REQUIRED_MARKER` belongs in shared location
+
+The constant is defined in `traverse_acl.rs` but consumed by `appcontainer.rs`, and `acl_helpers.rs` produces the same "elevation required" string literal independently. Should be defined once in `acl_helpers.rs` or `windows/mod.rs`.
+
+**Category:** Placement
+**Files:** `lot/src/windows/traverse_acl.rs`, `lot/src/windows/acl_helpers.rs`
+
+## Linux/macOS: `child_bail!` macro defined identically in both platforms
+
+The macro has identical implementations in `linux/mod.rs` and `macos/mod.rs`. Could be defined once in `unix.rs` and shared.
+
+**Category:** Simplification
+**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`

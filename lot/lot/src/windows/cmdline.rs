@@ -1,14 +1,9 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-// ── Command-line building/quoting ────────────────────────────────────
+use super::path_to_wide;
 
-fn os_to_wide(s: &OsString) -> Vec<u16> {
-    s.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
+// ── Command-line building/quoting ────────────────────────────────────
 
 pub fn build_env_block(env: &[(OsString, OsString)]) -> Vec<u16> {
     let mut block = Vec::new();
@@ -31,7 +26,8 @@ pub fn build_command_line(program: &OsString, args: &[OsString]) -> Vec<u16> {
         cmd.push(" ");
         append_escaped_arg(&mut cmd, arg);
     }
-    os_to_wide(&cmd)
+    // Reuse path_to_wide which does the same OsStr -> null-terminated UTF-16 conversion.
+    path_to_wide(std::path::Path::new(&cmd))
 }
 
 const WIDE_SPACE: u16 = b' ' as u16;

@@ -36,7 +36,7 @@ fn sentinel_path(profile_name: &str) -> PathBuf {
     sentinel_dir().join(format!("lot-sentinel-{profile_name}.txt"))
 }
 
-/// Extract the PID from a profile name. Format: `lot-{pid}-{tick}-{seq}`.
+/// Extract the PID from a profile name. Format: `lot-{pid}-{tick}-{qpc}-{seq}`.
 fn pid_from_profile_name(name: &str) -> Option<u32> {
     let rest = name.strip_prefix("lot-")?;
     let pid_str = rest.split('-').next()?;
@@ -206,6 +206,8 @@ pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
 // ── Sentinel file ────────────────────────────────────────────────────
 
 /// Line 1: profile name. Subsequent lines: `path\tSDDL`.
+/// Paths are percent-encoded: tab (`%09`), newline (`%0A`), carriage return (`%0D`),
+/// and percent (`%25`) characters are encoded to preserve the line format.
 pub struct SentinelFile {
     pub profile_name: String,
     pub entries: Vec<(PathBuf, String)>,

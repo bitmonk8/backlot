@@ -19,7 +19,7 @@ use windows_sys::Win32::Security::Isolation::{
 use windows_sys::Win32::Security::{
     ACL, AllocateAndInitializeSid, DACL_SECURITY_INFORMATION, FreeSid,
     PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
-    SID_AND_ATTRIBUTES, SID_IDENTIFIER_AUTHORITY, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
 use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
@@ -48,9 +48,7 @@ use super::sentinel::{SentinelFile, restore_from_sentinel, write_sentinel};
 
 // ── Constants ────────────────────────────────────────────────────────
 
-const SECURITY_APP_PACKAGE_AUTHORITY: SID_IDENTIFIER_AUTHORITY = SID_IDENTIFIER_AUTHORITY {
-    Value: [0, 0, 0, 0, 0, 15],
-};
+use super::acl_helpers::SECURITY_APP_PACKAGE_AUTHORITY;
 const SECURITY_CAPABILITY_INTERNET_CLIENT: u32 = 1;
 const SECURITY_BUILTIN_APP_PACKAGE_RID_COUNT: u8 = 2;
 const SECURITY_CAPABILITY_BASE_RID: u32 = 3;
@@ -67,6 +65,10 @@ pub const fn available() -> bool {
 use super::{path_to_wide, to_wide};
 
 fn unique_profile_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Atomic counter ensures uniqueness across concurrent calls from different threads.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     // SAFETY: Side-effect-free queries returning process ID and tick count.
     let pid = unsafe { GetCurrentProcessId() };
     let tick = unsafe { GetTickCount64() };
@@ -75,7 +77,7 @@ fn unique_profile_name() -> String {
     unsafe {
         QueryPerformanceCounter(&raw mut qpc);
     }
-    format!("lot-{pid}-{tick}-{qpc}")
+    format!("lot-{pid}-{tick}-{qpc}-{seq}")
 }
 
 fn hresult_to_io(hr: HRESULT) -> io::Error {
@@ -606,6 +608,24 @@ fn spawn_inner(
     }
 }
 
+/// Clean up attr_list and SIDs on error after attr_list has been initialized.
+///
+/// # Safety
+/// `attr_list` must be a valid initialized attribute list. Each SID in
+/// `cap_sids` must be a valid SID from `AllocateAndInitializeSid`.
+unsafe fn cleanup_attr_and_sids(attr_list: LPPROC_THREAD_ATTRIBUTE_LIST, cap_sids: &[PSID]) {
+    // SAFETY: Caller guarantees attr_list is valid.
+    unsafe {
+        DeleteProcThreadAttributeList(attr_list);
+    }
+    for sid in cap_sids {
+        // SAFETY: Caller guarantees each SID is valid.
+        unsafe {
+            FreeSid(*sid);
+        }
+    }
+}
+
 /// Spawn after sentinel is written. Returns sentinel back on error for cleanup.
 #[allow(clippy::too_many_lines)]
 fn spawn_with_sentinel(
@@ -698,6 +718,21 @@ fn spawn_with_sentinel(
     // 1 attribute for security caps, plus 1 for handle list if we have child handles.
     let attr_count: u32 = if has_child_handles { 2 } else { 1 };
 
+    // Cleanup helper for the pipe handles allocated above.
+    let close_all_pipes = |ps: Option<HANDLE>,
+                           cs: HANDLE,
+                           po: Option<HANDLE>,
+                           co: HANDLE,
+                           pe: Option<HANDLE>,
+                           ce: HANDLE| {
+        close_optional_handle(ps);
+        close_handle_if_valid(cs);
+        close_optional_handle(po);
+        close_handle_if_valid(co);
+        close_optional_handle(pe);
+        close_handle_if_valid(ce);
+    };
+
     // Initialize proc thread attribute list.
     let mut attr_list_size: usize = 0;
     // SAFETY: First call to determine required buffer size.
@@ -718,12 +753,14 @@ fn spawn_with_sentinel(
         InitializeProcThreadAttributeList(attr_list, attr_count, 0, &raw mut attr_list_size)
     };
     if ret == FALSE {
-        close_optional_handle(parent_stdin);
-        close_handle_if_valid(child_stdin);
-        close_optional_handle(parent_stdout);
-        close_handle_if_valid(child_stdout);
-        close_optional_handle(parent_stderr);
-        close_handle_if_valid(child_stderr);
+        close_all_pipes(
+            parent_stdin,
+            child_stdin,
+            parent_stdout,
+            child_stdout,
+            parent_stderr,
+            child_stderr,
+        );
         for sid in &cap_sids {
             // SAFETY: Each sid from AllocateAndInitializeSid.
             unsafe {
@@ -753,18 +790,17 @@ fn spawn_with_sentinel(
     };
     if ret == FALSE {
         let e = io::Error::last_os_error();
-        close_optional_handle(parent_stdin);
-        close_handle_if_valid(child_stdin);
-        close_optional_handle(parent_stdout);
-        close_handle_if_valid(child_stdout);
-        close_optional_handle(parent_stderr);
-        close_handle_if_valid(child_stderr);
-        // SAFETY: Cleaning up initialized attr_list and SIDs.
+        close_all_pipes(
+            parent_stdin,
+            child_stdin,
+            parent_stdout,
+            child_stdout,
+            parent_stderr,
+            child_stderr,
+        );
+        // SAFETY: attr_list is initialized; SIDs are from AllocateAndInitializeSid.
         unsafe {
-            DeleteProcThreadAttributeList(attr_list);
-            for sid in &cap_sids {
-                FreeSid(*sid);
-            }
+            cleanup_attr_and_sids(attr_list, &cap_sids);
         }
         return Err((
             sentinel,
@@ -788,18 +824,17 @@ fn spawn_with_sentinel(
         };
         if ret == FALSE {
             let e = io::Error::last_os_error();
-            close_optional_handle(parent_stdin);
-            close_handle_if_valid(child_stdin);
-            close_optional_handle(parent_stdout);
-            close_handle_if_valid(child_stdout);
-            close_optional_handle(parent_stderr);
-            close_handle_if_valid(child_stderr);
-            // SAFETY: Cleaning up.
+            close_all_pipes(
+                parent_stdin,
+                child_stdin,
+                parent_stdout,
+                child_stdout,
+                parent_stderr,
+                child_stderr,
+            );
+            // SAFETY: attr_list is initialized; SIDs are from AllocateAndInitializeSid.
             unsafe {
-                DeleteProcThreadAttributeList(attr_list);
-                for sid in &cap_sids {
-                    FreeSid(*sid);
-                }
+                cleanup_attr_and_sids(attr_list, &cap_sids);
             }
             return Err((
                 sentinel,

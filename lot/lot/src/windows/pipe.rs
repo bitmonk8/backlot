@@ -90,3 +90,36 @@ pub fn close_optional_handle(h: Option<HANDLE>) {
         close_handle_if_valid(handle);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_pipe_returns_valid_handles() {
+        let pipe = create_pipe().unwrap();
+        assert_ne!(pipe.read, INVALID_HANDLE_VALUE);
+        assert_ne!(pipe.write, INVALID_HANDLE_VALUE);
+        assert!(!pipe.read.is_null());
+        assert!(!pipe.write.is_null());
+        close_handle_if_valid(pipe.read);
+        close_handle_if_valid(pipe.write);
+    }
+
+    #[test]
+    fn resolve_stdio_input_null() {
+        let (child, parent) = resolve_stdio_input(SandboxStdio::Null).unwrap();
+        assert_eq!(child, INVALID_HANDLE_VALUE);
+        assert!(parent.is_none());
+    }
+
+    #[test]
+    fn resolve_stdio_input_piped() {
+        let (child, parent) = resolve_stdio_input(SandboxStdio::Piped).unwrap();
+        assert_ne!(child, INVALID_HANDLE_VALUE);
+        assert!(parent.is_some());
+        close_handle_if_valid(child);
+        close_optional_handle(parent);
+    }
+}

@@ -225,7 +225,10 @@ fn exit_code_from_status(status: std::process::ExitStatus) -> ExitCode {
     {
         // Windows exit codes are full 32-bit values; truncating to u8 loses
         // information (e.g. 0xC0000005 for access violation becomes 1).
-        // std::process::exit() takes i32 which covers the full Win32 range.
+        // We use process::exit() because ExitCode only supports u8 and there
+        // is no way to propagate the full 32-bit exit code through main's
+        // return value. This bypasses Drop impls, which is acceptable here
+        // because cmd_run owns no resources that require cleanup at this point.
         status.code().map_or(ExitCode::FAILURE, |code| {
             std::process::exit(code);
         })
@@ -358,5 +361,74 @@ fn main() -> ExitCode {
         Command::Run(ref args) => cmd_run(args),
         Command::Setup(ref args) => cmd_setup(args),
         Command::Probe => cmd_probe(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn exit_code_from_status_success() {
+        use std::process::Command;
+        let status = Command::new("true").status().expect("run true");
+        let code = exit_code_from_status(status);
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exit_code_from_status_failure() {
+        use std::process::Command;
+        let status = Command::new("false").status().expect("run false");
+        let code = exit_code_from_status(status);
+        assert_eq!(code, ExitCode::from(1));
+    }
+    // Windows exit_code_from_status calls process::exit() which cannot be
+    // tested in-process. The function is tested indirectly via integration.
+
+    #[test]
+    fn build_policy_minimal_config() {
+        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let config = SandboxConfig {
+            filesystem: FilesystemConfig {
+                read: vec![tmp.path().to_path_buf()],
+                ..FilesystemConfig::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let policy = build_policy(&config);
+        assert!(policy.is_ok(), "minimal config should produce valid policy");
+    }
+
+    #[test]
+    fn build_policy_empty_config_fails() {
+        let config = SandboxConfig::default();
+        let policy = build_policy(&config);
+        assert!(policy.is_err(), "empty config should fail validation");
+    }
+
+    #[test]
+    fn config_deserialization_minimal() {
+        let yaml = "filesystem:\n  read:\n    - .\n";
+        let config: Result<SandboxConfig, _> = serde_yml::from_str(yaml);
+        assert!(config.is_ok(), "minimal YAML should deserialize");
+    }
+
+    #[test]
+    fn config_deserialization_with_limits() {
+        let yaml = r"
+filesystem:
+  read:
+    - .
+limits:
+  max_memory_bytes: 1048576
+  max_processes: 10
+";
+        let config: SandboxConfig = serde_yml::from_str(yaml).expect("parse YAML");
+        assert_eq!(config.limits.max_memory_bytes, Some(1_048_576));
+        assert_eq!(config.limits.max_processes, Some(10));
     }
 }

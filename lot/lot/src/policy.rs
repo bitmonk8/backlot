@@ -122,30 +122,30 @@ fn check_cross_overlap(
     Ok(())
 }
 
-/// Like [`check_cross_overlap`] but allows `b` (higher-privilege) children
-/// under `a` (lower-privilege) parents.  Rejects exact duplicates, `a` children
-/// under `b` parents (redundant), and `b` parents over `a` children.
+/// Like [`check_cross_overlap`] but allows `higher` (higher-privilege) children
+/// under `lower` (lower-privilege) parents.  Rejects exact duplicates, `lower` children
+/// under `higher` parents (redundant), and `higher` parents over `lower` children.
 fn check_cross_overlap_directional(
-    a_paths: &[PathBuf],
-    a_name: &str,
-    b_paths: &[PathBuf],
-    b_name: &str,
+    lower_priv_paths: &[PathBuf],
+    lower_name: &str,
+    higher_priv_paths: &[PathBuf],
+    higher_name: &str,
 ) -> Result<(), SandboxError> {
-    for a in a_paths {
-        for b in b_paths {
-            if a == b {
+    for lower in lower_priv_paths {
+        for higher in higher_priv_paths {
+            if lower == higher {
                 return Err(SandboxError::InvalidPolicy(format!(
-                    "path appears in both {a_name} and {b_name}: {}",
-                    a.display()
+                    "path appears in both {lower_name} and {higher_name}: {}",
+                    lower.display()
                 )));
             }
-            // b child under a parent is allowed (elevated subdirectory).
-            // a child under b parent is redundant (b already covers a).
-            if is_parent_of(b, a) {
+            // higher child under lower parent is allowed (elevated subdirectory).
+            // lower child under higher parent is redundant (higher already covers lower).
+            if is_parent_of(higher, lower) {
                 return Err(SandboxError::InvalidPolicy(format!(
-                    "parent/child overlap between {b_name} and {a_name}: {} contains {}",
-                    b.display(),
-                    a.display()
+                    "parent/child overlap between {higher_name} and {lower_name}: {} contains {}",
+                    higher.display(),
+                    lower.display()
                 )));
             }
         }
@@ -215,6 +215,27 @@ fn check_deny_coverage(
     Ok(())
 }
 
+/// Canonicalize a list of paths, collecting errors into `errors` and returning
+/// successfully canonicalized paths.
+fn canon_collect(paths: &[PathBuf], label: &str, errors: &mut Vec<String>) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    for p in paths {
+        match canon(p, label) {
+            Ok(c) => result.push(c),
+            Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    result
+}
+
+/// If `result` is an `InvalidPolicy` error, push the message into `errors`.
+fn collect_validation_error(result: Result<(), SandboxError>, errors: &mut Vec<String>) {
+    if let Err(SandboxError::InvalidPolicy(msg)) = result {
+        errors.push(msg);
+    }
+}
+
 impl SandboxPolicy {
     /// Returns the union of `read_paths`, `write_paths`, `exec_paths`, and `deny_paths`.
     pub fn all_paths(&self) -> Vec<&std::path::Path> {
@@ -223,6 +244,17 @@ impl SandboxPolicy {
             .chain(self.write_paths.iter())
             .chain(self.exec_paths.iter())
             .chain(self.deny_paths.iter())
+            .map(PathBuf::as_path)
+            .collect()
+    }
+
+    /// Returns the union of `read_paths`, `write_paths`, and `exec_paths` (grant paths only).
+    /// Excludes `deny_paths` -- used for computing ancestors that need traverse ACEs.
+    pub fn grant_paths(&self) -> Vec<&std::path::Path> {
+        self.read_paths
+            .iter()
+            .chain(self.write_paths.iter())
+            .chain(self.exec_paths.iter())
             .map(PathBuf::as_path)
             .collect()
     }
@@ -245,60 +277,19 @@ impl SandboxPolicy {
         // Canonicalize all paths. This also validates existence.
         // Collect canonicalization errors but continue with successfully
         // canonicalized paths so subsequent checks can still run.
-        let mut read_canon: Vec<PathBuf> = Vec::new();
-        for p in &self.read_paths {
-            match canon(p, "read_paths") {
-                Ok(c) => read_canon.push(c),
-                Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
-                Err(e) => errors.push(e.to_string()),
-            }
-        }
-        let mut write_canon: Vec<PathBuf> = Vec::new();
-        for p in &self.write_paths {
-            match canon(p, "write_paths") {
-                Ok(c) => write_canon.push(c),
-                Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
-                Err(e) => errors.push(e.to_string()),
-            }
-        }
-        let mut exec_canon: Vec<PathBuf> = Vec::new();
-        for p in &self.exec_paths {
-            match canon(p, "exec_paths") {
-                Ok(c) => exec_canon.push(c),
-                Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
-                Err(e) => errors.push(e.to_string()),
-            }
-        }
-        let mut deny_canon: Vec<PathBuf> = Vec::new();
-        for p in &self.deny_paths {
-            match canon(p, "deny_paths") {
-                Ok(c) => deny_canon.push(c),
-                Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
-                Err(e) => errors.push(e.to_string()),
-            }
-        }
+        let read_canon = canon_collect(&self.read_paths, "read_paths", &mut errors);
+        let write_canon = canon_collect(&self.write_paths, "write_paths", &mut errors);
+        let exec_canon = canon_collect(&self.exec_paths, "exec_paths", &mut errors);
+        let deny_canon = canon_collect(&self.deny_paths, "deny_paths", &mut errors);
 
         // Check for intra-set overlaps.
-        if let Err(SandboxError::InvalidPolicy(msg)) =
-            check_intra_overlap(&read_canon, "read_paths")
-        {
-            errors.push(msg);
-        }
-        if let Err(SandboxError::InvalidPolicy(msg)) =
-            check_intra_overlap(&write_canon, "write_paths")
-        {
-            errors.push(msg);
-        }
-        if let Err(SandboxError::InvalidPolicy(msg)) =
-            check_intra_overlap(&exec_canon, "exec_paths")
-        {
-            errors.push(msg);
-        }
-        if let Err(SandboxError::InvalidPolicy(msg)) =
-            check_intra_overlap(&deny_canon, "deny_paths")
-        {
-            errors.push(msg);
-        }
+        collect_validation_error(check_intra_overlap(&read_canon, "read_paths"), &mut errors);
+        collect_validation_error(
+            check_intra_overlap(&write_canon, "write_paths"),
+            &mut errors,
+        );
+        collect_validation_error(check_intra_overlap(&exec_canon, "exec_paths"), &mut errors);
+        collect_validation_error(check_intra_overlap(&deny_canon, "deny_paths"), &mut errors);
 
         // Check for cross-set overlaps (exact match + parent/child).
         //
@@ -306,33 +297,27 @@ impl SandboxPolicy {
         // permissions to a specific subdirectory while the parent remains
         // read-only. The reverse (read child under write parent) is redundant
         // and rejected.
-        if let Err(SandboxError::InvalidPolicy(msg)) =
-            check_cross_overlap_directional(&read_canon, "read_paths", &write_canon, "write_paths")
-        {
-            errors.push(msg);
-        }
-        if let Err(SandboxError::InvalidPolicy(msg)) =
-            check_cross_overlap(&read_canon, "read_paths", &exec_canon, "exec_paths")
-        {
-            errors.push(msg);
-        }
-        if let Err(SandboxError::InvalidPolicy(msg)) =
-            check_cross_overlap(&write_canon, "write_paths", &exec_canon, "exec_paths")
-        {
-            errors.push(msg);
-        }
+        collect_validation_error(
+            check_cross_overlap_directional(&read_canon, "read_paths", &write_canon, "write_paths"),
+            &mut errors,
+        );
+        collect_validation_error(
+            check_cross_overlap(&read_canon, "read_paths", &exec_canon, "exec_paths"),
+            &mut errors,
+        );
+        collect_validation_error(
+            check_cross_overlap(&write_canon, "write_paths", &exec_canon, "exec_paths"),
+            &mut errors,
+        );
 
         // Each deny path must be a strict child of at least one grant path.
         // Exact matches are rejected — callers should remove the grant instead.
-        if let Err(SandboxError::InvalidPolicy(msg)) =
-            check_deny_coverage(&deny_canon, &read_canon, &write_canon, &exec_canon)
-        {
-            errors.push(msg);
-        }
+        collect_validation_error(
+            check_deny_coverage(&deny_canon, &read_canon, &write_canon, &exec_canon),
+            &mut errors,
+        );
 
-        if let Err(SandboxError::InvalidPolicy(msg)) = self.limits.validate() {
-            errors.push(msg);
-        }
+        collect_validation_error(self.limits.validate(), &mut errors);
 
         if errors.is_empty() {
             Ok(())
@@ -379,22 +364,21 @@ impl ResourceLimits {
     }
 
     fn validate(&self) -> Result<(), SandboxError> {
+        let mut msgs: Vec<&str> = Vec::new();
         if self.max_memory_bytes == Some(0) {
-            return Err(SandboxError::InvalidPolicy(
-                "max_memory_bytes must not be zero".into(),
-            ));
+            msgs.push("max_memory_bytes must not be zero");
         }
         if self.max_processes == Some(0) {
-            return Err(SandboxError::InvalidPolicy(
-                "max_processes must not be zero".into(),
-            ));
+            msgs.push("max_processes must not be zero");
         }
         if self.max_cpu_seconds == Some(0) {
-            return Err(SandboxError::InvalidPolicy(
-                "max_cpu_seconds must not be zero".into(),
-            ));
+            msgs.push("max_cpu_seconds must not be zero");
         }
-        Ok(())
+        if msgs.is_empty() {
+            Ok(())
+        } else {
+            Err(SandboxError::InvalidPolicy(msgs.join("; ")))
+        }
     }
 }
 
@@ -835,6 +819,85 @@ mod tests {
         assert!(
             msg.contains("unreachable"),
             "grant under deny should be rejected: {msg}"
+        );
+    }
+
+    #[test]
+    fn all_paths_returns_all_four_types() {
+        let tmp = make_temp_dir();
+        let read = tmp.path().join("r");
+        let write = tmp.path().join("w");
+        let exec = tmp.path().join("e");
+        let deny = tmp.path().join("d");
+        for p in [&read, &write, &exec, &deny] {
+            std::fs::create_dir(p).expect("create dir");
+        }
+
+        let policy = SandboxPolicy {
+            read_paths: vec![read.clone()],
+            write_paths: vec![write.clone()],
+            exec_paths: vec![exec.clone()],
+            deny_paths: vec![deny.clone()],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+
+        let all = policy.all_paths();
+        assert_eq!(all.len(), 4);
+        assert!(all.contains(&read.as_path()));
+        assert!(all.contains(&write.as_path()));
+        assert!(all.contains(&exec.as_path()));
+        assert!(all.contains(&deny.as_path()));
+    }
+
+    #[test]
+    fn grant_paths_excludes_deny() {
+        let tmp = make_temp_dir();
+        let read = tmp.path().join("r");
+        let deny = tmp.path().join("d");
+        for p in [&read, &deny] {
+            std::fs::create_dir(p).expect("create dir");
+        }
+
+        let policy = SandboxPolicy {
+            read_paths: vec![read.clone()],
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            deny_paths: vec![deny.clone()],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+
+        let grant = policy.grant_paths();
+        assert_eq!(grant.len(), 1);
+        assert!(grant.contains(&read.as_path()));
+        assert!(!grant.contains(&deny.as_path()));
+    }
+
+    #[test]
+    fn validate_reports_multiple_errors() {
+        let policy = SandboxPolicy {
+            read_paths: Vec::new(),
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
+            allow_network: false,
+            limits: ResourceLimits {
+                max_memory_bytes: Some(0),
+                max_processes: Some(0),
+                ..ResourceLimits::default()
+            },
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        // Should contain both "at least one path" and a resource limit error.
+        assert!(
+            msg.contains("at least one path"),
+            "should report empty policy: {msg}"
+        );
+        assert!(
+            msg.contains("max_memory_bytes") && msg.contains("max_processes"),
+            "should report resource limit errors: {msg}"
         );
     }
 }

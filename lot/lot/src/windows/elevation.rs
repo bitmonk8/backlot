@@ -38,3 +38,21 @@ pub fn is_elevated() -> bool {
 
     ret != FALSE && elevation.TokenIsElevated != 0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_elevated_does_not_panic() {
+        // Just verify it returns a bool without panicking.
+        let _result: bool = is_elevated();
+    }
+
+    #[test]
+    fn is_elevated_deterministic() {
+        let first = is_elevated();
+        let second = is_elevated();
+        assert_eq!(first, second, "should be deterministic between calls");
+    }
+}

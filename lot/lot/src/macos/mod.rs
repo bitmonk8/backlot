@@ -78,9 +78,15 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         .map_err(|e| SandboxError::Setup(format!("pre-fork preparation: {e}")))?;
 
     // Set up stdio pipes before forking
-    let (child_stdin, child_stdout, child_stderr, parent_stdin, parent_stdout, parent_stderr) =
-        unix::setup_stdio_pipes(command)
-            .map_err(|e| SandboxError::Setup(format!("stdio pipe setup: {e}")))?;
+    let unix::StdioPipes {
+        child_stdin,
+        child_stdout,
+        child_stderr,
+        parent_stdin,
+        parent_stdout,
+        parent_stderr,
+    } = unix::setup_stdio_pipes(command)
+        .map_err(|e| SandboxError::Setup(format!("stdio pipe setup: {e}")))?;
 
     // Error pipe: child writes errno here if anything fails before exec
     let (err_pipe_rd, err_pipe_wr) =

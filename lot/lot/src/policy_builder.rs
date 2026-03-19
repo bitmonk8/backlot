@@ -444,4 +444,62 @@ mod tests {
         // The produced policy should pass validate() independently.
         policy.validate().expect("validate should pass");
     }
+
+    #[test]
+    fn deny_path_dedup_same_path_twice() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let denied = tmp.path().join("secret");
+        std::fs::create_dir(&denied).expect("create denied dir");
+
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(&parent)
+            .deny_path(&denied)
+            .deny_path(&denied)
+            .build()
+            .expect("build should succeed");
+
+        assert_eq!(
+            policy.deny_paths().len(),
+            1,
+            "duplicate deny path should be deduplicated"
+        );
+    }
+
+    #[test]
+    fn deny_path_nonexistent_silently_skipped() {
+        let tmp = make_temp_dir();
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(tmp.path())
+            .deny_path("/surely/does/not/exist/xyz")
+            .build()
+            .expect("build should succeed");
+
+        assert!(
+            policy.deny_paths().is_empty(),
+            "nonexistent deny path should be silently skipped"
+        );
+    }
+
+    #[test]
+    fn deny_paths_batch_method() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let d1 = tmp.path().join("a");
+        let d2 = tmp.path().join("b");
+        std::fs::create_dir(&d1).expect("create dir a");
+        std::fs::create_dir(&d2).expect("create dir b");
+
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(&parent)
+            .deny_paths([&d1, &d2])
+            .build()
+            .expect("build should succeed");
+
+        assert_eq!(
+            policy.deny_paths().len(),
+            2,
+            "batch deny_paths should add both"
+        );
+    }
 }

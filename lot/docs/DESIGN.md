@@ -26,6 +26,7 @@ lot/                           (workspace root)
 │   │       ├── mod.rs         — WindowsSandbox: AppContainer + job object
 │   │       ├── appcontainer.rs — Profile lifecycle, capability assembly, ACL management, process creation
 │   │       ├── job.rs         — Job object creation, resource limits
+│   │       ├── acl_helpers.rs  — Shared DACL manipulation (SID allocation, ACE application)
 │   │       ├── nul_device.rs  — NUL device ACE, prerequisites API
 │   │       ├── traverse_acl.rs — Ancestor traverse ACE management
 │   │       ├── sentinel.rs    — Sentinel file ACL recovery (write, read, restore, cleanup_stale)
@@ -265,10 +266,10 @@ Tests gate on `probe()` results at runtime, skipping when a mechanism is unavail
 
 | Job | Platform | Setup |
 |---|---|---|
-| Format | All | `cargo fmt --all --check` |
-| Clippy | Linux, macOS, Windows | `cargo clippy --workspace --all-targets` |
-| Build | All | `cargo build --workspace` |
-| Test (Linux) | ubuntu-24.04 | `sysctl apparmor_restrict_unprivileged_userns=0`, cgroup delegation |
+| Format | ubuntu-latest | `cargo fmt --all --check` |
+| Clippy | ubuntu-latest, macos-latest, windows-latest (matrix) | `cargo clippy --workspace --all-targets --features tokio` |
+| Build | ubuntu-latest | `cargo build --workspace` |
+| Test (Linux) | ubuntu-latest | `sysctl apparmor_restrict_unprivileged_userns=0`, cgroup delegation |
 | Test (macOS) | macos-latest | None needed |
 | Test (Windows) | windows-latest | `lot setup` for AppContainer prerequisites |
 

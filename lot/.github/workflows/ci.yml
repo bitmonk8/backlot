@@ -18,41 +18,12 @@ jobs:
       - run: rustup show
       - run: cargo fmt --all --check
 
-  clippy-linux:
-    name: Clippy (Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - run: rustup show
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --workspace --all-targets --features tokio -- -D warnings
-
-  clippy-macos:
-    name: Clippy (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      - run: rustup show
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --workspace --all-targets --features tokio -- -D warnings
-
-  clippy-windows:
-    name: Clippy (Windows)
-    runs-on: windows-latest
+  clippy:
+    name: Clippy (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - run: rustup show
@@ -82,7 +53,9 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-test-
       - name: Enable unprivileged user namespaces
         run: |
+          # AppArmor restriction may not exist on all kernels -- failure is acceptable.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          # Sysctl may not exist on kernels that always allow user namespaces.
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
       - name: Run tests with delegated cgroup
         run: |
@@ -93,14 +66,20 @@ jobs:
           # Enable memory+pids controllers from root down to the parent.
           p="/sys/fs/cgroup"
           while [ "$p" != "$parent_cg" ] && [ "$p" != "/" ]; do
-            [ -f "$p/cgroup.subtree_control" ] && \
-              echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" 2>/dev/null || true
+            if [ -f "$p/cgroup.subtree_control" ]; then
+              echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" > /dev/null
+            fi
             # Walk toward parent_cg by appending the next path component
             next="$(echo "$parent_cg" | sed "s|^$p/||" | cut -d/ -f1)"
+            # Guard against infinite loop if sed/cut produce empty component
+            if [ -z "$next" ]; then
+              break
+            fi
             p="$p/$next"
           done
-          [ -f "$parent_cg/cgroup.subtree_control" ] && \
-            echo '+memory +pids' | sudo tee "$parent_cg/cgroup.subtree_control" 2>/dev/null || true
+          if [ -f "$parent_cg/cgroup.subtree_control" ]; then
+            echo '+memory +pids' | sudo tee "$parent_cg/cgroup.subtree_control" > /dev/null
+          fi
 
           # Create lot-test under the same parent as our current cgroup.
           # Layout:
@@ -150,7 +129,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-test-
       - name: Setup AppContainer prerequisites
         run: cargo run -p lot-cli -- setup --verbose
-      - run: cargo test -p lot --features tokio -- --test-threads=1
+      - run: cargo test -p lot --features tokio -- --test-threads=1 --nocapture
 
   build:
     name: Build

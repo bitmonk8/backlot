@@ -70,8 +70,9 @@ fn prepare_prefork(
 /// `close_range` syscall (Linux 5.9+). This prevents inherited write-open fds
 /// from other threads from causing ETXTBSY when a sibling process calls execve.
 ///
-/// If `close_range` is unavailable (kernel < 5.9), this is a no-op — the
-/// ETXTBSY race remains possible but spawn still works correctly.
+/// On kernels < 5.9, `close_range` fails silently and inherited fds are NOT
+/// closed (they leak). This is a known limitation: the ETXTBSY race remains
+/// possible but spawn still works correctly.
 ///
 /// # Safety
 /// Must only be called in a single-threaded forked child (the helper process).
@@ -164,9 +165,15 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         .map_err(|e| SandboxError::Setup(format!("seccomp filter build: {e}")))?;
 
     // Set up stdio pipes before forking
-    let (child_stdin, child_stdout, child_stderr, parent_stdin, parent_stdout, parent_stderr) =
-        unix::setup_stdio_pipes(command)
-            .map_err(|e| SandboxError::Setup(format!("stdio pipe setup: {e}")))?;
+    let unix::StdioPipes {
+        child_stdin,
+        child_stdout,
+        child_stderr,
+        parent_stdin,
+        parent_stdout,
+        parent_stderr,
+    } = unix::setup_stdio_pipes(command)
+        .map_err(|e| SandboxError::Setup(format!("stdio pipe setup: {e}")))?;
 
     // Error pipe: child writes errno here if anything fails before exec
     let (err_pipe_rd, err_pipe_wr) =
@@ -199,10 +206,10 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         const STEP_EXEC: i32 = 10;
         const STEP_CGROUP: i32 = 11;
 
-        // Macro to report error and exit from helper.
+        // Macro to report error and exit from child/helper.
         // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
         // which step failed.
-        macro_rules! helper_bail {
+        macro_rules! child_bail {
             ($err_fd:expr, $step:expr, $errno:expr) => {{
                 let mut buf = [0u8; 8];
                 buf[..4].copy_from_slice(&($step as i32).to_ne_bytes());
@@ -245,7 +252,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             // Capture errno immediately — subsequent calls could clobber it.
             // SAFETY: errno access has no preconditions.
             let saved_errno = unsafe { *libc::__errno_location() };
-            helper_bail!(err_pipe_wr, STEP_UNSHARE, saved_errno);
+            child_bail!(err_pipe_wr, STEP_UNSHARE, saved_errno);
         }
 
         // Set up UID/GID mapping — must happen before mount namespace setup.
@@ -253,7 +260,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // hasn't exec'd yet. The allocator is safe in a single-threaded forked
         // process that doesn't use the Rust async runtime.
         if let Err(e) = namespace::setup_user_namespace(prefork.uid, prefork.gid) {
-            helper_bail!(
+            child_bail!(
                 err_pipe_wr,
                 STEP_USER_NS,
                 e.raw_os_error().unwrap_or(libc::EPERM)
@@ -264,7 +271,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         let new_root = match namespace::setup_mount_namespace(policy) {
             Ok(root) => root,
             Err(e) => {
-                helper_bail!(
+                child_bail!(
                     err_pipe_wr,
                     STEP_MOUNT_NS,
                     e.raw_os_error().unwrap_or(libc::EPERM)
@@ -286,7 +293,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             let fd = unsafe { libc::open(procs_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
             if fd < 0 {
                 let saved_errno = unsafe { *libc::__errno_location() };
-                helper_bail!(err_pipe_wr, STEP_CGROUP, saved_errno);
+                child_bail!(err_pipe_wr, STEP_CGROUP, saved_errno);
             }
             // SAFETY: fd is valid, pid_bytes points into stack-allocated buf
             let written = unsafe { libc::write(fd, pid_bytes.as_ptr().cast(), pid_bytes.len()) };
@@ -296,7 +303,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             // SAFETY: fd is valid
             unsafe { libc::close(fd) };
             if written < 0 {
-                helper_bail!(err_pipe_wr, STEP_CGROUP, write_errno);
+                child_bail!(err_pipe_wr, STEP_CGROUP, write_errno);
             }
         }
 
@@ -305,7 +312,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         let inner_pid = unsafe { libc::fork() };
         if inner_pid < 0 {
             let saved_errno = unsafe { *libc::__errno_location() };
-            helper_bail!(err_pipe_wr, STEP_FORK_INNER, saved_errno);
+            child_bail!(err_pipe_wr, STEP_FORK_INNER, saved_errno);
         }
 
         if inner_pid == 0 {
@@ -324,21 +331,21 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             if child_stdin != 0 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stdin, 0) } < 0 {
-                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
+                    child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
                 }
                 unsafe { unix::close_if_not_std(child_stdin) };
             }
             if child_stdout != 1 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stdout, 1) } < 0 {
-                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
+                    child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
                 }
                 unsafe { unix::close_if_not_std(child_stdout) };
             }
             if child_stderr != 2 {
                 // SAFETY: both fds are valid
                 if unsafe { libc::dup2(child_stderr, 2) } < 0 {
-                    helper_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
+                    child_bail!(err_pipe_wr, STEP_DUP2, unsafe { *libc::__errno_location() });
                 }
                 unsafe { unix::close_if_not_std(child_stderr) };
             }
@@ -348,7 +355,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             // old root leaves stale procfs entries that cause
             // mnt_already_visible() to reject the mount.
             if let Err(e) = namespace::mount_proc_in_new_root(&new_root) {
-                helper_bail!(
+                child_bail!(
                     err_pipe_wr,
                     STEP_MOUNT_PROC,
                     e.raw_os_error().unwrap_or(libc::EPERM)
@@ -357,7 +364,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
             // Pivot into the new root and unmount the old root.
             if let Err(e) = namespace::pivot_root(&new_root) {
-                helper_bail!(
+                child_bail!(
                     err_pipe_wr,
                     STEP_PIVOT_ROOT,
                     e.raw_os_error().unwrap_or(libc::EPERM)
@@ -373,7 +380,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 // SAFETY: valid CString pointer
                 if unsafe { libc::chdir(cwd.as_ptr()) } != 0 {
                     let saved_errno = unsafe { *libc::__errno_location() };
-                    helper_bail!(err_pipe_wr, STEP_CHDIR, saved_errno);
+                    child_bail!(err_pipe_wr, STEP_CHDIR, saved_errno);
                 }
             }
 
@@ -382,7 +389,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {
                 if let Err(e) = seccomp::apply_filter(&bpf_filter) {
-                    helper_bail!(
+                    child_bail!(
                         err_pipe_wr,
                         STEP_SECCOMP,
                         e.raw_os_error().unwrap_or(libc::EPERM)
@@ -405,7 +412,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             }
 
             // exec failed — report errno via error pipe, then exit
-            helper_bail!(err_pipe_wr, STEP_EXEC, unsafe { *libc::__errno_location() });
+            child_bail!(err_pipe_wr, STEP_EXEC, unsafe { *libc::__errno_location() });
         }
 
         // === HELPER continues (inner_pid > 0) ===

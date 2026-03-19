@@ -262,6 +262,7 @@ dependencies = [
  "lot",
  "serde",
  "serde_yml",
+ "tempfile",
  "tokio",
 ]
 
