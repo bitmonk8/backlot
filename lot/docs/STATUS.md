@@ -16,7 +16,7 @@
 - `SandboxedChild::wait_with_output_timeout()`: async timeout with kill+cleanup (behind `tokio` feature)
 - `SandboxPolicy` fields are private; construction via `SandboxPolicyBuilder`, access via getter methods
 - `SandboxedChild::kill()` and `kill_and_cleanup()` take `&mut self`
-- Windows backend: AppContainer (filesystem/network isolation) + Job Objects (resource limits) + sentinel file ACL recovery + deny ACEs for denied paths. Modules: `appcontainer`, `sentinel`, `pipe`, `cmdline`, `job`, `nul_device`, `traverse_acl`, `elevation`
+- Windows backend: AppContainer (filesystem/network isolation) + Job Objects (resource limits) + sentinel file ACL recovery + deny ACEs for denied paths. Modules: `appcontainer`, `sentinel`, `pipe`, `cmdline`, `job`, `nul_device`, `traverse_acl`, `elevation`, `acl_helpers`
 - Linux backend: user/mount/pid/net/ipc namespaces + seccomp-BPF syscall filtering (argument-filtered prctl/ioctl) + cgroups v2 resource limits (sibling cgroup model) + empty tmpfs overmounts for denied paths + `close_range` fd cleanup to prevent ETXTBSY in parallel spawns
 - macOS backend: Seatbelt (sandbox_init SBPL profiles) + setrlimit resource limits + process group kill (setsid/killpg) + ancestor directory `file-read-metadata` grants + SBPL deny rules for denied paths
 - CI pipeline: clippy + test on Linux/macOS/Windows with namespace and cgroup setup, `lot setup` in Windows CI
@@ -32,12 +32,19 @@ Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 41 findings ordered
 |----------|-------|-----|--------|
 | Critical | 2 | C1–C2 | Fixed |
 | High | 8 | H1–H8 | Fixed |
-| Medium | 25 | M1–M25 | Not started |
-| Low | 6 | L1–L6 | Not started |
+| Medium | 25 | M1–M25 | Fixed (M8, M14 skipped — see below) |
+| Low | 6 | L1–L6 | Fixed (L1 skipped — see below) |
+
+### Skipped findings
+
+- **M8** (Unix SandboxedChild unification): Linux/macOS differ in kill semantics (kill vs killpg) and cgroup cleanup. Forced unification adds complexity for minimal gain.
+- **M14** (Unix pipe/fd unit tests): Cannot be implemented or verified on Windows. Exercised by integration tests on Linux/macOS CI.
+- **L1** (Non-Windows stubs): Two small inline stubs in lib.rs are clear and maintainable; moving them adds complexity with no benefit.
 
 ### Other remaining work
 
 - First real-world usage / `lot run` testing
+- Remaining issues tracked in `docs/ISSUES.md`
 
 ## CI Status
 
