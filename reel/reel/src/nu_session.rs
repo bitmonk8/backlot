@@ -1076,7 +1076,7 @@ mod tests {
 
     #[test]
     fn resolve_rg_binary_with_compile_time_tool_dir() {
-        let dir = option_env!("NU_CACHE_DIR").expect("NU_CACHE_DIR must be set");
+        let dir = env!("NU_CACHE_DIR");
         let result = resolve_rg_binary(Some(Path::new(dir)));
         assert!(
             result.is_some(),
