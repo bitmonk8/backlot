@@ -1,12 +1,15 @@
 //! Shared infrastructure for Unix backends (Linux, macOS).
 //!
 //! Contains pipe creation, stdio setup, concurrent pipe reading, fd helpers,
-//! and `ExitStatus` conversion that are identical across Linux and macOS.
+//! `ExitStatus` conversion, the `child_bail` error-reporting function, and
+//! the `UnixSandboxedChild` lifecycle struct that are identical across
+//! Linux and macOS.
 #![allow(unsafe_code)]
 
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::command::{SandboxCommand, SandboxStdio};
 
@@ -346,4 +349,212 @@ pub fn read_two_fds(fd1: Option<i32>, fd2: Option<i32>) -> io::Result<(Vec<u8>, 
 pub fn exit_status_from_raw(status: i32) -> std::process::ExitStatus {
     // SAFETY: from_raw takes a raw wait status on Unix
     std::os::unix::process::ExitStatusExt::from_raw(status)
+}
+
+/// Report an error from a forked child and exit. Async-signal-safe: no
+/// allocations, only a stack buffer write and `_exit`.
+///
+/// Writes 8 bytes `[step:i32, errno:i32]` to `err_fd` so the parent can
+/// identify which setup step failed.
+///
+/// # Safety
+/// `err_fd` must be a valid writable file descriptor. Must only be called
+/// in a forked child process (calls `_exit`).
+pub unsafe fn child_bail(err_fd: i32, step: i32, errno: i32) -> ! {
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(&step.to_ne_bytes());
+    buf[4..].copy_from_slice(&errno.to_ne_bytes());
+    // SAFETY: err_fd is valid, buf is stack-allocated
+    let _ = unsafe { libc::write(err_fd, buf.as_ptr().cast(), 8) };
+    // SAFETY: terminates the forked child
+    unsafe { libc::_exit(1) }
+}
+
+/// How to send SIGKILL to the sandboxed process tree. Linux kills the
+/// helper by PID (inner child dies via `PR_SET_PDEATHSIG`). macOS kills
+/// the process group (child called `setsid`).
+pub enum KillStyle {
+    /// `libc::kill(pid, SIGKILL)` — used on Linux where the helper PID
+    /// is the target.
+    Kill,
+    /// `libc::killpg(pid, SIGKILL)` — used on macOS where the child
+    /// started a new session.
+    KillProcessGroup,
+}
+
+/// Shared lifecycle state for a sandboxed Unix child process.
+///
+/// Both `LinuxSandboxedChild` and `MacSandboxedChild` delegate their
+/// wait/kill/drop/take_stdio methods here. Platform differences (kill
+/// strategy, extra cleanup like cgroup guards) are handled by the
+/// platform-specific wrappers.
+pub struct UnixSandboxedChild {
+    pub pid: i32,
+    pub stdin_fd: Option<i32>,
+    pub stdout_fd: Option<i32>,
+    pub stderr_fd: Option<i32>,
+    /// True once the child has been reaped via waitpid.
+    pub waited: AtomicBool,
+    pub kill_style: KillStyle,
+}
+
+impl UnixSandboxedChild {
+    pub const fn id(&self) -> u32 {
+        self.pid as u32
+    }
+
+    pub fn kill(&mut self) -> io::Result<()> {
+        if self.waited.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let rc = match self.kill_style {
+            // SAFETY: valid pid, SIGKILL is a well-known signal
+            KillStyle::Kill => unsafe { libc::kill(self.pid, libc::SIGKILL) },
+            // SAFETY: pid is a valid PGID after setsid(); SIGKILL is well-defined
+            KillStyle::KillProcessGroup => unsafe { libc::killpg(self.pid, libc::SIGKILL) },
+        };
+        if rc != 0 {
+            let err = io::Error::last_os_error();
+            // ESRCH means the process is already gone — not an error.
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn wait(&self) -> io::Result<std::process::ExitStatus> {
+        // Atomically claim the reap before calling waitpid to prevent
+        // concurrent double-wait racing on the same PID.
+        if self
+            .waited
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process already waited on",
+            ));
+        }
+
+        let mut status: libc::c_int = 0;
+        loop {
+            // SAFETY: valid pid, valid pointer
+            let rc = unsafe { libc::waitpid(self.pid, &raw mut status, 0) };
+            if rc < 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(err);
+            }
+            break;
+        }
+        Ok(exit_status_from_raw(status))
+    }
+
+    pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
+        // Atomically claim the reap BEFORE calling waitpid so a concurrent
+        // wait() cannot race and get ECHILD.
+        if self
+            .waited
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process already waited on",
+            ));
+        }
+
+        let mut status: libc::c_int = 0;
+        // SAFETY: valid pid, valid pointer, WNOHANG for non-blocking
+        let rc = unsafe { libc::waitpid(self.pid, &raw mut status, libc::WNOHANG) };
+        if rc < 0 {
+            // Revert the claim — waitpid failed, child is not reaped.
+            self.waited.store(false, Ordering::Release);
+            return Err(io::Error::last_os_error());
+        }
+        if rc == 0 {
+            // Child still running — revert the claim.
+            self.waited.store(false, Ordering::Release);
+            return Ok(None);
+        }
+        Ok(Some(exit_status_from_raw(status)))
+    }
+
+    pub fn wait_with_output(&mut self) -> io::Result<std::process::Output> {
+        // Take fds so Drop won't double-close them
+        let stdout_fd = self.stdout_fd.take();
+        let stderr_fd = self.stderr_fd.take();
+
+        // Read both pipes concurrently via poll to avoid deadlock when one
+        // pipe buffer fills while we block reading the other.
+        let (stdout, stderr) = read_two_fds(stdout_fd, stderr_fd)?;
+        let status = self.wait()?;
+
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+
+    pub fn take_stdin(&mut self) -> Option<std::fs::File> {
+        self.stdin_fd.take().map(|fd| {
+            // SAFETY: fd is a valid pipe fd we own
+            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
+        })
+    }
+
+    pub fn take_stdout(&mut self) -> Option<std::fs::File> {
+        self.stdout_fd.take().map(|fd| {
+            // SAFETY: fd is a valid pipe fd we own
+            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
+        })
+    }
+
+    pub fn take_stderr(&mut self) -> Option<std::fs::File> {
+        self.stderr_fd.take().map(|fd| {
+            // SAFETY: fd is a valid pipe fd we own
+            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
+        })
+    }
+
+    /// Close all remaining pipe fds.
+    pub fn close_fds(&mut self) {
+        for fd in [
+            self.stdin_fd.take(),
+            self.stdout_fd.take(),
+            self.stderr_fd.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            // SAFETY: fd is a valid pipe fd we own
+            unsafe {
+                libc::close(fd);
+            }
+        }
+    }
+
+    /// Kill and reap the process. Used by both `kill_and_cleanup`
+    /// and `Drop`. Callers must call `close_fds()` first.
+    pub fn kill_and_reap(&mut self) {
+        if !self.waited.load(Ordering::Acquire) {
+            let _ = self.kill();
+            loop {
+                // SAFETY: valid pid; blocking wait reaps the zombie
+                let rc = unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), 0) };
+                if rc < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                }
+                break;
+            }
+            self.waited.store(true, Ordering::Release);
+        }
+    }
 }

@@ -4,51 +4,47 @@ Issues grouped by code area, ordered by impact. Issues within a group touch over
 
 ---
 
-## 2. Unix: SandboxedChild Lifecycle (`linux/mod.rs`, `macos/mod.rs`, `unix.rs`)
+## 2. Unix: SandboxedChild Lifecycle — DONE
 
-All these issues involve the wait/kill/drop lifecycle shared between Linux and macOS. The deduplication issue is the anchor — extracting shared code to `unix.rs` naturally addresses the `child_bail!` macro, `try_wait` ordering, `Drop` consistency, and `setup_stdio_pipes` cleanup in one pass. This group ranks third because `try_wait` ordering is a correctness issue (albeit low-probability), and the ~160-line duplication means every future lifecycle change must be applied twice.
+Extracted `UnixSandboxedChild` struct and `child_bail` function to `unix.rs`. `LinuxSandboxedChild` and `MacSandboxedChild` now delegate lifecycle methods. Kill behavior parameterized via `KillStyle` enum. `try_wait` ordering fixed (compare_exchange before waitpid). `Drop` now sets `waited=true` via shared `kill_and_reap`. Double-wait test added to integration tests. `setup_stdio_pipes` RAII guard skipped (marginal benefit).
 
-### ~160 lines of duplicated `SandboxedChild` methods across Linux and macOS
+### Remaining (fix later)
 
-`wait`, `try_wait`, `wait_with_output`, `take_stdin/stdout/stderr`, `close_fds`, `kill_and_cleanup`, and `Drop` are near-identical between `LinuxSandboxedChild` and `MacSandboxedChild`. Differences: Linux uses `libc::kill` on helper pid; macOS uses `libc::killpg` on child pid. Linux `kill_and_cleanup` also drops `cgroup_guard`.
+#### `try_wait` revert race
 
-**Fix:** Extract shared struct or trait in `unix.rs`. The kill behavior difference can be parameterized.
-**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
+The compare_exchange-then-revert pattern in `try_wait` creates a brief window where concurrent `wait()` is spuriously rejected. `SandboxedChild` is not `Sync` and `try_wait`/`wait` take `&self`, making true concurrency very unlikely.
 
-### `child_bail!` macro defined identically in both platforms
-
-Both write 8 bytes `[step:i32, errno:i32]` via `libc::write` then call `libc::_exit(1)`.
-
-**Fix:** Move to `unix.rs`. Must remain async-signal-safe (no allocations).
-**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
-
-### `try_wait` calls `waitpid` before atomically claiming the reap
-
-In `try_wait`, `waitpid(WNOHANG)` is called before the `compare_exchange` that marks the child as reaped. If concurrent `wait()` and `try_wait()` race, `wait()` could get `ECHILD`. In practice, `SandboxedChild` is not `Sync` and `wait`/`try_wait` take `&self`/`&mut self` making true concurrency unlikely.
-
-**Fix:** Move `compare_exchange` before `waitpid`.
-**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
-
-### `Drop` for `LinuxSandboxedChild`/`MacSandboxedChild` does not set `waited=true` after reaping
-
-Inconsistency: `Drop` kills and reaps but does not set `waited` to `true`. Benign because `Drop` takes `&mut self` (exclusive access).
-
-**Fix:** Add `self.waited.store(true, Ordering::Release)` after `waitpid` in `Drop` for both platforms.
-**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
-
-### `setup_stdio_pipes` fd-cleanup closures
-
-Three `inspect_err` closures call `cleanup_stdio_fds` with progressively more fds. Already refactored to use a `cleanup_stdio_fds` helper (less fragile than original), but adding a new pipe step still requires updating closures.
-
-**Fix:** Consider RAII guard approach. Marginal benefit given the function is stable.
 **File:** `lot/src/unix.rs`
 
-### Tests: No test for `AtomicBool` double-wait prevention
+#### `take_stdin/stdout/stderr` triplication
 
-No test verifies that calling `wait()` twice returns an error.
+Three identical methods differing only in which field they access. A `take_fd(slot: &mut Option<i32>)` helper would eliminate the repetition.
 
-**Fix:** Spawn, wait, wait again, assert `ErrorKind::InvalidInput`.
+**File:** `lot/src/unix.rs`
+
+#### `KillStyle::Kill` naming ambiguity
+
+`KillSingle` or `KillProcess` would contrast more clearly with `KillProcessGroup`.
+
+**File:** `lot/src/unix.rs`
+
+#### Double-wait test doesn't cover `try_wait`
+
+`test_double_wait_returns_error` only tests `wait()`→`wait()`. Missing: `try_wait`→`wait`, `wait`→`try_wait`, and `try_wait` revert-then-`wait` paths.
+
+**File:** `lot/tests/integration.rs`
+
+#### Post-fork error-pipe checking duplicated
+
+Parent-side post-fork logic (close child fds, read error pipe, decode step/errno, reap zombie, return error) is structurally identical in both platform `spawn` functions. Could extract shared helper.
+
 **Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
+
+#### `pub` fields on `UnixSandboxedChild` should be `pub(crate)`
+
+All fields are `pub` but only accessed from sibling modules. `pub(crate)` is sufficient.
+
+**File:** `lot/src/unix.rs`
 
 ---
 

@@ -13,7 +13,7 @@ lot/                           (workspace root)
 │   │   ├── policy_builder.rs  — SandboxPolicyBuilder (auto-canonicalization, platform defaults)
 │   │   ├── command.rs         — SandboxCommand builder
 │   │   ├── error.rs           — SandboxError
-│   │   ├── unix.rs            — Shared Unix helpers
+│   │   ├── unix.rs            — Shared Unix helpers (pipes, stdio, UnixSandboxedChild lifecycle, child_bail)
 │   │   ├── linux/
 │   │   │   ├── mod.rs         — LinuxSandbox: orchestrates namespace + seccomp + cgroup
 │   │   │   ├── namespace.rs   — clone(), pivot_root, bind mounts, uid/gid mapping
@@ -124,6 +124,12 @@ void sandbox_free_error(char *errorbuf);
 **Resource limits:** `setrlimit(RLIMIT_AS, ...)` for memory. No cgroup equivalent on macOS.
 
 **Deprecation note:** Apple deprecated `sandbox_init` but has not removed it. It is still used by major applications (Chrome, Firefox) and the underlying kernel sandbox is actively maintained. No replacement API exists for third-party use.
+
+### Shared Unix lifecycle (`unix.rs`)
+
+`UnixSandboxedChild` in `unix.rs` holds the common state (pid, stdio fds, `AtomicBool` waited flag) and implements `wait`, `try_wait`, `wait_with_output`, `kill`, `take_stdin/stdout/stderr`, `close_fds`, and `kill_and_reap`. The kill mechanism differs between Linux (`libc::kill` on helper PID; inner child dies via `PR_SET_PDEATHSIG`) and macOS (`libc::killpg` on child PGID after `setsid`). This is parameterized via `KillStyle` enum. Platform wrappers (`LinuxSandboxedChild`, `MacSandboxedChild`) delegate lifecycle methods and add platform-specific cleanup (cgroup guard on Linux).
+
+The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `[step:i32, errno:i32]` error report to the error pipe and calls `_exit(1)`. Used by both platforms' forked child processes via a thin macro wrapper.
 
 ### Windows: AppContainer + Job Objects
 

@@ -7,11 +7,12 @@ mod seccomp;
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use crate::command::SandboxCommand;
 use crate::policy::SandboxPolicy;
 use crate::unix;
+use crate::unix::{KillStyle, UnixSandboxedChild};
 use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
 
 use cgroup::CgroupGuard;
@@ -206,17 +207,11 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         const STEP_EXEC: i32 = 10;
         const STEP_CGROUP: i32 = 11;
 
-        // Macro to report error and exit from child/helper.
-        // Writes 8 bytes: [step_id:i32, errno:i32] so the parent can identify
-        // which step failed.
+        // Macro wrapping unix::child_bail for ergonomic use in the child.
         macro_rules! child_bail {
             ($err_fd:expr, $step:expr, $errno:expr) => {{
-                let mut buf = [0u8; 8];
-                buf[..4].copy_from_slice(&($step as i32).to_ne_bytes());
-                buf[4..].copy_from_slice(&($errno as i32).to_ne_bytes());
-                // SAFETY: err_fd is valid, buf is stack-allocated
-                let _ = unsafe { libc::write($err_fd, buf.as_ptr().cast(), 8) };
-                unsafe { libc::_exit(1) };
+                // SAFETY: err_fd is valid; called from forked child
+                unsafe { unix::child_bail($err_fd, $step, $errno) }
             }};
         }
 
@@ -481,11 +476,14 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
     Ok(SandboxedChild {
         inner: LinuxSandboxedChild {
-            helper_pid,
-            stdin_fd: parent_stdin,
-            stdout_fd: parent_stdout,
-            stderr_fd: parent_stderr,
-            waited: AtomicBool::new(false),
+            inner: UnixSandboxedChild {
+                pid: helper_pid,
+                stdin_fd: parent_stdin,
+                stdout_fd: parent_stdout,
+                stderr_fd: parent_stderr,
+                waited: AtomicBool::new(false),
+                kill_style: KillStyle::Kill,
+            },
             cgroup_guard,
         },
     })
@@ -493,158 +491,47 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
 /// A running sandboxed process on Linux.
 ///
-/// Wraps the helper PID. The helper waits for the actual sandboxed (inner)
-/// child and exits with its status, so waiting on the helper gives us the
-/// inner child's exit status.
+/// Wraps `UnixSandboxedChild` for shared lifecycle methods and adds
+/// Linux-specific cgroup cleanup. The helper PID is the target for
+/// kill/wait; the inner child dies via `PR_SET_PDEATHSIG` when the
+/// helper exits.
 pub struct LinuxSandboxedChild {
-    helper_pid: i32,
-    stdin_fd: Option<i32>,
-    stdout_fd: Option<i32>,
-    stderr_fd: Option<i32>,
-    /// True once the helper has been reaped via waitpid.
-    /// AtomicBool prevents concurrent double-wait via compare_exchange.
-    waited: AtomicBool,
+    inner: UnixSandboxedChild,
     /// Held until drop to enforce resource limits and clean up the cgroup.
     cgroup_guard: Option<CgroupGuard>,
 }
 
 impl LinuxSandboxedChild {
     pub const fn id(&self) -> u32 {
-        self.helper_pid as u32
+        self.inner.id()
     }
 
     pub fn kill(&mut self) -> io::Result<()> {
-        if self.waited.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        // Kill the helper process. The inner child has PR_SET_PDEATHSIG
-        // set to SIGKILL, so it dies automatically when the helper exits.
-        // SAFETY: valid pid, SIGKILL is a well-known signal
-        let rc = unsafe { libc::kill(self.helper_pid, libc::SIGKILL) };
-        if rc != 0 {
-            let err = io::Error::last_os_error();
-            // ESRCH means the process is already gone — not an error.
-            if err.raw_os_error() != Some(libc::ESRCH) {
-                return Err(err);
-            }
-        }
-        Ok(())
+        self.inner.kill()
     }
 
     pub fn wait(&self) -> io::Result<std::process::ExitStatus> {
-        // Prevent concurrent double-wait which would race on the same PID.
-        if self
-            .waited
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "process already waited on",
-            ));
-        }
-
-        let mut status: libc::c_int = 0;
-        // SAFETY: valid pid, valid pointer
-        loop {
-            let rc = unsafe { libc::waitpid(self.helper_pid, &raw mut status, 0) };
-            if rc < 0 {
-                let err = io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                return Err(err);
-            }
-            break;
-        }
-        Ok(unix::exit_status_from_raw(status))
+        self.inner.wait()
     }
 
     pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
-        if self.waited.load(Ordering::Acquire) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "process already waited on",
-            ));
-        }
-
-        let mut status: libc::c_int = 0;
-        // SAFETY: valid pid, valid pointer, WNOHANG for non-blocking
-        let rc = unsafe { libc::waitpid(self.helper_pid, &raw mut status, libc::WNOHANG) };
-        if rc < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if rc == 0 {
-            return Ok(None);
-        }
-        // Child exited — atomically claim the reap so concurrent callers
-        // don't double-wait on a potentially recycled PID.
-        if self
-            .waited
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "process already waited on",
-            ));
-        }
-        Ok(Some(unix::exit_status_from_raw(status)))
+        self.inner.try_wait()
     }
 
     pub fn wait_with_output(mut self) -> io::Result<std::process::Output> {
-        // Take fds so Drop won't double-close them
-        let stdout_fd = self.stdout_fd.take();
-        let stderr_fd = self.stderr_fd.take();
-
-        // Read both pipes concurrently via poll to avoid deadlock when one
-        // pipe buffer fills while we block reading the other.
-        let (stdout, stderr) = unix::read_two_fds(stdout_fd, stderr_fd)?;
-        let status = self.wait()?;
-
-        Ok(std::process::Output {
-            status,
-            stdout,
-            stderr,
-        })
+        self.inner.wait_with_output()
     }
 
     pub fn take_stdin(&mut self) -> Option<std::fs::File> {
-        self.stdin_fd.take().map(|fd| {
-            // SAFETY: fd is a valid pipe fd we own
-            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
-        })
+        self.inner.take_stdin()
     }
 
     pub fn take_stdout(&mut self) -> Option<std::fs::File> {
-        self.stdout_fd.take().map(|fd| {
-            // SAFETY: fd is a valid pipe fd we own
-            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
-        })
+        self.inner.take_stdout()
     }
 
     pub fn take_stderr(&mut self) -> Option<std::fs::File> {
-        self.stderr_fd.take().map(|fd| {
-            // SAFETY: fd is a valid pipe fd we own
-            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
-        })
-    }
-
-    /// Close all remaining pipe fds.
-    fn close_fds(&mut self) {
-        for fd in [
-            self.stdin_fd.take(),
-            self.stdout_fd.take(),
-            self.stderr_fd.take(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            // SAFETY: fd is a valid pipe fd we own
-            unsafe {
-                libc::close(fd);
-            }
-        }
+        self.inner.take_stderr()
     }
 
     /// Kill the helper (and by extension, all namespaced descendants),
@@ -652,12 +539,8 @@ impl LinuxSandboxedChild {
     ///
     /// Consumes `self`; Drop still runs but sees already-cleaned-up state.
     pub fn kill_and_cleanup(mut self) -> crate::Result<()> {
-        self.close_fds();
-
-        if !self.waited.load(Ordering::Acquire) {
-            self.kill().map_err(crate::SandboxError::Io)?;
-            self.wait().map_err(crate::SandboxError::Io)?;
-        }
+        self.inner.close_fds();
+        self.inner.kill_and_reap();
 
         // CgroupGuard::drop handles kill + rmdir when self is dropped.
         // Taking it here and dropping explicitly makes the ordering clear.
@@ -684,17 +567,8 @@ pub fn kill_by_pid(pid: u32) {
 
 impl Drop for LinuxSandboxedChild {
     fn drop(&mut self) {
-        self.close_fds();
-
-        if !self.waited.load(Ordering::Acquire) {
-            // Kill and reap the helper to prevent zombie leak.
-            // SAFETY: helper_pid is valid; blocking wait ensures the zombie
-            // is reaped (SIGKILL delivery is near-instant).
-            unsafe {
-                libc::kill(self.helper_pid, libc::SIGKILL);
-                libc::waitpid(self.helper_pid, std::ptr::null_mut(), 0);
-            };
-        }
+        self.inner.close_fds();
+        self.inner.kill_and_reap();
     }
 }
 

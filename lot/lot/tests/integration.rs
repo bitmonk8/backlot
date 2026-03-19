@@ -954,6 +954,40 @@ fn test_symlink_into_deny_path() {
     eprintln!("[diag] PASSED");
 }
 
+#[test]
+#[cfg(unix)]
+fn test_double_wait_returns_error() {
+    eprintln!("[diag] === test_double_wait_returns_error ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = exit_command(0);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+
+    let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
+    cmd.args(&args);
+    cmd.stdout(lot::SandboxStdio::Piped);
+    cmd.stderr(lot::SandboxStdio::Piped);
+
+    let child = must_spawn(&policy, &cmd);
+
+    let status = child.wait().expect("first wait should succeed");
+    eprintln!("[diag] first wait: {:?}", status);
+
+    let err = child.wait().expect_err("second wait should fail");
+    eprintln!("[diag] second wait error: {err}");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::InvalidInput,
+        "expected InvalidInput, got: {:?}",
+        err.kind()
+    );
+    eprintln!("[diag] PASSED");
+}
+
 // ── Tokio timeout tests ────────────────────────────────────────────
 
 /// Platform-appropriate long-running command (sleep substitute).
