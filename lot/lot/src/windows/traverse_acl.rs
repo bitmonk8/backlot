@@ -15,27 +15,21 @@
 
 use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE, HANDLE,
-};
-use windows_sys::Win32::Security::Authorization::{
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SetEntriesInAclW, TRUSTEE_IS_SID,
-    TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, FALSE, HANDLE};
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, InitializeSecurityDescriptor,
-    SECURITY_DESCRIPTOR, SECURITY_DESCRIPTOR_CONTROL, SetSecurityDescriptorControl,
-    SetSecurityDescriptorDacl,
+    ACL, ACL_SIZE_INFORMATION, AclSizeInformation, AddAccessAllowedAceEx, AddAce,
+    DACL_SECURITY_INFORMATION, GetAclInformation, GetSecurityDescriptorControl, InitializeAcl,
+    InitializeSecurityDescriptor, SECURITY_DESCRIPTOR, SECURITY_DESCRIPTOR_CONTROL,
+    SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, OPEN_EXISTING,
 };
 
 use super::acl_helpers::{
-    ELEVATION_REQUIRED_MARKER, OwnedAcl, allocate_app_packages_sid, dacl_has_app_packages_ace,
-    read_dacl,
+    ELEVATION_REQUIRED_MARKER, allocate_app_packages_sid, dacl_has_app_packages_ace, read_dacl,
 };
-use super::{path_to_wide, win32_error_msg};
+use super::path_to_wide;
 use crate::error::SandboxError;
 
 // Raw FFI to ntdll!NtSetSecurityObject — the kernel API that sets an
@@ -107,6 +101,21 @@ const WRITE_DAC: u32 = 0x0004_0000;
 const READ_CONTROL: u32 = 0x0002_0000;
 /// SECURITY_DESCRIPTOR_REVISION — required by `InitializeSecurityDescriptor`.
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+/// ACL_REVISION — required by `InitializeAcl` and `AddAce`.
+const ACL_REVISION: u32 = 2;
+
+/// RAII guard for memory allocated with `std::alloc`. Cannot use `OwnedAcl`
+/// (which uses `LocalFree`) because we allocate with `alloc_zeroed`.
+struct AllocGuard {
+    ptr: *mut u8,
+    layout: std::alloc::Layout,
+}
+impl Drop for AllocGuard {
+    fn drop(&mut self) {
+        // SAFETY: ptr was allocated with std::alloc::alloc_zeroed with this layout.
+        unsafe { std::alloc::dealloc(self.ptr, self.layout) };
+    }
+}
 
 /// Grant `FILE_TRAVERSE | SYNCHRONIZE | FILE_READ_ATTRIBUTES` with
 /// `NO_INHERITANCE` for ALL APPLICATION PACKAGES on a single directory.
@@ -136,46 +145,129 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         return Ok(());
     }
 
-    // ACE not present — build merged DACL and apply via NtSetSecurityObject.
+    // ACE not present — build new DACL by copying existing ACEs byte-for-byte
+    // (preserving INHERITED_ACE flags) and appending the traverse ACE.
+    // SetEntriesInAclW strips inherited flags, so manual construction is needed.
     let Some(app_sid) = allocate_app_packages_sid() else {
         return Err(SandboxError::Setup(
             "failed to create ALL APPLICATION PACKAGES SID".into(),
         ));
     };
 
-    let trustee = TRUSTEE_W {
-        pMultipleTrustee: std::ptr::null_mut(),
-        MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-        TrusteeForm: TRUSTEE_IS_SID,
-        TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
-        ptstrName: app_sid.as_raw().cast(),
+    // Get existing ACL size info.
+    let mut acl_info = ACL_SIZE_INFORMATION {
+        AceCount: 0,
+        AclBytesInUse: 0,
+        AclBytesFree: 0,
     };
-
-    let ea = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: TRAVERSE_MASK,
-        grfAccessMode: GRANT_ACCESS,
-        grfInheritance: 0, // Ancestors only — no inheritance.
-        Trustee: trustee,
+    #[allow(clippy::cast_possible_truncation)]
+    let ret = unsafe {
+        GetAclInformation(
+            dacl_ptr,
+            (&raw mut acl_info).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
     };
-
-    // Merge the new ACE into the existing DACL.
-    let mut new_dacl: *mut ACL = std::ptr::null_mut();
-
-    // SAFETY: Merging one ACE into the existing DACL read above.
-    let err = unsafe { SetEntriesInAclW(1, &raw const ea, dacl_ptr, &raw mut new_dacl) };
-    if err != ERROR_SUCCESS {
+    if ret == FALSE {
         return Err(SandboxError::Setup(format!(
-            "failed to build DACL for {}: {}",
+            "GetAclInformation failed for {}",
             path.display(),
-            win32_error_msg(err),
         )));
     }
 
-    let Some(new_dacl_guard) = OwnedAcl::new(new_dacl) else {
+    // Calculate size for the new ACL: existing bytes + new ACE.
+    // ACCESS_ALLOWED_ACE struct size minus the SidStart DWORD, plus SID length.
+    let sid_len = unsafe { windows_sys::Win32::Security::GetLengthSid(app_sid.as_raw()) };
+    let extra_bytes = std::mem::size_of::<windows_sys::Win32::Security::ACCESS_ALLOWED_ACE>()
+        as u32
+        - std::mem::size_of::<u32>() as u32
+        + sid_len;
+    // Align to DWORD boundary.
+    let extra_bytes = (extra_bytes + 3) & !3;
+    let new_acl_size = acl_info.AclBytesInUse + extra_bytes;
+
+    // Allocate and initialize the new ACL.
+    let acl_layout = std::alloc::Layout::from_size_align(new_acl_size as usize, 4)
+        .map_err(|_| SandboxError::Setup(format!("invalid ACL layout for {}", path.display())))?;
+    // SAFETY: Layout is valid (size > 0, alignment is 4).
+    #[allow(clippy::cast_ptr_alignment)] // ACL alignment is 2, alloc alignment is 4.
+    let new_acl_ptr = unsafe { std::alloc::alloc_zeroed(acl_layout) }.cast::<ACL>();
+    if new_acl_ptr.is_null() {
         return Err(SandboxError::Setup(format!(
-            "SetEntriesInAclW returned null DACL for {}",
+            "ACL allocation failed for {}",
             path.display(),
         )));
+    }
+
+    // SAFETY: Initializing a freshly allocated, zeroed ACL buffer.
+    let ret = unsafe { InitializeAcl(new_acl_ptr, new_acl_size, ACL_REVISION) };
+    if ret == FALSE {
+        // SAFETY: Deallocating our allocation on error.
+        unsafe { std::alloc::dealloc(new_acl_ptr.cast(), acl_layout) };
+        return Err(SandboxError::Setup(format!(
+            "InitializeAcl failed for {}",
+            path.display(),
+        )));
+    }
+
+    // Copy all existing ACEs byte-for-byte, preserving INHERITED_ACE flags.
+    for i in 0..acl_info.AceCount {
+        let mut ace_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: Reading ACE at valid index from a valid DACL.
+        let ret = unsafe { windows_sys::Win32::Security::GetAce(dacl_ptr, i, &raw mut ace_ptr) };
+        if ret == FALSE {
+            unsafe { std::alloc::dealloc(new_acl_ptr.cast(), acl_layout) };
+            return Err(SandboxError::Setup(format!(
+                "GetAce failed for {} at index {i}",
+                path.display(),
+            )));
+        }
+        // SAFETY: ace_ptr points to a valid ACE. The ACE size is in its header.
+        let ace_header = unsafe { &*(ace_ptr.cast::<windows_sys::Win32::Security::ACE_HEADER>()) };
+        let ace_size = ace_header.AceSize;
+        // SAFETY: Adding the ACE (preserving all flags) to the new ACL.
+        let ret = unsafe {
+            AddAce(
+                new_acl_ptr,
+                ACL_REVISION,
+                u32::MAX, // Append at end.
+                ace_ptr,
+                u32::from(ace_size),
+            )
+        };
+        if ret == FALSE {
+            unsafe { std::alloc::dealloc(new_acl_ptr.cast(), acl_layout) };
+            return Err(SandboxError::Setup(format!(
+                "AddAce failed for {} at index {i}",
+                path.display(),
+            )));
+        }
+    }
+
+    // Append the new traverse ACE (explicit, no inheritance).
+    // SAFETY: Adding a well-formed ACE with a valid SID to a valid ACL.
+    let ret = unsafe {
+        AddAccessAllowedAceEx(
+            new_acl_ptr,
+            ACL_REVISION,
+            0,
+            TRAVERSE_MASK,
+            app_sid.as_raw(),
+        )
+    };
+    if ret == FALSE {
+        unsafe { std::alloc::dealloc(new_acl_ptr.cast(), acl_layout) };
+        return Err(SandboxError::Setup(format!(
+            "AddAccessAllowedAceEx failed for {}",
+            path.display(),
+        )));
+    }
+
+    // Wrap the ACL so it's freed if we return early after this point.
+    let _acl_guard = AllocGuard {
+        ptr: new_acl_ptr.cast(),
+        layout: acl_layout,
     };
 
     // Build a security descriptor containing the merged DACL.
@@ -199,12 +291,10 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         )));
     }
 
-    // SAFETY: Attaching the merged DACL to the security descriptor.
-    // The DACL memory (owned by new_dacl_guard) must outlive the
-    // NtSetSecurityObject call.
-    let ret = unsafe {
-        SetSecurityDescriptorDacl((&raw mut sd).cast(), 1, new_dacl_guard.as_raw(), FALSE)
-    };
+    // SAFETY: Attaching the manually-constructed DACL to the security
+    // descriptor. The DACL memory (owned by _acl_guard) must outlive
+    // the NtSetSecurityObject call.
+    let ret = unsafe { SetSecurityDescriptorDacl((&raw mut sd).cast(), 1, new_acl_ptr, FALSE) };
     if ret == FALSE {
         return Err(SandboxError::Setup(format!(
             "SetSecurityDescriptorDacl failed for {}",
