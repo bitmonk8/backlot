@@ -6,24 +6,28 @@
 //! ACEs on directory ancestors so AppContainer sandboxed processes can walk
 //! path components via `fs::metadata()`.
 //!
-//! Uses `SetFileSecurityW` instead of `SetNamedSecurityInfoW` /
-//! `SetSecurityInfo` to avoid O(subtree) inheritance propagation on
-//! directories with large subtrees (e.g. `C:\Users`). Both
-//! `SetNamedSecurityInfoW` and `SetSecurityInfo` re-evaluate
-//! auto-inheritance for the entire subtree; `SetFileSecurityW` writes
-//! only the target object's DACL.
+//! Uses `NtSetSecurityObject` (kernel API via ntdll) instead of
+//! `SetNamedSecurityInfoW` / `SetSecurityInfo` to avoid O(subtree)
+//! inheritance propagation on directories with large subtrees (e.g.
+//! `C:\Users`). The user-mode APIs re-evaluate auto-inheritance for
+//! the entire subtree; the kernel API writes only the target object's
+//! security descriptor without any propagation.
 
 use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE, HANDLE,
+};
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SetEntriesInAclW, TRUSTEE_IS_SID,
     TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, SE_DACL_AUTO_INHERITED,
-    SECURITY_DESCRIPTOR, SetFileSecurityW, SetSecurityDescriptorControl,
+    ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR,
     SetSecurityDescriptorDacl,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, OPEN_EXISTING,
 };
 
 use super::acl_helpers::{
@@ -32,6 +36,18 @@ use super::acl_helpers::{
 };
 use super::{path_to_wide, win32_error_msg};
 use crate::error::SandboxError;
+
+// Raw FFI to ntdll!NtSetSecurityObject — the kernel API that sets an
+// object's security descriptor without triggering user-mode inheritance
+// propagation. Stable since NT 3.1, present in all Windows versions.
+unsafe extern "system" {
+    #[link_name = "NtSetSecurityObject"]
+    fn nt_set_security_object(
+        handle: HANDLE,
+        security_information: u32,
+        security_descriptor: *mut std::ffi::c_void,
+    ) -> i32; // NTSTATUS
+}
 
 /// Minimum rights for `fs::metadata()` to succeed on a directory.
 const FILE_TRAVERSE: u32 = 0x0020;
@@ -84,17 +100,22 @@ pub fn has_traverse_ace(path: &Path) -> bool {
     dacl_has_app_packages_ace(dacl_ptr, TRAVERSE_MASK)
 }
 
+/// WRITE_DAC: permission to modify the object's DACL.
+const WRITE_DAC: u32 = 0x0004_0000;
+/// READ_CONTROL: permission to read the object's security descriptor.
+const READ_CONTROL: u32 = 0x0002_0000;
 /// SECURITY_DESCRIPTOR_REVISION — required by `InitializeSecurityDescriptor`.
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 
 /// Grant `FILE_TRAVERSE | SYNCHRONIZE | FILE_READ_ATTRIBUTES` with
 /// `NO_INHERITANCE` for ALL APPLICATION PACKAGES on a single directory.
 ///
-/// Uses `SetFileSecurityW` instead of `SetNamedSecurityInfoW` or
-/// `SetSecurityInfo`. Both high-level APIs re-evaluate auto-inheritance
-/// for the entire subtree, which takes minutes on directories like
-/// `C:\Users` with large subtrees. `SetFileSecurityW` writes only the
-/// target object's DACL with no subtree walk.
+/// Uses `NtSetSecurityObject` (kernel API) instead of the user-mode
+/// `SetNamedSecurityInfoW` / `SetSecurityInfo`. The user-mode APIs
+/// re-evaluate auto-inheritance for the entire subtree, which takes
+/// minutes on directories like `C:\Users` with large subtrees. The
+/// kernel API writes only the target object's security descriptor
+/// without any propagation, and preserves inherited ACE flags exactly.
 ///
 /// Reads the DACL once and checks for the ACE in the same read to avoid
 /// the TOCTOU race of separate check-then-modify calls. If the ACE already
@@ -114,7 +135,7 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         return Ok(());
     }
 
-    // ACE not present — build merged DACL and apply via SetFileSecurityW.
+    // ACE not present — build merged DACL and apply via NtSetSecurityObject.
     let Some(app_sid) = allocate_app_packages_sid() else {
         return Err(SandboxError::Setup(
             "failed to create ALL APPLICATION PACKAGES SID".into(),
@@ -156,9 +177,7 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         )));
     };
 
-    // Build a self-relative security descriptor containing the merged DACL.
-    // SetFileSecurityW does NOT trigger inheritance propagation, unlike
-    // SetNamedSecurityInfoW and SetSecurityInfo.
+    // Build a security descriptor containing the merged DACL.
     let mut sd = SECURITY_DESCRIPTOR {
         Revision: 0,
         Sbz1: 0,
@@ -181,7 +200,7 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
 
     // SAFETY: Attaching the merged DACL to the security descriptor.
     // The DACL memory (owned by new_dacl_guard) must outlive the
-    // SetFileSecurityW call.
+    // NtSetSecurityObject call.
     let ret = unsafe {
         SetSecurityDescriptorDacl((&raw mut sd).cast(), 1, new_dacl_guard.as_raw(), FALSE)
     };
@@ -192,46 +211,62 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         )));
     }
 
-    // Mark the DACL as auto-inherited so that SetNamedSecurityInfoW on
-    // child objects correctly re-derives inherited ACEs from this directory.
-    // Without this flag the DACL is treated as "legacy" and children may
-    // lose their inherited ACEs when their DACLs are re-evaluated.
-    // SAFETY: Setting a control bit on a valid, initialized security descriptor.
-    let ret = unsafe {
-        SetSecurityDescriptorControl(
-            (&raw mut sd).cast(),
-            SE_DACL_AUTO_INHERITED,
-            SE_DACL_AUTO_INHERITED,
-        )
-    };
-    if ret == FALSE {
-        return Err(SandboxError::Setup(format!(
-            "SetSecurityDescriptorControl failed for {}",
-            path.display(),
-        )));
-    }
-
-    // SAFETY: Applying the security descriptor to the directory.
-    // SetFileSecurityW writes only this object's DACL — no subtree walk.
-    let ret = unsafe {
-        SetFileSecurityW(
+    // Open directory handle with WRITE_DAC + READ_CONTROL.
+    // FILE_FLAG_BACKUP_SEMANTICS is required to open a directory handle.
+    // SAFETY: Opening an existing directory for DACL modification.
+    let handle: HANDLE = unsafe {
+        CreateFileW(
             wide.as_ptr(),
-            DACL_SECURITY_INFORMATION,
-            (&raw mut sd).cast(),
+            WRITE_DAC | READ_CONTROL,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
         )
     };
 
-    if ret == FALSE {
-        let err = std::io::Error::last_os_error();
+    if handle.is_null() || handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        let os_err = std::io::Error::last_os_error();
         #[allow(clippy::cast_possible_wrap)]
-        if err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+        if os_err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
             return Err(SandboxError::Setup(format!(
                 "cannot modify DACL for {}: {ELEVATION_REQUIRED_MARKER} (run as administrator)",
                 path.display(),
             )));
         }
         return Err(SandboxError::Setup(format!(
-            "failed to apply DACL for {}: {err}",
+            "failed to open {} for DACL modification: {os_err}",
+            path.display(),
+        )));
+    }
+
+    // SAFETY: NtSetSecurityObject is the kernel API that writes the
+    // security descriptor directly without user-mode inheritance
+    // propagation. Unlike SetNamedSecurityInfoW and SetSecurityInfo,
+    // it does not walk the subtree to re-evaluate inherited ACEs on
+    // descendants. Inherited ACE flags in the DACL are preserved exactly.
+    let ntstatus =
+        unsafe { nt_set_security_object(handle, DACL_SECURITY_INFORMATION, (&raw mut sd).cast()) };
+
+    // SAFETY: Closing a valid handle obtained from CreateFileW.
+    unsafe {
+        CloseHandle(handle);
+    }
+
+    if ntstatus < 0 {
+        // STATUS_ACCESS_DENIED = 0xC0000022
+        #[allow(clippy::cast_possible_wrap)]
+        if ntstatus == 0xC000_0022_u32 as i32 {
+            return Err(SandboxError::Setup(format!(
+                "cannot modify DACL for {}: {ELEVATION_REQUIRED_MARKER} (run as administrator)",
+                path.display(),
+            )));
+        }
+        return Err(SandboxError::Setup(format!(
+            "NtSetSecurityObject failed for {} (NTSTATUS: {ntstatus:#010X})",
             path.display(),
         )));
     }
