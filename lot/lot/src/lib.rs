@@ -404,19 +404,13 @@ mod tokio_tests {
     fn spawn_sleep(seconds: u32) -> (SandboxedChild, Vec<TempDir>) {
         #[cfg(unix)]
         {
-            // Grant both /usr and /bin so distros where /bin is not a
-            // symlink to /usr/bin can still locate the sleep binary.
-            let policy = SandboxPolicy::new(
-                vec![
-                    std::path::PathBuf::from("/usr"),
-                    std::path::PathBuf::from("/bin"),
-                ],
-                vec![],
-                vec![],
-                vec![],
-                false,
-                crate::policy::ResourceLimits::default(),
-            );
+            // Grant /usr and /bin via builder so distros where /bin is a
+            // symlink to /usr/bin get it deduplicated automatically.
+            let policy = SandboxPolicyBuilder::new()
+                .read_path("/usr")
+                .read_path("/bin")
+                .build()
+                .expect("build policy");
             let mut cmd = SandboxCommand::new("/bin/sleep");
             cmd.arg(seconds.to_string());
             cmd.stdout(SandboxStdio::Piped);
@@ -475,18 +469,12 @@ mod tokio_tests {
     async fn fast_child_completes_before_timeout() {
         #[cfg(unix)]
         {
-            // Grant both /usr and /bin for distro portability.
-            let policy = SandboxPolicy::new(
-                vec![
-                    std::path::PathBuf::from("/usr"),
-                    std::path::PathBuf::from("/bin"),
-                ],
-                vec![],
-                vec![],
-                vec![],
-                false,
-                crate::policy::ResourceLimits::default(),
-            );
+            // Grant /usr and /bin via builder for distro portability.
+            let policy = SandboxPolicyBuilder::new()
+                .read_path("/usr")
+                .read_path("/bin")
+                .build()
+                .expect("build policy");
             let mut cmd = SandboxCommand::new("/bin/echo");
             cmd.arg("hello");
             cmd.stdout(SandboxStdio::Piped);
