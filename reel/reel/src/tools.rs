@@ -67,6 +67,19 @@ impl ToolGrant {
         Ok(flags)
     }
 
+    /// Enforce invariants: WRITE implies TOOLS, NETWORK implies TOOLS.
+    ///
+    /// Call this on grants constructed directly via bitflags to ensure
+    /// they behave identically to grants produced by `from_names()`.
+    #[must_use]
+    pub const fn normalize(self) -> Self {
+        if self.contains(Self::WRITE) || self.contains(Self::NETWORK) {
+            self.union(Self::TOOLS)
+        } else {
+            self
+        }
+    }
+
     /// Return the canonical grant names for the active flags.
     ///
     /// The order is deterministic: `["tools", "write", "network"]`.
@@ -98,6 +111,7 @@ pub struct ToolDefinition {
 /// All file tools execute as nu custom commands (`reel read`, etc.).
 /// `NuShell` provides direct nu command execution.
 pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
+    let grant = grant.normalize();
     let mut tools = Vec::new();
 
     // Read-only tools: available when TOOLS is granted
@@ -151,8 +165,8 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
         });
     }
 
-    // Write tools: WRITE implies TOOLS, but guard both for correctness
-    if grant.contains(ToolGrant::WRITE | ToolGrant::TOOLS) {
+    // Write tools: available when WRITE is granted (normalize ensures TOOLS is set)
+    if grant.contains(ToolGrant::WRITE) {
         tools.push(ToolDefinition {
             name: "Write".into(),
             description: "Write content to a file, creating parent directories if necessary. Overwrites existing files.".into(),
@@ -1361,8 +1375,15 @@ mod tests {
     }
 
     #[test]
-    fn write_only_no_tools() {
-        assert!(tool_definitions(ToolGrant::WRITE).is_empty());
+    fn bare_write_produces_tool_definitions() {
+        // After normalization, bare WRITE implies TOOLS, so tool definitions
+        // include Write/Edit tools plus the read-only tools.
+        let tools = tool_definitions(ToolGrant::WRITE);
+        assert!(!tools.is_empty());
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"Write"));
+        assert!(names.contains(&"Edit"));
+        assert!(names.contains(&"Read"));
     }
 
     // -- ToolGrant::from_names tests (issue #36) --
@@ -1480,6 +1501,48 @@ mod tests {
     fn grant_parse_error_is_std_error() {
         let err = GrantParseError { name: "foo".into() };
         let _: &dyn std::error::Error = &err;
+    }
+
+    // -- ToolGrant::normalize tests (issue #52) --
+
+    #[test]
+    fn normalize_write_implies_tools() {
+        assert_eq!(
+            ToolGrant::WRITE.normalize(),
+            ToolGrant::WRITE | ToolGrant::TOOLS
+        );
+    }
+
+    #[test]
+    fn normalize_network_implies_tools() {
+        assert_eq!(
+            ToolGrant::NETWORK.normalize(),
+            ToolGrant::NETWORK | ToolGrant::TOOLS
+        );
+    }
+
+    #[test]
+    fn normalize_empty_stays_empty() {
+        assert_eq!(ToolGrant::empty().normalize(), ToolGrant::empty());
+    }
+
+    #[test]
+    fn normalize_idempotent() {
+        let grant = ToolGrant::WRITE | ToolGrant::NETWORK | ToolGrant::TOOLS;
+        assert_eq!(grant.normalize(), grant);
+    }
+
+    // -- ToolGrant::to_names guard (issue #69) --
+
+    #[test]
+    fn to_names_covers_all_flags() {
+        // If a new ToolGrant flag is added but to_names() is not updated,
+        // this test will fail.
+        assert_eq!(
+            ToolGrant::all().to_names().len(),
+            ToolGrant::all().bits().count_ones() as usize,
+            "to_names() must cover all ToolGrant flags"
+        );
     }
 
     #[tokio::test]

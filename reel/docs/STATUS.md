@@ -32,7 +32,10 @@
 - **Agent test gap coverage** — Boundary test for exactly `MAX_TOOL_CALLS` (200) succeeding (issue #53). Timeout during `client.resume()` in tool loop (issue #6). `RunResult` usage/response_hash propagation in both structured and tool-loop modes (issue #13).
 - **NuSession minor refinements** — Extracted `SessionState::register_inflight` helper to deduplicate 3x inflight registration in `ensure_and_take` (issue #55). Added `bounded_reap_returns_true_on_normal_exit` test for `Ok(Some(ExitStatus))` path (issue #58). Added comments documenting untestable retry branch (issue #56), concurrent evaluate limitation (issue #57), and singleton inflight handle limitation (issue #60).
 - **Network test helper improvements** — Narrowed `looks_like_sandbox_denial` keywords from generic single words to sandbox-specific multi-word phrases to reduce false positives (issue #65). Added unit tests for `looks_like_sandbox_denial` covering known denial messages and known non-denial messages (issue #66). Renamed `http_responding_listener` to `spawn_http_responder` (issue #67).
-- **Test counts** — 222 tests total (207 reel + 15 reel-cli), all pass locally.
+- **ToolGrant normalization** — `ToolGrant::normalize()` enforces WRITE-implies-TOOLS and NETWORK-implies-TOOLS at the type level. Called at `tool_definitions()` entry point so bare `ToolGrant::WRITE` produces correct tool definitions. `to_names()` coverage guard test catches future flag additions (issues #52, #69).
+- **Agent test consolidation** — `SlowProvider` and `FastThenSlowProvider` consolidated into `DelayProvider` with configurable `fast_calls` count (issue #71). `text_response()` and `tool_call_response()` helpers eliminate repeated `ModelResponse` boilerplate (issue #72). Boundary test for exactly 201 (MAX_TOOL_CALLS + 1) tool calls verifies `>` vs `>=` semantics (issue #73). Duplicate custom tool name HashMap semantics documented with test (issue #48).
+- **Test infrastructure cleanup** — `resolve_rg_binary_with_compile_time_tool_dir` converted from silent skip to unconditional assertions (issue #70). Regression assertions for removed sandbox denial keywords added (issue #74). CLI dry-run test exercises `build_dry_run_output` helper extracted from `cmd_run` (issue #68).
+- **Test counts** — 228 tests total (213 reel + 15 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
 ## What Is NOT Implemented
@@ -77,4 +80,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 ## Work Candidates
 
 ### Remaining (unscheduled)
-NuSession stderr capture (#23), public API surface (#31, #8), grant model (#52), tool timeout (#26), glob robustness (#28), duplicate tool dispatch (#48), CLI test gaps (#68, #69), test skip conventions (#70), test provider consolidation (#71), agent test improvements (#72, #73).
+NuSession stderr capture (#23), public API surface (#31, #8), tool timeout (#26), glob robustness (#28).

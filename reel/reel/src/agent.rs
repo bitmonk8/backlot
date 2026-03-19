@@ -610,6 +610,26 @@ mod tests {
         }
     }
 
+    fn text_response(text: &str) -> flick::provider::ModelResponse {
+        flick::provider::ModelResponse {
+            text: Some(text.into()),
+            thinking: Vec::new(),
+            tool_calls: Vec::new(),
+            usage: flick::provider::UsageResponse::default(),
+        }
+    }
+
+    fn tool_call_response(
+        calls: Vec<flick::provider::ToolCallResponse>,
+    ) -> flick::provider::ModelResponse {
+        flick::provider::ModelResponse {
+            text: None,
+            thinking: Vec::new(),
+            tool_calls: calls,
+            usage: flick::provider::UsageResponse::default(),
+        }
+    }
+
     /// Client factory that wraps any `Fn() -> Box<dyn DynProvider>` factory.
     struct FnClientFactory<F: Fn() -> Box<dyn flick::DynProvider> + Send + Sync>(F);
 
@@ -700,22 +720,12 @@ mod tests {
     fn tool_then_complete_factory() -> Box<dyn ClientFactory> {
         mock_client_factory(|| {
             MultiShotProvider::new(vec![
-                flick::provider::ModelResponse {
-                    text: None,
-                    thinking: Vec::new(),
-                    tool_calls: vec![flick::provider::ToolCallResponse {
-                        call_id: "tc_1".into(),
-                        tool_name: "Read".into(),
-                        arguments: r#"{"file_path":"/tmp/test"}"#.into(),
-                    }],
-                    usage: flick::provider::UsageResponse::default(),
-                },
-                flick::provider::ModelResponse {
-                    text: Some(r#"{"done":true}"#.into()),
-                    thinking: Vec::new(),
-                    tool_calls: Vec::new(),
-                    usage: flick::provider::UsageResponse::default(),
-                },
+                tool_call_response(vec![flick::provider::ToolCallResponse {
+                    call_id: "tc_1".into(),
+                    tool_name: "Read".into(),
+                    arguments: r#"{"file_path":"/tmp/test"}"#.into(),
+                }]),
+                text_response(r#"{"done":true}"#),
             ])
         })
     }
@@ -817,9 +827,15 @@ mod tests {
     // Timeout path
     // -----------------------------------------------------------------------
 
-    struct SlowProvider;
+    /// Provider where the first `fast_calls` invocations return a tool call
+    /// immediately, then all subsequent calls sleep for 60 s (triggering timeout).
+    /// Use `fast_calls: 0` for always-slow behavior.
+    struct DelayProvider {
+        call_count: AtomicU32,
+        fast_calls: u32,
+    }
 
-    impl flick::DynProvider for SlowProvider {
+    impl flick::DynProvider for DelayProvider {
         fn call_boxed<'a>(
             &'a self,
             _params: flick::provider::RequestParams<'a>,
@@ -834,15 +850,23 @@ mod tests {
                     + 'a,
             >,
         > {
-            Box::pin(async {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                Ok(flick::provider::ModelResponse {
-                    text: Some("never reached".into()),
-                    thinking: Vec::new(),
-                    tool_calls: Vec::new(),
-                    usage: flick::provider::UsageResponse::default(),
+            let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+            if call < self.fast_calls {
+                Box::pin(async {
+                    Ok(tool_call_response(vec![
+                        flick::provider::ToolCallResponse {
+                            call_id: "tc_1".into(),
+                            tool_name: "Read".into(),
+                            arguments: r#"{"file_path":"/tmp/x"}"#.into(),
+                        },
+                    ]))
                 })
-            })
+            } else {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Ok(text_response("never reached"))
+                })
+            }
         }
 
         fn build_request(
@@ -858,7 +882,12 @@ mod tests {
         let agent = Agent::with_injected(
             PathBuf::from("/tmp"),
             Duration::from_millis(10),
-            mock_client_factory(|| Box::new(SlowProvider) as Box<dyn flick::DynProvider>),
+            mock_client_factory(|| {
+                Box::new(DelayProvider {
+                    call_count: AtomicU32::new(0),
+                    fast_calls: 0,
+                }) as Box<dyn flick::DynProvider>
+            }),
             Box::new(DefaultToolExecutor),
         );
         let request = test_request();
@@ -937,22 +966,12 @@ mod tests {
 
         let factory = mock_client_factory(|| {
             MultiShotProvider::new(vec![
-                flick::provider::ModelResponse {
-                    text: None,
-                    thinking: Vec::new(),
-                    tool_calls: vec![flick::provider::ToolCallResponse {
-                        call_id: "tc_custom".into(),
-                        tool_name: "MyCustomTool".into(),
-                        arguments: "{}".into(),
-                    }],
-                    usage: flick::provider::UsageResponse::default(),
-                },
-                flick::provider::ModelResponse {
-                    text: Some(r#"{"result":"ok"}"#.into()),
-                    thinking: Vec::new(),
-                    tool_calls: Vec::new(),
-                    usage: flick::provider::UsageResponse::default(),
-                },
+                tool_call_response(vec![flick::provider::ToolCallResponse {
+                    call_id: "tc_custom".into(),
+                    tool_name: "MyCustomTool".into(),
+                    arguments: "{}".into(),
+                }]),
+                text_response(r#"{"result":"ok"}"#),
             ])
         });
 
@@ -1086,35 +1105,25 @@ mod tests {
             mock_client_factory(|| {
                 MultiShotProvider::new(vec![
                     // First response: 3 tool calls in a single round.
-                    flick::provider::ModelResponse {
-                        text: None,
-                        thinking: Vec::new(),
-                        tool_calls: vec![
-                            flick::provider::ToolCallResponse {
-                                call_id: "tc_a".into(),
-                                tool_name: "Read".into(),
-                                arguments: r#"{"file_path":"/tmp/a"}"#.into(),
-                            },
-                            flick::provider::ToolCallResponse {
-                                call_id: "tc_b".into(),
-                                tool_name: "Read".into(),
-                                arguments: r#"{"file_path":"/tmp/b"}"#.into(),
-                            },
-                            flick::provider::ToolCallResponse {
-                                call_id: "tc_c".into(),
-                                tool_name: "Read".into(),
-                                arguments: r#"{"file_path":"/tmp/c"}"#.into(),
-                            },
-                        ],
-                        usage: flick::provider::UsageResponse::default(),
-                    },
+                    tool_call_response(vec![
+                        flick::provider::ToolCallResponse {
+                            call_id: "tc_a".into(),
+                            tool_name: "Read".into(),
+                            arguments: r#"{"file_path":"/tmp/a"}"#.into(),
+                        },
+                        flick::provider::ToolCallResponse {
+                            call_id: "tc_b".into(),
+                            tool_name: "Read".into(),
+                            arguments: r#"{"file_path":"/tmp/b"}"#.into(),
+                        },
+                        flick::provider::ToolCallResponse {
+                            call_id: "tc_c".into(),
+                            tool_name: "Read".into(),
+                            arguments: r#"{"file_path":"/tmp/c"}"#.into(),
+                        },
+                    ]),
                     // Second response: completion.
-                    flick::provider::ModelResponse {
-                        text: Some(r#"{"done":true}"#.into()),
-                        thinking: Vec::new(),
-                        tool_calls: Vec::new(),
-                        usage: flick::provider::UsageResponse::default(),
-                    },
+                    text_response(r#"{"done":true}"#),
                 ])
             }),
             Box::new(CountingToolExecutor {
@@ -1142,22 +1151,12 @@ mod tests {
 
         let factory = mock_client_factory(|| {
             MultiShotProvider::new(vec![
-                flick::provider::ModelResponse {
-                    text: None,
-                    thinking: Vec::new(),
-                    tool_calls: vec![flick::provider::ToolCallResponse {
-                        call_id: "tc_custom".into(),
-                        tool_name: "MyTool".into(),
-                        arguments: "{}".into(),
-                    }],
-                    usage: flick::provider::UsageResponse::default(),
-                },
-                flick::provider::ModelResponse {
-                    text: Some(r#"{"ok":true}"#.into()),
-                    thinking: Vec::new(),
-                    tool_calls: Vec::new(),
-                    usage: flick::provider::UsageResponse::default(),
-                },
+                tool_call_response(vec![flick::provider::ToolCallResponse {
+                    call_id: "tc_custom".into(),
+                    tool_name: "MyTool".into(),
+                    arguments: "{}".into(),
+                }]),
+                text_response(r#"{"ok":true}"#),
             ])
         });
 
@@ -1271,66 +1270,42 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Timeout during resume (tool loop) phase (#6)
+    // Exactly MAX_TOOL_CALLS + 1 boundary (#73)
     // -----------------------------------------------------------------------
 
-    /// Provider where first call returns tool calls quickly, but the
-    /// second call (resume) sleeps forever so the timeout fires.
-    struct FastThenSlowProvider {
-        call_count: AtomicU32,
+    #[tokio::test]
+    async fn run_with_tools_exactly_max_tool_calls_plus_one_fails() {
+        // 201 = MAX_TOOL_CALLS + 1. Verifies the check is `>` not `>=`.
+        // 67 calls/round: round 1 = 67, round 2 = 134, round 3 = 201 > 200 -> bail.
+        let tool_calls_counter = Arc::new(AtomicU32::new(0));
+        let agent = Agent::with_injected(
+            PathBuf::from("/tmp"),
+            Duration::from_secs(60),
+            mock_client_factory(|| {
+                Box::new(RepeatingToolCallProvider {
+                    calls_per_round: 67,
+                }) as Box<dyn flick::DynProvider>
+            }),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::clone(&tool_calls_counter),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::TOOLS;
+        let result: anyhow::Result<RunResult<serde_json::Value>> =
+            agent.run(&request, "test").await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("tool calls"),
+            "expected 'tool calls' in error, got: {err}"
+        );
+        // Only 2 rounds executed (134 calls) before the 3rd round's 67 tripped the cap.
+        assert_eq!(tool_calls_counter.load(Ordering::Relaxed), 134);
     }
 
-    impl flick::DynProvider for FastThenSlowProvider {
-        fn call_boxed<'a>(
-            &'a self,
-            _params: flick::provider::RequestParams<'a>,
-        ) -> Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<
-                            flick::provider::ModelResponse,
-                            flick::error::ProviderError,
-                        >,
-                    > + Send
-                    + 'a,
-            >,
-        > {
-            let call = self.call_count.fetch_add(1, Ordering::Relaxed);
-            if call == 0 {
-                // First call: return a tool call immediately.
-                Box::pin(async {
-                    Ok(flick::provider::ModelResponse {
-                        text: None,
-                        thinking: Vec::new(),
-                        tool_calls: vec![flick::provider::ToolCallResponse {
-                            call_id: "tc_1".into(),
-                            tool_name: "Read".into(),
-                            arguments: r#"{"file_path":"/tmp/x"}"#.into(),
-                        }],
-                        usage: flick::provider::UsageResponse::default(),
-                    })
-                })
-            } else {
-                // Resume call: sleep forever so timeout fires.
-                Box::pin(async {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    Ok(flick::provider::ModelResponse {
-                        text: Some("never reached".into()),
-                        thinking: Vec::new(),
-                        tool_calls: Vec::new(),
-                        usage: flick::provider::UsageResponse::default(),
-                    })
-                })
-            }
-        }
-
-        fn build_request(
-            &self,
-            _params: flick::provider::RequestParams<'_>,
-        ) -> Result<serde_json::Value, flick::error::ProviderError> {
-            Ok(serde_json::json!({"model": "test"}))
-        }
-    }
+    // -----------------------------------------------------------------------
+    // Timeout during resume (tool loop) phase (#6)
+    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn run_with_tools_times_out_during_resume() {
@@ -1339,8 +1314,9 @@ mod tests {
             PathBuf::from("/tmp"),
             Duration::from_millis(500),
             mock_client_factory(|| {
-                Box::new(FastThenSlowProvider {
+                Box::new(DelayProvider {
                     call_count: AtomicU32::new(0),
+                    fast_calls: 1,
                 }) as Box<dyn flick::DynProvider>
             }),
             Box::new(CountingToolExecutor {
@@ -1466,5 +1442,26 @@ mod tests {
 
         // response_hash (always None from runner).
         assert!(r.response_hash.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Duplicate custom tool name HashMap semantics (#48)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn duplicate_custom_tool_names_uses_last_match() {
+        // HashMap::collect keeps the last entry for duplicate keys.
+        // This documents the current (academic) behavior -- duplicate
+        // custom tool names are already rejected by build_request_config.
+        let handlers: Vec<Box<dyn ToolHandler>> = vec![
+            Box::new(MockToolHandler::new("Dup", "first")),
+            Box::new(MockToolHandler::new("Dup", "second")),
+        ];
+        let index: HashMap<String, usize> = handlers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h.definition().name, i))
+            .collect();
+        assert_eq!(index["Dup"], 1, "HashMap should keep last entry");
     }
 }

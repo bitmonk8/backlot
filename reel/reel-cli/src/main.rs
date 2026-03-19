@@ -142,6 +142,25 @@ fn validate_timeout(timeout: u64) -> Result<(), String> {
     Ok(())
 }
 
+fn build_dry_run_output(
+    effective: &reel::RequestConfig,
+    grant: reel::ToolGrant,
+) -> serde_json::Value {
+    serde_json::json!({
+        "model": effective.model(),
+        "system_prompt": effective.system_prompt(),
+        "temperature": effective.temperature(),
+        "grant": grant.to_names(),
+        "tools": effective.tools().iter().map(|t| {
+            serde_json::json!({
+                "name": t.name(),
+                "description": t.description(),
+                "parameters": t.parameters()
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
 async fn cmd_run(args: RunArgs) -> Result<(), String> {
     validate_timeout(args.timeout)?;
 
@@ -161,19 +180,7 @@ async fn cmd_run(args: RunArgs) -> Result<(), String> {
     // Dry run: build the request config and print it without calling the model.
     if args.dry_run {
         let effective = reel::Agent::build_request_config(&request).map_err(|e| format!("{e}"))?;
-        let dry_output = serde_json::json!({
-            "model": effective.model(),
-            "system_prompt": effective.system_prompt(),
-            "temperature": effective.temperature(),
-            "grant": grant.to_names(),
-            "tools": effective.tools().iter().map(|t| {
-                serde_json::json!({
-                    "name": t.name(),
-                    "description": t.description(),
-                    "parameters": t.parameters()
-                })
-            }).collect::<Vec<_>>(),
-        });
+        let dry_output = build_dry_run_output(&effective, grant);
         let json = serde_json::to_string(&dry_output).map_err(|e| format!("serialize: {e}"))?;
         println!("{json}");
         return Ok(());
@@ -544,15 +551,28 @@ grant: []
     #[test]
     fn dry_run_output_includes_grant() {
         let grant = reel::ToolGrant::TOOLS | reel::ToolGrant::WRITE;
-        let dry_output = serde_json::json!({
-            "model": "test-model",
-            "grant": grant.to_names(),
-            "tools": [],
-        });
+        let request = reel::AgentRequestConfig {
+            config: reel::RequestConfig::builder()
+                .model("test-model")
+                .build()
+                .unwrap(),
+            grant,
+            custom_tools: Vec::new(),
+        };
+        let effective = reel::Agent::build_request_config(&request).unwrap();
+        let dry_output = build_dry_run_output(&effective, grant);
         let json = serde_json::to_string(&dry_output).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["grant"], serde_json::json!(["tools", "write"]));
         // Verify compact format (no newlines).
         assert!(!json.contains('\n'), "expected compact JSON, got: {json}");
+        // Verify tools are included (from build_request_config with TOOLS grant).
+        let tools = parsed["tools"].as_array().unwrap();
+        assert!(
+            !tools.is_empty(),
+            "expected tool definitions in dry-run output"
+        );
+        // Verify model propagated.
+        assert_eq!(parsed["model"], "test-model");
     }
 }

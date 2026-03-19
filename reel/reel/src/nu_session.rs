@@ -1076,24 +1076,15 @@ mod tests {
 
     #[test]
     fn resolve_rg_binary_with_compile_time_tool_dir() {
-        // When NU_CACHE_DIR is set at compile time, resolve_rg_binary
-        // should find rg there because build.rs downloads it.
-        let tool_dir = option_env!("NU_CACHE_DIR");
-        match tool_dir {
-            Some(dir) => {
-                let result = resolve_rg_binary(Some(Path::new(dir)));
-                assert!(
-                    result.is_some(),
-                    "rg should exist in NU_CACHE_DIR when set: {dir}"
-                );
-                let p = result.unwrap();
-                assert!(p.is_absolute());
-                assert!(p.exists());
-            }
-            None => {
-                eprintln!("SKIP: NU_CACHE_DIR not set at compile time");
-            }
-        }
+        let dir = option_env!("NU_CACHE_DIR").expect("NU_CACHE_DIR must be set");
+        let result = resolve_rg_binary(Some(Path::new(dir)));
+        assert!(
+            result.is_some(),
+            "rg should exist in NU_CACHE_DIR when set: {dir}"
+        );
+        let p = result.unwrap();
+        assert!(p.is_absolute());
+        assert!(p.exists());
     }
 
     // -----------------------------------------------------------------------
@@ -2635,6 +2626,11 @@ mod tests {
         // Empty and trivial strings.
         assert!(!looks_like_sandbox_denial(""));
         assert!(!looks_like_sandbox_denial("ok"));
+        // Bare words removed in issue #65 — must stay rejected.
+        assert!(!looks_like_sandbox_denial("denied"));
+        assert!(!looks_like_sandbox_denial("permission"));
+        assert!(!looks_like_sandbox_denial("blocked"));
+        assert!(!looks_like_sandbox_denial("forbidden"));
     }
 
     // -----------------------------------------------------------------------

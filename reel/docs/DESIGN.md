@@ -224,9 +224,15 @@ bitflags! {
 `"write"` and `"network"` imply `TOOLS` — callers need not specify `"tools"`
 explicitly. Returns `GrantParseError` on unknown names.
 
+`ToolGrant::normalize()` enforces the same invariants for grants constructed
+directly via bitflags: if WRITE or NETWORK is set, TOOLS is added. Called
+internally by `tool_definitions()` so bare `ToolGrant::WRITE` produces correct
+results.
+
 ### Tool Definitions
 
-`tool_definitions(grant)` returns a `Vec<ToolDefinition>` based on grant flags:
+`tool_definitions(grant)` returns a `Vec<ToolDefinition>` based on grant flags
+(normalizing the grant first):
 
 - **TOOLS** — Read, Glob, Grep, NuShell
 - **WRITE** (implies TOOLS) — adds Write, Edit
