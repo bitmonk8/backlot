@@ -27,6 +27,7 @@
 - `env_check.rs` module: extracted env/path validation from `lib.rs` with pre-canonicalization, fixed partial canonicalization fallback, delegated `kill_by_pid` to platform modules
 - Windows ACL infrastructure: RAII wrappers, shared DACL primitives, unified ACE checks, TOCTOU fix, prerequisites API extraction
 - Unix SandboxedChild lifecycle deduplication: extracted `UnixSandboxedChild` struct and `child_bail` function to `unix.rs`, `KillStyle` enum parameterizes kill behavior, `try_wait` compare_exchange moved before `waitpid`, `Drop` sets `waited=true` after reaping, double-wait prevention test added
+- Windows AppContainer spawn fixes: bundled pipe handles into `StdioPipes` struct, fixed `_for_policy` prerequisite functions to include deny paths, added `policy.all_paths()`, TEST_LOCK poisoning recovery, deny ACE test, `PrerequisitesNotMet` positive assertion test, conditional NUL device check skip
 
 ## Next Work
 
