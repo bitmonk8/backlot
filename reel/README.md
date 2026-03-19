@@ -257,7 +257,7 @@ On Windows, `reel setup` must be run once (as administrator) before sandboxed ex
 cargo test
 ```
 
-231 tests (216 reel + 15 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
+247 tests (232 reel + 15 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
 
 ## Dependencies
 

@@ -494,21 +494,21 @@ fn with_timeout(mut params: JsonValue) -> JsonValue {
             "timeout".to_string(),
             serde_json::json!({
                 "type": "integer",
-                "description": "Timeout in seconds. Default: 120, max: 600."
+                "description": "Timeout in seconds. Default: 120, min: 1, max: 600."
             }),
         );
     }
     params
 }
 
-/// Extract timeout from tool input, defaulting to `DEFAULT_NU_TIMEOUT_SECS` when absent and
-/// capped at `MAX_NU_TIMEOUT_SECS`.
+/// Extract timeout from tool input, defaulting to `DEFAULT_NU_TIMEOUT_SECS` when absent,
+/// clamped to `[1, MAX_NU_TIMEOUT_SECS]`.
 fn parse_timeout(input: &JsonValue) -> u64 {
     input
         .get("timeout")
         .and_then(JsonValue::as_u64)
         .unwrap_or(DEFAULT_NU_TIMEOUT_SECS)
-        .min(MAX_NU_TIMEOUT_SECS)
+        .clamp(1, MAX_NU_TIMEOUT_SECS)
 }
 
 /// Execute a tool call, checking grants and dispatching to the implementation.
@@ -1617,7 +1617,7 @@ mod tests {
     #[test]
     fn test_parse_timeout_zero() {
         let input = serde_json::json!({"timeout": 0});
-        assert_eq!(parse_timeout(&input), 0);
+        assert_eq!(parse_timeout(&input), 1);
     }
 
     #[test]
@@ -1636,6 +1636,24 @@ mod tests {
     fn test_parse_timeout_one_over_max() {
         let input = serde_json::json!({"timeout": MAX_NU_TIMEOUT_SECS + 1});
         assert_eq!(parse_timeout(&input), MAX_NU_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_parse_timeout_negative_falls_back() {
+        let input = serde_json::json!({"timeout": -5});
+        assert_eq!(parse_timeout(&input), DEFAULT_NU_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_parse_timeout_exact_min() {
+        let input = serde_json::json!({"timeout": 1});
+        assert_eq!(parse_timeout(&input), 1);
+    }
+
+    #[test]
+    fn test_parse_timeout_float_falls_back() {
+        let input = serde_json::json!({"timeout": 3.5});
+        assert_eq!(parse_timeout(&input), DEFAULT_NU_TIMEOUT_SECS);
     }
 
     // -- with_timeout tests --
@@ -1679,6 +1697,30 @@ mod tests {
     }
 
     #[test]
+    fn test_with_timeout_description_field() {
+        let params = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "foo": { "type": "string" }
+            }
+        });
+        let result = with_timeout(params);
+        let desc = result["properties"]["timeout"]["description"]
+            .as_str()
+            .expect("timeout should have a description");
+        assert!(desc.contains("120"), "description should mention default");
+        assert!(desc.contains("600"), "description should mention max");
+    }
+
+    #[test]
+    fn test_with_timeout_non_object_properties() {
+        // "properties" is a string, not an object — returns unchanged
+        let params = serde_json::json!({"type": "object", "properties": "not_an_object"});
+        let result = with_timeout(params.clone());
+        assert_eq!(result, params);
+    }
+
+    #[test]
     fn test_all_tool_definitions_have_timeout() {
         let grant = ToolGrant::WRITE | ToolGrant::TOOLS | ToolGrant::NETWORK;
         for tool in tool_definitions(grant) {
@@ -1690,6 +1732,20 @@ mod tests {
             assert!(
                 props.contains_key("timeout"),
                 "{} tool definition missing timeout property",
+                tool.name,
+            );
+            let timeout = &props["timeout"];
+            assert_eq!(
+                timeout["type"], "integer",
+                "{} timeout should be integer type",
+                tool.name,
+            );
+            assert!(
+                timeout
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .is_some(),
+                "{} timeout should have a description string",
                 tool.name,
             );
         }
