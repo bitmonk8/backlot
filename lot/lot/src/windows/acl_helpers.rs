@@ -265,8 +265,10 @@ pub(super) fn merge_and_set_dacl(
         )));
     }
 
-    // unwrap safe: null case handled above.
-    let new_dacl_guard = OwnedAcl::new(new_dacl).unwrap();
+    // SAFETY: null case handled above — OwnedAcl::new cannot return None.
+    let Some(new_dacl_guard) = OwnedAcl::new(new_dacl) else {
+        unreachable!("null DACL already checked above");
+    };
     let dacl_ptr = new_dacl_guard.as_raw();
 
     // SAFETY: Applying the new DACL to the object.
