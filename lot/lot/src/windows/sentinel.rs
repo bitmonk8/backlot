@@ -178,8 +178,8 @@ pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     let wide_path = path_to_wide(path);
 
     // SAFETY: Setting DACL on a named object. Owner/group/SACL unchanged (null).
-    // Use DACL_SECURITY_INFORMATION alone to replace the DACL entirely,
-    // preventing re-inheritance of ACEs from the parent.
+    // SetNamedSecurityInfoW re-evaluates inheritance from the parent, which
+    // re-derives inherited ACEs to match the parent's current inheritable ACEs.
     let err = unsafe {
         SetNamedSecurityInfoW(
             wide_path.as_ptr().cast_mut(),

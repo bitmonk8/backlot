@@ -1008,6 +1008,28 @@ mod tests {
         )
     }
 
+    /// Extract only explicit (non-inherited) ACEs from an SDDL string.
+    /// Inherited ACEs have the `ID` flag and may change when ancestor
+    /// DACLs are modified without inheritance propagation.
+    fn explicit_aces(sddl: &str) -> String {
+        let normalized = normalize_sddl(sddl);
+        let mut result = String::from("D:");
+        // Each ACE is a parenthesized group.
+        for ace in normalized.split('(').skip(1) {
+            if let Some(ace_content) = ace.strip_suffix(')') {
+                // ACE format: (type;flags;rights;...;trustee)
+                // The `ID` flag in the flags field indicates inherited.
+                let parts: Vec<&str> = ace_content.split(';').collect();
+                if parts.len() >= 2 && !parts[1].contains("ID") {
+                    result.push('(');
+                    result.push_str(ace_content);
+                    result.push(')');
+                }
+            }
+        }
+        result
+    }
+
     fn write_test_file(dir: &Path, name: &str, content: &str) -> PathBuf {
         let p = dir.join(name);
         fs::write(&p, content).expect("write test file");
@@ -1136,10 +1158,14 @@ mod tests {
         }
 
         let restored_sddl = get_sddl(tmp.path()).expect("get restored SDDL");
+        // Compare only explicit ACEs. Inherited ACEs may differ when ancestor
+        // DACLs are modified by grant_traverse (which uses NtSetSecurityObject
+        // without inheritance propagation). The security guarantee is that
+        // explicit ACEs — including any AppContainer grants — are fully restored.
         assert_eq!(
-            normalize_sddl(&original_sddl),
-            normalize_sddl(&restored_sddl),
-            "DACL ACEs should be restored after child exits"
+            explicit_aces(&original_sddl),
+            explicit_aces(&restored_sddl),
+            "explicit DACL ACEs should be restored after child exits"
         );
     }
 
