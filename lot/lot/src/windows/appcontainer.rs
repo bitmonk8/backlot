@@ -472,12 +472,9 @@ fn spawn_inner(
 ) -> Result<crate::SandboxedChild> {
     // Collect all paths that need ACL modification (grants + denies).
     let all_paths: Vec<PathBuf> = policy
-        .read_paths()
-        .iter()
-        .chain(policy.write_paths().iter())
-        .chain(policy.exec_paths().iter())
-        .chain(policy.deny_paths().iter())
-        .cloned()
+        .all_paths()
+        .into_iter()
+        .map(Path::to_path_buf)
         .collect();
 
     // Grant traverse ACEs on ancestors of policy paths so the sandboxed
@@ -499,7 +496,8 @@ fn spawn_inner(
             }
         }
     }
-    let nul_missing = !super::nul_device::nul_device_accessible();
+    // Skip the syscall when we already know prerequisites are missing.
+    let nul_missing = prereq_failed.is_empty() && !super::nul_device::nul_device_accessible();
     if !prereq_failed.is_empty() || nul_missing {
         return Err(SandboxError::PrerequisitesNotMet {
             missing_paths: prereq_failed,
@@ -615,36 +613,30 @@ fn spawn_with_sentinel(
         }
     };
 
+    let pipes = StdioPipes {
+        child_stdin,
+        parent_stdin,
+        child_stdout,
+        parent_stdout,
+        child_stderr,
+        parent_stderr,
+    };
+
     // Collect child-side handles for the explicit handle inheritance list.
     let mut child_handles: Vec<HANDLE> = Vec::new();
-    if child_stdin != INVALID_HANDLE_VALUE && !child_stdin.is_null() {
-        child_handles.push(child_stdin);
+    if pipes.child_stdin != INVALID_HANDLE_VALUE && !pipes.child_stdin.is_null() {
+        child_handles.push(pipes.child_stdin);
     }
-    if child_stdout != INVALID_HANDLE_VALUE && !child_stdout.is_null() {
-        child_handles.push(child_stdout);
+    if pipes.child_stdout != INVALID_HANDLE_VALUE && !pipes.child_stdout.is_null() {
+        child_handles.push(pipes.child_stdout);
     }
-    if child_stderr != INVALID_HANDLE_VALUE && !child_stderr.is_null() {
-        child_handles.push(child_stderr);
+    if pipes.child_stderr != INVALID_HANDLE_VALUE && !pipes.child_stderr.is_null() {
+        child_handles.push(pipes.child_stderr);
     }
 
     let has_child_handles = !child_handles.is_empty();
     // 1 attribute for security caps, plus 1 for handle list if we have child handles.
     let attr_count: u32 = if has_child_handles { 2 } else { 1 };
-
-    // Cleanup helper for the pipe handles allocated above.
-    let close_all_pipes = |ps: Option<HANDLE>,
-                           cs: HANDLE,
-                           po: Option<HANDLE>,
-                           co: HANDLE,
-                           pe: Option<HANDLE>,
-                           ce: HANDLE| {
-        close_optional_handle(ps);
-        close_handle_if_valid(cs);
-        close_optional_handle(po);
-        close_handle_if_valid(co);
-        close_optional_handle(pe);
-        close_handle_if_valid(ce);
-    };
 
     // Initialize proc thread attribute list.
     let mut attr_list_size: usize = 0;
@@ -666,14 +658,7 @@ fn spawn_with_sentinel(
         InitializeProcThreadAttributeList(attr_list, attr_count, 0, &raw mut attr_list_size)
     };
     if ret == FALSE {
-        close_all_pipes(
-            parent_stdin,
-            child_stdin,
-            parent_stdout,
-            child_stdout,
-            parent_stderr,
-            child_stderr,
-        );
+        pipes.close_all();
         for sid in &cap_sids {
             // SAFETY: Each sid from AllocateAndInitializeSid.
             unsafe {
@@ -703,14 +688,7 @@ fn spawn_with_sentinel(
     };
     if ret == FALSE {
         let e = io::Error::last_os_error();
-        close_all_pipes(
-            parent_stdin,
-            child_stdin,
-            parent_stdout,
-            child_stdout,
-            parent_stderr,
-            child_stderr,
-        );
+        pipes.close_all();
         // SAFETY: attr_list is initialized; SIDs are from AllocateAndInitializeSid.
         unsafe {
             cleanup_attr_and_sids(attr_list, &cap_sids);
@@ -737,14 +715,7 @@ fn spawn_with_sentinel(
         };
         if ret == FALSE {
             let e = io::Error::last_os_error();
-            close_all_pipes(
-                parent_stdin,
-                child_stdin,
-                parent_stdout,
-                child_stdout,
-                parent_stderr,
-                child_stderr,
-            );
+            pipes.close_all();
             // SAFETY: attr_list is initialized; SIDs are from AllocateAndInitializeSid.
             unsafe {
                 cleanup_attr_and_sids(attr_list, &cap_sids);
@@ -756,17 +727,7 @@ fn spawn_with_sentinel(
         }
     }
 
-    let result = create_sandboxed_process(
-        command,
-        &job,
-        attr_list,
-        child_stdin,
-        parent_stdin,
-        child_stdout,
-        parent_stdout,
-        child_stderr,
-        parent_stderr,
-    );
+    let result = create_sandboxed_process(command, &job, attr_list, &pipes);
 
     // SAFETY: attr_list must always be freed.
     unsafe {
@@ -801,22 +762,36 @@ fn spawn_with_sentinel(
     }
 }
 
-/// Create the child process with pre-created pipes and `STARTUPINFOEX`.
-#[allow(
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    clippy::type_complexity
-)]
-fn create_sandboxed_process(
-    command: &SandboxCommand,
-    job: &JobObject,
-    attr_list: LPPROC_THREAD_ATTRIBUTE_LIST,
+/// Bundle of child and parent pipe handles for stdin/stdout/stderr.
+struct StdioPipes {
     child_stdin: HANDLE,
     parent_stdin: Option<HANDLE>,
     child_stdout: HANDLE,
     parent_stdout: Option<HANDLE>,
     child_stderr: HANDLE,
     parent_stderr: Option<HANDLE>,
+}
+
+impl StdioPipes {
+    /// Close all pipe handles. Used on error paths before the handles have
+    /// been transferred to `File` ownership.
+    fn close_all(&self) {
+        close_optional_handle(self.parent_stdin);
+        close_handle_if_valid(self.child_stdin);
+        close_optional_handle(self.parent_stdout);
+        close_handle_if_valid(self.child_stdout);
+        close_optional_handle(self.parent_stderr);
+        close_handle_if_valid(self.child_stderr);
+    }
+}
+
+/// Create the child process with pre-created pipes and `STARTUPINFOEX`.
+#[allow(clippy::too_many_lines, clippy::type_complexity)]
+fn create_sandboxed_process(
+    command: &SandboxCommand,
+    job: &JobObject,
+    attr_list: LPPROC_THREAD_ATTRIBUTE_LIST,
+    pipes: &StdioPipes,
 ) -> std::result::Result<
     (
         PROCESS_INFORMATION,
@@ -840,9 +815,9 @@ fn create_sandboxed_process(
 
     if has_stdio {
         si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
-        si.StartupInfo.hStdInput = child_stdin;
-        si.StartupInfo.hStdOutput = child_stdout;
-        si.StartupInfo.hStdError = child_stderr;
+        si.StartupInfo.hStdInput = pipes.child_stdin;
+        si.StartupInfo.hStdOutput = pipes.child_stdout;
+        si.StartupInfo.hStdError = pipes.child_stderr;
     }
 
     let mut cmd_line = build_command_line(&command.program, &command.args);
@@ -889,20 +864,20 @@ fn create_sandboxed_process(
     // handles are either system-owned (NUL device) or the parent's own
     // console handles, which must not be closed here.
     if command.stdin == SandboxStdio::Piped {
-        close_handle_if_valid(child_stdin);
+        close_handle_if_valid(pipes.child_stdin);
     }
     if command.stdout == SandboxStdio::Piped {
-        close_handle_if_valid(child_stdout);
+        close_handle_if_valid(pipes.child_stdout);
     }
     if command.stderr == SandboxStdio::Piped {
-        close_handle_if_valid(child_stderr);
+        close_handle_if_valid(pipes.child_stderr);
     }
 
     if ret == FALSE {
         let err = io::Error::last_os_error();
-        close_optional_handle(parent_stdin);
-        close_optional_handle(parent_stdout);
-        close_optional_handle(parent_stderr);
+        close_optional_handle(pipes.parent_stdin);
+        close_optional_handle(pipes.parent_stdout);
+        close_optional_handle(pipes.parent_stderr);
         return Err(SandboxError::Setup(format!("CreateProcessW: {err}")));
     }
 
@@ -914,16 +889,22 @@ fn create_sandboxed_process(
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
         }
-        close_optional_handle(parent_stdin);
-        close_optional_handle(parent_stdout);
-        close_optional_handle(parent_stderr);
+        close_optional_handle(pipes.parent_stdin);
+        close_optional_handle(pipes.parent_stdout);
+        close_optional_handle(pipes.parent_stderr);
         return Err(SandboxError::Setup(format!("assign to job: {e}")));
     }
 
     // SAFETY: Each handle is valid from CreatePipe, ownership transfers to File.
-    let stdin_file = parent_stdin.map(|h| unsafe { std::fs::File::from_raw_handle(h.cast()) });
-    let stdout_file = parent_stdout.map(|h| unsafe { std::fs::File::from_raw_handle(h.cast()) });
-    let stderr_file = parent_stderr.map(|h| unsafe { std::fs::File::from_raw_handle(h.cast()) });
+    let stdin_file = pipes
+        .parent_stdin
+        .map(|h| unsafe { std::fs::File::from_raw_handle(h.cast()) });
+    let stdout_file = pipes
+        .parent_stdout
+        .map(|h| unsafe { std::fs::File::from_raw_handle(h.cast()) });
+    let stderr_file = pipes
+        .parent_stderr
+        .map(|h| unsafe { std::fs::File::from_raw_handle(h.cast()) });
 
     Ok((pi, stdin_file, stdout_file, stderr_file))
 }
@@ -987,9 +968,13 @@ mod tests {
         cmd.forward_common_env();
     }
 
-    /// Spawn, returning None if prerequisites aren't met (non-elevated env).
-    fn must_spawn(policy: &SandboxPolicy, cmd: &SandboxCommand) -> crate::SandboxedChild {
-        crate::spawn(policy, cmd).expect("spawn must succeed")
+    /// Spawn, returning `None` if prerequisites aren't met (non-elevated env).
+    fn try_spawn(policy: &SandboxPolicy, cmd: &SandboxCommand) -> Option<crate::SandboxedChild> {
+        match crate::spawn(policy, cmd) {
+            Ok(child) => Some(child),
+            Err(SandboxError::PrerequisitesNotMet { .. }) => None,
+            Err(e) => panic!("spawn failed: {e}"),
+        }
     }
 
     /// Strip DACL control flags (like AI, P) from SDDL for comparison.
@@ -1038,7 +1023,9 @@ mod tests {
 
     #[test]
     fn spawn_and_read_allowed_path() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = make_temp_dir();
         let scratch = make_temp_dir();
         let file = write_test_file(tmp.path(), "hello.txt", "sandbox_test_content_42");
@@ -1057,7 +1044,9 @@ mod tests {
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
-        let child = must_spawn(&policy, &cmd);
+        let Some(child) = try_spawn(&policy, &cmd) else {
+            return;
+        };
         let output = child.wait_with_output().expect("wait_with_output");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -1068,7 +1057,9 @@ mod tests {
 
     #[test]
     fn disallowed_path_unreadable() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let allowed = make_temp_dir();
         let scratch = make_temp_dir();
         let forbidden = make_temp_dir();
@@ -1088,7 +1079,9 @@ mod tests {
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
-        let child = must_spawn(&policy, &cmd);
+        let Some(child) = try_spawn(&policy, &cmd) else {
+            return;
+        };
         let output = child.wait_with_output().expect("wait");
 
         assert!(
@@ -1099,7 +1092,9 @@ mod tests {
 
     #[test]
     fn read_only_path_not_writable() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = make_temp_dir();
         let scratch = make_temp_dir();
         let target = tmp.path().join("readonly_test.txt");
@@ -1121,7 +1116,9 @@ mod tests {
         let target_str = target.to_string_lossy();
         cmd.args(["/C", &format!("echo overwritten > {target_str}")]);
 
-        let child = must_spawn(&policy, &cmd);
+        let Some(child) = try_spawn(&policy, &cmd) else {
+            return;
+        };
         let output = child.wait_with_output().expect("wait");
 
         let content = fs::read_to_string(&target).expect("read back");
@@ -1132,7 +1129,9 @@ mod tests {
 
     #[test]
     fn cleanup_restores_acls() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = make_temp_dir();
         let scratch = make_temp_dir();
         let _file = write_test_file(tmp.path(), "acl_test.txt", "test");
@@ -1153,7 +1152,9 @@ mod tests {
         cmd.args(["/C", "echo done"]);
 
         {
-            let child = must_spawn(&policy, &cmd);
+            let Some(child) = try_spawn(&policy, &cmd) else {
+                return;
+            };
             let _ = child.wait_with_output();
         }
 
@@ -1171,7 +1172,9 @@ mod tests {
 
     #[test]
     fn sentinel_recovery() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = make_temp_dir();
         let _file = write_test_file(tmp.path(), "sentinel_test.txt", "test");
 
@@ -1209,6 +1212,82 @@ mod tests {
         assert!(
             !sentinel_file_path.exists(),
             "sentinel file should be deleted"
+        );
+    }
+
+    #[test]
+    fn deny_all_file_access_adds_deny_ace() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = make_temp_dir();
+        let subdir = tmp.path().join("denied_sub");
+        fs::create_dir(&subdir).expect("create subdir");
+
+        let (name, sid) = create_profile().expect("create profile");
+
+        // Grant parent access first so there is an allow ACE to override.
+        grant_access(sid, tmp.path(), false).expect("grant parent");
+
+        // Baseline: no deny ACE on the subdirectory before deny_all_file_access.
+        let sddl_before = get_sddl(&subdir).expect("get SDDL before deny");
+        assert!(
+            !sddl_before.contains("(D;"),
+            "subdirectory should have no deny ACE before deny_all_file_access, got: {sddl_before}"
+        );
+
+        // Apply deny on the subdirectory.
+        deny_all_file_access(sid, &subdir).expect("deny subdir");
+
+        // Read back the SDDL and verify a deny ACE (type "D") is present.
+        let sddl = get_sddl(&subdir).expect("get SDDL of denied subdir");
+        assert!(
+            sddl.contains("(D;"),
+            "DACL should contain a deny ACE, got SDDL: {sddl}"
+        );
+
+        // SAFETY: sid was allocated by CreateAppContainerProfile.
+        unsafe {
+            FreeSid(sid);
+        }
+        let _ = delete_profile(&name);
+    }
+
+    #[test]
+    fn prerequisites_not_met_for_system_temp_path() {
+        // Verify that spawn() returns PrerequisitesNotMet when a path
+        // under system temp is used (ancestors like C:\Users require
+        // elevation for traverse ACE grants). Skip if elevated.
+        if super::super::elevation::is_elevated() {
+            return;
+        }
+
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Use system temp (under C:\Users\...\AppData\Local\Temp) whose
+        // ancestor C:\Users requires elevation for traverse ACE grants.
+        let sys_tmp = TempDir::new().expect("create system temp dir");
+        let scratch = make_temp_dir();
+
+        let policy = SandboxPolicy::new(
+            vec![sys_tmp.path().to_path_buf()],
+            vec![scratch.path().to_path_buf()],
+            Vec::new(),
+            Vec::new(),
+            false,
+            ResourceLimits::default(),
+        );
+
+        let mut cmd = SandboxCommand::new("cmd.exe");
+        set_sandbox_env(&mut cmd, scratch.path());
+        cmd.args(["/C", "echo hello"]);
+
+        let err = crate::spawn(&policy, &cmd).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::PrerequisitesNotMet { .. }),
+            "expected PrerequisitesNotMet, got: {err:?}"
         );
     }
 }

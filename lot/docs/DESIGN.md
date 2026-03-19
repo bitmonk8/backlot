@@ -140,8 +140,9 @@ The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `
 **Process model:**
 1. Create or open an AppContainer profile (`CreateAppContainerProfile`). Derives a unique package SID.
 2. Build a `SECURITY_CAPABILITIES` structure with the package SID and desired capability SIDs.
-3. Call `CreateProcessW` with `STARTUPINFOEX` containing the security capabilities via `UpdateProcThreadAttribute`.
-4. The child process runs inside the AppContainer boundary.
+3. Create stdio pipes (child and parent handles for stdin/stdout/stderr).
+4. Call `CreateProcessW` with `STARTUPINFOEX` containing the security capabilities via `UpdateProcThreadAttribute`.
+5. The child process runs inside the AppContainer boundary.
 
 **Filesystem access:**
 - Before launch, grant the package SID read or read-write ACL entries on allowed paths (`SetEntriesInAcl`, `SetNamedSecurityInfo`).
@@ -172,7 +173,7 @@ AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor direct
 
 ### Spawn-time automatic grants
 
-`spawn()` grants traverse ACEs on ancestor directories of policy paths automatically. For each ancestor lacking the ACE, it attempts `grant_traverse()`. Failures on directories the user cannot modify (system directories, volume root) produce `SandboxError::PrerequisitesNotMet`.
+`spawn()` grants traverse ACEs on ancestor directories of all policy paths (both grant and deny paths) automatically. For each ancestor lacking the ACE, it attempts `grant_traverse()`. Failures on directories the user cannot modify (system directories, volume root) produce `SandboxError::PrerequisitesNotMet`. The `_for_policy` prerequisite functions also cover deny paths to match `spawn_inner`'s behavior.
 
 ### ACE details
 

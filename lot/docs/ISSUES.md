@@ -286,3 +286,51 @@ When `canon_parent` fails but `canon_child` succeeds, the fallback logic is unte
 The guard logic (rejecting PID 0, preventing self-kill) is untested. Best-effort functions, but guard correctness matters.
 
 **Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`, `lot/src/windows/mod.rs`
+
+---
+
+## 11. Windows: Post-Group-3 Residual Issues
+
+Issues identified during review of the Group 3 implementation. Low-impact refinements.
+
+### `normalize_sddl` nested closures hard to read
+
+The `normalize_sddl` test helper uses nested `map_or_else` closures. Would be clearer as `if let` / early-return.
+
+**File:** `lot/src/windows/appcontainer.rs`
+
+### Silent test skips on `PrerequisitesNotMet`
+
+Tests using `try_spawn` silently `return` when prerequisites are not met. No diagnostic output. Should emit `eprintln!` on skip so CI can track how many tests are vacuously passing.
+
+**File:** `lot/src/windows/appcontainer.rs`
+
+### `StdioPipes::close_all()` has no direct test
+
+Only exercised on error paths inside `spawn_with_sentinel`. These error paths require specific Win32 API failures to trigger. A unit test creating known handles and calling `close_all()` would provide direct coverage.
+
+**File:** `lot/src/windows/appcontainer.rs`
+
+### `read_only_path_not_writable` conditional assertion
+
+The file-content assertion is inside `if output.status.success()`. If the command fails for an unrelated reason, the assertion is skipped. Should unconditionally verify file content is unchanged.
+
+**File:** `lot/src/windows/appcontainer.rs`
+
+### Integration test `must_spawn` diverges from unit test `try_spawn`
+
+The integration test helper `must_spawn` in `tests/integration.rs` panics on all errors including `PrerequisitesNotMet`, while the unit test helper `try_spawn` returns `None`. Should be aligned.
+
+**File:** `lot/tests/integration.rs`
+
+### `StdioPipes` could live in `pipe.rs`
+
+Pipe-handle lifecycle is split across `pipe.rs` (creation, individual close) and `appcontainer.rs` (bundling, batch close). Moving `StdioPipes` to `pipe.rs` would colocate pipe concerns.
+
+**File:** `lot/src/windows/appcontainer.rs`, `lot/src/windows/pipe.rs`
+
+### Conditional NUL check makes `nul_device_missing` field inaccurate when paths fail
+
+When `prereq_failed` is non-empty, `nul_missing` is forced to `false`. The `PrerequisitesNotMet` error reports `nul_device_missing: false` even if the NUL device ACE is actually missing. Diagnostic-only impact — callers running `grant_appcontainer_prerequisites` handle both anyway.
+
+**File:** `lot/src/windows/appcontainer.rs`
