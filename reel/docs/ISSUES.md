@@ -50,43 +50,7 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/tools.rs` — The implication (WRITE implies TOOLS, NETWORK implies TOOLS) is enforced only in `from_names`. Library consumers constructing `ToolGrant` directly via bitflags can create bare `WRITE` without `TOOLS`, which silently produces zero tool definitions. `tool_definitions` and `required_grant` defensively check `WRITE | TOOLS` together, duplicating the invariant. Consider a normalizing constructor or custom `BitOr` to enforce at the type level. **Category: Separation of concerns.**
 
-## 7. NuSession minor refinements (#55, #56, #57, #58, #60)
-
-### 55. `ensure_and_take` inflight registration duplicated 3x
-
-`reel/src/nu_session.rs` — The `st.inflight_child = Some(Arc::clone(...)); st.inflight_stdin = Some(Arc::clone(...));` pattern appears in three branches of `ensure_and_take` (fast path, generation-mismatch-with-compatible-process, install path). Extract a helper if the method grows further. **Category: Simplification.**
-
-### 56. `ensure_and_take` slow path retry loop untested
-
-`reel/src/nu_session.rs` — The `continue` branch in `ensure_and_take`'s slow path (generation changed, no compatible process available) has no dedicated test. Requires three concurrent actors to trigger deterministically. The generation mechanism guarantees correctness; the retry is defense-in-depth. **Category: Testing.**
-
-### 57. Concurrent evaluate test does not verify two distinct processes
-
-`reel/src/nu_session.rs` — `integration_concurrent_evaluate_both_succeed` asserts both evaluations succeed but does not verify that two distinct processes were used. Cannot distinguish sequential reuse from concurrent spawn without exposing internal state. **Category: Testing.**
-
-### 58. No `bounded_reap` test for `Ok(Some(ExitStatus))` path
-
-`reel/src/nu_session.rs` — All `bounded_reap` tests use `Err(...)` or `Ok(None)`. The `Ok(Some(status))` path (normal exit) is covered by the wildcard arm but has no dedicated test. **Category: Testing.**
-
-### 60. Singleton `inflight_child`/`inflight_stdin` fields cannot track concurrent callers
-
-`reel/src/nu_session.rs` — `SessionState` has single `inflight_child` and `inflight_stdin` fields. If two concurrent `evaluate` calls are in Phase 2 (blocking I/O), the second caller's `ensure_and_take` overwrites the first caller's handles. A `kill()` during this window only reaches the second caller's child; the first is unreachable. Not triggered today (agent turns are sequential; the concurrent test runs on single-threaded tokio). Would matter if true multi-threaded concurrent evaluate is ever supported. **Category: Correctness.**
-
-## 8. Network test helpers (#65, #66, #67)
-
-### 65. `looks_like_sandbox_denial` keywords are broad
-
-`reel/src/nu_session.rs` — The `looks_like_sandbox_denial` helper checks for generic keywords like `"denied"`, `"permission"`, `"blocked"` that could match non-sandbox errors (e.g. file permission errors). Narrowing to sandbox-specific phrases would reduce false positives but risks missing real denials. **Category: Testing.**
-
-### 66. `looks_like_sandbox_denial` has no unit tests
-
-`reel/src/nu_session.rs` — The helper is used by both network integration tests but has no dedicated unit tests with known sandbox denial messages and known non-denial messages. **Category: Testing.**
-
-### 67. `http_responding_listener` name does not convey side effects
-
-`reel/src/nu_session.rs` — The function spawns a background thread and returns a port number, but the name suggests it returns a listener. A name like `spawn_http_responder` would better convey the fire-and-forget nature. **Category: Naming.**
-
-## 9. CLI test coverage gaps (#68, #69)
+## 7. CLI test coverage gaps (#68, #69)
 
 ### 68. `dry_run_output_includes_grant` tests serde round-trip, not production path
 
@@ -96,19 +60,19 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 
 `reel/src/tools.rs` — If a new `ToolGrant` variant is added but `to_names` is not updated, no test catches the omission. A test asserting `ToolGrant::all().to_names().len()` equals the expected variant count would guard against this. **Category: Testing.**
 
-## 10. Test conditional skip conventions (#70)
+## 8. Test conditional skip conventions (#70)
 
 ### 70. `resolve_rg_binary_with_compile_time_tool_dir` silently skips
 
 `reel/src/nu_session.rs` — When `NU_CACHE_DIR` is not set at compile time (common in local dev), the test prints "SKIP" to stderr and passes with zero assertions. Inflates test count without signal. Consider `#[ignore]` or a project-wide conditional-skip convention. **Category: Testing.**
 
-## 11. Agent test provider consolidation (#71)
+## 9. Agent test provider consolidation (#71)
 
 ### 71. Agent test provider consolidation opportunity
 
 `reel/src/agent.rs` — Five `DynProvider` test doubles (`RepeatingToolCallProvider`, `SlowProvider`, `FastThenSlowProvider`, plus inline `MultiShotProvider` usage) share nearly identical boilerplate. `FastThenSlowProvider` is a superset of `SlowProvider` (set first-call count to 0 for always-slow). Could be consolidated into fewer helpers as the test module grows. **Category: Simplification.**
 
-## 12. Agent test improvements (#72, #73)
+## 10. Agent test improvements (#72, #73)
 
 ### 72. `ModelResponse` literal boilerplate in agent tests
 
@@ -117,3 +81,9 @@ No practical impact — unsupported scenario, already guarded by `build_request_
 ### 73. No test for exactly `MAX_TOOL_CALLS + 1` (201) boundary
 
 `reel/src/agent.rs` — The boundary test checks exactly 200 (succeeds) and the exceeds test jumps to 250. No test for exactly 201 tool calls, which would more precisely verify the `>` vs `>=` check. **Category: Testing.**
+
+## 11. Network test helper coverage (#74)
+
+### 74. No regression tests for removed `looks_like_sandbox_denial` keywords
+
+`reel/src/nu_session.rs` — When the keyword list was narrowed (issue #65), the old generic keywords (`"denied"`, `"permission"`, `"blocked"`, `"forbidden"`) were removed. The negative test (`sandbox_denial_rejects_non_denial_messages`) does not assert that these bare words are no longer matched. Adding explicit `assert!(!looks_like_sandbox_denial("denied"))` etc. would guard against accidental reversion. **Category: Testing.**

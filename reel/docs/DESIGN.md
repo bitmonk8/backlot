@@ -363,12 +363,13 @@ deserialization.
 - Network sandbox tests use a local loopback `TcpListener` on an ephemeral port
   instead of external hosts, making denial/allowance verification deterministic
   regardless of internet connectivity. The allowed-network test uses
-  `http_responding_listener()` which spawns a background thread that accepts one
+  `spawn_http_responder()` which spawns a background thread that accepts one
   connection and sends a minimal HTTP 200 response, ensuring `http get` succeeds
   and the sandbox-denial assertion on the `Ok` path is exercised.
 - `looks_like_sandbox_denial(content)` is a shared helper that checks for
-  sandbox denial keywords across platforms (denied, permission, not allowed,
-  blocked, forbidden, seatbelt, sandbox-exec, appcontainer, seccomp). Both
+  sandbox denial keywords across platforms ("permission denied", "access denied",
+  "operation not permitted", "not allowed", "seatbelt", "sandbox denial",
+  "sandbox-exec", "appcontainer", "seccomp"). Both
   network tests use it, keeping the keyword list in one place.
 - `skip_no_nu!()` macro skips integration tests when nu binary is unavailable.
 - Mock `ClientFactory` and `ToolExecutor` for agent-level tests without real

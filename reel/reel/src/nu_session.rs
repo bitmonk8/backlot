@@ -160,11 +160,29 @@ struct SessionState {
     generation: u64,
     /// Shared child handle kept here so `kill()` can reach the child even when
     /// the `NuProcess` has been taken out for blocking I/O in `evaluate_inner`.
+    ///
+    /// **Known limitation (issue #60):** This is a singleton field. If two
+    /// concurrent `evaluate` calls are in Phase 2 (blocking I/O), the second
+    /// caller's `ensure_and_take` overwrites the first caller's handle. A
+    /// `kill()` during that window only reaches the second caller's child.
+    /// Not triggered today because agent turns are sequential.
     inflight_child: Option<ChildHandle>,
     /// Shared stdin handle kept here so `kill()` can close stdin to trigger
     /// EOF on the inner child, causing it to exit even if the lot-level kill
     /// doesn't terminate it. Defense-in-depth for the PID namespace issue.
+    ///
+    /// **Known limitation (issue #60):** Same singleton limitation as
+    /// `inflight_child` — see its doc comment.
     inflight_stdin: Option<StdinHandle>,
+}
+
+impl SessionState {
+    /// Register a process's child and stdin handles as inflight so `kill()`
+    /// can reach them while the `NuProcess` is out of `self.process`.
+    fn register_inflight(&mut self, proc: &NuProcess) {
+        self.inflight_child = Some(Arc::clone(&proc.child_handle));
+        self.inflight_stdin = Some(Arc::clone(&proc.stdin));
+    }
 }
 
 /// Manages a persistent `nu --mcp` process.
@@ -266,8 +284,7 @@ impl NuSession {
                 .is_some_and(|p| p.is_compatible(project_root, grant));
             if dominated {
                 if let Some(proc) = st.process.take() {
-                    st.inflight_child = Some(Arc::clone(&proc.child_handle));
-                    st.inflight_stdin = Some(Arc::clone(&proc.stdin));
+                    st.register_inflight(&proc);
                     return Ok((proc, st.generation));
                 }
             }
@@ -290,20 +307,25 @@ impl NuSession {
                 if compatible {
                     // new_proc dropped after st (lock released first).
                     if let Some(proc) = st.process.take() {
-                        st.inflight_child = Some(Arc::clone(&proc.child_handle));
-                        st.inflight_stdin = Some(Arc::clone(&proc.stdin));
+                        st.register_inflight(&proc);
                         return Ok((proc, st.generation));
                     }
                 }
                 // No compatible process available — retry.
                 // new_proc dropped after st (lock released first).
+                //
+                // Untested (issue #56): triggering this branch deterministically
+                // requires three concurrent actors (two spawners + a kill) to
+                // interleave so that the generation changes during spawn AND no
+                // compatible process is left by the time we re-acquire the lock.
+                // The generation mechanism guarantees correctness; the retry is
+                // defense-in-depth. A test would be inherently racy.
                 continue;
             }
             // Install: drop old process (if any), take new one directly.
             st.process = None;
             st.generation += 1;
-            st.inflight_child = Some(Arc::clone(&new_proc.child_handle));
-            st.inflight_stdin = Some(Arc::clone(&new_proc.stdin));
+            st.register_inflight(&new_proc);
             return Ok((new_proc, st.generation));
         }
         Err("failed to acquire nu process after 3 attempts (session state kept changing)".into())
@@ -1229,6 +1251,18 @@ mod tests {
         assert!(start.elapsed() >= std::time::Duration::from_millis(80));
     }
 
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn bounded_reap_returns_true_on_normal_exit() {
+        // Cover the Ok(Some(status)) path — a process that has already exited
+        // normally. We spawn a real process to obtain a genuine ExitStatus.
+        let status = std::process::Command::new("true")
+            .status()
+            .expect("failed to run `true`");
+        let result = bounded_reap(|| Ok(Some(status)), std::time::Duration::from_secs(1));
+        assert!(result, "bounded_reap should return true on normal exit");
+    }
+
     // -----------------------------------------------------------------------
     // Generation-based session invalidation tests
     // -----------------------------------------------------------------------
@@ -1704,6 +1738,12 @@ mod tests {
         // process (fast path) and the second spawns a new one (slow path).
         // Both must succeed. Exercises the ensure_and_take fast/slow paths
         // under concurrent access (issue #44).
+        //
+        // Limitation (issue #57): this test asserts both evaluations succeed
+        // but does not verify that two *distinct* processes were used. We
+        // cannot distinguish sequential reuse from concurrent spawn without
+        // exposing internal state (e.g. process IDs). The test confirms
+        // correctness but not concurrency.
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
@@ -2512,21 +2552,22 @@ mod tests {
     /// Check whether an error/output string looks like a sandbox denial.
     ///
     /// Covers known sandbox denial wording across platforms:
-    /// - Generic: denied, permission, not allowed, blocked, forbidden
-    /// - macOS Seatbelt: seatbelt, sandbox-exec, sandbox denial
-    /// - Windows AppContainer: appcontainer
-    /// - Linux: seccomp, namespace
+    /// - Generic: "permission denied", "access denied", "operation not permitted",
+    ///   "not allowed"
+    /// - macOS Seatbelt: "seatbelt", "sandbox-exec", "sandbox denial"
+    /// - Windows AppContainer: "appcontainer"
+    /// - Linux: "seccomp"
     ///
-    /// Uses multi-word phrases or context-specific terms to avoid false
-    /// positives from path names (e.g. "sandbox-test" in cwd paths).
+    /// Uses multi-word phrases or sandbox-specific terms to avoid false
+    /// positives from unrelated errors (e.g. "connection refused") or path
+    /// names (e.g. "sandbox-test" in cwd paths).
     fn looks_like_sandbox_denial(content: &str) -> bool {
         let lower = content.to_lowercase();
         [
-            "denied",
-            "permission",
+            "permission denied",
+            "access denied",
+            "operation not permitted",
             "not allowed",
-            "blocked",
-            "forbidden",
             "seatbelt",
             "sandbox denial",
             "sandbox-exec",
@@ -2536,6 +2577,69 @@ mod tests {
         .iter()
         .any(|kw| lower.contains(kw))
     }
+
+    // -----------------------------------------------------------------------
+    // looks_like_sandbox_denial unit tests (issue #66)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sandbox_denial_detects_macos_seatbelt() {
+        assert!(looks_like_sandbox_denial(
+            "deny(1) network-outbound: (target seatbelt-denied)"
+        ));
+        assert!(looks_like_sandbox_denial(
+            "error: sandbox-exec: operation not allowed"
+        ));
+        assert!(looks_like_sandbox_denial(
+            "sandbox denial: network-outbound operation"
+        ));
+    }
+
+    #[test]
+    fn sandbox_denial_detects_windows_appcontainer() {
+        assert!(looks_like_sandbox_denial(
+            "AppContainer: access denied to network resource"
+        ));
+    }
+
+    #[test]
+    fn sandbox_denial_detects_linux_seccomp() {
+        assert!(looks_like_sandbox_denial(
+            "seccomp: blocked syscall connect()"
+        ));
+    }
+
+    #[test]
+    fn sandbox_denial_detects_generic_phrases() {
+        assert!(looks_like_sandbox_denial("Permission denied (os error 13)"));
+        assert!(looks_like_sandbox_denial("Access denied by policy"));
+        assert!(looks_like_sandbox_denial(
+            "Operation not permitted (os error 1)"
+        ));
+        assert!(looks_like_sandbox_denial("network operation not allowed"));
+    }
+
+    #[test]
+    fn sandbox_denial_rejects_non_denial_messages() {
+        // Generic errors that are NOT sandbox denials.
+        assert!(!looks_like_sandbox_denial("connection refused"));
+        assert!(!looks_like_sandbox_denial("connection timed out"));
+        assert!(!looks_like_sandbox_denial("host not found"));
+        assert!(!looks_like_sandbox_denial(
+            "Error: could not resolve address"
+        ));
+        // Path names that happen to contain sandbox-related substrings.
+        assert!(!looks_like_sandbox_denial(
+            "/tmp/sandbox-test/project/file.txt"
+        ));
+        // Empty and trivial strings.
+        assert!(!looks_like_sandbox_denial(""));
+        assert!(!looks_like_sandbox_denial("ok"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Network test helpers and integration tests
+    // -----------------------------------------------------------------------
 
     /// Bind a TCP listener on an ephemeral loopback port and return it with
     /// the port number.  The listener must be held alive for the test duration.
@@ -2549,7 +2653,7 @@ mod tests {
     /// minimal HTTP 200 response.  Returns the port number.  The background
     /// thread keeps the listener alive until the connection is served (or
     /// the timeout expires).
-    fn http_responding_listener() -> u16 {
+    fn spawn_http_responder() -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
         let port = listener.local_addr().expect("local addr").port();
         // Background thread blocks on accept(), serves one connection, then
@@ -2632,7 +2736,7 @@ mod tests {
         // that `http get` succeeds and the test reaches the Ok path, where we
         // verify no sandbox denial occurred.
         skip_no_nu!();
-        let port = http_responding_listener();
+        let port = spawn_http_responder();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
