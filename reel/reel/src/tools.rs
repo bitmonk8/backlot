@@ -119,35 +119,33 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
         tools.push(ToolDefinition {
             name: "Read".into(),
             description: "Read the contents of a file. Returns lines with line numbers. For large files, use offset and limit to read specific sections.".into(),
-            parameters: serde_json::json!({
+            parameters: with_timeout(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": { "type": "string", "description": "Absolute or project-relative file path" },
                     "offset": { "type": "integer", "description": "Line number to start reading from (1-based). Omit to start from the beginning." },
-                    "limit": { "type": "integer", "description": "Maximum number of lines to return. Omit to read up to the default cap." },
-                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
+                    "limit": { "type": "integer", "description": "Maximum number of lines to return. Omit to read up to the default cap." }
                 },
                 "required": ["file_path"]
-            }),
+            })),
         });
         tools.push(ToolDefinition {
             name: "Glob".into(),
             description: "Find files matching a glob pattern. Returns matching file paths sorted by modification time.".into(),
-            parameters: serde_json::json!({
+            parameters: with_timeout(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Glob pattern (e.g. **/*.rs, src/**/*.ts)" },
                     "path": { "type": "string", "description": "Directory to search in. Defaults to project root." },
-                    "depth": { "type": "integer", "description": "Max directory traversal depth. Default: 20." },
-                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
+                    "depth": { "type": "integer", "description": "Max directory traversal depth. Default: 20." }
                 },
                 "required": ["pattern"]
-            }),
+            })),
         });
         tools.push(ToolDefinition {
             name: "Grep".into(),
             description: "Search file contents for a regex pattern. Powered by ripgrep.".into(),
-            parameters: serde_json::json!({
+            parameters: with_timeout(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Regex pattern to search for" },
@@ -161,11 +159,10 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
                     "context_before": { "type": "integer", "description": "Number of lines to show before each match. Only applies to 'content' output mode." },
                     "context": { "type": "integer", "description": "Number of lines to show before and after each match. Only applies to 'content' output mode." },
                     "multiline": { "type": "boolean", "description": "Enable multiline matching (pattern can span lines). Default: false." },
-                    "head_limit": { "type": "integer", "description": "Limit output to first N lines/entries." },
-                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
+                    "head_limit": { "type": "integer", "description": "Limit output to first N lines/entries." }
                 },
                 "required": ["pattern"]
-            }),
+            })),
         });
     }
 
@@ -174,30 +171,28 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
         tools.push(ToolDefinition {
             name: "Write".into(),
             description: "Write content to a file, creating parent directories if necessary. Overwrites existing files.".into(),
-            parameters: serde_json::json!({
+            parameters: with_timeout(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": { "type": "string", "description": "File path to write to" },
-                    "content": { "type": "string", "description": "Content to write" },
-                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
+                    "content": { "type": "string", "description": "Content to write" }
                 },
                 "required": ["file_path", "content"]
-            }),
+            })),
         });
         tools.push(ToolDefinition {
             name: "Edit".into(),
             description: "Replace an exact string match in a file. By default, old_string must appear exactly once (prevents ambiguous edits). Set replace_all to replace every occurrence.".into(),
-            parameters: serde_json::json!({
+            parameters: with_timeout(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "file_path": { "type": "string", "description": "File path to edit" },
                     "old_string": { "type": "string", "description": "Exact text to find and replace" },
                     "new_string": { "type": "string", "description": "Replacement text" },
-                    "replace_all": { "type": "boolean", "description": "Replace all occurrences instead of requiring uniqueness. Default: false." },
-                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
+                    "replace_all": { "type": "boolean", "description": "Replace all occurrences instead of requiring uniqueness. Default: false." }
                 },
                 "required": ["file_path", "old_string", "new_string"]
-            }),
+            })),
         });
     }
 
@@ -206,15 +201,14 @@ pub fn tool_definitions(grant: ToolGrant) -> Vec<ToolDefinition> {
         tools.push(ToolDefinition {
             name: "NuShell".into(),
             description: "Execute a NuShell command or pipeline and return its output. Uses NuShell syntax (not POSIX sh). Session state (variables, env, cwd) persists across calls within the same task.".into(),
-            parameters: serde_json::json!({
+            parameters: with_timeout(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "The NuShell command to execute" },
-                    "description": { "type": "string", "description": "Brief description of what this command does" },
-                    "timeout": { "type": "integer", "description": "Timeout in seconds. Default: 120, max: 600." }
+                    "description": { "type": "string", "description": "Brief description of what this command does" }
                 },
                 "required": ["command"]
-            }),
+            })),
         });
     }
 
@@ -487,7 +481,28 @@ fn get_str_opt<'a>(input: &'a JsonValue, key: &str) -> Option<&'a str> {
     input.get(key).and_then(JsonValue::as_str)
 }
 
-/// Extract timeout from tool input, clamping to [`DEFAULT_NU_TIMEOUT_SECS`, `MAX_NU_TIMEOUT_SECS`].
+/// Add the shared timeout property to a JSON Schema `parameters` object.
+///
+/// Inserts the `"timeout"` key into `params["properties"]` and returns the
+/// modified value for inline use in `serde_json::json!` builders.
+fn with_timeout(mut params: JsonValue) -> JsonValue {
+    if let Some(props) = params
+        .get_mut("properties")
+        .and_then(JsonValue::as_object_mut)
+    {
+        props.insert(
+            "timeout".to_string(),
+            serde_json::json!({
+                "type": "integer",
+                "description": "Timeout in seconds. Default: 120, max: 600."
+            }),
+        );
+    }
+    params
+}
+
+/// Extract timeout from tool input, defaulting to `DEFAULT_NU_TIMEOUT_SECS` when absent and
+/// capped at `MAX_NU_TIMEOUT_SECS`.
 fn parse_timeout(input: &JsonValue) -> u64 {
     input
         .get("timeout")
@@ -1577,6 +1592,107 @@ mod tests {
             ToolGrant::all().bits().count_ones() as usize,
             "to_names() must cover all ToolGrant flags"
         );
+    }
+
+    // -- parse_timeout tests --
+
+    #[test]
+    fn test_parse_timeout_default_when_absent() {
+        let input = serde_json::json!({});
+        assert_eq!(parse_timeout(&input), DEFAULT_NU_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_parse_timeout_valid_value() {
+        let input = serde_json::json!({"timeout": 30});
+        assert_eq!(parse_timeout(&input), 30);
+    }
+
+    #[test]
+    fn test_parse_timeout_clamped_to_max() {
+        let input = serde_json::json!({"timeout": 9999});
+        assert_eq!(parse_timeout(&input), MAX_NU_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_parse_timeout_zero() {
+        let input = serde_json::json!({"timeout": 0});
+        assert_eq!(parse_timeout(&input), 0);
+    }
+
+    #[test]
+    fn test_parse_timeout_non_integer_falls_back() {
+        let input = serde_json::json!({"timeout": "fast"});
+        assert_eq!(parse_timeout(&input), DEFAULT_NU_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_parse_timeout_exact_max() {
+        let input = serde_json::json!({"timeout": MAX_NU_TIMEOUT_SECS});
+        assert_eq!(parse_timeout(&input), MAX_NU_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_parse_timeout_one_over_max() {
+        let input = serde_json::json!({"timeout": MAX_NU_TIMEOUT_SECS + 1});
+        assert_eq!(parse_timeout(&input), MAX_NU_TIMEOUT_SECS);
+    }
+
+    // -- with_timeout tests --
+
+    #[test]
+    fn test_with_timeout_adds_property() {
+        let params = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "foo": { "type": "string" }
+            }
+        });
+        let result = with_timeout(params);
+        let props = result["properties"].as_object().unwrap();
+        assert!(props.contains_key("timeout"));
+        assert_eq!(props["timeout"]["type"], "integer");
+    }
+
+    #[test]
+    fn test_with_timeout_preserves_existing_properties() {
+        let params = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "integer" }
+            }
+        });
+        let result = with_timeout(params);
+        let props = result["properties"].as_object().unwrap();
+        assert!(props.contains_key("a"));
+        assert!(props.contains_key("b"));
+        assert!(props.contains_key("timeout"));
+    }
+
+    #[test]
+    fn test_with_timeout_no_properties_key() {
+        // No "properties" key — returns unchanged
+        let params = serde_json::json!({"type": "object"});
+        let result = with_timeout(params.clone());
+        assert_eq!(result, params);
+    }
+
+    #[test]
+    fn test_all_tool_definitions_have_timeout() {
+        let grant = ToolGrant::WRITE | ToolGrant::TOOLS | ToolGrant::NETWORK;
+        for tool in tool_definitions(grant) {
+            let props = tool.parameters["properties"]
+                .as_object()
+                .unwrap_or_else(|| {
+                    panic!("{} missing properties", tool.name);
+                });
+            assert!(
+                props.contains_key("timeout"),
+                "{} tool definition missing timeout property",
+                tool.name,
+            );
+        }
     }
 
     #[tokio::test]
