@@ -975,7 +975,7 @@ fn test_double_wait_returns_error() {
     let child = must_spawn(&policy, &cmd);
 
     let status = child.wait().expect("first wait should succeed");
-    eprintln!("[diag] first wait: {:?}", status);
+    eprintln!("[diag] first wait: {status:?}");
 
     let err = child.wait().expect_err("second wait should fail");
     eprintln!("[diag] second wait error: {err}");
