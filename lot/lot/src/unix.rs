@@ -162,11 +162,9 @@ unsafe fn cleanup_stdio_fds(child_fds: &[i32], parent_fds: &[Option<i32>]) {
         // SAFETY: caller guarantees fds are valid
         unsafe { close_if_not_std(fd) };
     }
-    for fd in parent_fds.iter().copied() {
-        if let Some(f) = fd {
-            // SAFETY: fd is a valid pipe fd from make_pipe()
-            unsafe { libc::close(f) };
-        }
+    for f in parent_fds.iter().copied().flatten() {
+        // SAFETY: fd is a valid pipe fd from make_pipe()
+        unsafe { libc::close(f) };
     }
 }
 
@@ -203,16 +201,14 @@ pub fn setup_stdio_pipes(command: &SandboxCommand) -> io::Result<StdioPipes> {
             let (r, w) = make_pipe().inspect_err(|_| {
                 // SAFETY: fds are valid from successful steps above
                 unsafe {
-                    cleanup_stdio_fds(&[child_stdin, child_stdout], &[parent_stdin, parent_stdout])
-                };
+                    cleanup_stdio_fds(&[child_stdin, child_stdout], &[parent_stdin, parent_stdout]);
+                }
             })?;
             (w, Some(r))
         }
         SandboxStdio::Null => (
-            open_dev_null(libc::O_WRONLY).inspect_err(|_| {
-                unsafe {
-                    cleanup_stdio_fds(&[child_stdin, child_stdout], &[parent_stdin, parent_stdout])
-                };
+            open_dev_null(libc::O_WRONLY).inspect_err(|_| unsafe {
+                cleanup_stdio_fds(&[child_stdin, child_stdout], &[parent_stdin, parent_stdout]);
             })?,
             None,
         ),
