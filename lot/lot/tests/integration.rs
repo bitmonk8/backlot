@@ -42,6 +42,7 @@ fn set_sandbox_env(cmd: &mut lot::SandboxCommand, scratch: &std::path::Path) {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::missing_const_for_fn)]
 fn set_sandbox_env(_cmd: &mut lot::SandboxCommand, _scratch: &std::path::Path) {}
 
 /// Spawn a sandboxed child, panicking on any error.

@@ -780,6 +780,7 @@ mod tokio_tests {
 
     /// Create temp dir inside the project to avoid system temp ancestors
     /// (e.g. `C:\Users`) that require elevation for traverse ACE grants.
+    #[cfg(target_os = "windows")]
     fn make_temp_dir() -> TempDir {
         let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -802,6 +803,7 @@ mod tokio_tests {
     }
 
     #[cfg(not(target_os = "windows"))]
+    #[allow(dead_code, clippy::missing_const_for_fn)]
     fn set_sandbox_env(_cmd: &mut SandboxCommand, _scratch: &std::path::Path) {}
 
     /// Helper: build a minimal policy and command for timeout tests.
