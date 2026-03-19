@@ -27,10 +27,6 @@
 - First real-world usage / `lot run` testing
 - Remaining issues tracked in `docs/ISSUES.md`
 
-Full project audit completed — all 41 findings fixed (see `docs/AUDIT_FINDINGS.md`). Three findings intentionally skipped:
-- **M8**: Linux/macOS differ in kill semantics; forced unification adds complexity for no gain.
-- **M14**: Unix pipe/fd unit tests cannot run on Windows; covered by integration tests on Linux/macOS CI.
-- **L1**: Two small inline non-Windows stubs in lib.rs are clear as-is; extracting them adds complexity with no benefit.
 
 ## CI Status
 
