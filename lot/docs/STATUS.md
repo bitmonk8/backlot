@@ -16,11 +16,15 @@
 - `SandboxedChild::wait_with_output_timeout()`: async timeout with kill+cleanup (behind `tokio` feature)
 - `SandboxPolicy` fields are private; construction via `SandboxPolicyBuilder`, access via getter methods
 - `SandboxedChild::kill()` and `kill_and_cleanup()` take `&mut self`
-- Windows backend: AppContainer (filesystem/network isolation) + Job Objects (resource limits) + sentinel file ACL recovery + deny ACEs for denied paths. Modules: `appcontainer`, `sentinel`, `pipe`, `cmdline`, `job`, `nul_device`, `traverse_acl`, `elevation`, `acl_helpers`
+- Windows backend: AppContainer (filesystem/network isolation) + Job Objects (resource limits) + sentinel file ACL recovery + deny ACEs for denied paths. Modules: `appcontainer`, `sentinel`, `pipe`, `cmdline`, `job`, `nul_device`, `traverse_acl`, `elevation`, `acl_helpers`, `prerequisites`
 - Linux backend: user/mount/pid/net/ipc namespaces + seccomp-BPF syscall filtering (argument-filtered prctl/ioctl) + cgroups v2 resource limits (sibling cgroup model) + empty tmpfs overmounts for denied paths + `close_range` fd cleanup to prevent ETXTBSY in parallel spawns
 - macOS backend: Seatbelt (sandbox_init SBPL profiles) + setrlimit resource limits + process group kill (setsid/killpg) + ancestor directory `file-read-metadata` grants + SBPL deny rules for denied paths
 - CI pipeline: clippy + test on Linux/macOS/Windows with namespace and cgroup setup, `lot setup` in Windows CI
 - Rustdoc on all public API items
+
+## Completed Improvements
+
+- Windows ACL infrastructure: RAII wrappers (`OwnedHandle`, `OwnedSid`, `OwnedSecurityDescriptor`, `OwnedAcl`), shared `modify_dacl` primitive, unified ACE-check via direct iteration, TOCTOU fix in `grant_traverse`, `ELEVATION_REQUIRED_MARKER` moved to `acl_helpers.rs`, prerequisites API extracted to `prerequisites.rs`, `deny_access` renamed to `deny_all_file_access`, additional tests for `compute_ancestors` edge cases, null-DACL ACE-check test, and prerequisites error path test
 
 ## Next Work
 

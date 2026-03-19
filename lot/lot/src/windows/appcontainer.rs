@@ -5,21 +5,20 @@ use std::os::windows::io::FromRawHandle;
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, FALSE, HANDLE, INVALID_HANDLE_VALUE,
-    LocalFree, TRUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_ALREADY_EXISTS, FALSE, HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
-    DENY_ACCESS, EXPLICIT_ACCESS_W, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS,
-    SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
+    DENY_ACCESS, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SET_ACCESS, TRUSTEE_IS_SID,
     TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile,
 };
 use windows_sys::Win32::Security::{
-    ACL, AllocateAndInitializeSid, DACL_SECURITY_INFORMATION, FreeSid,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
-    SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    AllocateAndInitializeSid, DACL_SECURITY_INFORMATION, FreeSid,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
 use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
@@ -39,6 +38,7 @@ use crate::command::{SandboxCommand, SandboxStdio};
 use crate::error::SandboxError;
 use crate::policy::SandboxPolicy;
 
+use super::acl_helpers::{ELEVATION_REQUIRED_MARKER, modify_dacl};
 use super::cmdline::{build_command_line, build_env_block};
 use super::job::JobObject;
 use super::pipe::{
@@ -150,27 +150,10 @@ pub fn delete_profile(name: &str) -> io::Result<()> {
 // ── ACL management ───────────────────────────────────────────────────
 
 /// Add or modify an ACE for `sid` on `path` with the given access mode and mask.
+/// Delegates to the shared `modify_dacl` primitive.
 fn apply_ace(sid: PSID, path: &Path, access_mode: i32, access_mask: u32) -> io::Result<()> {
     let wide_path = path_to_wide(path);
-    let mut current_dacl: *mut ACL = std::ptr::null_mut();
-    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-
-    // SAFETY: Reading current DACL of the file/directory.
-    let err = unsafe {
-        GetNamedSecurityInfoW(
-            wide_path.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &raw mut current_dacl,
-            std::ptr::null_mut(),
-            &raw mut sd,
-        )
-    };
-    if err != ERROR_SUCCESS {
-        return Err(win32_to_io(err));
-    }
+    let display = path.display().to_string();
 
     let trustee = TRUSTEE_W {
         pMultipleTrustee: std::ptr::null_mut(),
@@ -188,41 +171,8 @@ fn apply_ace(sid: PSID, path: &Path, access_mode: i32, access_mask: u32) -> io::
         Trustee: trustee,
     };
 
-    let mut new_dacl: *mut ACL = std::ptr::null_mut();
-
-    // SAFETY: Merging a new ACE into the existing DACL.
-    let err = unsafe { SetEntriesInAclW(1, &raw const ea, current_dacl, &raw mut new_dacl) };
-    if err != ERROR_SUCCESS {
-        // SAFETY: sd from GetNamedSecurityInfoW.
-        unsafe {
-            LocalFree(sd.cast());
-        }
-        return Err(win32_to_io(err));
-    }
-
-    // SAFETY: Applying the new DACL. Owner/group/SACL unchanged.
-    let err = unsafe {
-        SetNamedSecurityInfoW(
-            wide_path.as_ptr().cast_mut(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            new_dacl,
-            std::ptr::null(),
-        )
-    };
-
-    // SAFETY: new_dacl from SetEntriesInAclW, sd from GetNamedSecurityInfoW.
-    unsafe {
-        LocalFree(new_dacl.cast());
-        LocalFree(sd.cast());
-    }
-
-    if err != ERROR_SUCCESS {
-        return Err(win32_to_io(err));
-    }
-    Ok(())
+    modify_dacl(&wide_path, &display, &[ea], DACL_SECURITY_INFORMATION)
+        .map_err(|e| io::Error::other(e.to_string()))
 }
 
 fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
@@ -245,7 +195,7 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
 /// inherited ACEs to explicit and blocks further inheritance from the parent.
 /// Then it adds the explicit deny ACE, which `SetEntriesInAclW` places before
 /// explicit allows in canonical DACL order.
-fn deny_access(sid: PSID, path: &Path) -> io::Result<()> {
+fn deny_all_file_access(sid: PSID, path: &Path) -> io::Result<()> {
     let access_mask = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
 
     if path.is_dir() {
@@ -268,51 +218,18 @@ fn deny_access(sid: PSID, path: &Path) -> io::Result<()> {
 
 /// Set `PROTECTED_DACL_SECURITY_INFORMATION` on a path, blocking inheritance
 /// from parent directories. Existing inherited ACEs are converted to explicit.
+/// Delegates to `modify_dacl` with an empty entry list and the PROTECTED flag.
 fn protect_dacl(path: &Path) -> io::Result<()> {
     let wide_path = path_to_wide(path);
-    let mut current_dacl: *mut ACL = std::ptr::null_mut();
-    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let display = path.display().to_string();
 
-    // SAFETY: Reading current DACL.
-    let err = unsafe {
-        GetNamedSecurityInfoW(
-            wide_path.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &raw mut current_dacl,
-            std::ptr::null_mut(),
-            &raw mut sd,
-        )
-    };
-    if err != ERROR_SUCCESS {
-        return Err(win32_to_io(err));
-    }
-
-    // SAFETY: Re-applying the same DACL with PROTECTED flag. This converts
-    // inherited ACEs to explicit and stops further inheritance from parent.
-    let err = unsafe {
-        SetNamedSecurityInfoW(
-            wide_path.as_ptr().cast_mut(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            current_dacl,
-            std::ptr::null(),
-        )
-    };
-
-    // SAFETY: sd from GetNamedSecurityInfoW.
-    unsafe {
-        LocalFree(sd.cast());
-    }
-
-    if err != ERROR_SUCCESS {
-        return Err(win32_to_io(err));
-    }
-    Ok(())
+    modify_dacl(
+        &wide_path,
+        &display,
+        &[],
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+    )
+    .map_err(|e| io::Error::other(e.to_string()))
 }
 
 // ── Security capabilities ────────────────────────────────────────────
@@ -578,7 +495,8 @@ fn spawn_inner(
         if let Err(e) = super::traverse_acl::grant_traverse(ancestor) {
             // ACCESS_DENIED means elevation is required (PrerequisitesNotMet).
             // Other errors are transient I/O failures propagated as Setup.
-            let is_access_denied = matches!(&e, SandboxError::Setup(msg) if msg.contains(super::traverse_acl::ELEVATION_REQUIRED_MARKER));
+            let is_access_denied =
+                matches!(&e, SandboxError::Setup(msg) if msg.contains(ELEVATION_REQUIRED_MARKER));
             if is_access_denied {
                 prereq_failed.push(ancestor.clone());
             } else {
@@ -1028,7 +946,7 @@ fn apply_policy_acls(sid: PSID, policy: &SandboxPolicy) -> io::Result<()> {
     // Deny ACEs are evaluated before allow ACEs by Windows, so these
     // override any inherited allows from parent grant paths.
     for path in policy.deny_paths() {
-        deny_access(sid, path)?;
+        deny_all_file_access(sid, path)?;
     }
     Ok(())
 }

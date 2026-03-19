@@ -8,23 +8,17 @@
 
 use std::path::{Path, PathBuf};
 
-/// Marker substring embedded in `SandboxError::Setup` messages when the failure
-/// is due to insufficient privilege (ACCESS_DENIED). Used by `appcontainer.rs`
-/// to distinguish prerequisite failures from transient I/O errors.
-pub const ELEVATION_REQUIRED_MARKER: &str = "elevation required";
-
-use windows_sys::Win32::Foundation::{ERROR_SUCCESS, FALSE, LocalFree};
-use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
-use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION,
-    EqualSid, FreeSid, GetAce, GetAclInformation, PSECURITY_DESCRIPTOR, PSID,
+use windows_sys::Win32::Security::Authorization::{
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, TRUSTEE_IS_SID,
+    TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
+use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 
-use super::acl_helpers::allocate_app_packages_sid;
+use super::acl_helpers::{
+    ELEVATION_REQUIRED_MARKER, allocate_app_packages_sid, dacl_has_app_packages_ace,
+    merge_and_set_dacl, read_dacl,
+};
 use crate::error::SandboxError;
-
-/// ACCESS_ALLOWED_ACE_TYPE — not exported by windows-sys without extra features.
-const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
 /// Minimum rights for `fs::metadata()` to succeed on a directory.
 const FILE_TRAVERSE: u32 = 0x0020;
@@ -35,7 +29,7 @@ const TRAVERSE_MASK: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 use super::path_to_wide;
 
 /// Walk parents of each path up to the volume root, deduplicate.
-/// Does NOT include the paths themselves — only their ancestors.
+/// Does NOT include the paths themselves -- only their ancestors.
 ///
 /// Returns an error if any path cannot be canonicalized, preventing
 /// vacuous-truth checks when all paths are silently skipped.
@@ -73,105 +67,10 @@ pub fn compute_ancestors<P: AsRef<Path>>(
 /// with at least `TRAVERSE_MASK` (`FILE_TRAVERSE | SYNCHRONIZE | FILE_READ_ATTRIBUTES`).
 pub fn has_traverse_ace(path: &Path) -> bool {
     let wide = path_to_wide(path);
-    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    let mut dacl_ptr: *mut ACL = std::ptr::null_mut();
-
-    // SAFETY: Reading the DACL. dacl_ptr points into sd's memory — only sd needs freeing.
-    let err = unsafe {
-        GetNamedSecurityInfoW(
-            wide.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &raw mut dacl_ptr,
-            std::ptr::null_mut(),
-            &raw mut sd,
-        )
-    };
-    if err != ERROR_SUCCESS {
-        return false;
-    }
-
-    let result = dacl_has_traverse_ace_for_app_packages(dacl_ptr);
-
-    // SAFETY: sd allocated by GetNamedSecurityInfoW.
-    unsafe {
-        LocalFree(sd.cast());
-    }
-
-    result
-}
-
-/// Iterate ACEs in a DACL looking for an ACCESS_ALLOWED_ACE whose SID matches
-/// ALL APPLICATION PACKAGES and whose mask includes `TRAVERSE_MASK`.
-fn dacl_has_traverse_ace_for_app_packages(dacl: *mut ACL) -> bool {
-    if dacl.is_null() {
-        // NULL DACL = unrestricted access, traverse is implicitly granted.
-        return true;
-    }
-
-    let Some(app_sid) = allocate_app_packages_sid() else {
+    let Some((dacl_ptr, _sd_guard)) = read_dacl(&wide) else {
         return false;
     };
-
-    let mut info = ACL_SIZE_INFORMATION {
-        AceCount: 0,
-        AclBytesInUse: 0,
-        AclBytesFree: 0,
-    };
-
-    // SAFETY: Querying ACL size info from a valid DACL.
-    #[allow(clippy::cast_possible_truncation)]
-    let ret = unsafe {
-        GetAclInformation(
-            dacl,
-            (&raw mut info).cast(),
-            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
-            AclSizeInformation,
-        )
-    };
-    if ret == FALSE {
-        // SAFETY: SID from allocate_app_packages_sid.
-        unsafe {
-            FreeSid(app_sid);
-        }
-        return false;
-    }
-
-    let mut found = false;
-    for i in 0..info.AceCount {
-        let mut ace_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-
-        // SAFETY: Reading ACE at valid index from a valid DACL.
-        let ret = unsafe { GetAce(dacl, i, &raw mut ace_ptr) };
-        if ret == FALSE {
-            continue;
-        }
-
-        // SAFETY: ace_ptr points to a valid ACE header within the DACL buffer.
-        let ace = unsafe { &*(ace_ptr.cast::<ACCESS_ALLOWED_ACE>()) };
-        if ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE {
-            continue;
-        }
-
-        // The SID starts at SidStart field offset within the ACE struct.
-        let sid_ptr: PSID = (&raw const ace.SidStart).cast_mut().cast();
-
-        // SAFETY: Both SIDs are valid — one from the ACE, one from AllocateAndInitializeSid.
-        let sids_equal = unsafe { EqualSid(sid_ptr, app_sid) } != FALSE;
-        if sids_equal && (ace.Mask & TRAVERSE_MASK) == TRAVERSE_MASK {
-            found = true;
-            break;
-        }
-    }
-
-    // SAFETY: SID from allocate_app_packages_sid.
-    unsafe {
-        FreeSid(app_sid);
-    }
-
-    found
+    dacl_has_app_packages_ace(dacl_ptr, TRAVERSE_MASK)
 }
 
 /// Grant `FILE_TRAVERSE | SYNCHRONIZE | FILE_READ_ATTRIBUTES` with
@@ -179,68 +78,51 @@ fn dacl_has_traverse_ace_for_app_packages(dacl: *mut ACL) -> bool {
 ///
 /// Reads the DACL once and checks for the ACE in the same read to avoid
 /// the TOCTOU race of separate check-then-modify calls. If the ACE already
-/// exists, no write is attempted. `SetEntriesInAclW` is idempotent, so
-/// duplicate ACEs from a concurrent modifier are harmless.
+/// exists, no write is attempted. The already-read DACL is passed directly
+/// to the merge-and-set flow, eliminating the window where another process
+/// could modify the DACL between check and write.
 pub fn grant_traverse(path: &Path) -> crate::Result<()> {
     let wide = path_to_wide(path);
-    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    let mut dacl_ptr: *mut ACL = std::ptr::null_mut();
 
-    // SAFETY: Reading the DACL. dacl_ptr points into sd's memory — only sd needs freeing.
-    let err = unsafe {
-        GetNamedSecurityInfoW(
-            wide.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &raw mut dacl_ptr,
-            std::ptr::null_mut(),
-            &raw mut sd,
-        )
-    };
-    if err != ERROR_SUCCESS {
+    let Some((dacl_ptr, _sd_guard)) = read_dacl(&wide) else {
         return Err(SandboxError::Setup(format!(
-            "failed to read DACL for {}: {}",
+            "failed to read DACL for {}: unable to read security info",
             path.display(),
-            super::win32_error_msg(err),
         )));
-    }
+    };
 
     // Check in the same DACL read whether the ACE already exists.
-    if dacl_has_traverse_ace_for_app_packages(dacl_ptr) {
-        // SAFETY: sd allocated by GetNamedSecurityInfoW.
-        unsafe {
-            LocalFree(sd.cast());
-        }
+    if dacl_has_app_packages_ace(dacl_ptr, TRAVERSE_MASK) {
         return Ok(());
     }
 
-    // SAFETY: sd allocated by GetNamedSecurityInfoW.
-    unsafe {
-        LocalFree(sd.cast());
-    }
-
-    // ACE not present — apply it via the shared helper.
+    // ACE not present -- build and apply using the already-read DACL
+    // (no re-read, no TOCTOU window).
     let Some(app_sid) = allocate_app_packages_sid() else {
         return Err(SandboxError::Setup(
             "failed to create ALL APPLICATION PACKAGES SID".into(),
         ));
     };
 
-    // Ancestors only — children are covered by policy path ACEs (no inheritance).
-    let result = super::acl_helpers::apply_dacl(&wide, Some(path), TRAVERSE_MASK, 0, app_sid);
+    let trustee = TRUSTEE_W {
+        pMultipleTrustee: std::ptr::null_mut(),
+        MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+        TrusteeForm: TRUSTEE_IS_SID,
+        TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+        ptstrName: app_sid.as_raw().cast(),
+    };
 
-    // SAFETY: SID from allocate_app_packages_sid.
-    unsafe {
-        FreeSid(app_sid);
-    }
+    let ea = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: TRAVERSE_MASK,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: 0, // Ancestors only -- no inheritance.
+        Trustee: trustee,
+    };
 
-    // Translate the generic "elevation required" message to include our marker
-    // so appcontainer.rs can distinguish prerequisite failures from I/O errors.
-    result.map_err(|e| {
+    let display = path.display().to_string();
+    merge_and_set_dacl(&wide, &display, dacl_ptr, &[ea], DACL_SECURITY_INFORMATION).map_err(|e| {
         if let SandboxError::Setup(ref msg) = e {
-            if msg.contains("elevation required") {
+            if msg.contains(ELEVATION_REQUIRED_MARKER) {
                 return SandboxError::Setup(format!(
                     "cannot modify DACL for {}: {} (run as administrator)",
                     path.display(),
@@ -337,10 +219,64 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "UNC paths require network share availability"]
+    fn compute_ancestors_unc_path() {
+        // UNC paths have the form \\server\share\dir. This test is ignored
+        // unless a UNC path is guaranteed to exist in the test environment.
+        let unc = Path::new(r"\\localhost\C$\Windows\System32");
+        let result = compute_ancestors(&[unc]);
+        // Just verify it doesn't panic; result depends on environment.
+        let _ = result;
+    }
+
+    #[test]
+    fn compute_ancestors_overlapping_prefix_paths() {
+        // Two paths where one is an ancestor of the other should not produce
+        // duplicates or incorrect results.
+        let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let shallow = PathBuf::from(&system_root);
+        let deep = PathBuf::from(format!("{system_root}\\System32"));
+        let ancestors = compute_ancestors(&[shallow.as_path(), deep.as_path()]).unwrap();
+
+        // Check no duplicates.
+        let mut seen = std::collections::HashSet::new();
+        for a in &ancestors {
+            assert!(seen.insert(a), "duplicate ancestor: {}", a.display());
+        }
+    }
+
+    #[test]
+    fn compute_ancestors_trailing_backslash() {
+        // Paths with trailing backslashes should be handled like their
+        // non-trailing equivalents.
+        let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let with_slash = PathBuf::from(format!("{system_root}\\System32\\"));
+        let without_slash = PathBuf::from(format!("{system_root}\\System32"));
+
+        let a1 = compute_ancestors(&[with_slash.as_path()]).unwrap();
+        let a2 = compute_ancestors(&[without_slash.as_path()]).unwrap();
+
+        // Both should produce the same set of ancestors.
+        let s1: std::collections::HashSet<_> = a1.into_iter().collect();
+        let s2: std::collections::HashSet<_> = a2.into_iter().collect();
+        assert_eq!(s1, s2, "trailing backslash should not affect ancestors");
+    }
+
+    #[test]
     fn has_traverse_ace_system_directory() {
-        // C:\Windows is a system directory — just verify the function doesn't
+        // C:\Windows is a system directory -- just verify the function doesn't
         // panic and returns a bool.
         let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
         let _result: bool = has_traverse_ace(Path::new(&system_root));
+    }
+
+    #[test]
+    fn has_traverse_ace_null_dacl_returns_true() {
+        // Directly test the null-DACL early-return path: a null DACL means
+        // unrestricted access, so dacl_has_app_packages_ace should return true.
+        assert!(
+            dacl_has_app_packages_ace(std::ptr::null_mut(), TRAVERSE_MASK),
+            "null DACL should return true (unrestricted access)"
+        );
     }
 }

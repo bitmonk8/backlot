@@ -315,7 +315,7 @@ pub fn cleanup_stale() -> Result<()> {
 #[cfg(target_os = "windows")]
 pub use windows::elevation::is_elevated;
 #[cfg(target_os = "windows")]
-pub use windows::nul_device::{
+pub use windows::prerequisites::{
     appcontainer_prerequisites_met, appcontainer_prerequisites_met_for_policy,
     grant_appcontainer_prerequisites, grant_appcontainer_prerequisites_for_policy,
 };

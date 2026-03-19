@@ -4,76 +4,7 @@ Issues grouped by code area, ordered by impact. Issues within a group touch over
 
 ---
 
-## 1. Windows: ACL Infrastructure (`acl_helpers.rs`, `traverse_acl.rs`, `nul_device.rs`)
-
-These issues all involve the DACL read-modify-write pipeline, ACE checking, and handle/resource lifetime management. Fixing the shared primitive (extract `modify_dacl`) first unblocks the ACE-check unification and TOCTOU fix. RAII wrappers should go in early since every other change here benefits from them. This group ranks first because it contains resource leak vectors, a correctness issue (SDDL check is less precise than direct iteration), a TOCTOU race, and is foundational — the AppContainer spawn group depends on these primitives.
-
-### No RAII wrappers for Win32 handles and allocations
-
-Multiple functions manage `HANDLE`, `PSID`, and `PSECURITY_DESCRIPTOR` with manual `CloseHandle`/`FreeSid`/`LocalFree` calls. A `Drop`-based wrapper would eliminate leak risk on early returns.
-
-**Fix:** Add newtype wrappers implementing `Drop` for each resource kind.
-**Files:** `lot/src/windows/nul_device.rs`, `lot/src/windows/traverse_acl.rs`, `lot/src/windows/appcontainer.rs`
-
-### Extract shared DACL read-modify-write primitive
-
-`appcontainer.rs` has `apply_ace`/`grant_access`/`deny_all_file_access`/`protect_dacl` (~160 lines) duplicating the DACL read-modify-write pattern in `acl_helpers::apply_dacl`. The `appcontainer.rs` version supports `SET_ACCESS`, `DENY_ACCESS`, `REVOKE_ACCESS` modes plus `PROTECTED_DACL_SECURITY_INFORMATION`, while `acl_helpers` only supports `GRANT_ACCESS`.
-
-**Fix:** Extract a low-level `modify_dacl(path, entries, flags)` function that handles the Win32 calls (`GetNamedSecurityInfo`/`SetEntriesInAcl`/`SetNamedSecurityInfo`/`LocalFree`). Both modules build their own `EXPLICIT_ACCESS_W` arrays and call it.
-**Files:** `lot/src/windows/appcontainer.rs`, `lot/src/windows/acl_helpers.rs`
-
-### Two different ACE-check strategies (SDDL vs direct iteration)
-
-NUL device check uses SDDL string matching (`sddl_has_ac_allow`). Traverse ACE check uses direct ACE iteration (`dacl_has_traverse_ace_for_app_packages` via `GetAce`/`EqualSid`). The SDDL approach is less precise (doesn't verify specific access mask, doesn't model deny ACE ordering).
-
-**Fix:** Unify on direct iteration. Parameterize `dacl_has_traverse_ace_for_app_packages` to accept an access mask argument, then use it for NUL device checks too. Remove `sd_contains_app_packages_ace`, `sddl_has_ac_allow`.
-**Files:** `lot/src/windows/nul_device.rs`, `lot/src/windows/traverse_acl.rs`
-
-### Residual TOCTOU in `grant_traverse` DACL handling
-
-`grant_traverse` reads the DACL once and checks for the ACE in-place (the original double-read was fixed). However, it frees the security descriptor, then `apply_dacl` re-reads the DACL to merge the new ACE. Between the free and re-read, another process could modify the DACL. Low impact (worst case: duplicate benign ACE).
-
-**Fix:** Pass the already-read DACL to `apply_dacl` (or a variant) instead of re-reading. Requires API change to the merge-and-set flow.
-**File:** `lot/src/windows/traverse_acl.rs`
-
-### `ELEVATION_REQUIRED_MARKER` belongs in `acl_helpers.rs`
-
-The constant is defined in `traverse_acl.rs` but consumed by `appcontainer.rs`, and `acl_helpers.rs` produces the same `"elevation required"` string as a hardcoded literal independently.
-
-**Fix:** Move constant to `acl_helpers.rs`, reference from both consumers.
-**Files:** `lot/src/windows/traverse_acl.rs`, `lot/src/windows/acl_helpers.rs`
-
-### Prerequisites API in `nul_device.rs`
-
-`grant_appcontainer_prerequisites`, `appcontainer_prerequisites_met`, and `_for_policy` variants orchestrate both NUL device and traverse ACL grants. Only the NUL device logic matches the module name.
-
-**Fix:** Move prerequisites API to a dedicated `prerequisites.rs` module. Move `_for_policy` wrappers to `appcontainer.rs` (they take `SandboxPolicy` and belong with the AppContainer lifecycle).
-**File:** `lot/src/windows/nul_device.rs`
-
-### Tests: `compute_ancestors` missing edge cases
-
-Root path is tested. Missing: UNC paths, overlapping prefix paths, paths with trailing backslashes.
-
-**Fix:** Add the three missing test cases. UNC path tests may need `#[ignore]` unless a UNC path is guaranteed to exist.
-**File:** `lot/src/windows/traverse_acl.rs`
-
-### Tests: `has_traverse_ace` lacks value-asserting test
-
-A smoke test (`has_traverse_ace_system_directory`) exists but only verifies no-panic, not a specific return value.
-
-**Fix:** Round-trip test (grant ACE, then check) would be meaningful but requires elevation. Alternatively, test the null-DACL early-return path directly.
-**File:** `lot/src/windows/traverse_acl.rs`
-
-### Tests: No test for `grant_appcontainer_prerequisites` error path
-
-No test verifies it returns `Err` when non-elevated.
-
-**Fix:** Call from non-elevated context, assert `is_err()`.
-**File:** `lot/src/windows/nul_device.rs`
-
----
-
-## 2. Env/Path Validation (`lib.rs` → `env_check.rs`, `policy.rs`)
+## 1. Env/Path Validation (`lib.rs` → `env_check.rs`, `policy.rs`)
 
 All these issues involve the path containment/validation functions in `lib.rs`. The extraction to `env_check.rs` is the anchor — the correctness fixes, deduplication, and naming fixes are best done as part of that extraction. This group ranks second because `path_contains` canonicalization fallback is security-relevant: incorrect path containment checks could allow access to paths outside the sandbox policy. The `is_parent_of`/`path_contains` duplication across `lib.rs` and `policy.rs` risks divergent behavior in policy validation vs runtime checks.
 
@@ -146,7 +77,7 @@ The test grants only `/usr` as a read_path and runs `/bin/sleep`. On distros whe
 
 ---
 
-## 3. Unix: SandboxedChild Lifecycle (`linux/mod.rs`, `macos/mod.rs`, `unix.rs`)
+## 2. Unix: SandboxedChild Lifecycle (`linux/mod.rs`, `macos/mod.rs`, `unix.rs`)
 
 All these issues involve the wait/kill/drop lifecycle shared between Linux and macOS. The deduplication issue is the anchor — extracting shared code to `unix.rs` naturally addresses the `child_bail!` macro, `try_wait` ordering, `Drop` consistency, and `setup_stdio_pipes` cleanup in one pass. This group ranks third because `try_wait` ordering is a correctness issue (albeit low-probability), and the ~160-line duplication means every future lifecycle change must be applied twice.
 
@@ -194,21 +125,15 @@ No test verifies that calling `wait()` twice returns an error.
 
 ---
 
-## 4. Windows: AppContainer Spawn (`appcontainer.rs`)
+## 3. Windows: AppContainer Spawn (`appcontainer.rs`)
 
-Issues specific to the AppContainer process creation and ACL grant/deny flow. The DACL primitive extraction (group 1) should land first since several fixes here depend on it. Ranks here because TEST_LOCK poisoning cascades all Windows unit tests, and missing deny-mode test coverage leaves a key code path unverified.
+Issues specific to the AppContainer process creation and ACL grant/deny flow. The DACL primitive extraction has landed (shared `modify_dacl` in `acl_helpers.rs`). TEST_LOCK poisoning cascades all Windows unit tests, and missing deny-mode test coverage leaves a key code path unverified.
 
 ### `create_sandboxed_process` takes 9 arguments including 6 pipe handles
 
 The function passes child and parent pipe handles individually.
 
 **Fix:** Bundle the 6 pipe handles into a struct.
-**File:** `lot/src/windows/appcontainer.rs`
-
-### `deny_access()` → `deny_all_file_access()`
-
-`deny_access` is generic. It denies `FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE`. Private function, mechanical rename.
-
 **File:** `lot/src/windows/appcontainer.rs`
 
 ### Spawn-time grant loop checks NUL device unconditionally
@@ -246,9 +171,30 @@ Integration tests skip on this error rather than verifying it.
 **Fix:** Construct a policy referencing a system directory requiring elevation from a non-elevated context, assert `PrerequisitesNotMet`.
 **Files:** `lot/src/error.rs`, `lot/src/windows/appcontainer.rs`
 
+### `_for_policy` prerequisite functions exclude deny paths
+
+`appcontainer_prerequisites_met_for_policy` and `grant_appcontainer_prerequisites_for_policy` use `policy.grant_paths()` which excludes deny paths. But `spawn_inner` computes ancestors from all paths including deny paths. If a deny path has ancestors under system directories requiring elevation, the prerequisites check will report "met" while `spawn` will fail with `PrerequisitesNotMet`.
+
+**Fix:** Include deny paths in the `_for_policy` functions' path collection.
+**File:** `lot/src/windows/prerequisites.rs`
+
+### `OwnedSecurityDescriptor` and `OwnedAcl` could share implementation
+
+Both wrap a pointer and call `LocalFree` on drop. A single generic `LocalFreeGuard<T>` would eliminate ~30 lines of near-duplicate code.
+
+**Fix:** Unify into a generic wrapper. Marginal benefit given the types are small.
+**File:** `lot/src/windows/acl_helpers.rs`
+
+### `dacl_has_app_packages_ace` ACE iteration loop untested with real DACLs
+
+Only the null-DACL early-return path is tested. The entire ACE iteration loop (GetAclInformation, GetAce, EqualSid, mask matching) has no direct test. Round-trip testing requires elevation to grant an ACE then check it.
+
+**Fix:** Add round-trip test behind `#[ignore]` or test with a mock DACL if feasible.
+**File:** `lot/src/windows/acl_helpers.rs`
+
 ---
 
-## 5. Integration Tests (`tests/integration.rs`)
+## 4. Integration Tests (`tests/integration.rs`)
 
 Duplicate helpers increase maintenance cost for every new test. The symlink test providing zero coverage in CI and the missing Unix env-var coverage leave gaps in platform-specific validation.
 
@@ -282,7 +228,7 @@ Duplicate helpers increase maintenance cost for every new test. The symlink test
 
 ---
 
-## 6. CLI (`lot-cli/`)
+## 5. CLI (`lot-cli/`)
 
 CI not testing `lot-cli` means regressions ship undetected. The config extraction is optional.
 
@@ -302,7 +248,7 @@ All test jobs run `cargo test -p lot`. The `lot-cli` crate tests are never execu
 
 ---
 
-## 7. Linux: Namespace Setup (`linux/namespace.rs`)
+## 6. Linux: Namespace Setup (`linux/namespace.rs`)
 
 Minor duplication and a test gap. Low impact — the mount-point pattern is stable and the conditional-mount behavior is exercised indirectly by other tests.
 
@@ -322,7 +268,7 @@ Conditional mounts based on `exec_paths.is_empty()` and `allow_network` are unte
 
 ---
 
-## 8. macOS: Seatbelt (`macos/seatbelt.rs`)
+## 7. macOS: Seatbelt (`macos/seatbelt.rs`)
 
 Single test gap. Deny paths work in integration tests but the SBPL generation is not unit-tested for deny rule ordering.
 
@@ -335,7 +281,7 @@ No test sets `deny_paths` on the policy and verifies the generated profile conta
 
 ---
 
-## 9. Windows: Command-line (`cmdline.rs`)
+## 8. Windows: Command-line (`cmdline.rs`)
 
 Edge-case test gap. Non-BMP characters are uncommon in process arguments; unpaired surrogates are rare but could cause panics if mishandled.
 
@@ -348,7 +294,7 @@ Tests cover spaces, quotes, backslashes, empty args. Missing: non-BMP characters
 
 ---
 
-## 10. Error Types (`error.rs`)
+## 9. Error Types (`error.rs`)
 
 Optional simplification. The structured fields are unused today but could be useful if callers start matching on them.
 

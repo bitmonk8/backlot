@@ -5,6 +5,7 @@ pub mod elevation;
 mod job;
 pub mod nul_device;
 mod pipe;
+pub mod prerequisites;
 mod sentinel;
 pub mod traverse_acl;
 
