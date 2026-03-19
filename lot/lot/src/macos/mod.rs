@@ -305,6 +305,7 @@ impl MacSandboxedChild {
     ///
     /// macOS seatbelt has no post-exit cleanup, so this is just kill + wait.
     /// Consumes `self`; Drop still runs but sees already-cleaned-up state.
+    #[allow(clippy::unnecessary_wraps)] // Signature must match SandboxedChild::kill_and_cleanup
     pub fn kill_and_cleanup(mut self) -> crate::Result<()> {
         self.inner.close_fds();
         self.inner.kill_and_reap();
