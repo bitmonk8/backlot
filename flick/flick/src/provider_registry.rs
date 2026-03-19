@@ -634,6 +634,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_before_any_set_returns_no_secret_key() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let registry = ProviderRegistry::load(dir.path().to_path_buf());
+        let result = registry.get("anthropic").await;
+        assert!(matches!(result, Err(CredentialError::NoSecretKey(_))));
+    }
+
+    #[tokio::test]
     async fn get_not_found() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let registry = ProviderRegistry::load(dir.path().to_path_buf());

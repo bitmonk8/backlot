@@ -196,6 +196,14 @@ async fn end_to_end_context_persistence() {
     .expect("second turn");
 
     assert_eq!(context2.messages.len(), 4);
+
+    let captured = provider2.captured_params();
+    assert_eq!(captured.len(), 1);
+    let msgs = &captured[0].messages;
+    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs[0].role, flick::context::Role::User);
+    assert_eq!(msgs[1].role, flick::context::Role::Assistant);
+    assert_eq!(msgs[2].role, flick::context::Role::User);
 }
 
 /// Context loaded from disk file continues conversation.
@@ -239,6 +247,14 @@ async fn end_to_end_context_file_loading() {
 
     assert_eq!(result.status, ResultStatus::Complete);
     assert_eq!(context.messages.len(), 4);
+
+    let captured = provider.captured_params();
+    assert_eq!(captured.len(), 1);
+    let msgs = &captured[0].messages;
+    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs[0].role, flick::context::Role::User);
+    assert_eq!(msgs[1].role, flick::context::Role::Assistant);
+    assert_eq!(msgs[2].role, flick::context::Role::User);
 }
 
 /// Context with `ToolUse` + `ToolResult` history loads and continues correctly.

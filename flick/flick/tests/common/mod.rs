@@ -12,7 +12,7 @@ use flick::model_registry::ModelInfo;
 use flick::provider::{DynProvider, ModelResponse, RequestParams, ToolDefinition, UsageResponse};
 
 /// Owned mirror of `RequestParams` for test assertions.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CapturedParams {
     pub model: String,
     pub max_tokens: Option<u32>,
@@ -57,8 +57,8 @@ impl MockProvider {
 
     /// Returns all captured `RequestParams` from `call_boxed` calls.
     pub fn captured_params(&self) -> Vec<CapturedParams> {
-        let mut guard = self.captured.lock().expect("captured mutex poisoned");
-        std::mem::take(&mut *guard)
+        let guard = self.captured.lock().expect("captured mutex poisoned");
+        guard.clone()
     }
 }
 

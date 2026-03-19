@@ -113,3 +113,23 @@ The `code()` method maps these new variants to string codes, but no test verifie
 `record_with_resume_hash` intermittently fails on ubuntu-latest CI runners. The test writes to a tempdir via `tokio::fs` async append, then reads back and asserts the line contains `"resume_hash":"somehash"`. Passes consistently on macOS, Windows, and local ubuntu. Likely a filesystem timing issue with async I/O on CI ephemeral runners. Observed 2026-03-18 (CI run 23239580696).
 
 **Fix:** Either add an explicit `file.flush().await` / `file.shutdown().await` before reading back, or switch the test to synchronous I/O since it only writes one line.
+
+---
+
+## 13. Integration tests don't verify first-turn provider receives only one user message
+
+**File:** `flick/tests/integration.rs` (`end_to_end_context_persistence`, `end_to_end_context_file_loading`)
+**Category:** Testing
+
+The second-turn provider's `captured_params()` is checked to confirm full history was transmitted, but the first-turn provider is not checked to confirm it received exactly one user message (no stale context leaking in).
+
+**Fix:** Add `captured_params()` assertion on the first-turn provider in both tests.
+
+---
+
+## 14. `assert!(matches!(...))` gives no diagnostic on failure in provider_registry tests
+
+**File:** `flick/src/provider_registry.rs` (`get_before_any_set_returns_no_secret_key`, `get_not_found`)
+**Category:** Testing
+
+Using `assert!(matches!(result, Err(...)))` prints only "assertion failed: false" on failure with no detail about the actual value. Adding a format string or using `assert!(matches!(...), "expected X, got {result:?}")` would improve diagnostics.

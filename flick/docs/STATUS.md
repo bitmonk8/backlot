@@ -28,9 +28,8 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - Messages API: system prompt serialized as content-block array (enables prompt caching), `tool_choice` support (`auto`/`any`/`none`/`tool`)
 - Chat Completions: `tool_choice` support mapped to equivalent values (`auto`/`required`/`none`/function spec)
 - `ToolChoice` enum in provider layer, `ToolChoiceConfig` in config layer with serde support and validation
-- 311 tests passing (254 lib, 26 bin, 20 runner, 11 integration), zero clippy errors
+- 312 tests passing (255 lib, 26 bin, 20 runner, 11 integration), zero clippy errors
 
 ## Next Work
 
 - reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
-- Backlog items (see `BACKLOG.md` — 3 items in 1 active cluster)

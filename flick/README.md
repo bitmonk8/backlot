@@ -414,7 +414,7 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-311 tests (254 lib, 26 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
+312 tests (255 lib, 26 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
 
 ## License
 
