@@ -131,7 +131,8 @@ JSON-RPC 2.0 over stdio (one JSON object per line).
 Internal state:
 
 - `NuProcess`: holds `SandboxedChild` via `ChildHandle`, stdin `File` via
-  `StdinHandle`, stdout `BufReader`, grant, project root, and session temp dir.
+  `StdinHandle`, stdout `BufReader`, stderr buffer (`Arc<Mutex<String>>`),
+  grant, project root, and session temp dir.
 - `SessionState` (behind `tokio::sync::Mutex`): holds `Option<NuProcess>`,
   generation counter, and shared `inflight_child`/`inflight_stdin` handles.
 - The inflight handles enable out-of-band `kill()` — close stdin to trigger EOF
@@ -162,6 +163,22 @@ project root, constructs a `SandboxCommand` for `nu --mcp`, and calls
 `try_wait()` for up to 5 seconds to reap the child (ensures handles are released
 before temp dir cleanup on Windows). Abandons silently if the process does not
 exit within the deadline. `bounded_reap` is a standalone testable function.
+
+### Stderr Capture
+
+Nu stderr is piped (`SandboxStdio::Piped`) and read by a background thread that
+appends lines to a shared `Arc<Mutex<String>>` buffer, capped at 64 KiB
+(`MAX_STDERR_BUF`) with oldest-line eviction via `append_capped`. The
+`drain_stderr` helper takes all accumulated content, returning `Option<String>`.
+
+Drain points:
+- `rpc_call` error paths (stdin write failure, stdout read failure) — stderr
+  content is appended to the error message for debuggability.
+- `rpc_call` success path — `NuOutput.stderr` is populated with any warnings.
+- `NuOutput` consumers can inspect the `stderr` field on both success and error.
+
+The background thread exits on EOF or read error (process death). No blocking
+of the main RPC read loop occurs.
 
 ### Sandbox Policy
 

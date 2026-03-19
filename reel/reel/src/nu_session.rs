@@ -22,6 +22,9 @@ use tokio::sync::Mutex;
 pub struct NuOutput {
     pub content: String,
     pub is_error: bool,
+    /// Captured stderr from the nu process, if any was written.
+    /// Populated on both success (warnings) and error paths.
+    pub stderr: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +72,10 @@ struct McpToolResult {
 /// Maximum number of non-matching lines to skip before giving up.
 const MAX_SKIPPED_LINES: usize = 64;
 
+/// Maximum bytes retained in the stderr buffer. Older content is discarded
+/// when new lines would exceed this limit.
+const MAX_STDERR_BUF: usize = 64 * 1024;
+
 /// Shared handle to the child process, accessible for killing from outside
 /// the blocking I/O thread.
 type ChildHandle = Arc<std::sync::Mutex<Option<lot::SandboxedChild>>>;
@@ -77,9 +84,15 @@ type ChildHandle = Arc<std::sync::Mutex<Option<lot::SandboxedChild>>>;
 /// child even if the `NuProcess` is trapped in a `spawn_blocking` closure.
 type StdinHandle = Arc<std::sync::Mutex<Option<File>>>;
 
+/// Shared buffer accumulating stderr output from the nu process.
+/// A background thread reads stderr lines and appends them here.
+type StderrBuf = Arc<std::sync::Mutex<String>>;
+
 struct NuProcess {
     stdin: StdinHandle,
     stdout: BufReader<File>,
+    /// Accumulated stderr from the background reader thread.
+    stderr_buf: StderrBuf,
     next_id: u64,
     /// The grant under which this process was spawned (determines sandbox policy).
     grant: ToolGrant,
@@ -213,6 +226,62 @@ fn send_line(stdin: &StdinHandle, payload: &[u8]) -> Result<(), String> {
         sink.flush()
     })()
     .map_err(|e| format!("failed to write to nu stdin: {e}"))
+}
+
+/// Drain accumulated stderr content, returning `Some` if non-empty.
+fn drain_stderr(buf: &StderrBuf) -> Option<String> {
+    let mut guard = buf
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.is_empty() {
+        None
+    } else {
+        Some(std::mem::take(&mut *guard))
+    }
+}
+
+/// Append `line` to `buf`, discarding oldest content to stay within `MAX_STDERR_BUF`.
+fn append_capped(buf: &mut String, line: &str) {
+    buf.push_str(line);
+    if buf.len() > MAX_STDERR_BUF {
+        let excess = buf.len() - MAX_STDERR_BUF;
+        // Find the next newline after the excess point to avoid
+        // splitting a line mid-way.
+        let drop_to = buf[excess..].find('\n').map_or(excess, |i| excess + i + 1);
+        buf.drain(..drop_to);
+    }
+}
+
+/// Spawn a background thread that reads stderr lines into a shared buffer.
+/// Returns the buffer handle. The thread exits on EOF or read error.
+fn spawn_stderr_reader(stderr: File) -> StderrBuf {
+    let buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+    let buf_clone = Arc::clone(&buf);
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let mut guard = buf_clone
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    append_capped(&mut guard, &line);
+                }
+            }
+        }
+    });
+    buf
+}
+
+/// Build an error string, appending any accumulated stderr for context.
+fn err_with_stderr(error: &str, buf: &StderrBuf) -> String {
+    match drain_stderr(buf) {
+        Some(s) => format!("{error}\nnu stderr:\n{s}"),
+        None => error.to_string(),
+    }
 }
 
 impl NuSession {
@@ -513,14 +582,18 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
     let request_bytes =
         serde_json::to_vec(&request).map_err(|e| format!("failed to serialize request: {e}"))?;
 
-    send_line(&proc.stdin, &request_bytes)?;
+    if let Err(e) = send_line(&proc.stdin, &request_bytes) {
+        return Err(err_with_stderr(&e, &proc.stderr_buf));
+    }
 
-    let response = read_response(&mut proc.stdout, request_id)?;
+    let response = read_response(&mut proc.stdout, request_id)
+        .map_err(|e| err_with_stderr(&e, &proc.stderr_buf))?;
 
     if let Some(err) = response.error {
         return Ok(NuOutput {
             content: err.message,
             is_error: true,
+            stderr: drain_stderr(&proc.stderr_buf),
         });
     }
 
@@ -540,6 +613,7 @@ fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
         return Ok(NuOutput {
             content: text,
             is_error,
+            stderr: drain_stderr(&proc.stderr_buf),
         });
     }
 
@@ -727,7 +801,7 @@ async fn spawn_nu_process(
 
         cmd.cwd(&project_root);
         cmd.stdout(SandboxStdio::Piped);
-        cmd.stderr(SandboxStdio::Null);
+        cmd.stderr(SandboxStdio::Piped);
         cmd.stdin(SandboxStdio::Piped);
         // Override TEMP/TMP before forward_common_env — explicit env takes
         // precedence over forwarded values. This redirects nu's temp I/O to
@@ -749,6 +823,9 @@ async fn spawn_nu_process(
 
         let stdin = child.take_stdin().ok_or("failed to capture nu stdin")?;
         let stdout = child.take_stdout().ok_or("failed to capture nu stdout")?;
+        let stderr = child.take_stderr().ok_or("failed to capture nu stderr")?;
+
+        let stderr_buf = spawn_stderr_reader(stderr);
 
         let child_handle: ChildHandle = Arc::new(std::sync::Mutex::new(Some(child)));
         let stdin_handle: StdinHandle = Arc::new(std::sync::Mutex::new(Some(stdin)));
@@ -756,6 +833,7 @@ async fn spawn_nu_process(
         let mut proc = NuProcess {
             stdin: stdin_handle,
             stdout: BufReader::new(stdout),
+            stderr_buf,
             next_id: 1,
             grant,
             project_root,
@@ -1255,6 +1333,120 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // drain_stderr tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn drain_stderr_returns_none_on_empty() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+        assert!(drain_stderr(&buf).is_none());
+    }
+
+    #[test]
+    fn drain_stderr_returns_content_and_clears() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new("error line\n".into()));
+        let drained = drain_stderr(&buf);
+        assert_eq!(drained.as_deref(), Some("error line\n"));
+        // Buffer should be empty after drain.
+        assert!(drain_stderr(&buf).is_none());
+    }
+
+    #[test]
+    fn drain_stderr_accumulates_multiple_lines() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+        {
+            let mut guard = buf.lock().unwrap();
+            guard.push_str("line 1\n");
+            guard.push_str("line 2\n");
+        }
+        let drained = drain_stderr(&buf).unwrap();
+        assert!(drained.contains("line 1"));
+        assert!(drained.contains("line 2"));
+    }
+
+    // -----------------------------------------------------------------------
+    // append_capped tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn append_capped_within_limit() {
+        let mut buf = String::new();
+        append_capped(&mut buf, "short line\n");
+        assert_eq!(buf, "short line\n");
+    }
+
+    #[test]
+    fn append_capped_truncates_oldest_on_overflow() {
+        let mut buf = String::new();
+        let line = format!("{}\n", "x".repeat(999));
+        let lines_needed = MAX_STDERR_BUF / line.len() + 2;
+        for _ in 0..lines_needed {
+            append_capped(&mut buf, &line);
+        }
+        assert!(
+            buf.len() <= MAX_STDERR_BUF,
+            "buf.len()={} exceeds cap {MAX_STDERR_BUF}",
+            buf.len()
+        );
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn append_capped_single_huge_line_truncates() {
+        let mut buf = String::new();
+        let huge = "y".repeat(MAX_STDERR_BUF + 500);
+        append_capped(&mut buf, &huge);
+        assert!(buf.len() <= MAX_STDERR_BUF);
+    }
+
+    // -----------------------------------------------------------------------
+    // err_with_stderr tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn err_with_stderr_without_stderr_returns_error_only() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+        let result = err_with_stderr("connection failed", &buf);
+        assert_eq!(result, "connection failed");
+    }
+
+    #[test]
+    fn err_with_stderr_with_stderr_appends_content() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new("panic at line 42\n".into()));
+        let result = err_with_stderr("connection failed", &buf);
+        assert_eq!(result, "connection failed\nnu stderr:\npanic at line 42\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // spawn_stderr_reader tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spawn_stderr_reader_captures_file_content() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp, b"warning: something\nerror: boom\n").unwrap();
+        // Open a fresh read handle from the same path.
+        let reader_file = File::open(tmp.path()).unwrap();
+        let buf = spawn_stderr_reader(reader_file);
+        // The background thread reads until EOF; give it a moment.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let content = drain_stderr(&buf);
+        assert_eq!(
+            content.as_deref(),
+            Some("warning: something\nerror: boom\n")
+        );
+    }
+
+    #[test]
+    fn spawn_stderr_reader_empty_file_yields_none() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let reader_file = File::open(tmp.path()).unwrap();
+        let buf = spawn_stderr_reader(reader_file);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(drain_stderr(&buf).is_none());
+    }
+
+    // -----------------------------------------------------------------------
     // Generation-based session invalidation tests
     // -----------------------------------------------------------------------
 
@@ -1504,6 +1696,30 @@ mod tests {
         let out = result.unwrap();
         assert!(out.is_error);
         assert!(out.content.contains("test error"));
+    }
+
+    #[tokio::test]
+    async fn integration_evaluate_stderr_none_on_success() {
+        skip_no_nu!();
+        let tmp = tmp_sandbox_project();
+        let (session, _tool) = isolated_session();
+        let result = try_eval(&session, "1 + 1", 30, tmp.path(), ToolGrant::TOOLS).await;
+        let out = result.unwrap();
+        assert!(!out.is_error);
+        // A simple arithmetic command should produce no stderr beyond
+        // framework log lines (INFO/DEBUG from rmcp).  Check that no line
+        // starts with an ERROR-level log prefix or a nu error marker.
+        if let Some(ref stderr) = out.stderr {
+            for line in stderr.lines() {
+                let trimmed = line.trim();
+                assert!(
+                    !trimmed.starts_with("Error")
+                        && !trimmed.starts_with("ERROR")
+                        && !trimmed.starts_with("error:"),
+                    "unexpected error line in stderr: {line}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

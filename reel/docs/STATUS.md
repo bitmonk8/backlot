@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 247 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
+**Core agent runtime and tooling implemented. All 258 tests pass locally.** Lot dependency at rev `c3cc94d`. Flick dependency at rev `287bfbd` (adds Clone derives for config types). CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel (ETXTBSY fix in lot).
 
 ## What Is Implemented
 
@@ -40,7 +40,8 @@
 - **Tool robustness** — All file tools (Read, Write, Edit, Glob, Grep) now accept an optional `timeout` parameter (default 120s, max 600s), matching the existing NuShell tool behavior (issue #26). `reel glob` has a default depth limit of 20 preventing runaway traversal in deep trees with symlink cycles; model can override via `depth` parameter (issue #28).
 - **Timeout schema deduplication** — Extracted `with_timeout()` helper in `tools.rs`, replacing 6 identical inline timeout JSON property fragments (issue #78). Added `parse_timeout` unit tests covering default, valid, clamped, zero, non-integer, and boundary values (issue #79).
 - **Timeout correctness and coverage** — `parse_timeout` now clamps to `[1, MAX_NU_TIMEOUT_SECS]`, preventing zero-timeout immediate expiration (issue #80). Added tests for negative number fallback, `with_timeout` description field, non-object properties value, exact-minimum boundary, and float fallback (issues #81, #82, #83).
-- **Test counts** — 247 tests total (232 reel + 15 reel-cli), all pass locally.
+- **NuSession stderr capture** — Nu stderr is now piped (not discarded) and captured by a background reader thread into a shared `Arc<Mutex<String>>` buffer. `drain_stderr` helper drains accumulated content. `NuOutput` gains `stderr: Option<String>` field populated on both success and error paths. RPC error messages include stderr content when available. Buffer capped at 64 KiB with oldest-line eviction via `append_capped`. Closes issues #23, #85, #86, #87, #88.
+- **Test counts** — 258 tests total (243 reel + 15 reel-cli), all pass locally.
 - **Documentation** — End-user `README.md` and developer `docs/DESIGN.md` written following sibling project conventions (lot, flick, epic). Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted — all content integrated into README and DESIGN.
 
 ## What Is NOT Implemented
@@ -84,5 +85,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-### Remaining (unscheduled)
-NuSession stderr capture (#23).
+No remaining work candidates.

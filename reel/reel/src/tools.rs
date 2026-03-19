@@ -577,6 +577,7 @@ pub async fn execute_tool(
                 NuOutput {
                     content: truncate_output(format_tool_result(name, &out.content)),
                     is_error: false,
+                    stderr: out.stderr,
                 }
             }
         });
@@ -1333,6 +1334,7 @@ mod tests {
             Ok(NuOutput {
                 content: "hello".into(),
                 is_error: false,
+                stderr: None,
             }),
         );
         assert_eq!(result.content, "hello");
@@ -1346,6 +1348,7 @@ mod tests {
             Ok(NuOutput {
                 content: "err".into(),
                 is_error: true,
+                stderr: None,
             }),
         );
         assert_eq!(result.content, "err");
