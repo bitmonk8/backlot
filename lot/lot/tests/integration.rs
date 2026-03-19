@@ -14,6 +14,36 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
+/// Create temp dir inside the project to avoid system temp ancestors
+/// (e.g. `C:\Users`) that require elevation for traverse ACE grants.
+fn make_temp_dir() -> TempDir {
+    let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("test_tmp");
+    std::fs::create_dir_all(&test_tmp).expect("create test_tmp dir");
+    TempDir::new_in(&test_tmp).expect("create temp dir")
+}
+
+/// Set sandbox-safe overrides for path-bearing env vars, then forward
+/// remaining parent env. On Windows, `forward_common_env` skips keys already
+/// set, so overrides take priority. No-op on non-Windows (Unix builds an
+/// explicit envp without inheriting parent env).
+/// `scratch` must be a write_path in the policy (used for TEMP/TMP/TMPDIR).
+#[cfg(target_os = "windows")]
+fn set_sandbox_env(cmd: &mut lot::SandboxCommand, scratch: &std::path::Path) {
+    let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+    let sys32 = format!(r"{sys_root}\System32");
+    cmd.env("PATH", &sys32);
+    cmd.env("TEMP", scratch);
+    cmd.env("TMP", scratch);
+    cmd.env("TMPDIR", scratch);
+    cmd.forward_common_env();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_sandbox_env(_cmd: &mut lot::SandboxCommand, _scratch: &std::path::Path) {}
+
 /// Spawn a sandboxed child, panicking on any error.
 fn must_spawn(policy: &lot::SandboxPolicy, cmd: &lot::SandboxCommand) -> lot::SandboxedChild {
     let child = lot::spawn(policy, cmd).expect("spawn must succeed");
@@ -113,7 +143,11 @@ fn stdin_echo_command() -> (PathBuf, Vec<String>) {
 /// On Windows, no `exec_paths` are needed — `AppContainer` can run system
 /// executables without explicit grants. On Unix, we add `/bin` (and `/usr/bin`
 /// if distinct) so the sandbox can find standard utilities.
-fn make_policy(read_paths: Vec<PathBuf>, write_paths: Vec<PathBuf>) -> lot::SandboxPolicy {
+fn make_policy(
+    read_paths: Vec<PathBuf>,
+    write_paths: Vec<PathBuf>,
+    scratch: &std::path::Path,
+) -> lot::SandboxPolicy {
     #[allow(unused_mut)]
     let mut exec_paths = Vec::new();
 
@@ -136,6 +170,9 @@ fn make_policy(read_paths: Vec<PathBuf>, write_paths: Vec<PathBuf>) -> lot::Sand
         exec_paths.push(PathBuf::from("/bin"));
         exec_paths.push(PathBuf::from("/usr/bin"));
     }
+
+    let mut write_paths = write_paths;
+    write_paths.push(scratch.to_path_buf());
 
     lot::SandboxPolicy::new(
         read_paths,
@@ -191,11 +228,15 @@ fn test_probe_returns_platform_capabilities() {
 fn test_spawn_echo() {
     eprintln!("[diag] === test_spawn_echo ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let (program, args) = echo_command();
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
 
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
@@ -230,14 +271,18 @@ fn test_spawn_echo() {
 fn test_spawn_read_allowed_path() {
     eprintln!("[diag] === test_spawn_read_allowed_path ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let file_path = tmp.path().join("readable.txt");
     std::fs::write(&file_path, "sandbox_test_data").expect("write test file");
 
     let (program, args) = cat_command(&file_path);
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
 
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
@@ -273,15 +318,19 @@ fn test_spawn_disallowed_path_blocked() {
     eprintln!("[diag] === test_spawn_disallowed_path_blocked ===");
 
     // Two separate temp dirs: one allowed, one forbidden.
-    let allowed = TempDir::new().expect("create allowed dir");
-    let forbidden = TempDir::new().expect("create forbidden dir");
+    let allowed = make_temp_dir();
+    let forbidden = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let secret_file = forbidden.path().join("secret.txt");
     std::fs::write(&secret_file, "secret_data").expect("write secret file");
 
     let (program, args) = cat_command(&secret_file);
-    let policy = make_policy(vec![allowed.path().to_path_buf()], vec![]);
+    let policy = make_policy(vec![allowed.path().to_path_buf()], vec![], scratch.path());
 
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
@@ -330,14 +379,18 @@ fn test_spawn_disallowed_path_blocked() {
 fn test_spawn_write_to_readonly_blocked() {
     eprintln!("[diag] === test_spawn_write_to_readonly_blocked ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let target = tmp.path().join("blocked_write.txt");
     let (program, args) = write_command(&target);
 
     // tmp.path() in read_paths only, not write_paths.
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
 
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
@@ -383,11 +436,15 @@ fn test_spawn_write_to_readonly_blocked() {
 fn test_cleanup_after_drop() {
     eprintln!("[diag] === test_cleanup_after_drop ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let (program, args) = echo_command();
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
 
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
@@ -440,11 +497,15 @@ fn test_cleanup_after_drop() {
 fn test_spawn_with_piped_stdin() {
     eprintln!("[diag] === test_spawn_with_piped_stdin ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let (program, args) = stdin_echo_command();
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
 
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdin(lot::SandboxStdio::Piped);
     cmd.stdout(lot::SandboxStdio::Piped);
@@ -487,14 +548,17 @@ fn test_spawn_with_piped_stdin() {
 fn test_wait_returns_exit_status() {
     eprintln!("[diag] === test_wait_returns_exit_status ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
 
     // Test exit code 0.
     {
         eprintln!("[diag] testing exit code 0");
         let (program, args) = exit_command(0);
-        let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+        let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
         let mut cmd = lot::SandboxCommand::new(&program);
+        set_sandbox_env(&mut cmd, scratch.path());
+
         cmd.args(&args);
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
@@ -517,8 +581,10 @@ fn test_wait_returns_exit_status() {
     {
         eprintln!("[diag] testing exit code 42");
         let (program, args) = exit_command(42);
-        let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+        let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
         let mut cmd = lot::SandboxCommand::new(&program);
+        set_sandbox_env(&mut cmd, scratch.path());
+
         cmd.args(&args);
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
@@ -545,7 +611,9 @@ fn test_wait_returns_exit_status() {
 fn test_deny_path_blocks_access_to_subtree() {
     eprintln!("[diag] === test_deny_path_blocks_access_to_subtree ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let allowed_dir = tmp.path().join("workspace");
     let denied_dir = allowed_dir.join("secrets");
     std::fs::create_dir_all(&denied_dir).expect("create denied dir");
@@ -584,7 +652,7 @@ fn test_deny_path_blocks_access_to_subtree() {
 
     let policy = lot::SandboxPolicy::new(
         vec![allowed_dir_canon],
-        vec![],
+        vec![scratch.path().to_path_buf()],
         exec_paths,
         vec![denied_dir_canon],
         false,
@@ -593,6 +661,8 @@ fn test_deny_path_blocks_access_to_subtree() {
 
     // Part 1: reading a file inside the denied subtree must fail.
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
@@ -624,6 +694,8 @@ fn test_deny_path_blocks_access_to_subtree() {
     // Part 2: reading a file outside the denied subtree must still succeed.
     let (pub_program, pub_args) = cat_command(&public_file);
     let mut pub_cmd = lot::SandboxCommand::new(&pub_program);
+    set_sandbox_env(&mut pub_cmd, scratch.path());
+
     pub_cmd.args(&pub_args);
     pub_cmd.stdout(lot::SandboxStdio::Piped);
     pub_cmd.stderr(lot::SandboxStdio::Piped);
@@ -652,6 +724,7 @@ fn make_deny_policy(
     parent: &std::path::Path,
     denied: &std::path::Path,
     write: bool,
+    scratch: &std::path::Path,
 ) -> lot::SandboxPolicy {
     #[allow(unused_mut)]
     let mut exec_paths = Vec::new();
@@ -675,11 +748,12 @@ fn make_deny_policy(
     let parent_canon = std::fs::canonicalize(parent).expect("canonicalize parent");
     let denied_canon = std::fs::canonicalize(denied).expect("canonicalize denied");
 
-    let (read, write_paths) = if write {
+    let (read, mut write_paths) = if write {
         (vec![], vec![parent_canon])
     } else {
         (vec![parent_canon], vec![])
     };
+    write_paths.push(scratch.to_path_buf());
 
     lot::SandboxPolicy::new(
         read,
@@ -695,7 +769,9 @@ fn make_deny_policy(
 fn test_deny_path_blocks_write() {
     eprintln!("[diag] === test_deny_path_blocks_write ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let parent = tmp.path().join("workspace");
     let denied = parent.join("readonly_zone");
     std::fs::create_dir_all(&denied).expect("create denied dir");
@@ -703,11 +779,13 @@ fn test_deny_path_blocks_write() {
     let target_in_denied = denied.join("blocked.txt");
     let target_in_parent = parent.join("allowed.txt");
 
-    let policy = make_deny_policy(&parent, &denied, true);
+    let policy = make_deny_policy(&parent, &denied, true, scratch.path());
 
     // Attempt write inside denied subdirectory — should fail.
     let (program, args) = write_command(&target_in_denied);
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
@@ -724,6 +802,8 @@ fn test_deny_path_blocks_write() {
     // Attempt write to parent (outside denied) — should succeed.
     let (program2, args2) = write_command(&target_in_parent);
     let mut cmd2 = lot::SandboxCommand::new(&program2);
+    set_sandbox_env(&mut cmd2, scratch.path());
+
     cmd2.args(&args2);
     cmd2.stdout(lot::SandboxStdio::Piped);
     cmd2.stderr(lot::SandboxStdio::Piped);
@@ -749,7 +829,9 @@ fn test_deny_path_blocks_write() {
 fn test_deny_path_blocks_execution() {
     eprintln!("[diag] === test_deny_path_blocks_execution ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let parent = tmp.path().join("workspace");
     let denied = parent.join("no_exec");
     std::fs::create_dir_all(&denied).expect("create denied dir");
@@ -760,9 +842,11 @@ fn test_deny_path_blocks_execution() {
         let script = denied.join("test.bat");
         std::fs::write(&script, "@echo SHOULD_NOT_RUN\r\n").expect("write bat");
 
-        let policy = make_deny_policy(&parent, &denied, false);
+        let policy = make_deny_policy(&parent, &denied, false, scratch.path());
 
         let mut cmd = lot::SandboxCommand::new("cmd.exe");
+        set_sandbox_env(&mut cmd, scratch.path());
+
         cmd.args(["/C", &script.to_string_lossy()]);
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
@@ -792,9 +876,11 @@ fn test_deny_path_blocks_execution() {
         // Make executable
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
-        let policy = make_deny_policy(&parent, &denied, false);
+        let policy = make_deny_policy(&parent, &denied, false, scratch.path());
 
         let mut cmd = lot::SandboxCommand::new("/bin/sh");
+        set_sandbox_env(&mut cmd, scratch.path());
+
         cmd.args(["-c", &format!("{}", script.display())]);
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
@@ -815,7 +901,9 @@ fn test_deny_path_blocks_execution() {
 fn test_symlink_into_deny_path() {
     eprintln!("[diag] === test_symlink_into_deny_path ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let parent = tmp.path().join("workspace");
     let denied = parent.join("forbidden");
     std::fs::create_dir_all(&denied).expect("create denied dir");
@@ -840,10 +928,12 @@ fn test_symlink_into_deny_path() {
         std::os::unix::fs::symlink(&secret_file, &symlink_path).expect("create symlink");
     }
 
-    let policy = make_deny_policy(&parent, &denied, false);
+    let policy = make_deny_policy(&parent, &denied, false, scratch.path());
 
     let (program, args) = cat_command(&symlink_path);
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
@@ -870,8 +960,6 @@ fn test_symlink_into_deny_path() {
 fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
-        // ping requires ICMP raw sockets which AppContainer blocks.
-        // Use powershell Start-Sleep instead.
         (
             PathBuf::from("powershell"),
             vec!["-Command".into(), format!("Start-Sleep -Seconds {seconds}")],
@@ -889,11 +977,15 @@ fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
 async fn test_wait_with_output_timeout_completes_before_timeout() {
     eprintln!("[diag] === test_wait_with_output_timeout_completes_before_timeout ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let (program, args) = echo_command();
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
 
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
@@ -922,12 +1014,16 @@ async fn test_wait_with_output_timeout_completes_before_timeout() {
 async fn test_wait_with_output_timeout_kills_on_timeout() {
     eprintln!("[diag] === test_wait_with_output_timeout_kills_on_timeout ===");
 
-    let tmp = TempDir::new().expect("create temp dir");
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
     let (program, args) = sleep_command(60);
 
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![]);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
 
     let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
     cmd.args(&args);
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);

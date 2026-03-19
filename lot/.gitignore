@@ -11,6 +11,10 @@
 Thumbs.db
 .DS_Store
 
+# Test temp directories (used instead of system temp to avoid AppContainer
+# traverse ACE elevation requirements on ancestor directories like C:\Users)
+/test_tmp/
+
 # Claude Code
 .claude/
 ._*

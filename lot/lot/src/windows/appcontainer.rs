@@ -1050,8 +1050,28 @@ mod tests {
     // with concurrent test sessions that share the same temp directory.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Create temp dir inside the project to avoid system temp ancestors
+    /// (e.g. `C:\Users`) that require elevation for traverse ACE grants.
     fn make_temp_dir() -> TempDir {
-        TempDir::new().expect("create temp dir")
+        let test_tmp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("test_tmp");
+        std::fs::create_dir_all(&test_tmp).expect("create test_tmp dir");
+        TempDir::new_in(&test_tmp).expect("create temp dir")
+    }
+
+    /// Set sandbox-safe overrides for path-bearing vars, then forward
+    /// remaining parent env. `forward_common_env` skips already-set keys,
+    /// so the overrides take priority.
+    fn set_sandbox_env(cmd: &mut SandboxCommand, scratch: &Path) {
+        let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+        let sys32 = format!(r"{sys_root}\System32");
+        cmd.env("PATH", &sys32);
+        cmd.env("TEMP", scratch);
+        cmd.env("TMP", scratch);
+        cmd.env("TMPDIR", scratch);
+        cmd.forward_common_env();
     }
 
     /// Spawn, returning None if prerequisites aren't met (non-elevated env).
@@ -1085,11 +1105,12 @@ mod tests {
     fn spawn_and_read_allowed_path() {
         let _guard = TEST_LOCK.lock().unwrap();
         let tmp = make_temp_dir();
+        let scratch = make_temp_dir();
         let file = write_test_file(tmp.path(), "hello.txt", "sandbox_test_content_42");
 
         let policy = SandboxPolicy::new(
             vec![tmp.path().to_path_buf()],
-            Vec::new(),
+            vec![scratch.path().to_path_buf()],
             Vec::new(),
             Vec::new(),
             false,
@@ -1097,6 +1118,7 @@ mod tests {
         );
 
         let mut cmd = SandboxCommand::new("cmd.exe");
+        set_sandbox_env(&mut cmd, scratch.path());
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
@@ -1113,12 +1135,13 @@ mod tests {
     fn disallowed_path_unreadable() {
         let _guard = TEST_LOCK.lock().unwrap();
         let allowed = make_temp_dir();
+        let scratch = make_temp_dir();
         let forbidden = make_temp_dir();
         let file = write_test_file(forbidden.path(), "secret.txt", "secret_data");
 
         let policy = SandboxPolicy::new(
             vec![allowed.path().to_path_buf()],
-            Vec::new(),
+            vec![scratch.path().to_path_buf()],
             Vec::new(),
             Vec::new(),
             false,
@@ -1126,6 +1149,7 @@ mod tests {
         );
 
         let mut cmd = SandboxCommand::new("cmd.exe");
+        set_sandbox_env(&mut cmd, scratch.path());
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
@@ -1142,12 +1166,13 @@ mod tests {
     fn read_only_path_not_writable() {
         let _guard = TEST_LOCK.lock().unwrap();
         let tmp = make_temp_dir();
+        let scratch = make_temp_dir();
         let target = tmp.path().join("readonly_test.txt");
         fs::write(&target, "original").expect("write");
 
         let policy = SandboxPolicy::new(
             vec![tmp.path().to_path_buf()],
-            Vec::new(),
+            vec![scratch.path().to_path_buf()],
             Vec::new(),
             Vec::new(),
             false,
@@ -1155,6 +1180,7 @@ mod tests {
         );
 
         let mut cmd = SandboxCommand::new("cmd.exe");
+        set_sandbox_env(&mut cmd, scratch.path());
         // Use short path form without spaces by writing to a file in a temp dir.
         // The redirect must be in a single /C argument so cmd.exe interprets `>`.
         let target_str = target.to_string_lossy();
@@ -1173,13 +1199,14 @@ mod tests {
     fn cleanup_restores_acls() {
         let _guard = TEST_LOCK.lock().unwrap();
         let tmp = make_temp_dir();
+        let scratch = make_temp_dir();
         let _file = write_test_file(tmp.path(), "acl_test.txt", "test");
 
         let original_sddl = get_sddl(tmp.path()).expect("get original SDDL");
 
         let policy = SandboxPolicy::new(
             vec![tmp.path().to_path_buf()],
-            Vec::new(),
+            vec![scratch.path().to_path_buf()],
             Vec::new(),
             Vec::new(),
             false,
@@ -1187,6 +1214,7 @@ mod tests {
         );
 
         let mut cmd = SandboxCommand::new("cmd.exe");
+        set_sandbox_env(&mut cmd, scratch.path());
         cmd.args(["/C", "echo done"]);
 
         {

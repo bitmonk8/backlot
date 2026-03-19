@@ -106,26 +106,12 @@ The traverse ACE grant loop in `spawn_inner` modifies DACLs one ancestor at a ti
 **Category:** Correctness
 **File:** `lot/src/windows/appcontainer.rs`
 
-## Silent test skipping on `PrerequisitesNotMet` masks regressions
-
-Both `try_spawn` helpers (in `appcontainer.rs` unit tests and `integration.rs`) return `None` on `PrerequisitesNotMet`, causing tests to silently pass without exercising sandbox logic. On a non-elevated CI runner, all Windows sandbox tests pass vacuously. No mechanism detects systematic skipping.
-
-**Category:** Testing
-**Files:** `lot/src/windows/appcontainer.rs`, `lot/tests/integration.rs`
-
 ## Spawn-time grant loop checks NUL device unconditionally
 
 `nul_device_accessible()` runs even when `failed` is already non-empty, making the NUL check redundant in that case. Minor inefficiency — could short-circuit.
 
 **Category:** Simplification
 **File:** `lot/src/windows/appcontainer.rs`
-
-## Two `try_spawn` helpers with same name but different semantics
-
-`try_spawn` in `appcontainer.rs` unit tests only skips `PrerequisitesNotMet`. `try_spawn` in `integration.rs` also skips `Setup` errors and logs diagnostics. Same name, different behavior.
-
-**Category:** Naming
-**Files:** `lot/src/windows/appcontainer.rs`, `lot/tests/integration.rs`
 
 ## Windows: TOCTOU in `grant_traverse` double DACL read
 
@@ -204,13 +190,6 @@ The seatbelt test module has no test that sets `deny_paths` on the policy and ve
 **Category:** Testing
 **File:** `lot/src/macos/seatbelt.rs`
 
-## No integration test for deny path blocking writes
-
-The deny path integration test only checks that reading from a denied path fails. A test with `write_paths` containing the parent and `deny_paths` containing a child, then attempting to write inside the denied subtree, would cover the write-deny path.
-
-**Category:** Testing
-**File:** `lot/tests/integration.rs`
-
 ## No builder unit tests for `deny_path()` / `deny_paths()`
 
 The builder has no tests for deny path addition, deduplication, or silent skip of nonexistent paths.
@@ -218,26 +197,12 @@ The builder has no tests for deny path addition, deduplication, or silent skip o
 **Category:** Testing
 **File:** `lot/src/policy_builder.rs`
 
-## No integration test for deny path blocking execution
-
-No test attempts to execute a binary inside a denied subtree. The integration test only covers read-denial.
-
-**Category:** Testing
-**File:** `lot/tests/integration.rs`
-
 ## No unit test for `deny_access()` / `apply_ace()` deny mode
 
 `deny_access()` delegates to `apply_ace()` with `DENY_ACCESS` mode, but no unit test exercises this path directly.
 
 **Category:** Testing
 **File:** `lot/src/windows/appcontainer.rs`
-
-## Symlink-into-deny-path behavior untested
-
-No test creates a symlink pointing into a denied subtree to verify path resolution behavior across platforms.
-
-**Category:** Testing
-**File:** `lot/tests/integration.rs`
 
 ## `deny_access()` naming
 
@@ -304,7 +269,7 @@ Both create an empty file as a mount point using the same `open(O_CREAT | O_WRON
 
 ## QPC uniqueness weaker than atomic counter for concurrent profile names
 
-`unique_profile_name()` replaced `AtomicU64` with `QueryPerformanceCounter`. QPC does not guarantee distinct values for concurrent calls from different threads. The `create_profile` retry on `ERROR_ALREADY_EXISTS` mitigates this, but the race window exists. Revisit if collisions are observed.
+`unique_profile_name()` uses both an `AtomicU64` counter and `QueryPerformanceCounter` for uniqueness. QPC alone does not guarantee distinct values for concurrent calls from different threads, but the atomic counter provides monotonic sequencing. The `create_profile` retry on `ERROR_ALREADY_EXISTS` further mitigates collisions. Revisit if collisions are observed.
 
 **Category:** Correctness
 **File:** `lot/src/windows/appcontainer.rs`
@@ -355,7 +320,7 @@ The cmdline.rs tests added for H6 cover spaces, quotes, backslashes, and empty a
 
 The appcontainer unit tests use `must_spawn()` which calls `.expect()` on `spawn()`. When prerequisites are not met (e.g., `lot setup` not run as administrator), `spawn()` returns `PrerequisitesNotMet` and `must_spawn` panics. This poisons the `TEST_LOCK` mutex, causing all subsequent tests to fail with `PoisonError` — masking the real issue.
 
-Fix: change `must_spawn` to skip tests on `PrerequisitesNotMet` (return early / use the `try_spawn` pattern from `integration.rs`) instead of panicking. Alternatively, use `.unwrap_or_else()` on the mutex lock to recover from poisoning.
+Fix: use `unwrap_or_else` on the mutex lock to recover from poisoning, or skip tests on `PrerequisitesNotMet` instead of panicking.
 
 **Category:** Testing
 **File:** `lot/src/windows/appcontainer.rs`
@@ -387,3 +352,157 @@ The macro has identical implementations in `linux/mod.rs` and `macos/mod.rs`. Co
 
 **Category:** Simplification
 **Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
+
+## Unix `spawn_sleep` test may fail on some distros
+
+The Unix `spawn_sleep` tokio test only has `/usr` as a read_path. The default PATH from `effective_env` includes `/bin`, `/sbin`, `/usr/local/bin`. On distros where these are real directories (not symlinks into `/usr`) and not present in the implicit paths list, the check could fail.
+
+**Category:** Correctness
+**File:** `lot/src/lib.rs`
+
+## No unit tests for env coverage validation functions
+
+`check_env_coverage`, `platform_implicit_read_paths`, `path_is_under`, `policy_covers_path` have no unit tests. Key missing cases: TEMP outside write_paths, PATH entry not covered by grants or implicit paths, empty command.env inheritance, multiple accumulated errors.
+
+**Category:** Testing
+**File:** `lot/src/lib.rs`
+
+## `effective_env` closure not separately testable
+
+The `effective_env` closure inside `check_env_coverage` captures `command.env` and contains platform-conditional logic. Extracting to a standalone function would improve testability.
+
+**Category:** Testing
+**File:** `lot/src/lib.rs`
+
+## Repeated canonicalization in `path_is_under` is O(P*G)
+
+`path_is_under` calls `fs::canonicalize` on both arguments every invocation. In `check_env_coverage`, grant/implicit paths are re-canonicalized for each PATH entry. Canonicalize once upfront and pass pre-resolved slices.
+
+**Category:** Simplification
+**File:** `lot/src/lib.rs`
+
+## Env validation logic should be extracted from `lib.rs`
+
+~160 lines of env-coverage validation (`check_env_coverage`, `platform_implicit_read_paths`, `policy_covers_path`, `path_is_under`) accreted in `lib.rs`. Should be a separate module (e.g., `env_check.rs`).
+
+**Category:** Separation of concerns
+**File:** `lot/src/lib.rs`
+
+## `platform_implicit_read_paths` should delegate to platform modules
+
+Contains per-platform `#[cfg]` blocks encoding platform-specific knowledge. Should delegate to each platform module, matching the `probe()`/`spawn()` dispatch pattern.
+
+**Category:** Separation of concerns
+**File:** `lot/src/lib.rs`
+
+## `effective_env` duplicates platform env inheritance knowledge
+
+The closure inside `check_env_coverage` has Windows-specific inheritance semantics and Unix-specific default PATH. This knowledge belongs closer to `SandboxCommand` or the platform spawn implementations. Specifically, the case-insensitive key matching (`eq_ignore_ascii_case` on Windows, exact on Unix) is duplicated from `SandboxCommand::forward_common_env` in `command.rs`. A shared `SandboxCommand::effective_var(key)` method would eliminate both copies.
+
+**Category:** Separation of concerns
+**File:** `lot/src/lib.rs`
+
+## Duplicate test helpers across test files
+
+`make_temp_dir()` and `set_sandbox_env()` are duplicated verbatim in `lib.rs` tokio_tests, `appcontainer.rs` tests, and `integration.rs`. Extract to shared test utility (e.g., `tests/common/mod.rs`).
+
+**Category:** Simplification
+**Files:** `lot/src/windows/appcontainer.rs`, `lot/tests/integration.rs`
+
+## Unix integration tests don't exercise TEMP/TMP/TMPDIR coverage check
+
+`set_sandbox_env` is no-op on non-Windows, so Unix integration tests never exercise `check_env_coverage` for TEMP/TMP/TMPDIR.
+
+**Category:** Testing
+**File:** `lot/tests/integration.rs`
+
+## Duplicate exec_paths construction in test helpers
+
+`make_policy` and `make_deny_policy` duplicate platform-conditional exec_paths construction; same pattern also inline in `test_deny_path_blocks_access_to_subtree`.
+
+**Category:** Simplification
+**File:** `lot/tests/integration.rs`
+
+## `policy_covers_path` and `path_is_under` placement
+
+General path utility functions unrelated to the public API facade. Better placed in the `policy` module alongside `SandboxPolicy`.
+
+**Category:** Placement
+**File:** `lot/src/lib.rs`
+
+## `path_is_under` duplicates `is_parent_of` in `policy.rs`
+
+`path_is_under` (lib.rs) and `is_parent_of` (policy.rs) both check path ancestry. `path_is_under` adds canonicalization + lexical fallback; `is_parent_of` uses component-wise comparison. Should be unified into a single function.
+
+**Category:** Simplification
+**Files:** `lot/src/lib.rs`, `lot/src/policy.rs`
+
+## `path_is_under(parent, child)` parameter order confusing
+
+Call sites read `path_is_under(g, dir)` which parses as "g is under dir" — the opposite of the actual semantics. Consider `path_contains(parent, child)` or `is_descendant_of(child, ancestor)`.
+
+**Category:** Naming
+**File:** `lot/src/lib.rs`
+
+## `grant` variable name in `check_env_coverage` unclear
+
+`grant` (from `policy.grant_paths()`) holds the union of read+write+exec paths but the name doesn't convey this. `all_grant_paths` would be clearer.
+
+**Category:** Naming
+**File:** `lot/src/lib.rs`
+
+## `check_env_coverage` name imprecise
+
+Name suggests it only checks env var coverage, but it validates env vars against sandbox policy accessibility. `validate_env_accessibility` would be more precise.
+
+**Category:** Naming
+**File:** `lot/src/lib.rs`
+
+## `is_accessible` and `policy_covers_path` are near-duplicates
+
+Both iterate a slice calling `path_is_under`. `is_accessible` (inner fn in `check_env_coverage`) checks two slices; `policy_covers_path` checks one. Should be unified.
+
+**Category:** Simplification
+**File:** `lot/src/lib.rs`
+
+## `kill_by_pid` has platform implementation in facade
+
+`kill_by_pid` contains `#[cfg(unix)]`/`#[cfg(windows)]` blocks with raw syscalls (`libc::kill`, `OpenProcess`/`TerminateProcess`) in `lib.rs`. Should delegate to platform modules like `probe()`/`spawn()`/`cleanup_stale()`.
+
+**Category:** Separation of concerns
+**File:** `lot/src/lib.rs`
+
+## No consistency test between Unix default PATH and `platform_implicit_read_paths`
+
+The Unix `effective_env` hardcodes a default PATH (`/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`). No test asserts all entries are covered by `platform_implicit_read_paths`. If the two lists diverge, `check_env_coverage` would reject valid empty-env configurations.
+
+**Category:** Testing
+**File:** `lot/src/lib.rs`
+
+## `path_is_under` partial canonicalization fallback
+
+When `canonicalize` succeeds for one path but fails for the other, `path_is_under` falls through to lexical comparison on the original (non-canonicalized) inputs. If the successful path involved symlink resolution, the lexical comparison operates on a different representation, potentially yielding incorrect containment results.
+
+**Category:** Correctness
+**File:** `lot/src/lib.rs`
+
+## `normalize_lexical` pops past root for relative paths
+
+`out.pop()` on `ParentDir` can silently discard `..` components for relative paths (e.g., `../../foo` normalizes to `foo`). Only safe if all inputs are absolute paths, which is not enforced. All current callers pass absolute paths.
+
+**Category:** Correctness
+**File:** `lot/src/lib.rs`
+
+## `platform_implicit_read_paths` rebuilds Vec on every call
+
+Builds a `Vec<PathBuf>` with existence checks on every `spawn()` call. These paths are static per platform. The existence filter adds no safety — a non-existent implicit path would never match a real PATH entry. Could use `LazyLock` or a static `&[&str]`.
+
+**Category:** Simplification
+**File:** `lot/src/lib.rs`
+
+## TEMP/TMP/TMPDIR checked on all platforms unconditionally
+
+`check_env_coverage` checks all three env var names on every platform, but `TEMP`/`TMP` are Windows-only and `TMPDIR` is Unix-only. Harmless but could use `cfg` to pick relevant names per platform.
+
+**Category:** Simplification
+**File:** `lot/src/lib.rs`

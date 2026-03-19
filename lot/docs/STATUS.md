@@ -24,27 +24,13 @@
 
 ## Next Work
 
-Full project audit completed (see `docs/AUDIT_FINDINGS.md`). 41 findings ordered by severity. Goal: fix all.
-
-### Audit findings by severity
-
-| Severity | Count | IDs | Status |
-|----------|-------|-----|--------|
-| Critical | 2 | C1–C2 | Fixed |
-| High | 8 | H1–H8 | Fixed |
-| Medium | 25 | M1–M25 | Fixed (M8, M14 skipped — see below) |
-| Low | 6 | L1–L6 | Fixed (L1 skipped — see below) |
-
-### Skipped findings
-
-- **M8** (Unix SandboxedChild unification): Linux/macOS differ in kill semantics (kill vs killpg) and cgroup cleanup. Forced unification adds complexity for minimal gain.
-- **M14** (Unix pipe/fd unit tests): Cannot be implemented or verified on Windows. Exercised by integration tests on Linux/macOS CI.
-- **L1** (Non-Windows stubs): Two small inline stubs in lib.rs are clear and maintainable; moving them adds complexity with no benefit.
-
-### Other remaining work
-
 - First real-world usage / `lot run` testing
 - Remaining issues tracked in `docs/ISSUES.md`
+
+Full project audit completed — all 41 findings fixed (see `docs/AUDIT_FINDINGS.md`). Three findings intentionally skipped:
+- **M8**: Linux/macOS differ in kill semantics; forced unification adds complexity for no gain.
+- **M14**: Unix pipe/fd unit tests cannot run on Windows; covered by integration tests on Linux/macOS CI.
+- **L1**: Two small inline non-Windows stubs in lib.rs are clear as-is; extracting them adds complexity with no benefit.
 
 ## CI Status
 

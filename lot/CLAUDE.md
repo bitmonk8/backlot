@@ -33,6 +33,9 @@ IMPORTANT: Follow these directives strictly; do not add compliments, flattery, o
 **ALWAYS delegate to tasks**: investigation, analysis, file reading, research, validation
 **Keep main context for**: writing/modifying files, final decisions, integration
 
+## Windows Test Temp Directories
+Tests that spawn sandboxed processes MUST use `TempDir::new_in()` with a project-local directory (the `test_tmp/` folder at the workspace root), NOT `TempDir::new()`. System temp lives under `C:\Users\{user}\AppData\Local\Temp` — its ancestor `C:\Users` requires elevation for AppContainer traverse ACE grants. Project-local paths avoid this because their ancestors (`C:\`, `C:\UnitySrc`) already have the required ACEs or are user-owned. The `test_tmp/` directory is gitignored.
+
 ## File Creation Rules
 - NEVER create files unless absolutely necessary
 - ALWAYS prefer editing existing files
