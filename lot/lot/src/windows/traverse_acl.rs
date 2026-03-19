@@ -23,7 +23,8 @@ use windows_sys::Win32::Security::Authorization::{
     TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR,
+    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, InitializeSecurityDescriptor,
+    SECURITY_DESCRIPTOR, SECURITY_DESCRIPTOR_CONTROL, SetSecurityDescriptorControl,
     SetSecurityDescriptorDacl,
 };
 use windows_sys::Win32::Storage::FileSystem::{
@@ -123,7 +124,7 @@ const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 pub fn grant_traverse(path: &Path) -> crate::Result<()> {
     let wide = path_to_wide(path);
 
-    let Some((dacl_ptr, _sd_guard)) = read_dacl(&wide) else {
+    let Some((dacl_ptr, sd_guard)) = read_dacl(&wide) else {
         return Err(SandboxError::Setup(format!(
             "failed to read DACL for {}: unable to read security info",
             path.display(),
@@ -209,6 +210,34 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
             "SetSecurityDescriptorDacl failed for {}",
             path.display(),
         )));
+    }
+
+    // Preserve the original SD's DACL-related control flags (especially
+    // SE_DACL_AUTO_INHERITED). Without this, SetNamedSecurityInfoW on child
+    // objects treats the parent's DACL as "legacy" and may not correctly
+    // re-derive inherited ACEs, causing children to lose inherited ACEs.
+    let mut original_control: SECURITY_DESCRIPTOR_CONTROL = 0;
+    let mut revision: u32 = 0;
+    // SAFETY: Reading control flags from the original security descriptor.
+    let ret = unsafe {
+        GetSecurityDescriptorControl(
+            sd_guard.as_raw(),
+            &raw mut original_control,
+            &raw mut revision,
+        )
+    };
+    if ret != FALSE {
+        // Mask to DACL-related control bits only.
+        const DACL_CONTROL_MASK: SECURITY_DESCRIPTOR_CONTROL = 0x0400  // SE_DACL_AUTO_INHERITED
+            | 0x0100 // SE_DACL_AUTO_INHERIT_REQ
+            | 0x0004; // SE_DACL_PROTECTED
+        let dacl_flags = original_control & DACL_CONTROL_MASK;
+        if dacl_flags != 0 {
+            // SAFETY: Setting control bits on a valid, initialized security descriptor.
+            unsafe {
+                SetSecurityDescriptorControl((&raw mut sd).cast(), dacl_flags, dacl_flags);
+            }
+        }
     }
 
     // Open directory handle with WRITE_DAC + READ_CONTROL.

@@ -74,6 +74,10 @@ impl OwnedSecurityDescriptor {
     pub const fn new(sd: PSECURITY_DESCRIPTOR) -> Option<Self> {
         if sd.is_null() { None } else { Some(Self(sd)) }
     }
+
+    pub const fn as_raw(&self) -> PSECURITY_DESCRIPTOR {
+        self.0
+    }
 }
 
 impl Drop for OwnedSecurityDescriptor {
