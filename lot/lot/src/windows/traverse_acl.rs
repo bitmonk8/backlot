@@ -6,20 +6,23 @@
 //! ACEs on directory ancestors so AppContainer sandboxed processes can walk
 //! path components via `fs::metadata()`.
 //!
-//! Uses handle-based `SetSecurityInfo` instead of `SetNamedSecurityInfoW` to
-//! avoid O(subtree) inheritance propagation on directories with large subtrees
-//! (e.g. `C:\Users`).
+//! Uses `SetFileSecurityW` instead of `SetNamedSecurityInfoW` /
+//! `SetSecurityInfo` to avoid O(subtree) inheritance propagation on
+//! directories with large subtrees (e.g. `C:\Users`). Both
+//! `SetNamedSecurityInfoW` and `SetSecurityInfo` re-evaluate
+//! auto-inheritance for the entire subtree; `SetFileSecurityW` writes
+//! only the target object's DACL.
 
 use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE};
+use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, FALSE};
 use windows_sys::Win32::Security::Authorization::{
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW,
-    SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SetEntriesInAclW, TRUSTEE_IS_SID,
+    TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
-use windows_sys::Win32::Security::{ACL, DACL_SECURITY_INFORMATION};
-use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, OPEN_EXISTING,
+use windows_sys::Win32::Security::{
+    ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR,
+    SetFileSecurityW, SetSecurityDescriptorDacl,
 };
 
 use super::acl_helpers::{
@@ -80,18 +83,17 @@ pub fn has_traverse_ace(path: &Path) -> bool {
     dacl_has_app_packages_ace(dacl_ptr, TRAVERSE_MASK)
 }
 
-/// WRITE_DAC: permission to modify the object's DACL.
-const WRITE_DAC: u32 = 0x0004_0000;
-/// READ_CONTROL: permission to read the object's security descriptor.
-const READ_CONTROL: u32 = 0x0002_0000;
+/// SECURITY_DESCRIPTOR_REVISION — required by `InitializeSecurityDescriptor`.
+const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 
 /// Grant `FILE_TRAVERSE | SYNCHRONIZE | FILE_READ_ATTRIBUTES` with
 /// `NO_INHERITANCE` for ALL APPLICATION PACKAGES on a single directory.
 ///
-/// Uses handle-based `SetSecurityInfo` instead of `SetNamedSecurityInfoW`.
-/// The name-based API re-evaluates auto-inheritance for the entire subtree,
-/// which takes minutes on directories like `C:\Users` with large subtrees.
-/// The handle-based API modifies only the target directory's DACL.
+/// Uses `SetFileSecurityW` instead of `SetNamedSecurityInfoW` or
+/// `SetSecurityInfo`. Both high-level APIs re-evaluate auto-inheritance
+/// for the entire subtree, which takes minutes on directories like
+/// `C:\Users` with large subtrees. `SetFileSecurityW` writes only the
+/// target object's DACL with no subtree walk.
 ///
 /// Reads the DACL once and checks for the ACE in the same read to avoid
 /// the TOCTOU race of separate check-then-modify calls. If the ACE already
@@ -111,7 +113,7 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         return Ok(());
     }
 
-    // ACE not present -- build merged DACL and apply via handle.
+    // ACE not present — build merged DACL and apply via SetFileSecurityW.
     let Some(app_sid) = allocate_app_packages_sid() else {
         return Err(SandboxError::Setup(
             "failed to create ALL APPLICATION PACKAGES SID".into(),
@@ -129,7 +131,7 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
     let ea = EXPLICIT_ACCESS_W {
         grfAccessPermissions: TRAVERSE_MASK,
         grfAccessMode: GRANT_ACCESS,
-        grfInheritance: 0, // Ancestors only -- no inheritance.
+        grfInheritance: 0, // Ancestors only — no inheritance.
         Trustee: trustee,
     };
 
@@ -153,69 +155,64 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         )));
     };
 
-    // Open directory handle with WRITE_DAC + READ_CONTROL.
-    // FILE_FLAG_BACKUP_SEMANTICS is required to open a directory.
-    // SAFETY: Opening an existing directory for DACL modification.
-    let handle: HANDLE = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            WRITE_DAC | READ_CONTROL,
-            // Share all access so other processes aren't blocked.
-            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
-                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
-                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS,
-            std::ptr::null_mut(),
-        )
+    // Build a self-relative security descriptor containing the merged DACL.
+    // SetFileSecurityW does NOT trigger inheritance propagation, unlike
+    // SetNamedSecurityInfoW and SetSecurityInfo.
+    let mut sd = SECURITY_DESCRIPTOR {
+        Revision: 0,
+        Sbz1: 0,
+        Control: 0,
+        Owner: std::ptr::null_mut(),
+        Group: std::ptr::null_mut(),
+        Sacl: std::ptr::null_mut(),
+        Dacl: std::ptr::null_mut(),
     };
 
-    if handle.is_null() || handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-        let os_err = std::io::Error::last_os_error();
-        #[allow(clippy::cast_possible_wrap)]
-        if os_err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
-            return Err(SandboxError::Setup(format!(
-                "cannot modify DACL for {}: {ELEVATION_REQUIRED_MARKER} (run as administrator)",
-                path.display(),
-            )));
-        }
+    // SAFETY: Initializing a stack-allocated security descriptor.
+    let ret =
+        unsafe { InitializeSecurityDescriptor((&raw mut sd).cast(), SECURITY_DESCRIPTOR_REVISION) };
+    if ret == FALSE {
         return Err(SandboxError::Setup(format!(
-            "failed to open {} for DACL modification: {os_err}",
+            "InitializeSecurityDescriptor failed for {}",
             path.display(),
         )));
     }
 
-    // SAFETY: Applying the merged DACL via handle. Does NOT propagate
-    // inheritance to children, unlike SetNamedSecurityInfoW.
-    let err = unsafe {
-        SetSecurityInfo(
-            handle,
-            SE_FILE_OBJECT,
+    // SAFETY: Attaching the merged DACL to the security descriptor.
+    // The DACL memory (owned by new_dacl_guard) must outlive the
+    // SetFileSecurityW call.
+    let ret = unsafe {
+        SetSecurityDescriptorDacl((&raw mut sd).cast(), 1, new_dacl_guard.as_raw(), FALSE)
+    };
+    if ret == FALSE {
+        return Err(SandboxError::Setup(format!(
+            "SetSecurityDescriptorDacl failed for {}",
+            path.display(),
+        )));
+    }
+
+    // SAFETY: Applying the security descriptor to the directory.
+    // SetFileSecurityW writes only this object's DACL — no subtree walk.
+    let ret = unsafe {
+        SetFileSecurityW(
+            wide.as_ptr(),
             DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            new_dacl_guard.as_raw(),
-            std::ptr::null(),
+            (&raw mut sd).cast(),
         )
     };
 
-    // SAFETY: Closing a valid handle obtained from CreateFileW.
-    unsafe {
-        CloseHandle(handle);
-    }
-
-    if err != ERROR_SUCCESS {
-        if err == ERROR_ACCESS_DENIED {
+    if ret == FALSE {
+        let err = std::io::Error::last_os_error();
+        #[allow(clippy::cast_possible_wrap)]
+        if err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
             return Err(SandboxError::Setup(format!(
                 "cannot modify DACL for {}: {ELEVATION_REQUIRED_MARKER} (run as administrator)",
                 path.display(),
             )));
         }
         return Err(SandboxError::Setup(format!(
-            "failed to apply DACL for {}: {}",
+            "failed to apply DACL for {}: {err}",
             path.display(),
-            win32_error_msg(err),
         )));
     }
 
