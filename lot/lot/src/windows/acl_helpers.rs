@@ -46,20 +46,12 @@ pub struct OwnedSid(PSID);
 
 impl OwnedSid {
     /// Wrap a raw SID pointer. Returns `None` if null.
-    pub fn new(sid: PSID) -> Option<Self> {
+    pub const fn new(sid: PSID) -> Option<Self> {
         if sid.is_null() { None } else { Some(Self(sid)) }
     }
 
-    pub fn as_raw(&self) -> PSID {
+    pub const fn as_raw(&self) -> PSID {
         self.0
-    }
-
-    /// Release ownership, returning the raw pointer. The caller is
-    /// responsible for freeing.
-    pub fn into_raw(self) -> PSID {
-        let raw = self.0;
-        std::mem::forget(self);
-        raw
     }
 }
 
@@ -79,7 +71,7 @@ pub struct OwnedSecurityDescriptor(PSECURITY_DESCRIPTOR);
 
 impl OwnedSecurityDescriptor {
     /// Wrap a raw security descriptor pointer. Returns `None` if null.
-    pub fn new(sd: PSECURITY_DESCRIPTOR) -> Option<Self> {
+    pub const fn new(sd: PSECURITY_DESCRIPTOR) -> Option<Self> {
         if sd.is_null() { None } else { Some(Self(sd)) }
     }
 }
@@ -100,11 +92,11 @@ pub struct OwnedAcl(*mut ACL);
 
 impl OwnedAcl {
     /// Wrap a raw ACL pointer. Returns `None` if null.
-    pub fn new(acl: *mut ACL) -> Option<Self> {
+    pub const fn new(acl: *mut ACL) -> Option<Self> {
         if acl.is_null() { None } else { Some(Self(acl)) }
     }
 
-    pub fn as_raw(&self) -> *mut ACL {
+    pub const fn as_raw(&self) -> *mut ACL {
         self.0
     }
 }

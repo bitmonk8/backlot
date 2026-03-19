@@ -84,11 +84,6 @@ fn hresult_to_io(hr: HRESULT) -> io::Error {
     io::Error::from_raw_os_error(hr)
 }
 
-#[allow(clippy::cast_possible_wrap)]
-fn win32_to_io(code: u32) -> io::Error {
-    io::Error::from_raw_os_error(code as i32)
-}
-
 // ── AppContainer profile lifecycle ───────────────────────────────────
 
 /// Create an `AppContainer` profile. Returns `(profile_name, SID)`.
