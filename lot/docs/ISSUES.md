@@ -4,17 +4,6 @@ Issues grouped by co-fixability, ordered by descending impact.
 
 ---
 
-## Group 10: Policy Validation & Path Safety
-
-Path traversal via lexical normalization, incomplete overlap deduction.
-
-| # | File | Lines | Description | Severity |
-|---|------|-------|-------------|----------|
-| 38 | lot/src/path_util.rs | 65-67 | `normalize_lexical` can silently collapse excess `..` to root. `debug_assert` disabled in release. Potential path-traversal issue if untrusted path reaches this function. | Medium |
-| 39 | lot/src/policy_builder.rs | 59-68, 88-96, 70-83 | Builder doc promises "overlap deduction" but doesn't deduplicate across read/exec or write/exec boundaries. Overlapping cross-set paths pass builder but fail at `validate()`. | Medium |
-
----
-
 ## Group 11: Separation of Concerns
 
 Duplicated constants and split validation logic requiring synchronized updates.
@@ -28,7 +17,7 @@ Duplicated constants and split validation logic requiring synchronized updates.
 
 ## Group 12: macOS Seatbelt Test Precision
 
-Test improvements deferred from Group 1 fix.
+Non-UTF-8 path handling tests need broader coverage and stricter assertions.
 
 | # | File | Lines | Description | Severity |
 |---|------|-------|-------------|----------|

@@ -54,12 +54,15 @@ impl SandboxPolicyBuilder {
     }
 
     /// Add a read-only path. Canonicalized on insert; silently skipped if
-    /// non-existent or already covered by a write or read entry.
+    /// non-existent or already covered by a write, read, or exec entry.
     #[must_use]
     pub fn read_path(mut self, path: impl AsRef<Path>) -> Self {
         if let Ok(canon) = std::fs::canonicalize(path.as_ref()) {
-            // Write is a superset of read — if write already covers this, skip.
-            if !covered_by(&canon, &self.write_paths) && !covered_by(&canon, &self.read_paths) {
+            // Write and exec are supersets of read — skip if already covered.
+            if !covered_by(&canon, &self.write_paths)
+                && !covered_by(&canon, &self.read_paths)
+                && !covered_by(&canon, &self.exec_paths)
+            {
                 remove_covered_by(&mut self.read_paths, &canon);
                 self.read_paths.push(canon);
             }
@@ -73,8 +76,9 @@ impl SandboxPolicyBuilder {
     pub fn write_path(mut self, path: impl AsRef<Path>) -> Self {
         if let Ok(canon) = std::fs::canonicalize(path.as_ref()) {
             if !covered_by(&canon, &self.write_paths) {
-                // A write path supersedes any read entries it covers.
+                // Write supersedes read and exec entries it covers.
                 remove_covered_by(&mut self.read_paths, &canon);
+                remove_covered_by(&mut self.exec_paths, &canon);
                 remove_covered_by(&mut self.write_paths, &canon);
                 self.write_paths.push(canon);
             }
@@ -83,11 +87,13 @@ impl SandboxPolicyBuilder {
     }
 
     /// Add an executable path. Canonicalized on insert; silently skipped if
-    /// non-existent or already covered by an existing exec entry.
+    /// non-existent or already covered by an existing exec or write entry.
     #[must_use]
     pub fn exec_path(mut self, path: impl AsRef<Path>) -> Self {
         if let Ok(canon) = std::fs::canonicalize(path.as_ref()) {
-            if !covered_by(&canon, &self.exec_paths) {
+            if !covered_by(&canon, &self.exec_paths) && !covered_by(&canon, &self.write_paths) {
+                // Exec subsumes read entries it covers.
+                remove_covered_by(&mut self.read_paths, &canon);
                 remove_covered_by(&mut self.exec_paths, &canon);
                 self.exec_paths.push(canon);
             }
@@ -519,5 +525,236 @@ mod tests {
             2,
             "batch deny_paths should add both"
         );
+    }
+
+    // ── cross-set deduction: read ↔ exec ──────────────────────────
+
+    #[test]
+    fn read_covered_by_exec_not_added() {
+        let tmp = make_temp_dir();
+        let dir = tmp.path().join("bin");
+        std::fs::create_dir(&dir).expect("create dir");
+
+        let policy = SandboxPolicyBuilder::new()
+            .exec_path(&dir)
+            .read_path(&dir)
+            .build()
+            .expect("build should succeed");
+
+        assert!(
+            policy.read_paths().is_empty(),
+            "read should be skipped when exec covers it"
+        );
+        assert_eq!(policy.exec_paths().len(), 1);
+    }
+
+    #[test]
+    fn read_child_under_exec_parent_not_added() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().join("bin");
+        let child = parent.join("sub");
+        std::fs::create_dir_all(&child).expect("create dirs");
+
+        let policy = SandboxPolicyBuilder::new()
+            .exec_path(&parent)
+            .read_path(&child)
+            .build()
+            .expect("build should succeed");
+
+        assert!(policy.read_paths().is_empty());
+        assert_eq!(policy.exec_paths().len(), 1);
+    }
+
+    #[test]
+    fn exec_path_removes_covered_read() {
+        let tmp = make_temp_dir();
+        let dir = tmp.path().join("lib");
+        std::fs::create_dir(&dir).expect("create dir");
+
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(&dir)
+            .exec_path(&dir)
+            .build()
+            .expect("build should succeed");
+
+        assert!(
+            policy.read_paths().is_empty(),
+            "exec should remove matching read"
+        );
+        assert_eq!(policy.exec_paths().len(), 1);
+    }
+
+    #[test]
+    fn exec_parent_removes_read_child() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().join("lib");
+        let child = parent.join("sub");
+        std::fs::create_dir_all(&child).expect("create dirs");
+
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(&child)
+            .exec_path(&parent)
+            .build()
+            .expect("build should succeed");
+
+        assert!(
+            policy.read_paths().is_empty(),
+            "exec parent should remove read child"
+        );
+        assert_eq!(policy.exec_paths().len(), 1);
+    }
+
+    // ── cross-set deduction: write ↔ exec ─────────────────────────
+
+    #[test]
+    fn exec_covered_by_write_not_added() {
+        let tmp = make_temp_dir();
+        let dir = tmp.path().join("data");
+        std::fs::create_dir(&dir).expect("create dir");
+
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(tmp.path())
+            .write_path(&dir)
+            .exec_path(&dir)
+            .build()
+            .expect("build should succeed");
+
+        assert!(
+            policy.exec_paths().is_empty(),
+            "exec should be skipped when write covers it"
+        );
+        assert_eq!(policy.write_paths().len(), 1);
+    }
+
+    #[test]
+    fn write_parent_removes_exec_child() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().join("data");
+        let child = parent.join("bin");
+        std::fs::create_dir_all(&child).expect("create dirs");
+        // Need a separate read path so the policy has at least one grant
+        // outside the write tree for a valid policy.
+        let read_dir = tmp.path().join("docs");
+        std::fs::create_dir(&read_dir).expect("create docs dir");
+
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(&read_dir)
+            .exec_path(&child)
+            .write_path(&parent)
+            .build()
+            .expect("build should succeed");
+
+        assert!(
+            policy.exec_paths().is_empty(),
+            "write parent should remove exec child"
+        );
+        assert_eq!(policy.write_paths().len(), 1);
+    }
+
+    #[test]
+    fn same_path_read_then_exec_passes_validate() {
+        let tmp = make_temp_dir();
+        let dir = tmp.path().join("shared");
+        std::fs::create_dir(&dir).expect("create dir");
+
+        // Cross-set deduction must prevent the same path from appearing
+        // in both read and exec sets, which validate() rejects.
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(&dir)
+            .exec_path(&dir)
+            .build()
+            .expect("build should succeed — cross-set dedup should prevent overlap");
+
+        policy
+            .validate()
+            .expect("produced policy must pass validate");
+    }
+
+    #[test]
+    fn read_parent_after_exec_child_rejected_by_validate() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().join("lib");
+        let child = parent.join("bin");
+        std::fs::create_dir_all(&child).expect("create dirs");
+
+        let result = SandboxPolicyBuilder::new()
+            .exec_path(&child)
+            .read_path(&parent)
+            .build();
+
+        assert!(
+            result.is_err(),
+            "read parent + exec child is an unresolvable conflict"
+        );
+    }
+
+    #[test]
+    fn exec_parent_with_write_child_rejected_by_validate() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().join("data");
+        let child = parent.join("sub");
+        std::fs::create_dir_all(&child).expect("create dirs");
+
+        let result = SandboxPolicyBuilder::new()
+            .write_path(&child)
+            .exec_path(&parent)
+            .build();
+
+        assert!(
+            result.is_err(),
+            "exec parent + write child is an unresolvable conflict"
+        );
+    }
+
+    #[test]
+    fn exec_child_under_write_parent_not_added() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().join("data");
+        let child = parent.join("bin");
+        std::fs::create_dir_all(&child).expect("create dirs");
+
+        let policy = SandboxPolicyBuilder::new()
+            .write_path(&parent)
+            .exec_path(&child)
+            .build()
+            .expect("build should succeed");
+
+        assert!(
+            policy.exec_paths().is_empty(),
+            "exec child under write parent should be skipped"
+        );
+        assert_eq!(policy.write_paths().len(), 1);
+    }
+
+    #[test]
+    fn exec_child_then_exec_parent_collapses() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().join("bin");
+        let child = parent.join("sub");
+        std::fs::create_dir_all(&child).expect("create dirs");
+
+        let policy = SandboxPolicyBuilder::new()
+            .exec_path(&child)
+            .exec_path(&parent)
+            .build()
+            .expect("build should succeed");
+
+        assert_eq!(policy.exec_paths().len(), 1);
+    }
+
+    #[test]
+    fn write_child_then_write_parent_collapses() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().join("data");
+        let child = parent.join("sub");
+        std::fs::create_dir_all(&child).expect("create dirs");
+
+        let policy = SandboxPolicyBuilder::new()
+            .write_path(&child)
+            .write_path(&parent)
+            .build()
+            .expect("build should succeed");
+
+        assert_eq!(policy.write_paths().len(), 1);
     }
 }

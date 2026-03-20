@@ -3,20 +3,24 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::SandboxError;
+
 /// True if `child` is equal to `parent` or a descendant of it.
 /// Tries canonicalization first; falls back to lexical comparison.
 /// When only one path canonicalizes, resolves the other's existing
 /// ancestor prefix to avoid mismatches from symlinks (e.g.,
 /// `/var` -> `/private/var` on macOS).
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 pub fn is_descendant_or_equal(parent: &Path, child: &Path) -> bool {
     let canon_parent = std::fs::canonicalize(parent);
     let canon_child = std::fs::canonicalize(child);
     if let (Ok(cp), Ok(cc)) = (&canon_parent, &canon_child) {
         return cc.starts_with(cp);
     }
-    let np = canon_parent.unwrap_or_else(|_| canonicalize_existing_prefix(parent));
-    let nc = canon_child.unwrap_or_else(|_| canonicalize_existing_prefix(child));
+    // Both paths come from test code with known-good absolute paths.
+    let np = canon_parent.unwrap_or_else(|_| canonicalize_existing_prefix(parent).unwrap());
+    let nc = canon_child.unwrap_or_else(|_| canonicalize_existing_prefix(child).unwrap());
     nc.starts_with(&np)
 }
 
@@ -28,7 +32,12 @@ pub fn is_strict_parent_of(parent: &Path, child: &Path) -> bool {
 /// Canonicalize the longest existing prefix of `path`, then append
 /// the remaining non-existent components. Handles cases where the
 /// full path doesn't exist but ancestors contain symlinks.
-pub fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+///
+/// # Errors
+///
+/// Returns `SandboxError::InvalidPolicy` if the path is relative or
+/// contains `..` components that would escape the root.
+pub fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, SandboxError> {
     let mut existing = path.to_path_buf();
     let mut suffix_parts = Vec::new();
     loop {
@@ -37,7 +46,7 @@ pub fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
             for part in suffix_parts.into_iter().rev() {
                 result.push(part);
             }
-            return result;
+            return Ok(result);
         }
         match existing.file_name() {
             Some(name) => {
@@ -50,25 +59,51 @@ pub fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
     normalize_lexical(path)
 }
 
+/// Best-effort path resolution: try full canonicalization, fall back to
+/// prefix canonicalization, then to the original path unchanged.
+pub fn canonicalize_best_effort(path: &Path) -> PathBuf {
+    canonicalize_existing_prefix(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Normalize a path lexically: resolve `.` and `..` components, normalize separators.
 /// Does NOT touch the filesystem.
-pub fn normalize_lexical(path: &Path) -> PathBuf {
+///
+/// # Errors
+///
+/// Returns `SandboxError::InvalidPolicy` if the path is not absolute or
+/// if a `..` component would escape past the root prefix.
+pub fn normalize_lexical(path: &Path) -> Result<PathBuf, SandboxError> {
     use std::path::Component;
-    debug_assert!(
-        path.is_absolute(),
-        "normalize_lexical requires absolute paths"
-    );
+    if !path.is_absolute() {
+        return Err(SandboxError::InvalidPolicy(format!(
+            "normalize_lexical requires an absolute path, got: {}",
+            path.display()
+        )));
+    }
+    let mut depth: usize = 0;
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
             Component::CurDir => {} // skip `.`
             Component::ParentDir => {
+                if depth == 0 {
+                    return Err(SandboxError::InvalidPolicy(format!(
+                        "path escapes root via excess `..`: {}",
+                        path.display()
+                    )));
+                }
+                depth -= 1;
                 out.pop();
             }
+            Component::Normal(_) => {
+                depth += 1;
+                out.push(comp);
+            }
+            // RootDir, Prefix — structural components that don't increase depth
             other => out.push(other),
         }
     }
-    out
+    Ok(out)
 }
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -188,7 +223,7 @@ mod tests {
     #[test]
     fn canonicalize_existing_prefix_full_path_exists() {
         let dir = tempfile::TempDir::new().expect("create temp dir");
-        let result = canonicalize_existing_prefix(dir.path());
+        let result = canonicalize_existing_prefix(dir.path()).unwrap();
         let expected = std::fs::canonicalize(dir.path()).expect("canonicalize");
         assert_eq!(result, expected);
     }
@@ -197,7 +232,7 @@ mod tests {
     fn canonicalize_existing_prefix_partial_path() {
         let dir = tempfile::TempDir::new().expect("create temp dir");
         let nonexistent = dir.path().join("a").join("b").join("c");
-        let result = canonicalize_existing_prefix(&nonexistent);
+        let result = canonicalize_existing_prefix(&nonexistent).unwrap();
         let canon_dir = std::fs::canonicalize(dir.path()).expect("canonicalize");
         // Should be canon_dir/a/b/c
         assert_eq!(result, canon_dir.join("a").join("b").join("c"));
@@ -211,8 +246,8 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         let path = Path::new("/surely_nonexistent_root_abc123/deep/path");
 
-        let result = canonicalize_existing_prefix(path);
-        let expected = normalize_lexical(path);
+        let result = canonicalize_existing_prefix(path).unwrap();
+        let expected = normalize_lexical(path).unwrap();
         assert_eq!(result, expected);
     }
 
@@ -225,7 +260,7 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         let input = Path::new("/a/./b");
 
-        let result = normalize_lexical(input);
+        let result = normalize_lexical(input).unwrap();
 
         #[cfg(target_os = "windows")]
         assert_eq!(result, PathBuf::from(r"C:\a\b"));
@@ -240,7 +275,7 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         let input = Path::new("/a/b/../c");
 
-        let result = normalize_lexical(input);
+        let result = normalize_lexical(input).unwrap();
 
         #[cfg(target_os = "windows")]
         assert_eq!(result, PathBuf::from(r"C:\a\c"));
@@ -255,11 +290,102 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         let input = Path::new("/a/b/c");
 
-        let result = normalize_lexical(input);
+        let result = normalize_lexical(input).unwrap();
 
         #[cfg(target_os = "windows")]
         assert_eq!(result, PathBuf::from(r"C:\a\b\c"));
         #[cfg(not(target_os = "windows"))]
         assert_eq!(result, PathBuf::from("/a/b/c"));
+    }
+
+    #[test]
+    fn normalize_lexical_excess_dotdot_returns_error() {
+        #[cfg(target_os = "windows")]
+        let input = Path::new(r"C:\a\..\..\etc\passwd");
+        #[cfg(not(target_os = "windows"))]
+        let input = Path::new("/a/../../etc/passwd");
+
+        let err = normalize_lexical(input).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("escapes root"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn normalize_lexical_relative_path_returns_error() {
+        let input = Path::new("relative/path");
+        let err = normalize_lexical(input).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("absolute"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn normalize_lexical_root_only() {
+        #[cfg(target_os = "windows")]
+        let input = Path::new(r"C:\");
+        #[cfg(not(target_os = "windows"))]
+        let input = Path::new("/");
+
+        let result = normalize_lexical(input).unwrap();
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn normalize_lexical_dotdot_at_boundary_succeeds() {
+        #[cfg(target_os = "windows")]
+        let input = Path::new(r"C:\a\..\b");
+        #[cfg(not(target_os = "windows"))]
+        let input = Path::new("/a/../b");
+
+        let result = normalize_lexical(input).unwrap();
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(result, PathBuf::from(r"C:\b"));
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(result, PathBuf::from("/b"));
+    }
+
+    #[test]
+    fn normalize_lexical_multi_level_dotdot() {
+        #[cfg(target_os = "windows")]
+        let input = Path::new(r"C:\a\b\c\..\..\d");
+        #[cfg(not(target_os = "windows"))]
+        let input = Path::new("/a/b/c/../../d");
+
+        let result = normalize_lexical(input).unwrap();
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(result, PathBuf::from(r"C:\a\d"));
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(result, PathBuf::from("/a/d"));
+    }
+
+    #[test]
+    fn normalize_lexical_trailing_dot() {
+        #[cfg(target_os = "windows")]
+        let input = Path::new(r"C:\a\b\.");
+        #[cfg(not(target_os = "windows"))]
+        let input = Path::new("/a/b/.");
+
+        let result = normalize_lexical(input).unwrap();
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(result, PathBuf::from(r"C:\a\b"));
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(result, PathBuf::from("/a/b"));
+    }
+
+    #[test]
+    fn normalize_lexical_trailing_dotdot() {
+        #[cfg(target_os = "windows")]
+        let input = Path::new(r"C:\a\b\c\..");
+        #[cfg(not(target_os = "windows"))]
+        let input = Path::new("/a/b/c/..");
+
+        let result = normalize_lexical(input).unwrap();
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(result, PathBuf::from(r"C:\a\b"));
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(result, PathBuf::from("/a/b"));
     }
 }

@@ -9,14 +9,13 @@ use std::path::{Path, PathBuf};
 use crate::Result;
 use crate::command::SandboxCommand;
 use crate::error::SandboxError;
-use crate::path_util::canonicalize_existing_prefix;
+use crate::path_util::canonicalize_best_effort;
 use crate::policy::SandboxPolicy;
 
 /// Check if `dir` is accessible given pre-canonicalized grant and implicit paths.
 /// Canonicalizes only `dir` (once) instead of re-canonicalizing grants per call.
 fn is_dir_accessible(dir: &Path, canon_grants: &[PathBuf], canon_implicit: &[PathBuf]) -> bool {
-    let resolved_dir =
-        std::fs::canonicalize(dir).unwrap_or_else(|_| canonicalize_existing_prefix(dir));
+    let resolved_dir = canonicalize_best_effort(dir);
 
     canon_grants.iter().any(|g| resolved_dir.starts_with(g))
         || canon_implicit.iter().any(|g| resolved_dir.starts_with(g))
@@ -39,16 +38,16 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
     // O(P*G) re-canonicalization in inner loops.
     let canon_grants: Vec<PathBuf> = grant_paths
         .iter()
-        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+        .map(|p| canonicalize_best_effort(p))
         .collect();
     let canon_implicit: Vec<PathBuf> = implicit
         .iter()
-        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .map(|p| canonicalize_best_effort(p))
         .collect();
     let canon_write_paths: Vec<PathBuf> = policy
         .write_paths()
         .iter()
-        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .map(|p| canonicalize_best_effort(p))
         .collect();
 
     // TEMP/TMP/TMPDIR must be under a write path (temp dirs need write access).
@@ -57,8 +56,7 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
         if let Some(val) = effective_env(command, key) {
             let dir = Path::new(&val);
             if !dir.as_os_str().is_empty() {
-                let resolved = std::fs::canonicalize(dir)
-                    .unwrap_or_else(|_| canonicalize_existing_prefix(dir));
+                let resolved = canonicalize_best_effort(dir);
                 if !canon_write_paths.iter().any(|wp| resolved.starts_with(wp)) {
                     errors.push(format!(
                         "{key}={} is not covered by any write_path in the policy. \
