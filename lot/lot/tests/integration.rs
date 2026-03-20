@@ -9,41 +9,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::io::Write;
 use std::path::PathBuf;
 
-use tempfile::TempDir;
-
-/// Create temp dir inside the project to avoid system temp ancestors
-/// (e.g. `C:\Users`) that require elevation for traverse ACE grants.
-fn make_temp_dir() -> TempDir {
-    let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace root")
-        .join("test_tmp");
-    std::fs::create_dir_all(&test_tmp).expect("create test_tmp dir");
-    TempDir::new_in(&test_tmp).expect("create temp dir")
-}
-
-/// Set sandbox-safe overrides for path-bearing env vars, then forward
-/// remaining parent env. On Windows, `forward_common_env` skips keys already
-/// set, so overrides take priority. No-op on non-Windows (Unix builds an
-/// explicit envp without inheriting parent env).
-/// `scratch` must be a write_path in the policy (used for TEMP/TMP/TMPDIR).
-#[cfg(target_os = "windows")]
-fn set_sandbox_env(cmd: &mut lot::SandboxCommand, scratch: &std::path::Path) {
-    let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
-    let sys32 = format!(r"{sys_root}\System32");
-    cmd.env("PATH", &sys32);
-    cmd.env("TEMP", scratch);
-    cmd.env("TMP", scratch);
-    cmd.env("TMPDIR", scratch);
-    cmd.forward_common_env();
-}
-
-#[cfg(not(target_os = "windows"))]
-#[allow(clippy::missing_const_for_fn)]
-fn set_sandbox_env(_cmd: &mut lot::SandboxCommand, _scratch: &std::path::Path) {}
+use common::{make_temp_dir, platform_exec_paths, set_sandbox_env};
 
 /// Spawn a sandboxed child, panicking on any error.
 fn must_spawn(policy: &lot::SandboxPolicy, cmd: &lot::SandboxCommand) -> lot::SandboxedChild {
@@ -149,36 +120,13 @@ fn make_policy(
     write_paths: Vec<PathBuf>,
     scratch: &std::path::Path,
 ) -> lot::SandboxPolicy {
-    #[allow(unused_mut)]
-    let mut exec_paths = Vec::new();
-
-    // Windows: AppContainer inherits access to system binaries; adding
-    // System32 to exec_paths would require admin ACL grants.
-    #[cfg(target_os = "linux")]
-    {
-        if std::path::Path::new("/bin").exists() {
-            exec_paths.push(PathBuf::from("/bin"));
-        }
-        if std::path::Path::new("/usr/bin").exists()
-            && std::fs::canonicalize("/usr/bin").ok() != std::fs::canonicalize("/bin").ok()
-        {
-            exec_paths.push(PathBuf::from("/usr/bin"));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        exec_paths.push(PathBuf::from("/bin"));
-        exec_paths.push(PathBuf::from("/usr/bin"));
-    }
-
     let mut write_paths = write_paths;
     write_paths.push(scratch.to_path_buf());
 
     lot::SandboxPolicy::new(
         read_paths,
         write_paths,
-        exec_paths,
+        platform_exec_paths(),
         Vec::new(),
         false,
         lot::ResourceLimits::default(),
@@ -629,32 +577,13 @@ fn test_deny_path_blocks_access_to_subtree() {
 
     let (program, args) = cat_command(&secret_file);
 
-    #[allow(unused_mut)]
-    let mut exec_paths = Vec::new();
-    #[cfg(target_os = "linux")]
-    {
-        if std::path::Path::new("/bin").exists() {
-            exec_paths.push(PathBuf::from("/bin"));
-        }
-        if std::path::Path::new("/usr/bin").exists()
-            && std::fs::canonicalize("/usr/bin").ok() != std::fs::canonicalize("/bin").ok()
-        {
-            exec_paths.push(PathBuf::from("/usr/bin"));
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        exec_paths.push(PathBuf::from("/bin"));
-        exec_paths.push(PathBuf::from("/usr/bin"));
-    }
-
     let allowed_dir_canon = std::fs::canonicalize(&allowed_dir).expect("canonicalize allowed_dir");
     let denied_dir_canon = std::fs::canonicalize(&denied_dir).expect("canonicalize denied_dir");
 
     let policy = lot::SandboxPolicy::new(
         vec![allowed_dir_canon],
         vec![scratch.path().to_path_buf()],
-        exec_paths,
+        platform_exec_paths(),
         vec![denied_dir_canon],
         false,
         lot::ResourceLimits::default(),
@@ -727,25 +656,6 @@ fn make_deny_policy(
     write: bool,
     scratch: &std::path::Path,
 ) -> lot::SandboxPolicy {
-    #[allow(unused_mut)]
-    let mut exec_paths = Vec::new();
-    #[cfg(target_os = "linux")]
-    {
-        if std::path::Path::new("/bin").exists() {
-            exec_paths.push(PathBuf::from("/bin"));
-        }
-        if std::path::Path::new("/usr/bin").exists()
-            && std::fs::canonicalize("/usr/bin").ok() != std::fs::canonicalize("/bin").ok()
-        {
-            exec_paths.push(PathBuf::from("/usr/bin"));
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        exec_paths.push(PathBuf::from("/bin"));
-        exec_paths.push(PathBuf::from("/usr/bin"));
-    }
-
     let parent_canon = std::fs::canonicalize(parent).expect("canonicalize parent");
     let denied_canon = std::fs::canonicalize(denied).expect("canonicalize denied");
 
@@ -759,7 +669,7 @@ fn make_deny_policy(
     lot::SandboxPolicy::new(
         read,
         write_paths,
-        exec_paths,
+        platform_exec_paths(),
         vec![denied_canon],
         false,
         lot::ResourceLimits::default(),

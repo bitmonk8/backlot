@@ -121,19 +121,13 @@ Only the null-DACL early-return path is tested. The entire ACE iteration loop (G
 
 Duplicate helpers increase maintenance cost for every new test. The symlink test providing zero coverage in CI and the missing Unix env-var coverage leave gaps in platform-specific validation.
 
-### Duplicate test helpers across test files
+### Duplicate test helpers across test files — DONE
 
-`make_temp_dir()` and `set_sandbox_env()` are duplicated in `lib.rs` tests, `appcontainer.rs` tests, and `integration.rs`.
+Extracted `make_temp_dir()`, `set_sandbox_env()`, and `platform_exec_paths()` to `lot/tests/common/mod.rs`. Integration tests import via `mod common`. Unit tests in `appcontainer.rs` retain their own copies because Rust unit tests inside `src/` cannot import from the `tests/` directory.
 
-**Fix:** Extract to shared test utility module.
-**Files:** `lot/src/windows/appcontainer.rs`, `lot/tests/integration.rs`
+### Duplicate exec_paths construction in test helpers — DONE
 
-### Duplicate exec_paths construction in test helpers
-
-`make_policy`, `make_deny_policy`, and `test_deny_path_blocks_access_to_subtree` duplicate platform-conditional exec_paths construction.
-
-**Fix:** Extract to shared helper.
-**File:** `lot/tests/integration.rs`
+Extracted `platform_exec_paths()` to `lot/tests/common/mod.rs`. `make_policy`, `make_deny_policy`, and `test_deny_path_blocks_access_to_subtree` now call it instead of duplicating the platform-conditional logic.
 
 ### Symlink-into-deny-path test silently skips without developer mode
 
