@@ -4,17 +4,6 @@ Issues grouped by co-fixability, ordered by descending impact.
 
 ---
 
-## Group 2: Windows Process Creation & Stdio Handle Safety
-
-Console handle corruption on error paths and invalid handles passed to child processes.
-
-| # | File | Lines | Description | Severity |
-|---|------|-------|-------------|----------|
-| 3 | lot/src/windows/appcontainer.rs | 607-608, 617, 669, 699, 726 | On error paths only, `close_handle_if_valid(child_stdin/stdout/stderr)` closes parent's own console handle when stdio is `Inherit`. `GetStdHandle()` returns a borrowed console handle; closing it corrupts parent's console I/O. Success path correctly avoids this. | Critical |
-| 4 | lot/src/windows/appcontainer.rs | 797-805 | When `STARTF_USESTDHANDLES` is set and a stream is `Null`, `INVALID_HANDLE_VALUE` is passed as the child's handle — not a handle to NUL device. Child receives an invalid handle. Only manifests when mixing `Null` with `Piped`/`Inherit`. | High |
-
----
-
 ## Group 3: Windows Sentinel & ACL Recovery Robustness
 
 Sentinel errors discarded, malformed entries skipped, memory leaks. Security state left permanently modified after failures.
@@ -83,6 +72,8 @@ Zero coverage on public API surfaces, assertion-free tests, untested platforms.
 | 28 | lot/tests/integration.rs | 452-463 | macOS branch of `test_cleanup_after_drop` has no assertion. Test cannot fail on macOS. | Medium |
 | 29 | lot/tests/integration.rs | 204-1105 | All tests using `try_spawn` silently return on `PrerequisitesNotMet`. No mechanism to detect when entire suite runs zero assertions. Intentional design for cross-platform CI, but means test pass does not guarantee code was exercised. | Medium |
 | 30 | lot/tests/integration.rs | 850-895 | `test_symlink_into_deny_path` is Unix-only (`#[cfg(unix)]`). Symlink bypass attack untested on Windows. Windows deny paths use explicit deny ACEs which may resolve symlinks differently. | Medium |
+| 45 | lot/src/windows/pipe.rs | tests | `stdio_pipes_close_owned_skips_inherit` is smoke-only (no-panic). Does not verify the inherited handle remains valid after `close_owned`. A post-call check (e.g., `GetFileType`) would prove the handle was not closed. | Medium |
+| 46 | lot/src/windows/pipe.rs | tests | No test for `resolve_stdio_output(SandboxStdio::Null)` — the write path of `open_nul_device` is untested. | Medium |
 
 ---
 

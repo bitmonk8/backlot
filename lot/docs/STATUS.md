@@ -2,16 +2,17 @@
 
 ## Current Phase
 
-**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across 11 remaining groups (2–12). Goal: clear all issues.
+**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across 10 remaining groups (3–12). Goal: clear all issues.
 
 ## Resolved
 
 - **Group 1: macOS Seatbelt Silent Security Bypass** — `generate_profile` and `append_sbpl_rule` now return `Result`, propagating path-encoding errors instead of silently dropping rules. `canonicalize` failure in `spawn()` returns `SandboxError::Setup` instead of silently falling back.
+- **Group 2: Windows Process Creation & Stdio Handle Safety** — Error paths now only close owned child handles (Piped, Null), never borrowed Inherit handles from the parent console. Null stdio streams open a real `\\.\NUL` device handle instead of passing `INVALID_HANDLE_VALUE`. `STARTF_USESTDHANDLES` is always set since all streams have valid handles.
 
 ## Next Work
 
-1. **Group 2: Windows Process Creation & Stdio Handle Safety** — Console handle corruption on error paths and invalid handles passed to child processes. (1 Critical, 1 High)
-2. Groups 3–12 in `ISSUES.md`, ordered by descending impact.
+1. **Group 3: Windows Sentinel & ACL Recovery Robustness** — Sentinel errors discarded, malformed entries skipped, memory leaks. (3 High, 4 Medium)
+2. Groups 4–12 in `ISSUES.md`, ordered by descending impact.
 
 After all issues resolved:
 - First real-world usage / `lot run` testing

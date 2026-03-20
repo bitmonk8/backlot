@@ -605,7 +605,11 @@ fn spawn_with_sentinel(
             Ok(v) => v,
             Err(e) => {
                 close_optional_handle(parent_stdin);
-                close_handle_if_valid(child_stdin);
+                // Only close child_stdin if we own it (Piped or Null).
+                // Inherit handles are borrowed from the parent process.
+                if command.stdin != SandboxStdio::Inherit {
+                    close_handle_if_valid(child_stdin);
+                }
                 return Err((sentinel, SandboxError::Setup(format!("stdout pipe: {e}"))));
             }
         };
@@ -614,9 +618,14 @@ fn spawn_with_sentinel(
         Ok(v) => v,
         Err(e) => {
             close_optional_handle(parent_stdin);
-            close_handle_if_valid(child_stdin);
             close_optional_handle(parent_stdout);
-            close_handle_if_valid(child_stdout);
+            // Only close child handles we own (Piped or Null), not Inherit.
+            if command.stdin != SandboxStdio::Inherit {
+                close_handle_if_valid(child_stdin);
+            }
+            if command.stdout != SandboxStdio::Inherit {
+                close_handle_if_valid(child_stdout);
+            }
             return Err((sentinel, SandboxError::Setup(format!("stderr pipe: {e}"))));
         }
     };
@@ -666,7 +675,7 @@ fn spawn_with_sentinel(
         InitializeProcThreadAttributeList(attr_list, attr_count, 0, &raw mut attr_list_size)
     };
     if ret == FALSE {
-        pipes.close_all();
+        pipes.close_owned(command.stdin, command.stdout, command.stderr);
         for sid in &cap_sids {
             // SAFETY: Each sid from AllocateAndInitializeSid.
             unsafe {
@@ -696,7 +705,7 @@ fn spawn_with_sentinel(
     };
     if ret == FALSE {
         let e = io::Error::last_os_error();
-        pipes.close_all();
+        pipes.close_owned(command.stdin, command.stdout, command.stderr);
         // SAFETY: attr_list is initialized; SIDs are from AllocateAndInitializeSid.
         unsafe {
             cleanup_attr_and_sids(attr_list, &cap_sids);
@@ -723,7 +732,7 @@ fn spawn_with_sentinel(
         };
         if ret == FALSE {
             let e = io::Error::last_os_error();
-            pipes.close_all();
+            pipes.close_owned(command.stdin, command.stdout, command.stderr);
             // SAFETY: attr_list is initialized; SIDs are from AllocateAndInitializeSid.
             unsafe {
                 cleanup_attr_and_sids(attr_list, &cap_sids);
@@ -794,16 +803,12 @@ fn create_sandboxed_process(
     }
     si.lpAttributeList = attr_list;
 
-    let has_stdio = command.stdin != SandboxStdio::Null
-        || command.stdout != SandboxStdio::Null
-        || command.stderr != SandboxStdio::Null;
-
-    if has_stdio {
-        si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
-        si.StartupInfo.hStdInput = pipes.child_stdin;
-        si.StartupInfo.hStdOutput = pipes.child_stdout;
-        si.StartupInfo.hStdError = pipes.child_stderr;
-    }
+    // All streams now have real handles (Piped = pipe, Inherit = console,
+    // Null = \\.\NUL), so always set STARTF_USESTDHANDLES.
+    si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = pipes.child_stdin;
+    si.StartupInfo.hStdOutput = pipes.child_stdout;
+    si.StartupInfo.hStdError = pipes.child_stderr;
 
     let mut cmd_line = build_command_line(&command.program, &command.args);
 
@@ -820,7 +825,7 @@ fn create_sandboxed_process(
         creation_flags |= CREATE_UNICODE_ENVIRONMENT;
     }
 
-    let inherit_handles = if has_stdio { TRUE } else { FALSE };
+    let inherit_handles = TRUE;
 
     // SAFETY: Zeroing a POD struct.
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
@@ -843,18 +848,17 @@ fn create_sandboxed_process(
         )
     };
 
-    // Close child-side pipe handles in the parent after CreateProcessW.
+    // Close child-side handles in the parent after CreateProcessW.
     // The child inherited these handles via PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
-    // Only Piped streams have parent-owned child handles; Null and Inherit
-    // handles are either system-owned (NUL device) or the parent's own
-    // console handles, which must not be closed here.
-    if command.stdin == SandboxStdio::Piped {
+    // Piped and Null child handles are owned by us; Inherit handles are
+    // borrowed from the parent's console and must NOT be closed.
+    if command.stdin != SandboxStdio::Inherit {
         close_handle_if_valid(pipes.child_stdin);
     }
-    if command.stdout == SandboxStdio::Piped {
+    if command.stdout != SandboxStdio::Inherit {
         close_handle_if_valid(pipes.child_stdout);
     }
-    if command.stderr == SandboxStdio::Piped {
+    if command.stderr != SandboxStdio::Inherit {
         close_handle_if_valid(pipes.child_stderr);
     }
 
