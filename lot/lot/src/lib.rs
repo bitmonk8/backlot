@@ -18,6 +18,7 @@
 mod command;
 mod env_check;
 mod error;
+pub(crate) mod path_util;
 mod policy;
 mod policy_builder;
 
@@ -81,6 +82,22 @@ pub fn probe() -> PlatformCapabilities {
         appcontainer: false,
         job_objects: false,
     };
+}
+
+/// Directories each platform makes accessible to sandboxed processes
+/// regardless of what the policy grants. Dispatches to platform modules.
+pub(crate) fn platform_implicit_read_paths() -> Vec<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    return linux::platform_implicit_read_paths();
+
+    #[cfg(target_os = "macos")]
+    return macos::platform_implicit_read_paths();
+
+    #[cfg(target_os = "windows")]
+    return windows::platform_implicit_read_paths();
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    return Vec::new();
 }
 
 /// Spawn a sandboxed child process.
@@ -361,6 +378,32 @@ mod tests {
             msg.contains("5s"),
             "expected duration in message, got: {msg}"
         );
+    }
+
+    /// PID 0 must be silently rejected. Reaching the end of this test
+    /// confirms the guard prevented the OS call (which would be undefined behavior).
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn kill_by_pid_zero_does_not_panic() {
+        kill_by_pid(0);
+    }
+
+    /// Killing our own PID must be silently rejected. Reaching the assertion
+    /// confirms the guard worked — the process is still alive.
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn kill_by_pid_self_does_not_kill() {
+        kill_by_pid(std::process::id());
+        assert!(std::process::id() > 0, "process still alive");
+    }
+
+    /// A nonexistent PID should be silently ignored (best-effort).
+    /// No stronger assertion possible for a void FFI function.
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn kill_by_pid_nonexistent_does_not_panic() {
+        // u32::MAX is extremely unlikely to be a valid PID.
+        kill_by_pid(u32::MAX);
     }
 }
 

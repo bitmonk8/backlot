@@ -173,7 +173,7 @@ AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor direct
 
 ### Spawn-time automatic grants
 
-`spawn()` grants traverse ACEs on ancestor directories of all policy paths (both grant and deny paths) automatically. For each ancestor lacking the ACE, it attempts `grant_traverse()`. Failures on directories the user cannot modify (system directories, volume root) produce `SandboxError::PrerequisitesNotMet`. The `_for_policy` prerequisite functions also cover deny paths to match `spawn_inner`'s behavior.
+`spawn()` grants traverse ACEs on ancestor directories of all policy paths (both grant and deny paths) automatically. For each ancestor lacking the ACE, it attempts `grant_traverse()`. Failures on directories the user cannot modify (system directories, volume root) produce `SandboxError::PrerequisitesNotMet(String)` with a pre-formatted diagnostic message. The `_for_policy` prerequisite functions also cover deny paths to match `spawn_inner`'s behavior.
 
 ### ACE details
 

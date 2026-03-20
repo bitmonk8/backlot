@@ -7,7 +7,6 @@
 ## Next Work
 
 - First real-world usage / `lot run` testing
-- Remaining issues tracked in `docs/ISSUES.md`
 
 ## CI Status
 

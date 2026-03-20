@@ -4,12 +4,15 @@
 
 #![allow(clippy::print_stderr)]
 
-use std::collections::HashMap;
+mod config;
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+
+use config::{SandboxConfig, build_policy};
 
 /// Cross-platform process sandboxing.
 #[derive(Parser)]
@@ -56,67 +59,6 @@ struct SetupArgs {
     /// Print details of what is being configured.
     #[arg(long)]
     verbose: bool,
-}
-
-// ── Config deserialization ──────────────────────────────────────────
-
-#[derive(serde::Deserialize, Default)]
-struct SandboxConfig {
-    #[serde(default)]
-    filesystem: FilesystemConfig,
-    #[serde(default)]
-    network: NetworkConfig,
-    #[serde(default)]
-    limits: LimitsConfig,
-    #[serde(default)]
-    environment: EnvironmentConfig,
-    #[serde(default)]
-    process: ProcessConfig,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct FilesystemConfig {
-    #[serde(default)]
-    read: Vec<PathBuf>,
-    #[serde(default)]
-    write: Vec<PathBuf>,
-    #[serde(default)]
-    exec: Vec<PathBuf>,
-    #[serde(default)]
-    deny: Vec<PathBuf>,
-    #[serde(default)]
-    include_platform_exec: bool,
-    #[serde(default)]
-    include_platform_lib: bool,
-    #[serde(default)]
-    include_temp: bool,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct NetworkConfig {
-    #[serde(default)]
-    allow: bool,
-}
-
-#[allow(clippy::struct_field_names)]
-#[derive(serde::Deserialize, Default)]
-struct LimitsConfig {
-    max_memory_bytes: Option<u64>,
-    max_processes: Option<u32>,
-    max_cpu_seconds: Option<u64>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct EnvironmentConfig {
-    #[serde(default)]
-    forward_common: bool,
-    #[serde(default)]
-    vars: HashMap<String, String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct ProcessConfig {
-    cwd: Option<PathBuf>,
 }
 
 // ── Command handlers ────────────────────────────────────────────────
@@ -243,46 +185,6 @@ fn exit_code_from_status(status: std::process::ExitStatus) -> ExitCode {
     }
 }
 
-fn build_policy(config: &SandboxConfig) -> lot::Result<lot::SandboxPolicy> {
-    let mut builder = lot::SandboxPolicyBuilder::new();
-
-    for path in &config.filesystem.read {
-        builder = builder.read_path(path);
-    }
-    for path in &config.filesystem.write {
-        builder = builder.write_path(path);
-    }
-    for path in &config.filesystem.exec {
-        builder = builder.exec_path(path);
-    }
-    for path in &config.filesystem.deny {
-        builder = builder.deny_path(path);
-    }
-    if config.filesystem.include_platform_exec {
-        builder = builder.include_platform_exec_paths();
-    }
-    if config.filesystem.include_platform_lib {
-        builder = builder.include_platform_lib_paths();
-    }
-    if config.filesystem.include_temp {
-        builder = builder.include_temp_dirs();
-    }
-
-    builder = builder.allow_network(config.network.allow);
-
-    if let Some(bytes) = config.limits.max_memory_bytes {
-        builder = builder.max_memory_bytes(bytes);
-    }
-    if let Some(n) = config.limits.max_processes {
-        builder = builder.max_processes(n);
-    }
-    if let Some(secs) = config.limits.max_cpu_seconds {
-        builder = builder.max_cpu_seconds(secs);
-    }
-
-    builder.build()
-}
-
 fn cmd_setup(args: &SetupArgs) -> ExitCode {
     #[cfg(target_os = "windows")]
     {
@@ -367,6 +269,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
@@ -388,47 +291,4 @@ mod tests {
     }
     // Windows exit_code_from_status calls process::exit() which cannot be
     // tested in-process. The function is tested indirectly via integration.
-
-    #[test]
-    fn build_policy_minimal_config() {
-        let tmp = tempfile::TempDir::new().expect("create temp dir");
-        let config = SandboxConfig {
-            filesystem: FilesystemConfig {
-                read: vec![tmp.path().to_path_buf()],
-                ..FilesystemConfig::default()
-            },
-            ..SandboxConfig::default()
-        };
-        let policy = build_policy(&config);
-        assert!(policy.is_ok(), "minimal config should produce valid policy");
-    }
-
-    #[test]
-    fn build_policy_empty_config_fails() {
-        let config = SandboxConfig::default();
-        let policy = build_policy(&config);
-        assert!(policy.is_err(), "empty config should fail validation");
-    }
-
-    #[test]
-    fn config_deserialization_minimal() {
-        let yaml = "filesystem:\n  read:\n    - .\n";
-        let config: Result<SandboxConfig, _> = serde_yml::from_str(yaml);
-        assert!(config.is_ok(), "minimal YAML should deserialize");
-    }
-
-    #[test]
-    fn config_deserialization_with_limits() {
-        let yaml = r"
-filesystem:
-  read:
-    - .
-limits:
-  max_memory_bytes: 1048576
-  max_processes: 10
-";
-        let config: SandboxConfig = serde_yml::from_str(yaml).expect("parse YAML");
-        assert_eq!(config.limits.max_memory_bytes, Some(1_048_576));
-        assert_eq!(config.limits.max_processes, Some(10));
-    }
 }

@@ -41,6 +41,12 @@ pub fn win32_error_msg(code: u32) -> String {
 
 pub use appcontainer::WindowsSandboxedChild;
 
+/// Directories Windows makes accessible to AppContainer processes by default.
+pub fn platform_implicit_read_paths() -> Vec<std::path::PathBuf> {
+    let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+    vec![std::path::PathBuf::from(&sys_root)]
+}
+
 use crate::command::SandboxCommand;
 use crate::policy::SandboxPolicy;
 use crate::{PlatformCapabilities, Result, SandboxedChild};
@@ -71,6 +77,9 @@ pub fn cleanup_stale() -> Result<()> {
 #[cfg(feature = "tokio")]
 #[allow(unsafe_code)]
 pub fn kill_by_pid(pid: u32) {
+    if pid == 0 || pid == std::process::id() {
+        return;
+    }
     // SAFETY: Opening a process handle by PID and terminating it.
     // The handle is closed immediately after.
     unsafe {

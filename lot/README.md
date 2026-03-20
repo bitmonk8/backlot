@@ -179,7 +179,7 @@ pub enum SandboxError {
     InvalidPolicy(String),      // Policy validation failed
     Cleanup(String),            // Post-session cleanup failed
     Timeout(Duration),          // Child exceeded timeout (from wait_with_output_timeout)
-    PrerequisitesNotMet { missing_paths, nul_device_missing }, // Windows: AppContainer ACL prerequisites missing
+    PrerequisitesNotMet(String),    // Windows: AppContainer ACL prerequisites missing
     Io(std::io::Error),         // Underlying I/O error
 }
 ```

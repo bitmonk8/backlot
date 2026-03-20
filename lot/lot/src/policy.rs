@@ -82,12 +82,6 @@ fn canon(path: &std::path::Path, which: &str) -> Result<PathBuf, SandboxError> {
     })
 }
 
-/// Returns true if `parent` is a strict prefix of `child` (directory ancestry).
-fn is_parent_of(parent: &std::path::Path, child: &std::path::Path) -> bool {
-    // `starts_with` on Path checks component-wise, so /tmp won't match /tmpfoo.
-    child.starts_with(parent) && child != parent
-}
-
 /// Check for parent/child overlaps between two named sets of canonicalized paths.
 fn check_cross_overlap(
     a_paths: &[PathBuf],
@@ -103,14 +97,14 @@ fn check_cross_overlap(
                     a.display()
                 )));
             }
-            if is_parent_of(a, b) {
+            if crate::path_util::is_strict_parent_of(a, b) {
                 return Err(SandboxError::InvalidPolicy(format!(
                     "parent/child overlap between {a_name} and {b_name}: {} contains {}",
                     a.display(),
                     b.display()
                 )));
             }
-            if is_parent_of(b, a) {
+            if crate::path_util::is_strict_parent_of(b, a) {
                 return Err(SandboxError::InvalidPolicy(format!(
                     "parent/child overlap between {b_name} and {a_name}: {} contains {}",
                     b.display(),
@@ -141,7 +135,7 @@ fn check_cross_overlap_directional(
             }
             // higher child under lower parent is allowed (elevated subdirectory).
             // lower child under higher parent is redundant (higher already covers lower).
-            if is_parent_of(higher, lower) {
+            if crate::path_util::is_strict_parent_of(higher, lower) {
                 return Err(SandboxError::InvalidPolicy(format!(
                     "parent/child overlap between {higher_name} and {lower_name}: {} contains {}",
                     higher.display(),
@@ -163,7 +157,9 @@ fn check_intra_overlap(paths: &[PathBuf], name: &str) -> Result<(), SandboxError
                     a.display()
                 )));
             }
-            if is_parent_of(a, b) || is_parent_of(b, a) {
+            if crate::path_util::is_strict_parent_of(a, b)
+                || crate::path_util::is_strict_parent_of(b, a)
+            {
                 return Err(SandboxError::InvalidPolicy(format!(
                     "parent/child overlap within {name}: {} and {}",
                     a.display(),
@@ -190,7 +186,9 @@ fn check_deny_coverage(
         .collect();
 
     for deny in deny_paths {
-        let covered = all_grants.iter().any(|grant| is_parent_of(grant, deny));
+        let covered = all_grants
+            .iter()
+            .any(|grant| crate::path_util::is_strict_parent_of(grant, deny));
         if !covered {
             return Err(SandboxError::InvalidPolicy(format!(
                 "deny path is not a strict child of any grant path: {}",
@@ -202,7 +200,7 @@ fn check_deny_coverage(
     // Reject grant paths nested under deny paths — they would be unreachable.
     for grant in &all_grants {
         for deny in deny_paths {
-            if is_parent_of(deny, grant) {
+            if crate::path_util::is_strict_parent_of(deny, grant) {
                 return Err(SandboxError::InvalidPolicy(format!(
                     "grant path {} is under deny path {} and would be unreachable",
                     grant.display(),

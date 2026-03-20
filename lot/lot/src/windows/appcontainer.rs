@@ -499,10 +499,18 @@ fn spawn_inner(
     }
     let nul_missing = !super::nul_device::nul_device_accessible();
     if !prereq_failed.is_empty() || nul_missing {
-        return Err(SandboxError::PrerequisitesNotMet {
-            missing_paths: prereq_failed,
-            nul_device_missing: nul_missing,
-        });
+        use std::fmt::Write;
+        let mut msg = String::new();
+        if !prereq_failed.is_empty() {
+            let _ = write!(msg, "missing traverse ACEs: {prereq_failed:?}");
+        }
+        if nul_missing {
+            if !msg.is_empty() {
+                msg.push_str(", ");
+            }
+            msg.push_str("NUL device ACE missing");
+        }
+        return Err(SandboxError::PrerequisitesNotMet(msg));
     }
 
     // Write sentinel with original DACLs before modifying anything.
@@ -949,7 +957,7 @@ mod tests {
     fn try_spawn(policy: &SandboxPolicy, cmd: &SandboxCommand) -> Option<crate::SandboxedChild> {
         match crate::spawn(policy, cmd) {
             Ok(child) => Some(child),
-            Err(SandboxError::PrerequisitesNotMet { .. }) => {
+            Err(SandboxError::PrerequisitesNotMet(..)) => {
                 eprintln!("[diag] SKIPPED: prerequisites not met");
                 None
             }
@@ -1266,7 +1274,7 @@ mod tests {
 
         let err = crate::spawn(&policy, &cmd).unwrap_err();
         assert!(
-            matches!(err, SandboxError::PrerequisitesNotMet { .. }),
+            matches!(err, SandboxError::PrerequisitesNotMet(..)),
             "expected PrerequisitesNotMet, got: {err:?}"
         );
     }

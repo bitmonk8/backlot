@@ -17,6 +17,29 @@ use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
 
 use cgroup::CgroupGuard;
 
+/// Directories Linux makes accessible to sandboxed processes (auto-mounted).
+pub fn platform_implicit_read_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    for p in &[
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/lib32",
+        "/bin",
+        "/usr/bin",
+        "/sbin",
+        "/usr/sbin",
+        "/usr/local/bin",
+    ] {
+        let path = std::path::Path::new(p);
+        if path.exists() {
+            paths.push(path.to_path_buf());
+        }
+    }
+    paths
+}
+
 pub fn probe() -> PlatformCapabilities {
     PlatformCapabilities {
         namespaces: namespace::available(),
@@ -552,6 +575,9 @@ pub fn kill_by_pid(pid: u32) {
     let Some(pid_i32) = i32::try_from(pid).ok().filter(|&p| p > 0) else {
         return;
     };
+    if pid == std::process::id() {
+        return;
+    }
     // SAFETY: Sending SIGKILL to a valid pid.
     unsafe {
         libc::kill(pid_i32, libc::SIGKILL);

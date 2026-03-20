@@ -11,6 +11,27 @@ use crate::unix;
 use crate::unix::{KillStyle, UnixSandboxedChild};
 use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
 
+/// Directories macOS makes accessible to sandboxed processes (Seatbelt defaults).
+pub fn platform_implicit_read_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    for p in &[
+        "/usr/lib",
+        "/usr/bin",
+        "/bin",
+        "/sbin",
+        "/usr/sbin",
+        "/usr/local/bin",
+        "/System/Library",
+        "/System/Cryptexes",
+    ] {
+        let path = std::path::Path::new(p);
+        if path.exists() {
+            paths.push(path.to_path_buf());
+        }
+    }
+    paths
+}
+
 pub const fn probe() -> PlatformCapabilities {
     PlatformCapabilities {
         namespaces: false,
@@ -313,6 +334,9 @@ pub fn kill_by_pid(pid: u32) {
     let Some(pid_i32) = i32::try_from(pid).ok().filter(|&p| p > 0) else {
         return;
     };
+    if pid == std::process::id() {
+        return;
+    }
     // macOS children call setsid(), so PGID == PID — negate to kill
     // the entire process group.
     // SAFETY: Sending SIGKILL to a valid negated PGID.

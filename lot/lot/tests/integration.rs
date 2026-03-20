@@ -26,7 +26,7 @@ fn try_spawn(
             eprintln!("[diag] spawn succeeded, pid={}", child.id());
             Some(child)
         }
-        Err(lot::SandboxError::PrerequisitesNotMet { .. }) => {
+        Err(lot::SandboxError::PrerequisitesNotMet(..)) => {
             eprintln!("[diag] SKIPPED: prerequisites not met");
             None
         }
