@@ -145,22 +145,16 @@ Extracted `platform_exec_paths()` to `lot/tests/common/mod.rs`. `make_policy`, `
 
 ---
 
-## 5. CLI (`lot-cli/`)
+## 5. CLI (`lot-cli/`) — DONE
 
-CI not testing `lot-cli` means regressions ship undetected. The config extraction is optional.
+### CI does not test `lot-cli` crate — DONE
 
-### CI does not test `lot-cli` crate
+Added `cargo test -p lot-cli` step to all three CI test jobs (Linux, macOS, Windows).
 
-All test jobs run `cargo test -p lot`. The `lot-cli` crate tests are never executed.
+### CLI config types could be extracted to `config.rs` — deferred
 
-**Fix:** Add `cargo test -p lot-cli` step to CI test jobs.
-**File:** `.github/workflows/ci.yml`
+`SandboxConfig` and sub-structs plus `build_policy` form a distinct concern from CLI dispatch. Optional; extract when the file grows larger.
 
-### CLI config types could be extracted to `config.rs`
-
-`SandboxConfig` and sub-structs plus `build_policy` (~58 lines of types) form a distinct concern from CLI dispatch. Currently manageable.
-
-**Fix:** Optional. Extract when the file grows larger.
 **File:** `lot-cli/src/main.rs`
 
 ---

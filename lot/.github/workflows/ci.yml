@@ -96,6 +96,8 @@ jobs:
           # Move ourselves into the runner leaf.
           echo $$ | sudo tee "$cg/runner/cgroup.procs"
           cargo test -p lot --features tokio -- --test-threads=1 --nocapture
+      - name: Run lot-cli tests
+        run: cargo test -p lot-cli
 
   test-macos:
     name: Test (macOS)
@@ -112,6 +114,8 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
       - run: cargo test -p lot --features tokio -- --test-threads=1 --nocapture
+      - name: Run lot-cli tests
+        run: cargo test -p lot-cli
 
   test-windows:
     name: Test (Windows)
@@ -130,6 +134,8 @@ jobs:
       - name: Setup AppContainer prerequisites
         run: cargo run -p lot-cli -- setup --verbose
       - run: cargo test -p lot --features tokio -- --test-threads=1 --nocapture
+      - name: Run lot-cli tests
+        run: cargo test -p lot-cli
 
   build:
     name: Build
