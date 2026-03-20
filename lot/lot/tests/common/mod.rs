@@ -52,23 +52,23 @@ pub fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
     (PathBuf::from("/bin/sleep"), vec![seconds.to_string()])
 }
 
-/// Platform-appropriate command that attempts to allocate large memory.
+/// Platform-appropriate command that attempts to allocate 1 GB of memory.
 #[cfg(target_os = "windows")]
 pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
     (
         PathBuf::from("powershell"),
-        vec!["-Command".into(), "[byte[]]::new(128MB) | Out-Null".into()],
+        vec!["-Command".into(), "[byte[]]::new(1GB) | Out-Null".into()],
     )
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
-    // Genuinely allocate 128MB via perl or python3 to trigger cgroup limits.
+    // Genuinely allocate 1GB via perl or python3 to trigger memory limits.
     (
         PathBuf::from("/bin/sh"),
         vec![
             "-c".into(),
-            "perl -e '$x = \"A\" x (128*1024*1024); sleep 1' 2>/dev/null || python3 -c 'x = bytearray(128*1024*1024); import time; time.sleep(1)'".into(),
+            "perl -e '$x = \"A\" x (1024*1024*1024); sleep 1' 2>/dev/null || python3 -c 'x = bytearray(1024*1024*1024); import time; time.sleep(1)'".into(),
         ],
     )
 }

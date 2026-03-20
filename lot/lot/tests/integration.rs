@@ -1208,7 +1208,7 @@ fn test_try_wait_returns_none_then_some() {
     let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
+    let Some(mut child) = try_spawn(&policy, &cmd) else {
         return;
     };
 
@@ -1217,13 +1217,21 @@ fn test_try_wait_returns_none_then_some() {
     eprintln!("[diag] first try_wait: {poll:?}");
     assert!(poll.is_none(), "process should still be running");
 
-    // Wait for completion, then poll again.
-    let status = child.wait().expect("wait");
-    eprintln!("[diag] wait returned: {status:?}");
-
-    let poll2 = child.try_wait().expect("try_wait after wait");
-    eprintln!("[diag] second try_wait: {poll2:?}");
-    assert!(poll2.is_some(), "process should have exited");
+    // Kill, then poll until reaped.
+    child.kill().expect("kill");
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!("[diag] try_wait after kill: {status:?}");
+                assert!(!status.success(), "killed process should not succeed");
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => panic!("try_wait failed: {e}"),
+        }
+    }
     eprintln!("[diag] PASSED");
 }
 
@@ -1407,8 +1415,8 @@ fn test_memory_limit_enforcement() {
 
     let (program, args) = memory_hog_command();
 
-    // 64 MB limit — enough for PowerShell startup but well below the
-    // 128 MB the command tries to allocate.
+    // 512 MB limit — high enough for process startup (macOS RLIMIT_AS
+    // fails if below current virtual memory) but below the 1 GB allocation.
     let policy = lot::SandboxPolicy::new(
         vec![tmp.path().to_path_buf()],
         vec![scratch.path().to_path_buf()],
@@ -1416,7 +1424,7 @@ fn test_memory_limit_enforcement() {
         Vec::new(),
         false,
         lot::ResourceLimits {
-            max_memory_bytes: Some(64 * 1024 * 1024),
+            max_memory_bytes: Some(512 * 1024 * 1024),
             ..lot::ResourceLimits::default()
         },
     );
