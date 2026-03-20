@@ -216,34 +216,26 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         unix::close_if_not_std(child_stderr);
     }
 
-    // Check error pipe: if child wrote [step:i32, errno:i32], setup failed
-    let mut err_buf = [0u8; 8];
-    // SAFETY: err_pipe_rd is valid, err_buf is stack-allocated
-    let n = unsafe { libc::read(err_pipe_rd, err_buf.as_mut_ptr().cast(), 8) };
-    // SAFETY: valid fd
-    unsafe { libc::close(err_pipe_rd) };
-
-    if n == 8 {
-        let step = i32::from_ne_bytes([err_buf[0], err_buf[1], err_buf[2], err_buf[3]]);
-        let errno = i32::from_ne_bytes([err_buf[4], err_buf[5], err_buf[6], err_buf[7]]);
-        let step_name = match step {
-            1 => "setsid",
-            2 => "seatbelt (sandbox_init)",
-            3 => "resource limits (setrlimit)",
-            4 => "dup2 (stdio)",
-            5 => "chdir",
-            6 => "execve",
-            _ => "unknown",
-        };
-        // Reap the child so we don't leak a zombie
-        // SAFETY: valid pid
-        unsafe { libc::waitpid(child_pid, std::ptr::null_mut(), 0) };
-        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
-        return Err(SandboxError::Setup(format!(
-            "child setup failed at step '{}': {}",
-            step_name,
-            io::Error::from_raw_os_error(errno)
-        )));
+    // Check error pipe: if child wrote [step:i32, errno:i32], setup failed.
+    // Step names are 1-indexed, matching the STEP_* constants in the child.
+    const STEP_NAMES: &[&str] = &[
+        "setsid",                      // 1
+        "seatbelt (sandbox_init)",     // 2
+        "resource limits (setrlimit)", // 3
+        "dup2 (stdio)",                // 4
+        "chdir",                       // 5
+        "execve",                      // 6
+    ];
+    // SAFETY: err_pipe_rd is valid, child_pid is valid
+    unsafe {
+        unix::check_child_error_pipe(
+            err_pipe_rd,
+            child_pid,
+            parent_stdin,
+            parent_stdout,
+            parent_stderr,
+            STEP_NAMES,
+        )?;
     }
 
     Ok(SandboxedChild {

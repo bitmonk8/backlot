@@ -322,18 +322,23 @@ fn make_mount_private(path: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Bind-mount a single file `src` to `dst` read-only.
-/// Creates an empty file at `dst` as the mount point.
-fn bind_mount_file_readonly(src: &str, dst: &str) -> io::Result<()> {
-    let c_dst = to_cstring(dst)?;
+/// Create an empty file at `path` to use as a bind-mount point.
+fn create_mount_point_file(path: &str) -> io::Result<()> {
+    let c_path = to_cstring(path)?;
     // SAFETY: valid CString pointer, creating regular file with 0o644
-    let fd = unsafe { libc::open(c_dst.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o644) };
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o644) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: fd is valid (checked above)
     unsafe { libc::close(fd) };
+    Ok(())
+}
 
+/// Bind-mount a single file `src` to `dst` read-only.
+/// Creates an empty file at `dst` as the mount point.
+fn bind_mount_file_readonly(src: &str, dst: &str) -> io::Result<()> {
+    create_mount_point_file(dst)?;
     bind_mount_readonly(src, dst)
 }
 
@@ -423,15 +428,7 @@ fn mount_proc(target: &str) -> io::Result<()> {
 fn mount_dev_node(new_root: &str, dev_path: &str) -> io::Result<()> {
     let dest = format!("{new_root}{dev_path}");
 
-    // Create an empty file to use as a mount point
-    let c_dest = to_cstring(&dest)?;
-    // SAFETY: valid CString pointer, creating regular file with 0o644
-    let fd = unsafe { libc::open(c_dest.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o644) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fd is valid (checked above)
-    unsafe { libc::close(fd) };
+    create_mount_point_file(&dest)?;
 
     let c_src = to_cstring(dev_path)?;
     // SAFETY: valid CString pointers, bind mounting a device node

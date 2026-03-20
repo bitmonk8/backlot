@@ -370,6 +370,58 @@ pub unsafe fn child_bail(err_fd: i32, step: i32, errno: i32) -> ! {
     unsafe { libc::_exit(1) }
 }
 
+/// Take ownership of an fd from an `Option<i32>` slot, returning it as a `File`.
+fn take_fd(slot: &mut Option<i32>) -> Option<std::fs::File> {
+    slot.take().map(|fd| {
+        // SAFETY: fd is a valid pipe fd we own
+        unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
+    })
+}
+
+/// Decode child error report from the error pipe after fork.
+/// Returns `Ok(())` if the child started successfully (EOF on pipe),
+/// or `Err(SandboxError::Setup(...))` if the child reported a failure.
+///
+/// On error, reaps the child process and closes parent pipe fds.
+///
+/// # Safety
+/// `err_pipe_rd` must be a valid readable fd. `child_pid` must be a valid PID.
+pub unsafe fn check_child_error_pipe(
+    err_pipe_rd: i32,
+    child_pid: i32,
+    parent_stdin: Option<i32>,
+    parent_stdout: Option<i32>,
+    parent_stderr: Option<i32>,
+    step_names: &[&str],
+) -> crate::Result<()> {
+    let mut err_buf = [0u8; 8];
+    // SAFETY: err_pipe_rd is valid, err_buf is stack-allocated
+    let n = unsafe { libc::read(err_pipe_rd, err_buf.as_mut_ptr().cast(), 8) };
+    // SAFETY: valid fd
+    unsafe { libc::close(err_pipe_rd) };
+
+    if n == 8 {
+        let step = i32::from_ne_bytes([err_buf[0], err_buf[1], err_buf[2], err_buf[3]]);
+        let errno = i32::from_ne_bytes([err_buf[4], err_buf[5], err_buf[6], err_buf[7]]);
+        // step_names is 1-indexed: step 1 → index 0
+        let step_name = step_names
+            .get((step - 1) as usize)
+            .copied()
+            .unwrap_or("unknown");
+        // Reap the child so we don't leak a zombie
+        // SAFETY: valid pid, null pointer (don't need status)
+        unsafe { libc::waitpid(child_pid, std::ptr::null_mut(), 0) };
+        close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
+        return Err(crate::SandboxError::Setup(format!(
+            "child setup failed at step '{}': {}",
+            step_name,
+            io::Error::from_raw_os_error(errno)
+        )));
+    }
+
+    Ok(())
+}
+
 /// How to send SIGKILL to the sandboxed process tree. Linux kills the
 /// helper by PID (inner child dies via `PR_SET_PDEATHSIG`). macOS kills
 /// the process group (child called `setsid`).
@@ -377,7 +429,7 @@ pub unsafe fn child_bail(err_fd: i32, step: i32, errno: i32) -> ! {
 pub enum KillStyle {
     /// `libc::kill(pid, SIGKILL)` — used on Linux where the helper PID
     /// is the target.
-    Kill,
+    KillSingle,
     /// `libc::killpg(pid, SIGKILL)` — used on macOS where the child
     /// started a new session.
     KillProcessGroup,
@@ -390,13 +442,13 @@ pub enum KillStyle {
 /// strategy, extra cleanup like cgroup guards) are handled by the
 /// platform-specific wrappers.
 pub struct UnixSandboxedChild {
-    pub pid: i32,
-    pub stdin_fd: Option<i32>,
-    pub stdout_fd: Option<i32>,
-    pub stderr_fd: Option<i32>,
+    pub(crate) pid: i32,
+    pub(crate) stdin_fd: Option<i32>,
+    pub(crate) stdout_fd: Option<i32>,
+    pub(crate) stderr_fd: Option<i32>,
     /// True once the child has been reaped via waitpid.
-    pub waited: AtomicBool,
-    pub kill_style: KillStyle,
+    pub(crate) waited: AtomicBool,
+    pub(crate) kill_style: KillStyle,
 }
 
 impl UnixSandboxedChild {
@@ -410,7 +462,7 @@ impl UnixSandboxedChild {
         }
         let rc = match self.kill_style {
             // SAFETY: valid pid, SIGKILL is a well-known signal
-            KillStyle::Kill => unsafe { libc::kill(self.pid, libc::SIGKILL) },
+            KillStyle::KillSingle => unsafe { libc::kill(self.pid, libc::SIGKILL) },
             // SAFETY: pid is a valid PGID after setsid(); SIGKILL is well-defined
             KillStyle::KillProcessGroup => unsafe { libc::killpg(self.pid, libc::SIGKILL) },
         };
@@ -502,24 +554,15 @@ impl UnixSandboxedChild {
     }
 
     pub fn take_stdin(&mut self) -> Option<std::fs::File> {
-        self.stdin_fd.take().map(|fd| {
-            // SAFETY: fd is a valid pipe fd we own
-            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
-        })
+        take_fd(&mut self.stdin_fd)
     }
 
     pub fn take_stdout(&mut self) -> Option<std::fs::File> {
-        self.stdout_fd.take().map(|fd| {
-            // SAFETY: fd is a valid pipe fd we own
-            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
-        })
+        take_fd(&mut self.stdout_fd)
     }
 
     pub fn take_stderr(&mut self) -> Option<std::fs::File> {
-        self.stderr_fd.take().map(|fd| {
-            // SAFETY: fd is a valid pipe fd we own
-            unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) }
-        })
+        take_fd(&mut self.stderr_fd)
     }
 
     /// Close all remaining pipe fds.

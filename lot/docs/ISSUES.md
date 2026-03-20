@@ -12,35 +12,11 @@ The compare_exchange-then-revert pattern in `try_wait` creates a brief window wh
 
 **File:** `lot/src/unix.rs`
 
-#### `take_stdin/stdout/stderr` triplication
-
-Three identical methods differing only in which field they access. A `take_fd(slot: &mut Option<i32>)` helper would eliminate the repetition.
-
-**File:** `lot/src/unix.rs`
-
-#### `KillStyle::Kill` naming ambiguity
-
-`KillSingle` or `KillProcess` would contrast more clearly with `KillProcessGroup`.
-
-**File:** `lot/src/unix.rs`
-
 #### Double-wait test doesn't cover `try_wait`
 
 `test_double_wait_returns_error` only tests `wait()`→`wait()`. Missing: `try_wait`→`wait`, `wait`→`try_wait`, and `try_wait` revert-then-`wait` paths.
 
 **File:** `lot/tests/integration.rs`
-
-#### Post-fork error-pipe checking duplicated
-
-Parent-side post-fork logic (close child fds, read error pipe, decode step/errno, reap zombie, return error) is structurally identical in both platform `spawn` functions. Could extract shared helper.
-
-**Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`
-
-#### `pub` fields on `UnixSandboxedChild` should be `pub(crate)`
-
-All fields are `pub` but only accessed from sibling modules. `pub(crate)` is sufficient.
-
-**File:** `lot/src/unix.rs`
 
 ---
 
@@ -141,16 +117,9 @@ Only the null-DACL early-return path is tested. The entire ACE iteration loop (G
 
 ## Linux: Namespace Setup (`linux/namespace.rs`)
 
-### `bind_mount_file_readonly` and `mount_dev_node` duplicate file-creation-then-bind-mount pattern
+### Tests: No test for conditional `/etc` file mounts
 
-Both create an empty file as a mount point using the same `open(O_CREAT | O_WRONLY)` + `close` pattern. The bind-mount step differs (readonly remount vs raw `MS_BIND`).
-
-**Fix:** Extract `create_mount_point_file` helper for the open/close pattern.
-**File:** `lot/src/linux/namespace.rs`
-
-### Tests: No test for conditional system library and `/etc` file mounts
-
-Conditional mounts based on `exec_paths.is_empty()` and `allow_network` are untested.
+Network-dependent config file mounts (gated on `policy.allow_network()`) are untested.
 
 **Fix:** Add integration test exercising both branches.
 **File:** `lot/src/linux/namespace.rs`

@@ -439,39 +439,31 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         unix::close_if_not_std(child_stderr);
     }
 
-    // Check error pipe: if child wrote [step:i32, errno:i32], setup failed
-    let mut err_buf = [0u8; 8];
-    // SAFETY: err_pipe_rd is valid, err_buf is stack-allocated
-    let n = unsafe { libc::read(err_pipe_rd, err_buf.as_mut_ptr().cast(), 8) };
-    // SAFETY: valid fd
-    unsafe { libc::close(err_pipe_rd) };
-
-    if n == 8 {
-        let step = i32::from_ne_bytes([err_buf[0], err_buf[1], err_buf[2], err_buf[3]]);
-        let errno = i32::from_ne_bytes([err_buf[4], err_buf[5], err_buf[6], err_buf[7]]);
-        let step_name = match step {
-            1 => "unshare",
-            2 => "user namespace (uid/gid map)",
-            3 => "mount namespace",
-            4 => "inner fork",
-            5 => "dup2 (stdio)",
-            6 => "chdir",
-            7 => "mount /proc",
-            8 => "pivot_root",
-            9 => "seccomp",
-            10 => "execve",
-            11 => "cgroup join",
-            _ => "unknown",
-        };
-        // Reap the helper so we don't leak a zombie
-        // SAFETY: valid pid, null pointer (don't need status)
-        unsafe { libc::waitpid(helper_pid, std::ptr::null_mut(), 0) };
-        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
-        return Err(SandboxError::Setup(format!(
-            "child setup failed at step '{}': {}",
-            step_name,
-            io::Error::from_raw_os_error(errno)
-        )));
+    // Check error pipe: if child wrote [step:i32, errno:i32], setup failed.
+    // Step names are 1-indexed, matching the STEP_* constants in the child.
+    const STEP_NAMES: &[&str] = &[
+        "unshare",                      // 1
+        "user namespace (uid/gid map)", // 2
+        "mount namespace",              // 3
+        "inner fork",                   // 4
+        "dup2 (stdio)",                 // 5
+        "chdir",                        // 6
+        "mount /proc",                  // 7
+        "pivot_root",                   // 8
+        "seccomp",                      // 9
+        "execve",                       // 10
+        "cgroup join",                  // 11
+    ];
+    // SAFETY: err_pipe_rd is valid, helper_pid is valid
+    unsafe {
+        unix::check_child_error_pipe(
+            err_pipe_rd,
+            helper_pid,
+            parent_stdin,
+            parent_stdout,
+            parent_stderr,
+            STEP_NAMES,
+        )?;
     }
 
     Ok(SandboxedChild {
@@ -482,7 +474,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 stdout_fd: parent_stdout,
                 stderr_fd: parent_stderr,
                 waited: AtomicBool::new(false),
-                kill_style: KillStyle::Kill,
+                kill_style: KillStyle::KillSingle,
             },
             cgroup_guard,
         },
