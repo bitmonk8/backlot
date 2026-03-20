@@ -165,4 +165,27 @@ mod tests {
         let result = escape_one("\"\"\"");
         assert_eq!(result, "\"\\\"\\\"\\\"\"");
     }
+
+    #[test]
+    fn test_non_bmp_unicode() {
+        // U+1F389 PARTY POPPER -- a non-BMP character requiring a surrogate pair in UTF-16.
+        let arg = OsString::from("hello\u{1F389}world");
+        let program = OsString::from("test.exe");
+        let wide = build_command_line(&program, &[arg]);
+        let result = wide_to_string(&wide);
+        assert_eq!(result, "\"test.exe\" hello\u{1F389}world");
+    }
+
+    #[test]
+    fn test_unpaired_surrogate() {
+        use std::os::windows::ffi::OsStringExt;
+        // A lone high surrogate (U+D800) -- invalid Unicode but valid in OsString on Windows.
+        let arg = OsString::from_wide(&[0xD800]);
+        let program = OsString::from("test.exe");
+        let wide = build_command_line(&program, &[arg]);
+        assert!(
+            wide.contains(&0xD800),
+            "output should contain the lone surrogate 0xD800"
+        );
+    }
 }

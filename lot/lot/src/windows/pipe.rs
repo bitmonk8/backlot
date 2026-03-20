@@ -91,6 +91,29 @@ pub fn close_optional_handle(h: Option<HANDLE>) {
     }
 }
 
+/// Bundle of child and parent pipe handles for stdin/stdout/stderr.
+pub struct StdioPipes {
+    pub child_stdin: HANDLE,
+    pub parent_stdin: Option<HANDLE>,
+    pub child_stdout: HANDLE,
+    pub parent_stdout: Option<HANDLE>,
+    pub child_stderr: HANDLE,
+    pub parent_stderr: Option<HANDLE>,
+}
+
+impl StdioPipes {
+    /// Close all pipe handles. Used on error paths before the handles have
+    /// been transferred to `File` ownership.
+    pub fn close_all(&self) {
+        close_optional_handle(self.parent_stdin);
+        close_handle_if_valid(self.child_stdin);
+        close_optional_handle(self.parent_stdout);
+        close_handle_if_valid(self.child_stdout);
+        close_optional_handle(self.parent_stderr);
+        close_handle_if_valid(self.child_stderr);
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -121,5 +144,24 @@ mod tests {
         assert!(parent.is_some());
         close_handle_if_valid(child);
         close_optional_handle(parent);
+    }
+
+    #[test]
+    fn stdio_pipes_close_all() {
+        let p1 = create_pipe().unwrap();
+        let p2 = create_pipe().unwrap();
+        let p3 = create_pipe().unwrap();
+
+        let pipes = StdioPipes {
+            child_stdin: p1.read,
+            parent_stdin: Some(p1.write),
+            child_stdout: p2.write,
+            parent_stdout: Some(p2.read),
+            child_stderr: p3.write,
+            parent_stderr: Some(p3.read),
+        };
+
+        // Smoke test: close_all runs without panic and exercises all six handle closes.
+        pipes.close_all();
     }
 }

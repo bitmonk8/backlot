@@ -65,55 +65,36 @@ impl Drop for OwnedSid {
     }
 }
 
-/// RAII wrapper for a `PSECURITY_DESCRIPTOR` allocated by
-/// `GetNamedSecurityInfoW`. Calls `LocalFree` on drop.
-pub struct OwnedSecurityDescriptor(PSECURITY_DESCRIPTOR);
+/// RAII wrapper for a pointer allocated by a Win32 function that requires
+/// `LocalFree` for cleanup (e.g., `GetNamedSecurityInfoW`, `SetEntriesInAclW`).
+pub struct LocalFreeGuard<T>(*mut T);
 
-impl OwnedSecurityDescriptor {
-    /// Wrap a raw security descriptor pointer. Returns `None` if null.
-    pub const fn new(sd: PSECURITY_DESCRIPTOR) -> Option<Self> {
-        if sd.is_null() { None } else { Some(Self(sd)) }
+impl<T> LocalFreeGuard<T> {
+    /// Wrap a raw pointer. Returns `None` if null.
+    pub const fn new(ptr: *mut T) -> Option<Self> {
+        if ptr.is_null() { None } else { Some(Self(ptr)) }
     }
 
-    pub const fn as_raw(&self) -> PSECURITY_DESCRIPTOR {
+    pub const fn as_raw(&self) -> *mut T {
         self.0
     }
 }
 
-impl Drop for OwnedSecurityDescriptor {
+impl<T> Drop for LocalFreeGuard<T> {
     fn drop(&mut self) {
-        // SAFETY: Descriptor was validated non-null at construction and was
-        // allocated by GetNamedSecurityInfoW which requires LocalFree.
+        // SAFETY: Pointer was validated non-null at construction and was
+        // allocated by a Win32 function that requires LocalFree.
         unsafe {
             LocalFree(self.0.cast());
         }
     }
 }
 
-/// RAII wrapper for an ACL pointer allocated by `SetEntriesInAclW`.
-/// Calls `LocalFree` on drop.
-pub struct OwnedAcl(*mut ACL);
+/// RAII wrapper for a `PSECURITY_DESCRIPTOR` from `GetNamedSecurityInfoW`.
+pub type OwnedSecurityDescriptor = LocalFreeGuard<std::ffi::c_void>;
 
-impl OwnedAcl {
-    /// Wrap a raw ACL pointer. Returns `None` if null.
-    pub const fn new(acl: *mut ACL) -> Option<Self> {
-        if acl.is_null() { None } else { Some(Self(acl)) }
-    }
-
-    pub const fn as_raw(&self) -> *mut ACL {
-        self.0
-    }
-}
-
-impl Drop for OwnedAcl {
-    fn drop(&mut self) {
-        // SAFETY: ACL was validated non-null at construction and was allocated
-        // by SetEntriesInAclW which requires LocalFree.
-        unsafe {
-            LocalFree(self.0.cast());
-        }
-    }
-}
+/// RAII wrapper for an ACL pointer from `SetEntriesInAclW`.
+pub type OwnedAcl = LocalFreeGuard<ACL>;
 
 // ── SID allocation ───────────────────────────────────────────────────
 
@@ -398,4 +379,47 @@ pub fn dacl_has_app_packages_ace(dacl: *mut ACL, required_mask: u32) -> bool {
     }
 
     found
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn dacl_has_app_packages_ace_round_trip() {
+        let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("test_tmp");
+        std::fs::create_dir_all(&test_tmp).expect("create test_tmp dir");
+        let tmp = TempDir::new_in(&test_tmp).expect("create temp dir");
+
+        let wide_path = super::super::path_to_wide(tmp.path());
+        let app_sid = allocate_app_packages_sid().expect("allocate SID");
+
+        let access_mask = super::super::FILE_GENERIC_READ | super::super::FILE_GENERIC_EXECUTE;
+
+        apply_dacl(
+            &wide_path,
+            Some(tmp.path()),
+            access_mask,
+            0,
+            app_sid.as_raw(),
+        )
+        .expect("apply_dacl");
+
+        let (dacl, _sd) = read_dacl(&wide_path).expect("read_dacl");
+        assert!(
+            dacl_has_app_packages_ace(dacl, access_mask),
+            "DACL should contain APP_PACKAGES ACE with the granted mask"
+        );
+
+        let write_mask = super::super::FILE_GENERIC_WRITE;
+        assert!(
+            !dacl_has_app_packages_ace(dacl, access_mask | write_mask),
+            "DACL should NOT have write access"
+        );
+    }
 }

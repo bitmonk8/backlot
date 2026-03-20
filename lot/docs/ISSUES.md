@@ -4,73 +4,6 @@ Issues grouped by code area, ordered by impact. Issues within a group touch over
 
 ---
 
-## Windows: AppContainer Spawn (`appcontainer.rs`)
-
-### `create_sandboxed_process` takes 9 arguments including 6 pipe handles
-
-The function passes child and parent pipe handles individually.
-
-**Fix:** Bundle the 6 pipe handles into a struct.
-**File:** `lot/src/windows/appcontainer.rs`
-
-### Spawn-time grant loop checks NUL device unconditionally
-
-`nul_device_accessible()` runs even when `prereq_failed` is already non-empty.
-
-**Fix:** Wrap in `if prereq_failed.is_empty()`.
-**File:** `lot/src/windows/appcontainer.rs`
-
-### Spawn-time grant loop could use iterator combinators
-
-The imperative loop collecting failed ancestors has an early `return Err(e)` branch for non-access-denied errors, preventing a simple `filter+collect`. A `try_fold` approach would work but may not improve readability.
-
-**Fix:** Optional. Marginal benefit.
-**File:** `lot/src/windows/appcontainer.rs`
-
-### Tests: `must_spawn` panics poison `TEST_LOCK`, cascading all appcontainer tests
-
-When `spawn()` returns `PrerequisitesNotMet`, `must_spawn` panics while holding the mutex. All subsequent tests fail with `PoisonError`.
-
-**Fix:** Use `unwrap_or_else(|e| e.into_inner())` on mutex lock, or skip tests on `PrerequisitesNotMet` instead of panicking.
-**File:** `lot/src/windows/appcontainer.rs`
-
-### Tests: No unit test for `deny_all_file_access()` / `apply_ace()` deny mode
-
-No test exercises the `DENY_ACCESS` code path.
-
-**Fix:** Add a test with a deny path that overrides an inherited allow.
-**File:** `lot/src/windows/appcontainer.rs`
-
-### Tests: No test positively asserts `PrerequisitesNotMet` is produced
-
-Integration tests skip on this error rather than verifying it.
-
-**Fix:** Construct a policy referencing a system directory requiring elevation from a non-elevated context, assert `PrerequisitesNotMet`.
-**Files:** `lot/src/error.rs`, `lot/src/windows/appcontainer.rs`
-
-### `_for_policy` prerequisite functions exclude deny paths
-
-`appcontainer_prerequisites_met_for_policy` and `grant_appcontainer_prerequisites_for_policy` use `policy.grant_paths()` which excludes deny paths. But `spawn_inner` computes ancestors from all paths including deny paths. If a deny path has ancestors under system directories requiring elevation, the prerequisites check will report "met" while `spawn` will fail with `PrerequisitesNotMet`.
-
-**Fix:** Include deny paths in the `_for_policy` functions' path collection.
-**File:** `lot/src/windows/prerequisites.rs`
-
-### `OwnedSecurityDescriptor` and `OwnedAcl` could share implementation
-
-Both wrap a pointer and call `LocalFree` on drop. A single generic `LocalFreeGuard<T>` would eliminate ~30 lines of near-duplicate code.
-
-**Fix:** Unify into a generic wrapper. Marginal benefit given the types are small.
-**File:** `lot/src/windows/acl_helpers.rs`
-
-### `dacl_has_app_packages_ace` ACE iteration loop untested with real DACLs
-
-Only the null-DACL early-return path is tested. The entire ACE iteration loop (GetAclInformation, GetAce, EqualSid, mask matching) has no direct test. Round-trip testing requires elevation to grant an ACE then check it.
-
-**Fix:** Add round-trip test behind `#[ignore]` or test with a mock DACL if feasible.
-**File:** `lot/src/windows/acl_helpers.rs`
-
----
-
 ## Integration Tests (`tests/integration.rs`)
 
 ### Symlink-into-deny-path test silently skips without developer mode
@@ -107,17 +40,6 @@ No test sets `deny_paths` on the policy and verifies the generated profile conta
 
 **Fix:** Add test with deny_paths, assert profile contains `(deny file-read*`, `(deny file-write*`, etc.
 **File:** `lot/src/macos/seatbelt.rs`
-
----
-
-## Windows: Command-line (`cmdline.rs`)
-
-### Tests: No test for non-BMP Unicode or unpaired surrogates
-
-Tests cover spaces, quotes, backslashes, empty args. Missing: non-BMP characters (emoji) and unpaired surrogates.
-
-**Fix:** Add tests with non-BMP code points and unpaired surrogates via `OsString::from_wide`.
-**File:** `lot/src/windows/cmdline.rs`
 
 ---
 
@@ -187,48 +109,3 @@ The guard logic (rejecting PID 0, preventing self-kill) is untested. Best-effort
 
 **Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`, `lot/src/windows/mod.rs`
 
----
-
-## Windows: Residual Issues
-
-### `normalize_sddl` nested closures hard to read
-
-The `normalize_sddl` test helper uses nested `map_or_else` closures. Would be clearer as `if let` / early-return.
-
-**File:** `lot/src/windows/appcontainer.rs`
-
-### Silent test skips on `PrerequisitesNotMet`
-
-Tests using `try_spawn` silently `return` when prerequisites are not met. No diagnostic output. Should emit `eprintln!` on skip so CI can track how many tests are vacuously passing.
-
-**File:** `lot/src/windows/appcontainer.rs`
-
-### `StdioPipes::close_all()` has no direct test
-
-Only exercised on error paths inside `spawn_with_sentinel`. These error paths require specific Win32 API failures to trigger. A unit test creating known handles and calling `close_all()` would provide direct coverage.
-
-**File:** `lot/src/windows/appcontainer.rs`
-
-### `read_only_path_not_writable` conditional assertion
-
-The file-content assertion is inside `if output.status.success()`. If the command fails for an unrelated reason, the assertion is skipped. Should unconditionally verify file content is unchanged.
-
-**File:** `lot/src/windows/appcontainer.rs`
-
-### Integration test `must_spawn` diverges from unit test `try_spawn`
-
-The integration test helper `must_spawn` in `tests/integration.rs` panics on all errors including `PrerequisitesNotMet`, while the unit test helper `try_spawn` returns `None`. Should be aligned.
-
-**File:** `lot/tests/integration.rs`
-
-### `StdioPipes` could live in `pipe.rs`
-
-Pipe-handle lifecycle is split across `pipe.rs` (creation, individual close) and `appcontainer.rs` (bundling, batch close). Moving `StdioPipes` to `pipe.rs` would colocate pipe concerns.
-
-**File:** `lot/src/windows/appcontainer.rs`, `lot/src/windows/pipe.rs`
-
-### Conditional NUL check makes `nul_device_missing` field inaccurate when paths fail
-
-When `prereq_failed` is non-empty, `nul_missing` is forced to `false`. The `PrerequisitesNotMet` error reports `nul_device_missing: false` even if the NUL device ACE is actually missing. Diagnostic-only impact — callers running `grant_appcontainer_prerequisites` handle both anyway.
-
-**File:** `lot/src/windows/appcontainer.rs`

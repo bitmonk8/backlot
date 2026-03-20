@@ -42,7 +42,8 @@ use super::acl_helpers::{ELEVATION_REQUIRED_MARKER, modify_dacl};
 use super::cmdline::{build_command_line, build_env_block};
 use super::job::JobObject;
 use super::pipe::{
-    close_handle_if_valid, close_optional_handle, resolve_stdio_input, resolve_stdio_output,
+    StdioPipes, close_handle_if_valid, close_optional_handle, resolve_stdio_input,
+    resolve_stdio_output,
 };
 use super::sentinel::{SentinelFile, restore_from_sentinel, write_sentinel};
 
@@ -496,8 +497,7 @@ fn spawn_inner(
             }
         }
     }
-    // Skip the syscall when we already know prerequisites are missing.
-    let nul_missing = prereq_failed.is_empty() && !super::nul_device::nul_device_accessible();
+    let nul_missing = !super::nul_device::nul_device_accessible();
     if !prereq_failed.is_empty() || nul_missing {
         return Err(SandboxError::PrerequisitesNotMet {
             missing_paths: prereq_failed,
@@ -762,29 +762,6 @@ fn spawn_with_sentinel(
     }
 }
 
-/// Bundle of child and parent pipe handles for stdin/stdout/stderr.
-struct StdioPipes {
-    child_stdin: HANDLE,
-    parent_stdin: Option<HANDLE>,
-    child_stdout: HANDLE,
-    parent_stdout: Option<HANDLE>,
-    child_stderr: HANDLE,
-    parent_stderr: Option<HANDLE>,
-}
-
-impl StdioPipes {
-    /// Close all pipe handles. Used on error paths before the handles have
-    /// been transferred to `File` ownership.
-    fn close_all(&self) {
-        close_optional_handle(self.parent_stdin);
-        close_handle_if_valid(self.child_stdin);
-        close_optional_handle(self.parent_stdout);
-        close_handle_if_valid(self.child_stdout);
-        close_optional_handle(self.parent_stderr);
-        close_handle_if_valid(self.child_stderr);
-    }
-}
-
 /// Create the child process with pre-created pipes and `STARTUPINFOEX`.
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
 fn create_sandboxed_process(
@@ -972,7 +949,10 @@ mod tests {
     fn try_spawn(policy: &SandboxPolicy, cmd: &SandboxCommand) -> Option<crate::SandboxedChild> {
         match crate::spawn(policy, cmd) {
             Ok(child) => Some(child),
-            Err(SandboxError::PrerequisitesNotMet { .. }) => None,
+            Err(SandboxError::PrerequisitesNotMet { .. }) => {
+                eprintln!("[diag] SKIPPED: prerequisites not met");
+                None
+            }
             Err(e) => panic!("spawn failed: {e}"),
         }
     }
@@ -981,16 +961,14 @@ mod tests {
     /// `SetNamedSecurityInfoW` recalculates auto-inherit flags, so exact SDDL
     /// comparison would fail. Comparing only the ACE entries is sufficient.
     fn normalize_sddl(sddl: &str) -> String {
-        sddl.find("D:").map_or_else(
-            || sddl.to_owned(),
-            |d_pos| {
-                let after_d = &sddl[d_pos + 2..];
-                after_d.find('(').map_or_else(
-                    || "D:".to_owned(),
-                    |paren_pos| format!("D:{}", &after_d[paren_pos..]),
-                )
-            },
-        )
+        let Some(d_pos) = sddl.find("D:") else {
+            return sddl.to_owned();
+        };
+        let after_d = &sddl[d_pos + 2..];
+        let Some(paren_pos) = after_d.find('(') else {
+            return "D:".to_owned();
+        };
+        format!("D:{}", &after_d[paren_pos..])
     }
 
     /// Extract only explicit (non-inherited) ACEs from an SDDL string.
@@ -1120,11 +1098,13 @@ mod tests {
             return;
         };
         let output = child.wait_with_output().expect("wait");
+        assert!(
+            output.status.code().is_some(),
+            "process should exit normally"
+        );
 
         let content = fs::read_to_string(&target).expect("read back");
-        if output.status.success() {
-            assert_eq!(content.trim(), "original", "file should not be overwritten");
-        }
+        assert_eq!(content.trim(), "original", "file should not be overwritten");
     }
 
     #[test]
@@ -1289,5 +1269,34 @@ mod tests {
             matches!(err, SandboxError::PrerequisitesNotMet { .. }),
             "expected PrerequisitesNotMet, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn normalize_sddl_strips_control_flags() {
+        // Full SDDL with control flags before the first ACE
+        assert_eq!(
+            normalize_sddl("O:BAG:BAD:PAI(A;;FA;;;BA)"),
+            "D:(A;;FA;;;BA)"
+        );
+        // No D: section at all
+        assert_eq!(normalize_sddl("O:BAG:BA"), "O:BAG:BA");
+        // D: with no ACEs
+        assert_eq!(normalize_sddl("D:P"), "D:");
+        // D: with ACEs and no flags
+        assert_eq!(
+            normalize_sddl("D:(A;;FA;;;BA)(A;;FR;;;WD)"),
+            "D:(A;;FA;;;BA)(A;;FR;;;WD)"
+        );
+    }
+
+    #[test]
+    fn explicit_aces_filters_inherited() {
+        // Mix of explicit and inherited ACEs. Inherited ACEs have "ID" in the flags field.
+        let sddl = "D:(A;;FA;;;BA)(A;ID;FR;;;WD)(D;;FW;;;S-1-5-11)";
+        assert_eq!(explicit_aces(sddl), "D:(A;;FA;;;BA)(D;;FW;;;S-1-5-11)");
+        // All inherited
+        assert_eq!(explicit_aces("D:(A;ID;FA;;;BA)"), "D:");
+        // All explicit
+        assert_eq!(explicit_aces("D:(A;;FA;;;BA)"), "D:(A;;FA;;;BA)");
     }
 }
