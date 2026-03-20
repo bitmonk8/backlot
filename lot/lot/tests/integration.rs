@@ -1431,8 +1431,22 @@ fn test_memory_limit_enforcement() {
 
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
+    // macOS RLIMIT_AS can fail with EINVAL when the limit is below
+    // current virtual memory usage, so treat Setup errors as skip.
+    let child = match lot::spawn(&policy, &cmd) {
+        Ok(c) => {
+            eprintln!("[diag] spawn succeeded, pid={}", c.id());
+            c
+        }
+        Err(lot::SandboxError::PrerequisitesNotMet(..)) => {
+            eprintln!("[diag] SKIPPED: prerequisites not met");
+            return;
+        }
+        Err(lot::SandboxError::Setup(ref msg)) if msg.contains("setrlimit") => {
+            eprintln!("[diag] SKIPPED: setrlimit failed (platform limit too low): {msg}");
+            return;
+        }
+        Err(e) => panic!("spawn must succeed: {e}"),
     };
     let output = child.wait_with_output().expect("wait_with_output");
     eprintln!("[diag] exit status: {:?}", output.status);
