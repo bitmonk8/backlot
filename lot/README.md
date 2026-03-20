@@ -341,6 +341,7 @@ For user-owned directories, `spawn()` grants ancestor traverse ACEs automaticall
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
 - Windows: AppContainer processes cannot access `\\.\NUL` without a one-time system fix (see above).
 - Deny paths: `stat()` succeeds on denied paths on Linux (shows empty tmpfs metadata) but fails on macOS/Windows. File access is blocked on all platforms.
+- Linux kernels < 5.9: parallel `spawn()` calls from multi-threaded processes may hit ETXTBSY due to missing `close_range` syscall. Works correctly on 5.9+.
 
 ## Requirements
 
