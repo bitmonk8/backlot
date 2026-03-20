@@ -4,16 +4,6 @@ Issues grouped by co-fixability, ordered by descending impact.
 
 ---
 
-## Group 8: CLI Environment Variable Ordering
-
-User's explicit env overrides silently ignored.
-
-| # | File | Lines | Description | Severity |
-|---|------|-------|-------------|----------|
-| 31 | lot-cli/src/main.rs, lot/src/command.rs, lot/src/env_check.rs | — | CLI calls `forward_common_env()` before explicit user vars. Since consumers take first match, user's explicit env overrides are silently ignored. CLI-only issue; library callers control call order. Downgraded from Critical. | High |
-
----
-
 ## Group 9: DESIGN.md Documentation Accuracy
 
 Implementation details diverged from design document.

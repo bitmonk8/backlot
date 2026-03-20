@@ -113,11 +113,12 @@ fn cmd_run(args: &RunArgs) -> ExitCode {
     cmd.stdout(lot::SandboxStdio::Inherit);
     cmd.stderr(lot::SandboxStdio::Inherit);
 
-    if config.environment.forward_common {
-        cmd.forward_common_env();
-    }
+    // User's explicit vars first so forward_common_env() skips duplicates.
     for (key, val) in &config.environment.vars {
         cmd.env(key, val);
+    }
+    if config.environment.forward_common {
+        cmd.forward_common_env();
     }
     if let Some(ref cwd) = config.process.cwd {
         cmd.cwd(cwd);
