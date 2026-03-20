@@ -2,10 +2,14 @@
 
 ## Current Phase
 
-**All phases complete.** The library is fully implemented across all three platforms. All tests pass on all platforms.
+**Issue resolution.** Implementation complete across all platforms. 41 audit findings documented in `ISSUES.md` across 11 groups. Goal: clear all issues.
 
 ## Next Work
 
+1. **Group 1: macOS Seatbelt Silent Security Bypass** — `seatbelt.rs` silently drops deny rules on path escape failure; `canonicalize` failure swallowed. (1 Critical, 1 Medium)
+2. Groups 2–11 in `ISSUES.md`, ordered by descending impact.
+
+After all issues resolved:
 - First real-world usage / `lot run` testing
 - crates.io publish (metadata ready, needs public repository URL)
 
