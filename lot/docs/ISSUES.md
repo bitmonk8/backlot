@@ -4,11 +4,7 @@ Issues grouped by code area, ordered by impact. Issues within a group touch over
 
 ---
 
-## 2. Unix: SandboxedChild Lifecycle — DONE
-
-Extracted `UnixSandboxedChild` struct and `child_bail` function to `unix.rs`. `LinuxSandboxedChild` and `MacSandboxedChild` now delegate lifecycle methods. Kill behavior parameterized via `KillStyle` enum. `try_wait` ordering fixed (compare_exchange before waitpid). `Drop` now sets `waited=true` via shared `kill_and_reap`. Double-wait test added to integration tests. `setup_stdio_pipes` RAII guard skipped (marginal benefit).
-
-### Remaining (fix later)
+## Unix: SandboxedChild Lifecycle
 
 #### `try_wait` revert race
 
@@ -48,9 +44,7 @@ All fields are `pub` but only accessed from sibling modules. `pub(crate)` is suf
 
 ---
 
-## 3. Windows: AppContainer Spawn (`appcontainer.rs`)
-
-Issues specific to the AppContainer process creation and ACL grant/deny flow. The DACL primitive extraction has landed (shared `modify_dacl` in `acl_helpers.rs`). TEST_LOCK poisoning cascades all Windows unit tests, and missing deny-mode test coverage leaves a key code path unverified.
+## Windows: AppContainer Spawn (`appcontainer.rs`)
 
 ### `create_sandboxed_process` takes 9 arguments including 6 pipe handles
 
@@ -117,17 +111,7 @@ Only the null-DACL early-return path is tested. The entire ACE iteration loop (G
 
 ---
 
-## 4. Integration Tests (`tests/integration.rs`)
-
-Duplicate helpers increase maintenance cost for every new test. The symlink test providing zero coverage in CI and the missing Unix env-var coverage leave gaps in platform-specific validation.
-
-### Duplicate test helpers across test files — DONE
-
-Extracted `make_temp_dir()`, `set_sandbox_env()`, and `platform_exec_paths()` to `lot/tests/common/mod.rs`. Integration tests import via `mod common`. Unit tests in `appcontainer.rs` retain their own copies because Rust unit tests inside `src/` cannot import from the `tests/` directory.
-
-### Duplicate exec_paths construction in test helpers — DONE
-
-Extracted `platform_exec_paths()` to `lot/tests/common/mod.rs`. `make_policy`, `make_deny_policy`, and `test_deny_path_blocks_access_to_subtree` now call it instead of duplicating the platform-conditional logic.
+## Integration Tests (`tests/integration.rs`)
 
 ### Symlink-into-deny-path test silently skips without developer mode
 
@@ -145,13 +129,9 @@ Extracted `platform_exec_paths()` to `lot/tests/common/mod.rs`. `make_policy`, `
 
 ---
 
-## 5. CLI (`lot-cli/`) — DONE
+## CLI (`lot-cli/`)
 
-### CI does not test `lot-cli` crate — DONE
-
-Added `cargo test -p lot-cli` step to all three CI test jobs (Linux, macOS, Windows).
-
-### CLI config types could be extracted to `config.rs` — deferred
+### CLI config types could be extracted to `config.rs`
 
 `SandboxConfig` and sub-structs plus `build_policy` form a distinct concern from CLI dispatch. Optional; extract when the file grows larger.
 
@@ -159,9 +139,7 @@ Added `cargo test -p lot-cli` step to all three CI test jobs (Linux, macOS, Wind
 
 ---
 
-## 6. Linux: Namespace Setup (`linux/namespace.rs`)
-
-Minor duplication and a test gap. Low impact — the mount-point pattern is stable and the conditional-mount behavior is exercised indirectly by other tests.
+## Linux: Namespace Setup (`linux/namespace.rs`)
 
 ### `bind_mount_file_readonly` and `mount_dev_node` duplicate file-creation-then-bind-mount pattern
 
@@ -179,9 +157,7 @@ Conditional mounts based on `exec_paths.is_empty()` and `allow_network` are unte
 
 ---
 
-## 7. macOS: Seatbelt (`macos/seatbelt.rs`)
-
-Single test gap. Deny paths work in integration tests but the SBPL generation is not unit-tested for deny rule ordering.
+## macOS: Seatbelt (`macos/seatbelt.rs`)
 
 ### Tests: No seatbelt unit test for deny rules in generated SBPL profile
 
@@ -192,9 +168,7 @@ No test sets `deny_paths` on the policy and verifies the generated profile conta
 
 ---
 
-## 8. Windows: Command-line (`cmdline.rs`)
-
-Edge-case test gap. Non-BMP characters are uncommon in process arguments; unpaired surrogates are rare but could cause panics if mishandled.
+## Windows: Command-line (`cmdline.rs`)
 
 ### Tests: No test for non-BMP Unicode or unpaired surrogates
 
@@ -205,9 +179,7 @@ Tests cover spaces, quotes, backslashes, empty args. Missing: non-BMP characters
 
 ---
 
-## 9. Error Types (`error.rs`)
-
-Optional simplification. The structured fields are unused today but could be useful if callers start matching on them.
+## Error Types (`error.rs`)
 
 ### `PrerequisitesNotMet` payload
 
@@ -218,9 +190,7 @@ The structured fields `missing_paths` and `nul_device_missing` are used in the `
 
 ---
 
-## 10. Env/Path Module Structure (`env_check.rs`, `policy.rs`)
-
-Issues deferred from the env/path validation extraction. These are naming, placement, and test coverage refinements.
+## Env/Path Module Structure (`env_check.rs`, `policy.rs`)
 
 ### `path_contains` naming ambiguity
 
@@ -277,9 +247,7 @@ The guard logic (rejecting PID 0, preventing self-kill) is untested. Best-effort
 
 ---
 
-## 11. Windows: Post-Group-3 Residual Issues
-
-Issues identified during review of the Group 3 implementation. Low-impact refinements.
+## Windows: Residual Issues
 
 ### `normalize_sddl` nested closures hard to read
 
