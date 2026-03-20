@@ -52,7 +52,7 @@ pub fn prepare_prefork(command: &SandboxCommand) -> io::Result<PreForkData> {
     if !has_path {
         env_pairs.push((
             b"PATH".to_vec(),
-            b"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_vec(),
+            crate::env_check::DEFAULT_UNIX_PATH.as_bytes().to_vec(),
         ));
     }
 

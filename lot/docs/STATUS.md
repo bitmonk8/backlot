@@ -2,11 +2,11 @@
 
 ## Current Phase
 
-**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining groups (11–12). Goal: clear all issues.
+**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining group (12). Goal: clear all issues.
 
 ## Next Work
 
-1. Groups 11–12 in `ISSUES.md`, ordered by descending impact.
+1. Group 12 in `ISSUES.md`.
 
 After all issues resolved:
 - First real-world usage / `lot run` testing
