@@ -1,24 +1,6 @@
 # Known Issues
 
-Issues grouped by code area, ordered by impact. Issues within a group touch overlapping files and benefit from co-implementation.
-
----
-
-## Integration Tests (`tests/integration.rs`)
-
-### Symlink-into-deny-path test silently skips without developer mode
-
-`test_symlink_into_deny_path` returns early if symlink creation fails. In standard CI, the test provides no coverage.
-
-**Fix:** Use `#[ignore]` with a reason, or enable developer mode in CI.
-**File:** `lot/tests/integration.rs`
-
-### Unix integration tests don't exercise TEMP/TMP/TMPDIR coverage check
-
-`set_sandbox_env` is no-op on non-Windows, so Unix integration tests never exercise `validate_env_accessibility` for temp dir env vars.
-
-**Fix:** Add env var coverage tests on Unix.
-**File:** `lot/tests/integration.rs`
+Issues grouped by code area, ordered by impact.
 
 ---
 

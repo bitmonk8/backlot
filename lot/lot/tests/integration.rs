@@ -847,6 +847,7 @@ fn test_deny_path_blocks_execution() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn test_symlink_into_deny_path() {
     eprintln!("[diag] === test_symlink_into_deny_path ===");
@@ -864,19 +865,7 @@ fn test_symlink_into_deny_path() {
     // Create symlink in the allowed area pointing into the denied area.
     let symlink_path = parent.join("sneaky_link.txt");
 
-    #[cfg(target_os = "windows")]
-    {
-        // Windows symlinks may require developer mode or elevation.
-        // If symlink creation fails, skip the test.
-        if std::os::windows::fs::symlink_file(&secret_file, &symlink_path).is_err() {
-            eprintln!("[diag] SKIPPED: cannot create symlink (needs developer mode)");
-            return;
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::os::unix::fs::symlink(&secret_file, &symlink_path).expect("create symlink");
-    }
+    std::os::unix::fs::symlink(&secret_file, &symlink_path).expect("create symlink");
 
     let policy = make_deny_policy(&parent, &denied, false, scratch.path());
 
@@ -1035,5 +1024,116 @@ async fn test_wait_with_output_timeout_kills_on_timeout() {
             eprintln!("[diag] PASSED: timeout fired and child killed");
         }
         other => panic!("expected Timeout error, got: {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_unix_tmpdir_in_write_paths_succeeds() {
+    eprintln!("[diag] === test_unix_tmpdir_in_write_paths_succeeds ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = echo_command();
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+
+    let mut cmd = lot::SandboxCommand::new(&program);
+    // scratch is already a write_path via make_policy, so TMPDIR is valid.
+    cmd.env("TMPDIR", scratch.path());
+    cmd.env("PATH", "/usr/bin:/bin");
+    cmd.args(&args);
+
+    let Some(child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+    let output = child.wait_with_output().expect("wait");
+    assert!(output.status.success(), "process should succeed");
+    eprintln!("[diag] PASSED");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_unix_tmpdir_outside_write_paths_returns_invalid_policy() {
+    eprintln!("[diag] === test_unix_tmpdir_outside_write_paths_returns_invalid_policy ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+    let outside = make_temp_dir();
+
+    let (program, args) = echo_command();
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+
+    let mut cmd = lot::SandboxCommand::new(&program);
+    cmd.env("TMPDIR", outside.path());
+    cmd.env("PATH", "/usr/bin:/bin");
+    cmd.args(&args);
+
+    match lot::spawn(&policy, &cmd) {
+        Err(lot::SandboxError::InvalidPolicy(msg)) => {
+            assert!(msg.contains("TMPDIR"), "error should mention TMPDIR: {msg}");
+            eprintln!("[diag] PASSED: InvalidPolicy for inaccessible TMPDIR");
+        }
+        other => panic!("expected InvalidPolicy for inaccessible TMPDIR, got: {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(target_os = "windows")]
+fn test_windows_temp_in_write_paths_succeeds() {
+    eprintln!("[diag] === test_windows_temp_in_write_paths_succeeds ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = echo_command();
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+
+    let mut cmd = lot::SandboxCommand::new(&program);
+    let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+    cmd.env("PATH", format!(r"{sys_root}\System32"));
+    cmd.env("TMPDIR", scratch.path());
+    cmd.env("TEMP", scratch.path());
+    cmd.env("TMP", scratch.path());
+    cmd.forward_common_env();
+    cmd.args(&args);
+    cmd.stdout(lot::SandboxStdio::Piped);
+    cmd.stderr(lot::SandboxStdio::Piped);
+
+    let Some(child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+    let output = child.wait_with_output().expect("wait");
+    assert!(output.status.success(), "process should succeed");
+    eprintln!("[diag] PASSED");
+}
+
+#[test]
+#[cfg(target_os = "windows")]
+fn test_windows_temp_outside_write_paths_returns_invalid_policy() {
+    eprintln!("[diag] === test_windows_temp_outside_write_paths_returns_invalid_policy ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+    let outside = make_temp_dir();
+
+    let (program, args) = echo_command();
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+
+    let mut cmd = lot::SandboxCommand::new(&program);
+    let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+    cmd.env("PATH", format!(r"{sys_root}\System32"));
+    cmd.env("TMPDIR", outside.path());
+    cmd.env("TEMP", outside.path());
+    cmd.env("TMP", outside.path());
+    cmd.forward_common_env();
+    cmd.args(&args);
+
+    match lot::spawn(&policy, &cmd) {
+        Err(lot::SandboxError::InvalidPolicy(msg)) => {
+            assert!(msg.contains("TEMP"), "error should mention TEMP: {msg}");
+            eprintln!("[diag] PASSED: InvalidPolicy for inaccessible TEMP");
+        }
+        other => panic!("expected InvalidPolicy for inaccessible TEMP, got: {other:?}"),
     }
 }
