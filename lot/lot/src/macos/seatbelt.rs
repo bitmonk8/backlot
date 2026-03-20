@@ -6,6 +6,7 @@ use std::io;
 use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
 
+use crate::SandboxError;
 use crate::policy::SandboxPolicy;
 
 // SAFETY: These are Apple's sandbox API functions, always available on macOS.
@@ -56,7 +57,14 @@ pub const fn available() -> bool {
 /// Generate an SBPL (Seatbelt Profile Language) profile string from a policy.
 ///
 /// `program_path` is the absolute path to the binary that will be exec'd.
-pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
+///
+/// Returns an error if any policy path cannot be encoded into a valid SBPL rule
+/// (e.g., non-UTF-8 paths or paths containing null bytes). This is intentional:
+/// silently dropping a rule — especially a deny rule — would weaken the sandbox.
+pub fn generate_profile(
+    policy: &SandboxPolicy,
+    program_path: &Path,
+) -> Result<String, SandboxError> {
     let mut profile = String::with_capacity(2048);
 
     profile.push_str("(version 1)\n");
@@ -101,13 +109,13 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
     }
     // Also allow metadata on all policy-granted paths
     for path in policy.read_paths() {
-        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path)?;
     }
     for path in policy.write_paths() {
-        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path)?;
     }
     for path in policy.exec_paths() {
-        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read-metadata", "subpath", path)?;
     }
 
     // Scoped process-exec: target binary + exec_paths + system bin dirs.
@@ -118,30 +126,30 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
         "process-exec",
         "literal",
         program_path,
-    );
-    append_sbpl_rule(&mut profile, "allow", "file-read*", "literal", program_path);
+    )?;
+    append_sbpl_rule(&mut profile, "allow", "file-read*", "literal", program_path)?;
     append_sbpl_rule(
         &mut profile,
         "allow",
         "file-map-executable",
         "literal",
         program_path,
-    );
+    )?;
     for path in policy.exec_paths() {
-        append_sbpl_rule(&mut profile, "allow", "process-exec", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "process-exec", "subpath", path)?;
         append_sbpl_rule(
             &mut profile,
             "allow",
             "file-map-executable",
             "subpath",
             path,
-        );
+        )?;
     }
     for sys_path in EXEC_SYSTEM_PATHS {
         let sys = std::path::Path::new(sys_path);
-        append_sbpl_rule(&mut profile, "allow", "process-exec", "subpath", sys);
-        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", sys);
-        append_sbpl_rule(&mut profile, "allow", "file-map-executable", "subpath", sys);
+        append_sbpl_rule(&mut profile, "allow", "process-exec", "subpath", sys)?;
+        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", sys)?;
+        append_sbpl_rule(&mut profile, "allow", "file-map-executable", "subpath", sys)?;
     }
 
     profile.push_str("(allow process-fork)\n");
@@ -164,29 +172,29 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
 
     // Policy-specified read paths
     for path in policy.read_paths() {
-        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path)?;
     }
 
     // Policy-specified write paths get both read and write
     for path in policy.write_paths() {
-        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path);
-        append_sbpl_rule(&mut profile, "allow", "file-write*", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path)?;
+        append_sbpl_rule(&mut profile, "allow", "file-write*", "subpath", path)?;
     }
 
     // Exec paths get read access (needed to load the binary)
     for path in policy.exec_paths() {
-        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path);
+        append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path)?;
     }
 
     // Deny rules override grants above. SBPL uses last-match-wins, so these
     // must appear after the allow rules for the denied subtrees.
     for path in policy.deny_paths() {
-        append_sbpl_rule(&mut profile, "deny", "file-read*", "subpath", path);
+        append_sbpl_rule(&mut profile, "deny", "file-read*", "subpath", path)?;
         // file-read-metadata is a separate SBPL operation not covered by file-read*
-        append_sbpl_rule(&mut profile, "deny", "file-read-metadata", "subpath", path);
-        append_sbpl_rule(&mut profile, "deny", "file-write*", "subpath", path);
-        append_sbpl_rule(&mut profile, "deny", "process-exec", "subpath", path);
-        append_sbpl_rule(&mut profile, "deny", "file-map-executable", "subpath", path);
+        append_sbpl_rule(&mut profile, "deny", "file-read-metadata", "subpath", path)?;
+        append_sbpl_rule(&mut profile, "deny", "file-write*", "subpath", path)?;
+        append_sbpl_rule(&mut profile, "deny", "process-exec", "subpath", path)?;
+        append_sbpl_rule(&mut profile, "deny", "file-map-executable", "subpath", path)?;
     }
 
     // Ancestor directory metadata: macOS needs stat() on every component of a
@@ -200,7 +208,7 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
             "file-read-metadata",
             "literal",
             ancestor,
-        );
+        )?;
     }
 
     // Network access
@@ -208,7 +216,7 @@ pub fn generate_profile(policy: &SandboxPolicy, program_path: &Path) -> String {
         profile.push_str("(allow network*)\n");
     }
 
-    profile
+    Ok(profile)
 }
 
 /// Collect ancestor directories of all policy paths and the program path that
@@ -285,17 +293,23 @@ fn resolve_path(path: &Path) -> std::path::PathBuf {
 
 /// Append an SBPL `(<action> <op> (<filter> "<path>"))` rule.
 /// Resolves symlinks via canonicalize because SBPL matches real paths.
+/// Returns an error if the resolved path cannot be encoded into SBPL
+/// (non-UTF-8 or contains null bytes).
 fn append_sbpl_rule(
     profile: &mut String,
     action: &str,
     operation: &str,
     filter: &str,
     path: &Path,
-) {
+) -> Result<(), SandboxError> {
     let resolved = resolve_path(path);
-    let Ok(escaped) = escape_sbpl_path(&resolved) else {
-        return;
-    };
+    let escaped = escape_sbpl_path(&resolved).map_err(|reason| {
+        SandboxError::Setup(format!(
+            "cannot encode path into SBPL rule: {}: {}",
+            path.display(),
+            reason,
+        ))
+    })?;
     profile.push('(');
     profile.push_str(action);
     profile.push(' ');
@@ -305,6 +319,7 @@ fn append_sbpl_rule(
     profile.push_str(" \"");
     profile.push_str(&escaped);
     profile.push_str("\"))\n");
+    Ok(())
 }
 
 /// Apply a Seatbelt profile to the current process. This is permanent and
@@ -378,7 +393,7 @@ mod tests {
     #[test]
     fn profile_contains_version_and_deny_default() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
     }
@@ -386,7 +401,7 @@ mod tests {
     #[test]
     fn profile_contains_system_essentials() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(allow file-read* (literal \"/\"))"));
         assert!(profile.contains("(allow file-read* (subpath \"/usr/lib\"))"));
         assert!(profile.contains("(allow file-read* (subpath \"/System/Library\"))"));
@@ -400,7 +415,7 @@ mod tests {
     #[test]
     fn profile_scoped_metadata() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         // Metadata is scoped to system paths, not blanket
         assert!(!profile.contains("(allow file-read-metadata)\n"));
         assert!(profile.contains("(allow file-read-metadata (literal \"/\"))"));
@@ -411,7 +426,7 @@ mod tests {
     #[test]
     fn profile_scoped_exec() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         // Exec is scoped, not blanket
         assert!(!profile.contains("(allow process-exec*)"));
         assert!(profile.contains("(allow process-exec (literal \"/usr/bin/true\"))"));
@@ -426,7 +441,7 @@ mod tests {
     #[test]
     fn profile_signal_self_only() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(allow signal (target self))"));
         assert!(!profile.contains("(allow signal)\n"));
     }
@@ -434,14 +449,14 @@ mod tests {
     #[test]
     fn profile_contains_read_paths() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(allow file-read* (subpath \"/tmp/test_read\"))"));
     }
 
     #[test]
     fn profile_contains_write_paths_with_read() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(allow file-read* (subpath \"/tmp/test_write\"))"));
         assert!(profile.contains("(allow file-write* (subpath \"/tmp/test_write\"))"));
     }
@@ -449,14 +464,14 @@ mod tests {
     #[test]
     fn profile_contains_exec_paths_with_read() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(allow file-read* (subpath \"/opt/mybin\"))"));
     }
 
     #[test]
     fn profile_no_network_by_default() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(!profile.contains("(allow network*)"));
     }
 
@@ -472,7 +487,7 @@ mod tests {
             true,
             policy.limits().clone(),
         );
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(allow network*)"));
         // Redundant sub-rules should not be present
         assert!(!profile.contains("(allow network-outbound)"));
@@ -489,7 +504,7 @@ mod tests {
             false,
             ResourceLimits::default(),
         );
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
     }
@@ -594,7 +609,7 @@ mod tests {
     fn profile_contains_ancestor_metadata_rules() {
         // /opt/mybin from exec_paths should produce ancestor /opt
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(
             profile.contains("(allow file-read-metadata (literal \"/opt\"))"),
             "profile should contain ancestor metadata for /opt"
@@ -604,7 +619,7 @@ mod tests {
     #[test]
     fn profile_contains_deny_rules() {
         let policy = policy_with_deny_path();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         for op in &[
             "file-read*",
             "file-read-metadata",
@@ -622,7 +637,7 @@ mod tests {
         // SBPL uses last-match-wins, so deny rules must appear after allow rules
         // for the parent path to actually override them.
         let policy = policy_with_deny_path();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
 
         for op in &["file-read*", "file-read-metadata"] {
             let allow_rule = format!("(allow {op} (subpath \"/tmp/test_read\"))");
@@ -643,7 +658,7 @@ mod tests {
     #[test]
     fn profile_no_deny_rules_when_deny_paths_empty() {
         let policy = basic_policy();
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(
             !profile.contains("(deny file-read* (subpath"),
             "no deny file-read* rules without deny paths"
@@ -679,7 +694,7 @@ mod tests {
             false,
             ResourceLimits::default(),
         );
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         for op in &[
             "file-read*",
             "file-read-metadata",
@@ -705,7 +720,7 @@ mod tests {
             false,
             ResourceLimits::default(),
         );
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
 
         for op in &["file-read*", "file-write*"] {
             let allow_rule = format!("(allow {op} (subpath \"/tmp/test_write\"))");
@@ -724,6 +739,51 @@ mod tests {
     }
 
     #[test]
+    fn generate_profile_errors_on_non_utf8_read_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // 0xFF is not valid UTF-8
+        let bad_path = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+        let policy = SandboxPolicy::new(
+            vec![bad_path],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
+        let err = generate_profile(&policy, &test_program()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not valid UTF-8"),
+            "expected UTF-8 error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn generate_profile_errors_on_non_utf8_deny_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let bad_path = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
+        let policy = SandboxPolicy::new(
+            vec![PathBuf::from("/tmp/test_read")],
+            vec![],
+            vec![],
+            vec![bad_path],
+            false,
+            ResourceLimits::default(),
+        );
+        let err = generate_profile(&policy, &test_program()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not valid UTF-8"),
+            "expected UTF-8 error, got: {msg}"
+        );
+    }
+
+    #[test]
     fn ancestor_metadata_before_network() {
         let bp = basic_policy();
         let policy = SandboxPolicy::new(
@@ -734,7 +794,7 @@ mod tests {
             true,
             bp.limits().clone(),
         );
-        let profile = generate_profile(&policy, &test_program());
+        let profile = generate_profile(&policy, &test_program()).unwrap();
         let ancestor_pos = profile.find("(allow file-read-metadata (literal \"/opt\"))");
         let network_pos = profile.find("(allow network*)");
         assert!(

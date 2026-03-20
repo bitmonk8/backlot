@@ -102,9 +102,13 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     let program_path = std::path::Path::new(&command.program);
     // Resolve symlinks/firmlinks so the seatbelt profile matches the real path.
     // On macOS 13+, /bin and /usr/bin are firmlinks to /System/Cryptexes/OS/...
-    let resolved =
-        std::fs::canonicalize(program_path).unwrap_or_else(|_| program_path.to_path_buf());
-    let profile = seatbelt::generate_profile(policy, &resolved);
+    let resolved = std::fs::canonicalize(program_path).map_err(|e| {
+        SandboxError::Setup(format!(
+            "cannot resolve program path '{}': {e}",
+            program_path.display()
+        ))
+    })?;
+    let profile = seatbelt::generate_profile(policy, &resolved)?;
 
     let prefork = unix::prepare_prefork(command)
         .map_err(|e| SandboxError::Setup(format!("pre-fork preparation: {e}")))?;
@@ -378,7 +382,7 @@ mod tests {
         let policy = test_policy(vec![PathBuf::from("/usr")]);
         let program = std::path::Path::new("/bin/echo");
         let resolved = std::fs::canonicalize(program).unwrap_or_else(|_| program.to_path_buf());
-        let profile = seatbelt::generate_profile(&policy, &resolved);
+        let profile = seatbelt::generate_profile(&policy, &resolved).unwrap();
 
         let out = std::process::Command::new("/usr/bin/sandbox-exec")
             .args(["-p", &profile, "/bin/echo", "hello"])
@@ -480,7 +484,7 @@ mod tests {
             ResourceLimits::default(),
         );
         let program = std::path::PathBuf::from("/usr/bin/test");
-        let profile = seatbelt::generate_profile(&policy, &program);
+        let profile = seatbelt::generate_profile(&policy, &program).unwrap();
         assert!(profile.starts_with("(version 1)"));
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow file-read* (subpath \"/tmp/read\"))"));

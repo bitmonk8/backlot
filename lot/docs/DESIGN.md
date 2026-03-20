@@ -118,6 +118,7 @@ void sandbox_free_error(char *errorbuf);
 - Add `(allow file-read-metadata (literal "..."))` for each ancestor directory of all policy paths and the program binary. Enables `stat()`-based path traversal (e.g., nu_glob walking path components). Uses `literal` (exact match), not `subpath`. Excludes `/` and system paths already granted.
 - Always allow: system libraries (`/usr/lib`, `/System/Library`), dynamic linker cache, `/dev/urandom`.
 - `mach-lookup` is unrestricted (narrowing breaks most programs).
+- `generate_profile` returns `Result<String, SandboxError>`. Path-encoding failures (non-UTF-8, null bytes) are propagated as errors rather than silently dropping rules, which would weaken the sandbox.
 
 **Process model:** Fork a helper, call `setsid()` so the child becomes its own process group leader (enabling `killpg` to kill all descendants on drop/timeout), apply `sandbox_init` in the helper (permanent, no undo), then exec the target. The parent is never sandboxed.
 

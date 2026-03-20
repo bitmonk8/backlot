@@ -2,12 +2,16 @@
 
 ## Current Phase
 
-**Issue resolution.** Implementation complete across all platforms. 41 audit findings documented in `ISSUES.md` across 11 groups. Goal: clear all issues.
+**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across 11 remaining groups (2–12). Goal: clear all issues.
+
+## Resolved
+
+- **Group 1: macOS Seatbelt Silent Security Bypass** — `generate_profile` and `append_sbpl_rule` now return `Result`, propagating path-encoding errors instead of silently dropping rules. `canonicalize` failure in `spawn()` returns `SandboxError::Setup` instead of silently falling back.
 
 ## Next Work
 
-1. **Group 1: macOS Seatbelt Silent Security Bypass** — `seatbelt.rs` silently drops deny rules on path escape failure; `canonicalize` failure swallowed. (1 Critical, 1 Medium)
-2. Groups 2–11 in `ISSUES.md`, ordered by descending impact.
+1. **Group 2: Windows Process Creation & Stdio Handle Safety** — Console handle corruption on error paths and invalid handles passed to child processes. (1 Critical, 1 High)
+2. Groups 3–12 in `ISSUES.md`, ordered by descending impact.
 
 After all issues resolved:
 - First real-world usage / `lot run` testing
