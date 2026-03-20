@@ -35,6 +35,7 @@ pub fn set_sandbox_env(cmd: &mut lot::SandboxCommand, scratch: &std::path::Path)
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::missing_const_for_fn)] // empty stub; clippy flags it but const fn with &mut is unstable
 pub fn set_sandbox_env(_cmd: &mut lot::SandboxCommand, _scratch: &std::path::Path) {}
 
 /// Platform-appropriate exec_paths for sandbox policies.
