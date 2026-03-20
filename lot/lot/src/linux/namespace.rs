@@ -134,26 +134,41 @@ fn mount_system_paths(new_root: &str, policy: &SandboxPolicy) -> io::Result<()> 
     Ok(())
 }
 
+/// Create a mount target at `dest` matching the type of `src`.
+/// If `src` is a regular file, creates parent directories and an empty file.
+/// Otherwise (directory, symlink-to-dir, etc.), creates the full directory path.
+fn create_mount_target(src: &str, dest: &str) -> io::Result<()> {
+    if Path::new(src).is_file() {
+        // dest is &str so parent is always valid UTF-8
+        if let Some(parent) = Path::new(dest).parent() {
+            mkdir_p(parent.to_str().unwrap())?;
+        }
+        create_mount_point_file(dest)
+    } else {
+        mkdir_p(dest)
+    }
+}
+
 /// Mount policy-specified read/write/exec paths.
 fn mount_policy_paths(new_root: &str, policy: &SandboxPolicy) -> io::Result<()> {
     for path in policy.read_paths() {
         let s = path_to_str(path, "read")?;
         let dest = format!("{new_root}{s}");
-        mkdir_p(&dest)?;
+        create_mount_target(s, &dest)?;
         bind_mount_readonly(s, &dest)?;
     }
 
     for path in policy.write_paths() {
         let s = path_to_str(path, "write")?;
         let dest = format!("{new_root}{s}");
-        mkdir_p(&dest)?;
+        create_mount_target(s, &dest)?;
         bind_mount_readwrite(s, &dest)?;
     }
 
     for path in policy.exec_paths() {
         let s = path_to_str(path, "exec")?;
         let dest = format!("{new_root}{s}");
-        mkdir_p(&dest)?;
+        create_mount_target(s, &dest)?;
         bind_mount_exec(s, &dest)?;
     }
 
@@ -554,5 +569,54 @@ mod tests {
             result.is_ok(),
             "probe should not return Err on a normal system"
         );
+    }
+
+    /// Project-local test temp base to match CLAUDE.md conventions.
+    fn test_tmp_base(name: &str) -> std::path::PathBuf {
+        let ws_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        let base = ws_root
+            .join("test_tmp")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn test_create_mount_target_for_file() {
+        let base = test_tmp_base("mount-target-file");
+
+        let src_file = base.join("src.txt");
+        std::fs::write(&src_file, "data").unwrap();
+        let dest_file = base.join("dest_parent/dest.txt");
+
+        let src_str = src_file.to_str().unwrap();
+        let dest_str = dest_file.to_str().unwrap();
+        create_mount_target(src_str, dest_str).unwrap();
+
+        assert!(dest_file.exists(), "dest should be created as a file");
+        assert!(dest_file.is_file(), "dest should be a regular file");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_create_mount_target_for_directory() {
+        let base = test_tmp_base("mount-target-dir");
+
+        let src_dir = base.join("src_dir");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let dest_dir = base.join("dest_dir/nested");
+
+        let src_str = src_dir.to_str().unwrap();
+        let dest_str = dest_dir.to_str().unwrap();
+        create_mount_target(src_str, dest_str).unwrap();
+
+        assert!(dest_dir.exists(), "dest should be created as a directory");
+        assert!(dest_dir.is_dir(), "dest should be a directory");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

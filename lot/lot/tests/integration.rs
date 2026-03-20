@@ -277,6 +277,68 @@ fn test_spawn_read_allowed_path() {
     eprintln!("[diag] PASSED");
 }
 
+/// Grant read access to a single file (not its parent directory) and verify
+/// the sandboxed process can read it. Exercises the file bind-mount path in
+/// `create_mount_target` on Linux.
+#[test]
+fn test_spawn_read_single_file() {
+    eprintln!("[diag] === test_spawn_read_single_file ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let file_path = tmp.path().join("single_file.txt");
+    std::fs::write(&file_path, "file_mount_test").expect("write test file");
+
+    let file_canon = std::fs::canonicalize(&file_path).expect("canonicalize file");
+
+    let (program, args) = cat_command(&file_canon);
+
+    // Grant the single file, not the directory
+    let policy = lot::SandboxPolicy::new(
+        vec![file_canon],
+        vec![scratch.path().to_path_buf()],
+        platform_exec_paths(),
+        Vec::new(),
+        false,
+        lot::ResourceLimits::default(),
+    );
+
+    let mut cmd = lot::SandboxCommand::new(&program);
+    set_sandbox_env(&mut cmd, scratch.path());
+
+    cmd.args(&args);
+    cmd.stdout(lot::SandboxStdio::Piped);
+    cmd.stderr(lot::SandboxStdio::Piped);
+
+    let Some(child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+    let output = child.wait_with_output().expect("wait_with_output");
+
+    eprintln!("[diag] exit status: {:?}", output.status);
+    eprintln!(
+        "[diag] stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        output.status.success(),
+        "cat should succeed for single file read path, got: {:?}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("file_mount_test"),
+        "should read single-file mount, got: {stdout:?}"
+    );
+    eprintln!("[diag] PASSED");
+}
+
 #[test]
 fn test_spawn_disallowed_path_blocked() {
     eprintln!("[diag] === test_spawn_disallowed_path_blocked ===");

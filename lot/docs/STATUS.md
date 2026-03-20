@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining groups (6–12). Goal: clear all issues.
+**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining groups (7–12). Goal: clear all issues.
 
 ## Resolved
 
@@ -11,11 +11,12 @@
 - **Group 3: Windows Sentinel & ACL Recovery Robustness**
 - **Group 4: Unix Process Lifecycle Safety**
 - **Group 5: Windows ACL/DACL Error Propagation**
+- **Group 6: Linux Cgroup & Mount Robustness**
 
 ## Next Work
 
-1. **Group 6: Linux Cgroup & Mount Robustness** — File bind-mount failure, cgroup leaks, silent process survival. (1 High, 4 Medium)
-2. Groups 7–12 in `ISSUES.md`, ordered by descending impact.
+1. **Group 7: Test Coverage Gaps** — Zero coverage on public API surfaces, assertion-free tests. (2 High, 5 Medium)
+2. Groups 8–12 in `ISSUES.md`, ordered by descending impact.
 
 After all issues resolved:
 - First real-world usage / `lot run` testing

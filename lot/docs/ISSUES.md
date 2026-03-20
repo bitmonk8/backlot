@@ -4,31 +4,17 @@ Issues grouped by co-fixability, ordered by descending impact.
 
 ---
 
-## Group 6: Linux Cgroup & Mount Robustness
-
-File bind-mount failure, cgroup leaks, silent process survival.
-
-| # | File | Lines | Description | Severity |
-|---|------|-------|-------------|----------|
-| 21 | lot/src/linux/namespace.rs | 139-158 | `mount_policy_paths` unconditionally uses `mkdir_p` + directory bind-mount for all policy paths. If a policy path refers to a regular file, `mkdir_p` creates a directory and the bind mount fails. No file-vs-directory detection. | High |
-| 22 | lot/src/linux/cgroup.rs | 232-266 | If `cgroup.kill` succeeds but processes don't exit within ~100ms poll budget, `remove_dir` is called while processes may still be alive, causing EBUSY. The `remove_dir` error is silently ignored, leaking the cgroup. | Medium |
-| 23 | lot/src/linux/cgroup.rs | 55-62 | Fallback `is_writable(&cgroup_path)` in `has_writable_subtree` doesn't check `subtree_control` controllers. `available()` can return true when cgroup creation will actually fail. | Medium |
-| 24 | lot/src/linux/cgroup.rs | 144-152 | If limit write fails after cgroup directory creation, cgroup directory is leaked (not cleaned up on error path). | Medium |
-| 25 | lot/src/linux/cgroup.rs | 188-189 | `kill_all` silently returns on `cgroup.procs` read failure. Processes in the cgroup may survive. | Medium |
-
----
-
 ## Group 7: Test Coverage Gaps
 
 Zero coverage on public API surfaces, assertion-free tests, untested platforms.
 
 | # | File | Lines | Description | Severity |
 |---|------|-------|-------------|----------|
-| 26 | lot/tests/integration.rs | 1-1139 | No integration tests for: `allow_network`, `ResourceLimits` enforcement, `kill()`, `kill_and_cleanup()`, `try_wait()`, `take_stdout`/`take_stderr`, `SandboxPolicyBuilder` usage. These are public API surfaces with zero coverage. | High |
+| 26 | lot/tests/integration.rs | 1-1201 | No integration tests for: `allow_network`, `ResourceLimits` enforcement, `kill()`, `kill_and_cleanup()`, `try_wait()`, `take_stdout`/`take_stderr`, `SandboxPolicyBuilder` usage. These are public API surfaces with zero coverage. | High |
 | 27 | lot/src/unix.rs | — | File has zero unit tests. All functions (wait, kill, pipe management, error pipe protocol) exercised only indirectly through integration tests that can skip on `PrerequisitesNotMet`. | High |
-| 28 | lot/tests/integration.rs | 452-463 | macOS branch of `test_cleanup_after_drop` has no assertion. Test cannot fail on macOS. | Medium |
-| 29 | lot/tests/integration.rs | 204-1105 | All tests using `try_spawn` silently return on `PrerequisitesNotMet`. No mechanism to detect when entire suite runs zero assertions. Intentional design for cross-platform CI, but means test pass does not guarantee code was exercised. | Medium |
-| 30 | lot/tests/integration.rs | 850-895 | `test_symlink_into_deny_path` is Unix-only (`#[cfg(unix)]`). Symlink bypass attack untested on Windows. Windows deny paths use explicit deny ACEs which may resolve symlinks differently. | Medium |
+| 28 | lot/tests/integration.rs | 514-525 | macOS branch of `test_cleanup_after_drop` has no assertion. Test cannot fail on macOS. | Medium |
+| 29 | lot/tests/integration.rs | 204-1167 | All tests using `try_spawn` silently return on `PrerequisitesNotMet`. No mechanism to detect when entire suite runs zero assertions. Intentional design for cross-platform CI, but means test pass does not guarantee code was exercised. | Medium |
+| 30 | lot/tests/integration.rs | 912-957 | `test_symlink_into_deny_path` is Unix-only (`#[cfg(unix)]`). Symlink bypass attack untested on Windows. Windows deny paths use explicit deny ACEs which may resolve symlinks differently. | Medium |
 | 45 | lot/src/windows/pipe.rs | tests | `stdio_pipes_close_owned_skips_inherit` is smoke-only (no-panic). Does not verify the inherited handle remains valid after `close_owned`. A post-call check (e.g., `GetFileType`) would prove the handle was not closed. | Medium |
 | 46 | lot/src/windows/pipe.rs | tests | No test for `resolve_stdio_output(SandboxStdio::Null)` — the write path of `open_nul_device` is untested. | Medium |
 
@@ -90,4 +76,3 @@ Test improvements deferred from Group 1 fix.
 | 42 | lot/src/macos/seatbelt.rs | tests | Non-UTF-8 error tests (`generate_profile_errors_on_non_utf8_read_path`, `_deny_path`) only check `msg.contains("not valid UTF-8")`. Should verify error variant and which path triggered the error. | Medium |
 | 43 | lot/src/macos/seatbelt.rs | tests | Missing non-UTF-8 test coverage for write_paths and exec_paths vectors. Only read and deny paths are tested. | Medium |
 | 44 | lot/src/macos/seatbelt.rs | tests | The two non-UTF-8 test functions share nearly identical bodies. Could be consolidated with a parameterized helper. | Low |
-

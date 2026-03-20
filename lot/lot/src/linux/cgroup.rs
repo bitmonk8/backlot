@@ -55,11 +55,13 @@ fn has_writable_subtree() -> bool {
     // Fallback: check current cgroup's subtree_control (works if the process
     // was placed here by systemd before we check).
     let subtree_control = cgroup_path.join("cgroup.subtree_control");
-    if subtree_control.exists() {
-        return is_writable(&subtree_control);
+    if subtree_control.exists() && is_writable(&subtree_control) {
+        if let Ok(contents) = fs::read_to_string(&subtree_control) {
+            return !contents.trim().is_empty();
+        }
     }
 
-    is_writable(&cgroup_path)
+    false
 }
 
 /// Parse /proc/self/cgroup to find the cgroupv2 path.
@@ -141,14 +143,20 @@ impl CgroupGuard {
             ));
         }
 
-        // Write memory limit
-        if let Some(bytes) = limits.max_memory_bytes {
-            fs::write(path.join("memory.max"), bytes.to_string())?;
-        }
+        // Write resource limits. On failure, clean up the directory we created.
+        let write_limits = || -> io::Result<()> {
+            if let Some(bytes) = limits.max_memory_bytes {
+                fs::write(path.join("memory.max"), bytes.to_string())?;
+            }
+            if let Some(count) = limits.max_processes {
+                fs::write(path.join("pids.max"), count.to_string())?;
+            }
+            Ok(())
+        };
 
-        // Write process (PID) limit
-        if let Some(count) = limits.max_processes {
-            fs::write(path.join("pids.max"), count.to_string())?;
+        if let Err(e) = write_limits() {
+            let _ = fs::remove_dir(&path);
+            return Err(e);
         }
 
         // max_cpu_seconds: intentionally not enforced via cgroups.
@@ -186,6 +194,10 @@ impl CgroupGuard {
         // but it is substantially narrower than killing without any check.
         let procs_path = self.path.join("cgroup.procs");
         let Ok(contents) = fs::read_to_string(&procs_path) else {
+            eprintln!(
+                "lot: failed to read cgroup.procs for kill fallback: {}",
+                procs_path.display()
+            );
             return;
         };
 
@@ -242,23 +254,34 @@ impl Drop for CgroupGuard {
 
         // Wait for processes to exit so the cgroup directory becomes empty.
         // With cgroup.kill this should be near-instant; with fallback we poll.
-        for _ in 0..10 {
+        // Budget: 50 iterations x 20ms = 1s total.
+        let mut drained = false;
+        for _ in 0..50 {
             let procs_path = self.path.join("cgroup.procs");
             match fs::read_to_string(&procs_path) {
-                Ok(contents) if contents.trim().is_empty() => break,
-                Err(_) => break,
-                _ => {
+                Ok(contents) if !contents.trim().is_empty() => {
                     // SAFETY: timespec is valid, null second arg means we don't
                     // care about remaining time.
                     unsafe {
                         let ts = libc::timespec {
                             tv_sec: 0,
-                            tv_nsec: 10_000_000, // 10ms
+                            tv_nsec: 20_000_000, // 20ms
                         };
                         libc::nanosleep(&raw const ts, std::ptr::null_mut());
                     }
                 }
+                _ => {
+                    drained = true;
+                    break;
+                }
             }
+        }
+
+        if !drained {
+            eprintln!(
+                "lot: cgroup still has processes after 1s drain: {}",
+                self.path.display()
+            );
         }
 
         // Best-effort removal; ignore failure to avoid panicking in drop.
@@ -346,5 +369,53 @@ mod tests {
         assert!(path.exists());
         drop(guard);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn cgroup_guard_drain_with_live_process() {
+        if !available() {
+            eprintln!("[skip] cgroup_guard_drain_with_live_process: cgroups v2 not available");
+            return;
+        }
+        let limits = ResourceLimits::default();
+        let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
+        let path = guard.path().to_path_buf();
+
+        // RAII guard ensures forked child is killed+reaped on all paths
+        // (including assertion failures that unwind).
+        struct ChildGuard(i32);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                    libc::waitpid(self.0, std::ptr::null_mut(), 0);
+                }
+            }
+        }
+
+        // SAFETY: fork() is safe here; child immediately pauses.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe { libc::pause() };
+            std::process::exit(0);
+        }
+        let _child_guard = ChildGuard(pid);
+
+        // Try adding the child — may fail depending on cgroup config
+        if guard.add_process(pid).is_err() {
+            eprintln!("[skip] add_process failed; cannot test drain");
+            return;
+        }
+
+        drop(guard);
+
+        // After drop, the cgroup directory should be removed.
+        // The guard's Drop kills all cgroup processes via cgroup.kill,
+        // then drains and removes the directory.
+        assert!(
+            !path.exists(),
+            "cgroup directory should be removed after draining live process"
+        );
     }
 }
