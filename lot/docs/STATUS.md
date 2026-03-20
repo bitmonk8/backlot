@@ -2,17 +2,18 @@
 
 ## Current Phase
 
-**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across 10 remaining groups (3–12). Goal: clear all issues.
+**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining groups (4–12). Goal: clear all issues.
 
 ## Resolved
 
-- **Group 1: macOS Seatbelt Silent Security Bypass** — `generate_profile` and `append_sbpl_rule` now return `Result`, propagating path-encoding errors instead of silently dropping rules. `canonicalize` failure in `spawn()` returns `SandboxError::Setup` instead of silently falling back.
-- **Group 2: Windows Process Creation & Stdio Handle Safety** — Error paths now only close owned child handles (Piped, Null), never borrowed Inherit handles from the parent console. Null stdio streams open a real `\\.\NUL` device handle instead of passing `INVALID_HANDLE_VALUE`. `STARTF_USESTDHANDLES` is always set since all streams have valid handles.
+- **Group 1: macOS Seatbelt Silent Security Bypass**
+- **Group 2: Windows Process Creation & Stdio Handle Safety**
+- **Group 3: Windows Sentinel & ACL Recovery Robustness**
 
 ## Next Work
 
-1. **Group 3: Windows Sentinel & ACL Recovery Robustness** — Sentinel errors discarded, malformed entries skipped, memory leaks. (3 High, 4 Medium)
-2. Groups 4–12 in `ISSUES.md`, ordered by descending impact.
+1. **Group 4: Unix Process Lifecycle Safety** — Error pipe misreporting, race conditions in wait/kill, orphaned child processes. (2 High, 3 Medium)
+2. Groups 5–12 in `ISSUES.md`, ordered by descending impact.
 
 After all issues resolved:
 - First real-world usage / `lot run` testing
@@ -34,4 +35,3 @@ After all issues resolved:
 ### Note: ubuntu-24.04 AppArmor
 
 Ubuntu 24.04 requires `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` to allow unprivileged user namespace creation. The CI already sets this.
-

@@ -430,7 +430,7 @@ fn test_cleanup_after_drop() {
     // Platform-specific verification:
     #[cfg(target_os = "windows")]
     {
-        // Drop ran restore_from_sentinel. Verify no stale sentinel remains
+        // Drop ran restore_acls_and_delete_sentinel. Verify no stale sentinel remains
         // for this child by checking cleanup_stale succeeds without error.
         let cleanup_result = lot::cleanup_stale();
         assert!(

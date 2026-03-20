@@ -45,7 +45,7 @@ use super::pipe::{
     StdioPipes, close_handle_if_valid, close_optional_handle, resolve_stdio_input,
     resolve_stdio_output,
 };
-use super::sentinel::{SentinelFile, restore_from_sentinel, write_sentinel};
+use super::sentinel::{SentinelFile, restore_acls_and_delete_sentinel, write_sentinel};
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -407,7 +407,15 @@ impl WindowsSandboxedChild {
     }
 
     fn cleanup(&mut self) {
-        let _ = restore_from_sentinel(&self.sentinel);
+        if !self.sentinel.profile_name.is_empty() {
+            if let Err(e) = restore_acls_and_delete_sentinel(&self.sentinel) {
+                eprintln!("lot: ACL restore failed: {e}");
+            }
+            if let Err(e) = delete_profile(&self.sentinel.profile_name) {
+                eprintln!("lot: profile delete failed: {e}");
+            }
+            self.sentinel.profile_name.clear();
+        }
 
         for sid in self.cap_sids.drain(..) {
             // SAFETY: Each sid was allocated by AllocateAndInitializeSid.
@@ -521,8 +529,13 @@ fn spawn_inner(
     match spawn_with_sentinel(policy, command, profile_name, ac_sid, sentinel) {
         Ok(child) => Ok(child),
         Err((sent, err)) => {
-            let _ = restore_from_sentinel(&sent);
-            Err(err)
+            let combined = match restore_acls_and_delete_sentinel(&sent) {
+                Ok(()) => err,
+                Err(restore_err) => {
+                    SandboxError::Setup(format!("{err}; ACL restore also failed: {restore_err}"))
+                }
+            };
+            Err(combined)
         }
     }
 }
@@ -927,7 +940,7 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::TempDir;
 
-    use super::super::sentinel::get_sddl;
+    use super::super::sddl::get_sddl;
 
     // Serialize appcontainer tests to prevent cleanup_stale from interfering
     // with concurrent test sessions that share the same temp directory.
@@ -1187,18 +1200,19 @@ mod tests {
         let modified_sddl = get_sddl(tmp.path()).expect("get modified SDDL");
         assert_ne!(original_sddl, modified_sddl, "ACL should be modified");
 
-        // Call restore_from_sentinel directly rather than cleanup_stale.
+        // Call restore_acls_and_delete_sentinel directly rather than cleanup_stale.
         // cleanup_stale skips sentinels owned by live processes (this PID),
         // and this test is about the restore logic, not the scanning.
         let sentinel_file_path = std::env::temp_dir().join(format!("lot-sentinel-{name}.txt"));
         let sentinel_read = SentinelFile::read(&sentinel_file_path).expect("read sentinel");
-        restore_from_sentinel(&sentinel_read).expect("restore_from_sentinel");
+        restore_acls_and_delete_sentinel(&sentinel_read).expect("restore_acls_and_delete_sentinel");
+        let _ = delete_profile(&sentinel_read.profile_name);
 
         let restored_sddl = get_sddl(tmp.path()).expect("get restored SDDL");
         assert_eq!(
             explicit_aces(&original_sddl),
             explicit_aces(&restored_sddl),
-            "explicit DACL ACEs should be restored by restore_from_sentinel"
+            "explicit DACL ACEs should be restored by restore_acls_and_delete_sentinel"
         );
 
         assert!(

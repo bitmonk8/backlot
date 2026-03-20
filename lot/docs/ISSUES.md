@@ -4,22 +4,6 @@ Issues grouped by co-fixability, ordered by descending impact.
 
 ---
 
-## Group 3: Windows Sentinel & ACL Recovery Robustness
-
-Sentinel errors discarded, malformed entries skipped, memory leaks. Security state left permanently modified after failures.
-
-| # | File | Lines | Description | Severity |
-|---|------|-------|-------------|----------|
-| 5 | lot/src/windows/appcontainer.rs | 410 | `restore_from_sentinel` errors silently discarded in `cleanup()`. Filesystem left in modified security state. | High |
-| 6 | lot/src/windows/appcontainer.rs | 524 | `restore_from_sentinel` error silently discarded during spawn error cleanup. ACL restoration failure lost. Unlike drop context, this error could be propagated. | High |
-| 7 | lot/src/windows/sentinel.rs | 293-298 | Malformed sentinel entries silently skipped. ACLs for those paths are never restored. | High |
-| 8 | lot/src/windows/sentinel.rs | 233 | `to_string_lossy` replaces non-Unicode paths with U+FFFD. Restoration targets wrong path. Rare on Windows in practice (paths are natively UTF-16). | High |
-| 9 | lot/src/windows/sentinel.rs | 83 | If `sd_to_sddl()` returns error, `?` causes early return skipping `LocalFree(sd)`. Security descriptor memory leaked on error path. | Medium |
-| 10 | lot/src/windows/sentinel.rs | 47-58 | `is_process_alive` susceptible to PID reuse. Stale sentinel may be skipped if PID has been reused by another process, leaving ACL changes permanent. | Medium |
-| 11 | lot/src/windows/sentinel.rs | 362-364 | `cleanup_stale` returns `Ok(())` when `read_dir` fails. Caller cannot distinguish "no stale sentinels" from "couldn't read sentinel directory." | Medium |
-
----
-
 ## Group 4: Unix Process Lifecycle Safety
 
 Error pipe misreporting, race conditions in wait/kill, orphaned child processes.

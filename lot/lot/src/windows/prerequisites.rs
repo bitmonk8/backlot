@@ -80,15 +80,22 @@ mod tests {
     #[test]
     fn grant_prerequisites_fails_without_elevation() {
         // System directories (e.g. C:\Windows) require elevation to modify.
-        // From a non-elevated context this should return an error.
+        // From a non-elevated context this should return an error — unless the
+        // prerequisites are already in place from a prior elevated run, in which
+        // case grant_traverse succeeds idempotently. Skip in that case.
         let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
         let sys32 = PathBuf::from(format!("{system_root}\\System32"));
         if !sys32.exists() {
-            return; // Skip if path does not exist (unlikely).
+            return;
         }
 
-        // Only run the assertion when not elevated; elevated CI would succeed.
         if super::super::elevation::is_elevated() {
+            return;
+        }
+
+        // If prerequisites are already met (e.g., from a prior `lot setup`),
+        // the grant call succeeds idempotently. Skip the test in that case.
+        if appcontainer_prerequisites_met(&[sys32.as_path()]) {
             return;
         }
 

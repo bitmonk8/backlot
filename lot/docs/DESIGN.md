@@ -29,7 +29,8 @@ lot/                           (workspace root)
 │   │       ├── acl_helpers.rs  — Shared DACL manipulation (SID allocation, ACE application)
 │   │       ├── nul_device.rs  — NUL device ACE, prerequisites API
 │   │       ├── traverse_acl.rs — Ancestor traverse ACE management
-│   │       ├── sentinel.rs    — Sentinel file ACL recovery (write, read, restore, cleanup_stale)
+│   │       ├── sddl.rs        — SDDL/DACL helpers (get_sddl, restore_sddl)
+│   │       ├── sentinel.rs    — Sentinel file ACL recovery (write, read, restore, find_stale_sentinels)
 │   │       ├── elevation.rs   — is_elevated() check (UAC token inspection)
 │   │       ├── pipe.rs        — Pipe creation and stdio handle helpers
 │   │       └── cmdline.rs     — Command-line building and argument quoting

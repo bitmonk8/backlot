@@ -6,6 +6,7 @@ mod job;
 pub mod nul_device;
 mod pipe;
 pub mod prerequisites;
+pub mod sddl;
 mod sentinel;
 pub mod traverse_acl;
 
@@ -68,7 +69,21 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 }
 
 pub fn cleanup_stale() -> Result<()> {
-    sentinel::cleanup_stale()
+    let stale = sentinel::find_stale_sentinels()?;
+    let mut errors = Vec::new();
+    for s in &stale {
+        if let Err(e) = sentinel::restore_acls_and_delete_sentinel(s) {
+            errors.push(format!("{}: {e}", s.profile_name));
+        }
+        if let Err(e) = appcontainer::delete_profile(&s.profile_name) {
+            errors.push(format!("delete profile {}: {e}", s.profile_name));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::SandboxError::Cleanup(errors.join("; ")))
+    }
 }
 
 /// Send a terminate signal to a process by raw PID. Best-effort; the
