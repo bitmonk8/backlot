@@ -362,7 +362,13 @@ pub fn apply_profile(profile: &str) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::policy::{ResourceLimits, SandboxPolicy};
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
     use std::path::PathBuf;
+
+    fn bad_utf8_path() -> PathBuf {
+        PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"))
+    }
 
     fn basic_policy() -> SandboxPolicy {
         SandboxPolicy::new(
@@ -738,48 +744,100 @@ mod tests {
         }
     }
 
-    #[test]
-    fn generate_profile_errors_on_non_utf8_read_path() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        // 0xFF is not valid UTF-8
-        let bad_path = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
-        let policy = SandboxPolicy::new(
-            vec![bad_path],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            ResourceLimits::default(),
-        );
+    fn assert_non_utf8_path_rejected(
+        read: Vec<PathBuf>,
+        write: Vec<PathBuf>,
+        exec: Vec<PathBuf>,
+        deny: Vec<PathBuf>,
+    ) {
+        let policy = SandboxPolicy::new(read, write, exec, deny, false, ResourceLimits::default());
         let err = generate_profile(&policy, &test_program()).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::Setup(_)),
+            "expected SandboxError::Setup, got: {err:?}"
+        );
         let msg = err.to_string();
         assert!(
             msg.contains("not valid UTF-8"),
             "expected UTF-8 error, got: {msg}"
+        );
+        assert!(
+            msg.contains("\u{FFFD}"),
+            "error should contain the replacement character from the non-UTF-8 path, got: {msg}"
         );
     }
 
     #[test]
-    fn generate_profile_errors_on_non_utf8_deny_path() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
+    fn generate_profile_errors_on_non_utf8_read_path() {
+        assert_non_utf8_path_rejected(vec![bad_utf8_path()], vec![], vec![], vec![]);
+    }
 
-        let bad_path = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
-        let policy = SandboxPolicy::new(
+    #[test]
+    fn generate_profile_errors_on_non_utf8_write_path() {
+        assert_non_utf8_path_rejected(vec![], vec![bad_utf8_path()], vec![], vec![]);
+    }
+
+    #[test]
+    fn generate_profile_errors_on_non_utf8_exec_path() {
+        assert_non_utf8_path_rejected(vec![], vec![], vec![bad_utf8_path()], vec![]);
+    }
+
+    #[test]
+    fn generate_profile_errors_on_non_utf8_deny_path() {
+        assert_non_utf8_path_rejected(
             vec![PathBuf::from("/tmp/test_read")],
             vec![],
             vec![],
-            vec![bad_path],
+            vec![bad_utf8_path()],
+        );
+    }
+
+    #[test]
+    fn generate_profile_errors_on_non_utf8_program_path() {
+        let policy = SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
             false,
             ResourceLimits::default(),
         );
-        let err = generate_profile(&policy, &test_program()).unwrap_err();
+        let err = generate_profile(&policy, &bad_utf8_path()).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::Setup(_)),
+            "expected SandboxError::Setup, got: {err:?}"
+        );
         let msg = err.to_string();
         assert!(
             msg.contains("not valid UTF-8"),
             "expected UTF-8 error, got: {msg}"
+        );
+        assert!(
+            msg.contains("\u{FFFD}"),
+            "error should contain the replacement character from the non-UTF-8 path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn generate_profile_errors_on_null_byte_path() {
+        let null_path = PathBuf::from("/tmp/has\0null");
+        let policy = SandboxPolicy::new(
+            vec![null_path],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
+        let err = generate_profile(&policy, &test_program()).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::Setup(_)),
+            "expected SandboxError::Setup, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("null byte"),
+            "expected null byte error, got: {msg}"
         );
     }
 

@@ -2,13 +2,10 @@
 
 ## Current Phase
 
-**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining group (12). Goal: clear all issues.
+**All issues resolved.** Implementation complete across all platforms. No remaining audit findings.
 
 ## Next Work
 
-1. Group 12 in `ISSUES.md`.
-
-After all issues resolved:
 - First real-world usage / `lot run` testing
 - crates.io publish (metadata ready, needs public repository URL)
 
