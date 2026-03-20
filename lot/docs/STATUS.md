@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining groups (9–12). Goal: clear all issues.
+**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining groups (10–12). Goal: clear all issues.
 
 ## Resolved
 
@@ -14,10 +14,11 @@
 - **Group 6: Linux Cgroup & Mount Robustness**
 - **Group 7: Test Coverage Gaps**
 - **Group 8: CLI Environment Variable Ordering**
+- **Group 9: DESIGN.md Documentation Accuracy**
 
 ## Next Work
 
-1. Groups 9–12 in `ISSUES.md`, ordered by descending impact.
+1. Groups 10–12 in `ISSUES.md`, ordered by descending impact.
 
 After all issues resolved:
 - First real-world usage / `lot run` testing

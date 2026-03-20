@@ -13,10 +13,12 @@ lot/                           (workspace root)
 │   │   ├── policy_builder.rs  — SandboxPolicyBuilder (auto-canonicalization, platform defaults)
 │   │   ├── command.rs         — SandboxCommand builder
 │   │   ├── error.rs           — SandboxError
+│   │   ├── env_check.rs       — Pre-spawn env/path validation (TEMP, PATH reachability)
+│   │   ├── path_util.rs       — Shared path utilities (ancestry checks, lexical normalization)
 │   │   ├── unix.rs            — Shared Unix helpers (pipes, stdio, UnixSandboxedChild lifecycle, child_bail)
 │   │   ├── linux/
 │   │   │   ├── mod.rs         — LinuxSandbox: orchestrates namespace + seccomp + cgroup
-│   │   │   ├── namespace.rs   — clone(), pivot_root, bind mounts, uid/gid mapping
+│   │   │   ├── namespace.rs   — fork()+unshare(), pivot_root, bind mounts, uid/gid mapping
 │   │   │   ├── seccomp.rs     — BPF filter construction and application
 │   │   │   └── cgroup.rs      — cgroup v2 creation, limit writes, cleanup
 │   │   ├── macos/
@@ -32,6 +34,7 @@ lot/                           (workspace root)
 │   │       ├── sddl.rs        — SDDL/DACL helpers (get_sddl, restore_sddl)
 │   │       ├── sentinel.rs    — Sentinel file ACL recovery (write, read, restore, find_stale_sentinels)
 │   │       ├── elevation.rs   — is_elevated() check (UAC token inspection)
+│   │       ├── prerequisites.rs — AppContainer prerequisite checking and granting (NUL device, traverse ACEs)
 │   │       ├── pipe.rs        — Pipe creation and stdio handle helpers
 │   │       └── cmdline.rs     — Command-line building and argument quoting
 │   └── tests/
@@ -39,7 +42,8 @@ lot/                           (workspace root)
 ├── lot-cli/                   (CLI binary crate)
 │   ├── Cargo.toml
 │   └── src/
-│       └── main.rs            — lot run, lot setup, lot probe
+│       ├── main.rs            — lot run, lot setup, lot probe
+│       └── config.rs          — YAML config deserialization and policy construction
 ├── docs/
 ├── prompts/
 └── .github/
@@ -51,7 +55,7 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 
 | Crate | Platform | Purpose |
 |---|---|---|
-| `libc` | Linux, macOS | Syscall wrappers (`clone`, `setrlimit`, `prctl`, etc.) |
+| `libc` | Linux, macOS | Syscall wrappers (`fork`, `unshare`, `setrlimit`, `prctl`, etc.) |
 | `seccompiler` | Linux | seccomp-BPF filter construction |
 | `windows-sys` | Windows | Win32 API bindings (AppContainer, Job Objects, ACL) |
 | `thiserror` | All | Error derive |
@@ -95,9 +99,9 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 4. Bind-mount allowed executable paths with `MS_RDONLY | MS_NOSUID | MS_NODEV` (no `MS_NOEXEC`).
 5. Overmount each deny path with an empty read-only tmpfs (`size=0`, `MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC`). Must happen after step 2–4 so the parent grant mount exists. The denied subtree appears as an empty directory; reads/writes/creates fail with ENOENT/EROFS.
 6. `pivot_root` into the new root. Unmount old root.
-7. Essential paths (`/proc`, `/dev/null`, `/dev/urandom`, dynamic linker paths) are always mounted read-only.
+7. Essential paths are always mounted: `/proc` (procfs, `MS_NOSUID | MS_NODEV | MS_NOEXEC`), device nodes `/dev/null`, `/dev/zero`, `/dev/urandom` (bind-mounted with `MS_BIND` only — readable and writable), and dynamic linker paths (`MS_RDONLY | MS_NOSUID | MS_NODEV`).
 
-**Single-threaded constraint:** `CLONE_NEWUSER` requires the calling process to be single-threaded. Lot handles this by forking a single-threaded helper process before calling `clone()` with namespace flags. The caller (which may be multi-threaded/tokio) never directly enters the namespace. Mount namespace setup is split into two phases (helper + inner child) to correctly mount `/proc` after the PID namespace is active.
+**Single-threaded constraint:** `CLONE_NEWUSER` requires the calling process to be single-threaded. Lot handles this by forking a single-threaded helper process which then calls `unshare()` with namespace flags. The caller (which may be multi-threaded/tokio) never directly enters the namespace. Mount namespace setup is split into two phases (helper + inner child) to correctly mount `/proc` after the PID namespace is active.
 
 ### macOS: Seatbelt (sandbox_init)
 
@@ -117,13 +121,17 @@ void sandbox_free_error(char *errorbuf);
 - Add `(allow network*)` if network permitted.
 - Add `(deny file-read* ...)`, `(deny file-read-metadata ...)`, `(deny file-write* ...)`, `(deny process-exec ...)`, `(deny file-map-executable ...)` for deny paths. Must appear after allow rules (SBPL uses last-match-wins).
 - Add `(allow file-read-metadata (literal "..."))` for each ancestor directory of all policy paths and the program binary. Enables `stat()`-based path traversal (e.g., nu_glob walking path components). Uses `literal` (exact match), not `subpath`. Excludes `/` and system paths already granted.
-- Always allow: system libraries (`/usr/lib`, `/System/Library`), dynamic linker cache, `/dev/urandom`.
-- `mach-lookup` is unrestricted (narrowing breaks most programs).
+- Always-allowed file-read surface area: `/` (literal), `/usr/lib`, `/System/Library`, `/System/Cryptexes`, `/Library/Preferences`, `/Library/Apple`, `/private/var/db/dyld` (dynamic linker cache), `/dev/urandom`, `/dev/random`, `/dev/null`.
+- Always-allowed file-write-data: `/dev/null` (literal), `/dev/fd` (subpath, for stdout/stderr pipes). Uses `file-write-data` (not `file-write*`) — only permits writing bytes to existing files, not create/truncate/unlink.
+- Always-allowed file-map-executable: `/usr/lib`, `/System/Library/Frameworks`, `/System/Library/PrivateFrameworks`, `/System/Library/Extensions`, `/Library/Apple/System/Library/Frameworks`, `/Library/Apple/System/Library/PrivateFrameworks`, `/Library/Apple/usr/lib`.
+- Always-allowed exec paths (8 system dirs): `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, `/System/Cryptexes/OS/usr/bin`, `/System/Cryptexes/OS/bin`, `/System/Cryptexes/OS/usr/sbin`, `/System/Cryptexes/OS/sbin`. Each also gets `file-read*` and `file-map-executable`.
+- Always-allowed metadata paths (15 literal entries): `/`, `/usr`, `/usr/lib`, `/usr/local`, `/System`, `/System/Library`, `/Library`, `/Library/Preferences`, `/private`, `/private/var`, `/private/var/db`, `/private/var/db/dyld`, `/dev`, `/tmp`, `/var`.
+- Always-allowed operations: `process-fork`, `sysctl-read`, `process-info*` (target self), `signal` (target self), `mach-lookup` (unrestricted — narrowing breaks most programs), `iokit-open` (scoped to `RootDomainUserClient`).
 - `generate_profile` returns `Result<String, SandboxError>`. Path-encoding failures (non-UTF-8, null bytes) are propagated as errors rather than silently dropping rules, which would weaken the sandbox.
 
-**Process model:** Fork a helper, call `setsid()` so the child becomes its own process group leader (enabling `killpg` to kill all descendants on drop/timeout), apply `sandbox_init` in the helper (permanent, no undo), then exec the target. The parent is never sandboxed.
+**Process model:** Fork the child directly (single fork), call `setsid()` so the child becomes its own process group leader (enabling `killpg` to kill all descendants on drop/timeout), apply `sandbox_init` in the child (permanent, no undo), then exec the target. No intermediate helper process — the helper pattern is Linux-only. The parent is never sandboxed.
 
-**Resource limits:** `setrlimit(RLIMIT_AS, ...)` for memory. No cgroup equivalent on macOS.
+**Resource limits:** `setrlimit(RLIMIT_AS, ...)` for memory, `setrlimit(RLIMIT_NPROC, ...)` for process count, `setrlimit(RLIMIT_CPU, ...)` for CPU time. No cgroup equivalent on macOS.
 
 **Deprecation note:** Apple deprecated `sandbox_init` but has not removed it. It is still used by major applications (Chrome, Firefox) and the underlying kernel sandbox is actively maintained. No replacement API exists for third-party use.
 

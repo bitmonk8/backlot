@@ -4,21 +4,6 @@ Issues grouped by co-fixability, ordered by descending impact.
 
 ---
 
-## Group 9: DESIGN.md Documentation Accuracy
-
-Implementation details diverged from design document.
-
-| # | File | Lines | Description | Severity |
-|---|------|-------|-------------|----------|
-| 32 | docs/DESIGN.md | 97 | Omits `/dev/zero` from device list. Claims devices are "read-only" but they are bind-mounted without `MS_RDONLY`. Device nodes are writable when documentation says they should be read-only. | High |
-| 33 | docs/DESIGN.md | 119 | Substantially understates macOS always-allowed surface area. Lists only `/usr/lib`, `/System/Library`, dynamic linker cache, `/dev/urandom`. Actual code allows `/System/Cryptexes`, `/Library/Preferences`, `/Library/Apple`, `/dev/random`, `/dev/null`, `/dev/fd`, 8 system exec paths, 15 metadata paths, plus `process-fork`, `sysctl-read`, `iokit-open`, `mach-lookup`, and more. | High |
-| 34 | docs/DESIGN.md | 19, 99 | Says Linux uses `clone()` with namespace flags. Implementation uses `fork()` + `unshare()`. No `clone()` syscall exists in the codebase. | Medium |
-| 35 | docs/DESIGN.md | 122 | Says "Fork a helper" for macOS. macOS forks child directly (single fork + setsid + sandbox_init + execve). The "helper" pattern is Linux-only. | Medium |
-| 36 | docs/DESIGN.md | 124 | Says macOS resource limits are only `RLIMIT_AS`. Code also applies `RLIMIT_NPROC` and `RLIMIT_CPU`. | Medium |
-| 37 | docs/DESIGN.md | 5-45 | Project structure tree omits 4 source files: `env_check.rs`, `path_util.rs`, `windows/prerequisites.rs`, `lot-cli/src/config.rs`. | Medium |
-
----
-
 ## Group 10: Policy Validation & Path Safety
 
 Path traversal via lexical normalization, incomplete overlap deduction.
