@@ -32,17 +32,6 @@ Issues grouped by code area, ordered by impact. Issues within a group touch over
 
 ---
 
-## macOS: Seatbelt (`macos/seatbelt.rs`)
-
-### Tests: No seatbelt unit test for deny rules in generated SBPL profile
-
-No test sets `deny_paths` on the policy and verifies the generated profile contains deny rules appearing after allow rules.
-
-**Fix:** Add test with deny_paths, assert profile contains `(deny file-read*`, `(deny file-write*`, etc.
-**File:** `lot/src/macos/seatbelt.rs`
-
----
-
 ## Error Types (`error.rs`)
 
 ### `PrerequisitesNotMet` payload

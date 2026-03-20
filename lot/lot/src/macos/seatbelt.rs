@@ -364,6 +364,17 @@ mod tests {
         PathBuf::from("/usr/bin/true")
     }
 
+    fn policy_with_deny_path() -> SandboxPolicy {
+        SandboxPolicy::new(
+            vec![PathBuf::from("/tmp/test_read")],
+            vec![PathBuf::from("/tmp/test_write")],
+            vec![PathBuf::from("/opt/mybin")],
+            vec![PathBuf::from("/tmp/test_read/secret")],
+            false,
+            ResourceLimits::default(),
+        )
+    }
+
     #[test]
     fn profile_contains_version_and_deny_default() {
         let policy = basic_policy();
@@ -588,6 +599,128 @@ mod tests {
             profile.contains("(allow file-read-metadata (literal \"/opt\"))"),
             "profile should contain ancestor metadata for /opt"
         );
+    }
+
+    #[test]
+    fn profile_contains_deny_rules() {
+        let policy = policy_with_deny_path();
+        let profile = generate_profile(&policy, &test_program());
+        for op in &[
+            "file-read*",
+            "file-read-metadata",
+            "file-write*",
+            "process-exec",
+            "file-map-executable",
+        ] {
+            let rule = format!("(deny {op} (subpath \"/tmp/test_read/secret\"))");
+            assert!(profile.contains(&rule), "profile must contain: {rule}");
+        }
+    }
+
+    #[test]
+    fn profile_deny_rules_after_allow_rules() {
+        // SBPL uses last-match-wins, so deny rules must appear after allow rules
+        // for the parent path to actually override them.
+        let policy = policy_with_deny_path();
+        let profile = generate_profile(&policy, &test_program());
+
+        for op in &["file-read*", "file-read-metadata"] {
+            let allow_rule = format!("(allow {op} (subpath \"/tmp/test_read\"))");
+            let deny_rule = format!("(deny {op} (subpath \"/tmp/test_read/secret\"))");
+            let allow_pos = profile
+                .find(&allow_rule)
+                .unwrap_or_else(|| panic!("allow {op} rule for parent must exist"));
+            let deny_pos = profile
+                .find(&deny_rule)
+                .unwrap_or_else(|| panic!("deny {op} rule for child must exist"));
+            assert!(
+                deny_pos > allow_pos,
+                "deny {op} must appear after allow {op} for parent"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_no_deny_rules_when_deny_paths_empty() {
+        let policy = basic_policy();
+        let profile = generate_profile(&policy, &test_program());
+        assert!(
+            !profile.contains("(deny file-read* (subpath"),
+            "no deny file-read* rules without deny paths"
+        );
+        assert!(
+            !profile.contains("(deny file-read-metadata (subpath"),
+            "no deny file-read-metadata rules without deny paths"
+        );
+        assert!(
+            !profile.contains("(deny file-write*"),
+            "no deny file-write* rules without deny paths"
+        );
+        assert!(
+            !profile.contains("(deny process-exec (subpath"),
+            "no deny process-exec rules without deny paths"
+        );
+        assert!(
+            !profile.contains("(deny file-map-executable (subpath"),
+            "no deny file-map-executable rules without deny paths"
+        );
+    }
+
+    #[test]
+    fn profile_multiple_deny_paths() {
+        let policy = SandboxPolicy::new(
+            vec![PathBuf::from("/tmp/test_read")],
+            vec![PathBuf::from("/tmp/test_write")],
+            vec![PathBuf::from("/opt/mybin")],
+            vec![
+                PathBuf::from("/tmp/test_read/secret"),
+                PathBuf::from("/tmp/test_write/private"),
+            ],
+            false,
+            ResourceLimits::default(),
+        );
+        let profile = generate_profile(&policy, &test_program());
+        for op in &[
+            "file-read*",
+            "file-read-metadata",
+            "file-write*",
+            "process-exec",
+            "file-map-executable",
+        ] {
+            for deny in &["/tmp/test_read/secret", "/tmp/test_write/private"] {
+                let rule = format!("(deny {op} (subpath \"{deny}\"))");
+                assert!(profile.contains(&rule), "profile must contain: {rule}");
+            }
+        }
+    }
+
+    #[test]
+    fn profile_deny_write_path_ordering() {
+        // Verify deny rules under a write-path parent also appear after allow rules.
+        let policy = SandboxPolicy::new(
+            vec![PathBuf::from("/tmp/test_read")],
+            vec![PathBuf::from("/tmp/test_write")],
+            vec![PathBuf::from("/opt/mybin")],
+            vec![PathBuf::from("/tmp/test_write/private")],
+            false,
+            ResourceLimits::default(),
+        );
+        let profile = generate_profile(&policy, &test_program());
+
+        for op in &["file-read*", "file-write*"] {
+            let allow_rule = format!("(allow {op} (subpath \"/tmp/test_write\"))");
+            let deny_rule = format!("(deny {op} (subpath \"/tmp/test_write/private\"))");
+            let allow_pos = profile
+                .find(&allow_rule)
+                .unwrap_or_else(|| panic!("allow {op} rule for parent must exist"));
+            let deny_pos = profile
+                .find(&deny_rule)
+                .unwrap_or_else(|| panic!("deny {op} rule for child must exist"));
+            assert!(
+                deny_pos > allow_pos,
+                "deny {op} must appear after allow {op} for parent"
+            );
+        }
     }
 
     #[test]
