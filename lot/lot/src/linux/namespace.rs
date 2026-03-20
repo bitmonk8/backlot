@@ -139,9 +139,10 @@ fn mount_system_paths(new_root: &str, policy: &SandboxPolicy) -> io::Result<()> 
 /// Otherwise (directory, symlink-to-dir, etc.), creates the full directory path.
 fn create_mount_target(src: &str, dest: &str) -> io::Result<()> {
     if Path::new(src).is_file() {
-        // dest is &str so parent is always valid UTF-8
-        if let Some(parent) = Path::new(dest).parent() {
-            mkdir_p(parent.to_str().unwrap())?;
+        // dest comes from format!("{new_root}{s}") where both parts are &str,
+        // so parent() always yields valid UTF-8.
+        if let Some(parent) = Path::new(dest).parent().and_then(|p| p.to_str()) {
+            mkdir_p(parent)?;
         }
         create_mount_point_file(dest)
     } else {

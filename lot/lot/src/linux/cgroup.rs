@@ -373,14 +373,6 @@ mod tests {
 
     #[test]
     fn cgroup_guard_drain_with_live_process() {
-        if !available() {
-            eprintln!("[skip] cgroup_guard_drain_with_live_process: cgroups v2 not available");
-            return;
-        }
-        let limits = ResourceLimits::default();
-        let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
-        let path = guard.path().to_path_buf();
-
         // RAII guard ensures forked child is killed+reaped on all paths
         // (including assertion failures that unwind).
         struct ChildGuard(i32);
@@ -392,6 +384,14 @@ mod tests {
                 }
             }
         }
+
+        if !available() {
+            eprintln!("[skip] cgroup_guard_drain_with_live_process: cgroups v2 not available");
+            return;
+        }
+        let limits = ResourceLimits::default();
+        let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
+        let path = guard.path().to_path_buf();
 
         // SAFETY: fork() is safe here; child immediately pauses.
         let pid = unsafe { libc::fork() };
