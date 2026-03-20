@@ -4,22 +4,6 @@ Issues grouped by code area, ordered by impact. Issues within a group touch over
 
 ---
 
-## Unix: SandboxedChild Lifecycle
-
-#### `try_wait` revert race
-
-The compare_exchange-then-revert pattern in `try_wait` creates a brief window where concurrent `wait()` is spuriously rejected. `SandboxedChild` is not `Sync` and `try_wait`/`wait` take `&self`, making true concurrency very unlikely.
-
-**File:** `lot/src/unix.rs`
-
-#### Double-wait test doesn't cover `try_wait`
-
-`test_double_wait_returns_error` only tests `wait()`→`wait()`. Missing: `try_wait`→`wait`, `wait`→`try_wait`, and `try_wait` revert-then-`wait` paths.
-
-**File:** `lot/tests/integration.rs`
-
----
-
 ## Windows: AppContainer Spawn (`appcontainer.rs`)
 
 ### `create_sandboxed_process` takes 9 arguments including 6 pipe handles
@@ -112,17 +96,6 @@ Only the null-DACL early-return path is tested. The entire ACE iteration loop (G
 `SandboxConfig` and sub-structs plus `build_policy` form a distinct concern from CLI dispatch. Optional; extract when the file grows larger.
 
 **File:** `lot-cli/src/main.rs`
-
----
-
-## Linux: Namespace Setup (`linux/namespace.rs`)
-
-### Tests: No test for conditional `/etc` file mounts
-
-Network-dependent config file mounts (gated on `policy.allow_network()`) are untested.
-
-**Fix:** Add integration test exercising both branches.
-**File:** `lot/src/linux/namespace.rs`
 
 ---
 
