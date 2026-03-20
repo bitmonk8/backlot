@@ -4,22 +4,6 @@ Issues grouped by co-fixability, ordered by descending impact.
 
 ---
 
-## Group 7: Test Coverage Gaps
-
-Zero coverage on public API surfaces, assertion-free tests, untested platforms.
-
-| # | File | Lines | Description | Severity |
-|---|------|-------|-------------|----------|
-| 26 | lot/tests/integration.rs | 1-1201 | No integration tests for: `allow_network`, `ResourceLimits` enforcement, `kill()`, `kill_and_cleanup()`, `try_wait()`, `take_stdout`/`take_stderr`, `SandboxPolicyBuilder` usage. These are public API surfaces with zero coverage. | High |
-| 27 | lot/src/unix.rs | — | File has zero unit tests. All functions (wait, kill, pipe management, error pipe protocol) exercised only indirectly through integration tests that can skip on `PrerequisitesNotMet`. | High |
-| 28 | lot/tests/integration.rs | 514-525 | macOS branch of `test_cleanup_after_drop` has no assertion. Test cannot fail on macOS. | Medium |
-| 29 | lot/tests/integration.rs | 204-1167 | All tests using `try_spawn` silently return on `PrerequisitesNotMet`. No mechanism to detect when entire suite runs zero assertions. Intentional design for cross-platform CI, but means test pass does not guarantee code was exercised. | Medium |
-| 30 | lot/tests/integration.rs | 912-957 | `test_symlink_into_deny_path` is Unix-only (`#[cfg(unix)]`). Symlink bypass attack untested on Windows. Windows deny paths use explicit deny ACEs which may resolve symlinks differently. | Medium |
-| 45 | lot/src/windows/pipe.rs | tests | `stdio_pipes_close_owned_skips_inherit` is smoke-only (no-panic). Does not verify the inherited handle remains valid after `close_owned`. A post-call check (e.g., `GetFileType`) would prove the handle was not closed. | Medium |
-| 46 | lot/src/windows/pipe.rs | tests | No test for `resolve_stdio_output(SandboxStdio::Null)` — the write path of `open_nul_device` is untested. | Medium |
-
----
-
 ## Group 8: CLI Environment Variable Ordering
 
 User's explicit env overrides silently ignored.

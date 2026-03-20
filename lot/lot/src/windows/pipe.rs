@@ -238,6 +238,7 @@ mod tests {
 
     #[test]
     fn stdio_pipes_close_owned_skips_inherit() {
+        use windows_sys::Win32::Storage::FileSystem::GetFileType;
         use windows_sys::Win32::System::Console::GetStdHandle;
         use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
 
@@ -261,5 +262,25 @@ mod tests {
             SandboxStdio::Inherit,
             SandboxStdio::Piped,
         );
+
+        // Verify the inherited handle is still valid after close_owned.
+        // SAFETY: GetFileType on a handle we know came from GetStdHandle.
+        let file_type = unsafe { GetFileType(inherited_handle) };
+        // FILE_TYPE_UNKNOWN with no error means closed handle; any other type means valid.
+        assert_ne!(
+            file_type, 0,
+            "inherited stdout handle should still be valid after close_owned"
+        );
+    }
+
+    #[test]
+    fn resolve_stdio_output_null() {
+        use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
+
+        let (child, parent) = resolve_stdio_output(SandboxStdio::Null, STD_OUTPUT_HANDLE).unwrap();
+        assert_ne!(child, INVALID_HANDLE_VALUE);
+        assert!(!child.is_null());
+        assert!(parent.is_none(), "Null mode should have no parent handle");
+        close_handle_if_valid(child);
     }
 }

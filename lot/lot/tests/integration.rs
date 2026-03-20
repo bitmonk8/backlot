@@ -11,12 +11,18 @@
 
 mod common;
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use common::{make_temp_dir, platform_exec_paths, set_sandbox_env};
+use common::{
+    make_sandbox_cmd, make_temp_dir, memory_hog_command, network_connect_command,
+    platform_exec_paths, set_sandbox_env, sleep_command,
+};
 
 /// Spawn a sandboxed child, returning `None` on `PrerequisitesNotMet`.
+///
+/// When `LOT_REQUIRE_SANDBOX=1` is set (intended for CI), panics instead
+/// of returning `None` so silent skips are caught.
 fn try_spawn(
     policy: &lot::SandboxPolicy,
     cmd: &lot::SandboxCommand,
@@ -26,7 +32,11 @@ fn try_spawn(
             eprintln!("[diag] spawn succeeded, pid={}", child.id());
             Some(child)
         }
-        Err(lot::SandboxError::PrerequisitesNotMet(..)) => {
+        Err(lot::SandboxError::PrerequisitesNotMet(ref msg)) => {
+            assert!(
+                std::env::var("LOT_REQUIRE_SANDBOX").as_deref() != Ok("1"),
+                "LOT_REQUIRE_SANDBOX=1 but prerequisites not met: {msg}"
+            );
             eprintln!("[diag] SKIPPED: prerequisites not met");
             None
         }
@@ -516,14 +526,14 @@ fn test_cleanup_after_drop() {
 
     #[cfg(target_os = "macos")]
     {
-        // Check if the process is still alive after drop.
-        // signal 0 doesn't send a signal, just checks if pid exists.
+        // signal 0 checks if pid exists without sending a signal.
         let result = std::process::Command::new("/bin/kill")
             .args(["-0", &pid.to_string()])
             .output();
         let gone = result.map_or(true, |o| !o.status.success());
         eprintln!("[diag] process gone after drop: {gone}");
-        eprintln!("[diag] PASSED: cleanup ran (process gone={gone})");
+        assert!(gone, "process should be gone after drop");
+        eprintln!("[diag] PASSED: process cleaned up");
     }
 }
 
@@ -996,23 +1006,6 @@ fn test_double_wait_returns_error() {
 
 // ── Tokio timeout tests ────────────────────────────────────────────
 
-/// Platform-appropriate long-running command (sleep substitute).
-#[cfg(feature = "tokio")]
-fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
-    #[cfg(target_os = "windows")]
-    {
-        (
-            PathBuf::from("powershell"),
-            vec!["-Command".into(), format!("Start-Sleep -Seconds {seconds}")],
-        )
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        (PathBuf::from("/bin/sleep"), vec![seconds.to_string()])
-    }
-}
-
 #[cfg(feature = "tokio")]
 #[tokio::test]
 async fn test_wait_with_output_timeout_completes_before_timeout() {
@@ -1200,4 +1193,340 @@ fn test_windows_temp_outside_write_paths_returns_invalid_policy() {
         }
         other => panic!("expected InvalidPolicy for inaccessible TEMP, got: {other:?}"),
     }
+}
+
+// ── Child lifecycle, I/O handle, and policy enforcement tests ───────
+
+#[test]
+fn test_try_wait_returns_none_then_some() {
+    eprintln!("[diag] === test_try_wait_returns_none_then_some ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = sleep_command(60);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let Some(child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+
+    // Process just started — should not have exited yet.
+    let poll = child.try_wait().expect("try_wait");
+    eprintln!("[diag] first try_wait: {poll:?}");
+    assert!(poll.is_none(), "process should still be running");
+
+    // Wait for completion, then poll again.
+    let status = child.wait().expect("wait");
+    eprintln!("[diag] wait returned: {status:?}");
+
+    let poll2 = child.try_wait().expect("try_wait after wait");
+    eprintln!("[diag] second try_wait: {poll2:?}");
+    assert!(poll2.is_some(), "process should have exited");
+    eprintln!("[diag] PASSED");
+}
+
+#[test]
+fn test_kill_terminates_running_process() {
+    eprintln!("[diag] === test_kill_terminates_running_process ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = sleep_command(60);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let Some(mut child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+
+    child.kill().expect("kill should succeed");
+    let status = child.wait().expect("wait after kill");
+    eprintln!("[diag] exit status after kill: {status:?}");
+    assert!(
+        !status.success(),
+        "killed process should not report success"
+    );
+    eprintln!("[diag] PASSED");
+}
+
+#[test]
+fn test_kill_and_cleanup() {
+    eprintln!("[diag] === test_kill_and_cleanup ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = sleep_command(60);
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let Some(child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+    let pid = child.id();
+
+    child
+        .kill_and_cleanup()
+        .expect("kill_and_cleanup should succeed");
+
+    // Verify the process is actually gone.
+    #[cfg(target_os = "linux")]
+    {
+        let proc_path = format!("/proc/{pid}");
+        assert!(
+            !std::path::Path::new(&proc_path).exists(),
+            "process should be gone after kill_and_cleanup"
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let result = std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .output();
+        let gone = result.map_or(true, |o| !o.status.success());
+        assert!(gone, "process should be gone after kill_and_cleanup");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, kill_and_cleanup closes the job handle which kills
+        // all processes. Verify cleanup_stale succeeds.
+        let cleanup_result = lot::cleanup_stale();
+        assert!(
+            cleanup_result.is_ok(),
+            "cleanup_stale after kill_and_cleanup should succeed: {:?}",
+            cleanup_result.err()
+        );
+    }
+    eprintln!("[diag] PASSED (pid={pid} cleaned up)");
+}
+
+#[test]
+fn test_take_stdout_and_stderr() {
+    eprintln!("[diag] === test_take_stdout_and_stderr ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = echo_command();
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let Some(mut child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+
+    let mut stdout_handle = child.take_stdout().expect("take_stdout should return Some");
+    let mut stderr_handle = child.take_stderr().expect("take_stderr should return Some");
+
+    // Second take returns None (already taken).
+    assert!(
+        child.take_stdout().is_none(),
+        "second take_stdout should be None"
+    );
+    assert!(
+        child.take_stderr().is_none(),
+        "second take_stderr should be None"
+    );
+
+    let status = child.wait().expect("wait");
+    eprintln!("[diag] exit status: {status:?}");
+
+    let mut stdout_buf = String::new();
+    stdout_handle
+        .read_to_string(&mut stdout_buf)
+        .expect("read stdout");
+    eprintln!("[diag] stdout from taken handle: {stdout_buf:?}");
+    assert!(
+        stdout_buf.contains("hello"),
+        "taken stdout should contain 'hello', got: {stdout_buf:?}"
+    );
+
+    let mut stderr_buf = String::new();
+    stderr_handle
+        .read_to_string(&mut stderr_buf)
+        .expect("read stderr");
+    eprintln!("[diag] stderr from taken handle: {stderr_buf:?}");
+    // stderr may be empty for echo, just verify read succeeded.
+
+    assert!(status.success(), "echo should succeed, got: {status:?}");
+    eprintln!("[diag] PASSED");
+}
+
+#[test]
+fn test_sandbox_policy_builder_basic() {
+    eprintln!("[diag] === test_sandbox_policy_builder_basic ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let mut builder = lot::SandboxPolicyBuilder::new()
+        .read_path(tmp.path())
+        .write_path(scratch.path())
+        .allow_network(false);
+
+    // Add exec paths individually so the builder can canonicalize and deduplicate.
+    for p in platform_exec_paths() {
+        builder = builder.exec_path(p);
+    }
+
+    let policy = builder
+        .build()
+        .expect("builder should produce valid policy");
+
+    let (program, args) = echo_command();
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let Some(child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+    let output = child.wait_with_output().expect("wait_with_output");
+    eprintln!("[diag] exit status: {:?}", output.status);
+
+    assert!(
+        output.status.success(),
+        "builder-spawned process should succeed, got: {:?}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello"),
+        "stdout should contain 'hello', got: {stdout:?}"
+    );
+    eprintln!("[diag] PASSED");
+}
+
+#[test]
+fn test_memory_limit_enforcement() {
+    eprintln!("[diag] === test_memory_limit_enforcement ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = memory_hog_command();
+
+    // 64 MB limit — enough for PowerShell startup but well below the
+    // 128 MB the command tries to allocate.
+    let policy = lot::SandboxPolicy::new(
+        vec![tmp.path().to_path_buf()],
+        vec![scratch.path().to_path_buf()],
+        platform_exec_paths(),
+        Vec::new(),
+        false,
+        lot::ResourceLimits {
+            max_memory_bytes: Some(64 * 1024 * 1024),
+            ..lot::ResourceLimits::default()
+        },
+    );
+
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let Some(child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+    let output = child.wait_with_output().expect("wait_with_output");
+    eprintln!("[diag] exit status: {:?}", output.status);
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The child should fail or be killed due to memory limit.
+    assert!(
+        !output.status.success(),
+        "process exceeding memory limit should fail, got: {:?}",
+        output.status
+    );
+    eprintln!("[diag] PASSED");
+}
+
+#[test]
+fn test_allow_network_false_blocks_connections() {
+    eprintln!("[diag] === test_allow_network_false_blocks_connections ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = network_connect_command();
+
+    let policy = lot::SandboxPolicy::new(
+        vec![tmp.path().to_path_buf()],
+        vec![scratch.path().to_path_buf()],
+        platform_exec_paths(),
+        Vec::new(),
+        false, // network denied
+        lot::ResourceLimits::default(),
+    );
+
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let Some(child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+    let output = child.wait_with_output().expect("wait_with_output");
+    eprintln!("[diag] exit status: {:?}", output.status);
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Network should be blocked by the sandbox.
+    assert!(
+        !output.status.success(),
+        "network connection should fail when allow_network=false, got: {:?}",
+        output.status
+    );
+    eprintln!("[diag] PASSED");
+}
+
+// ── Windows symlink deny-path test ─────────────────────────────────
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_symlink_into_deny_path_windows() {
+    eprintln!("[diag] === test_symlink_into_deny_path_windows ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let parent = tmp.path().join("workspace");
+    let denied = parent.join("forbidden");
+    std::fs::create_dir_all(&denied).expect("create denied dir");
+
+    let secret_file = denied.join("secret.txt");
+    std::fs::write(&secret_file, "secret_via_symlink").expect("write secret");
+
+    let symlink_path = parent.join("sneaky_link.txt");
+
+    // Symlink creation may require Developer Mode or elevation.
+    if std::os::windows::fs::symlink_file(&secret_file, &symlink_path).is_err() {
+        eprintln!("[diag] SKIPPED: symlink creation failed (requires Developer Mode or elevation)");
+        return;
+    }
+
+    let policy = make_deny_policy(&parent, &denied, false, scratch.path());
+
+    let (program, args) = cat_command(&symlink_path);
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let Some(child) = try_spawn(&policy, &cmd) else {
+        return;
+    };
+    let output = child.wait_with_output().expect("wait");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    eprintln!("[diag] exit: {:?}, stdout: {stdout:?}", output.status);
+
+    assert!(
+        !output.status.success(),
+        "reading via symlink into denied path should fail, got: {:?}",
+        output.status
+    );
+    assert!(
+        !stdout.contains("secret_via_symlink"),
+        "symlink into denied path should not expose secret data"
+    );
+    eprintln!("[diag] PASSED");
 }

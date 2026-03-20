@@ -38,6 +38,79 @@ pub fn set_sandbox_env(cmd: &mut lot::SandboxCommand, scratch: &std::path::Path)
 #[allow(clippy::missing_const_for_fn)] // empty stub; clippy flags it but const fn with &mut is unstable
 pub fn set_sandbox_env(_cmd: &mut lot::SandboxCommand, _scratch: &std::path::Path) {}
 
+/// Platform-appropriate long-running sleep command.
+#[cfg(target_os = "windows")]
+pub fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("powershell"),
+        vec!["-Command".into(), format!("Start-Sleep -Seconds {seconds}")],
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
+    (PathBuf::from("/bin/sleep"), vec![seconds.to_string()])
+}
+
+/// Platform-appropriate command that attempts to allocate large memory.
+#[cfg(target_os = "windows")]
+pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("powershell"),
+        vec!["-Command".into(), "[byte[]]::new(128MB) | Out-Null".into()],
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
+    // Genuinely allocate 128MB via perl or python3 to trigger cgroup limits.
+    (
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".into(),
+            "perl -e '$x = \"A\" x (128*1024*1024); sleep 1' 2>/dev/null || python3 -c 'x = bytearray(128*1024*1024); import time; time.sleep(1)'".into(),
+        ],
+    )
+}
+
+/// Platform-appropriate command that attempts a TCP connection.
+#[cfg(target_os = "windows")]
+pub fn network_connect_command() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("powershell"),
+        vec![
+            "-Command".into(),
+            "(New-Object System.Net.Sockets.TcpClient).Connect('1.1.1.1', 80)".into(),
+        ],
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn network_connect_command() -> (PathBuf, Vec<String>) {
+    // perl is more portable than bash's /dev/tcp pseudo-device.
+    (
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".into(),
+            "perl -MIO::Socket::INET -e 'IO::Socket::INET->new(PeerAddr=>q(1.1.1.1:80),Timeout=>5) or die' 2>/dev/null || python3 -c 'import socket; socket.create_connection((\"1.1.1.1\",80),timeout=5)' 2>/dev/null || exit 1".into(),
+        ],
+    )
+}
+
+/// Build a `SandboxCommand` with piped stdio and platform-safe env.
+pub fn make_sandbox_cmd(
+    program: &std::path::Path,
+    args: &[String],
+    scratch: &std::path::Path,
+) -> lot::SandboxCommand {
+    let mut cmd = lot::SandboxCommand::new(program);
+    set_sandbox_env(&mut cmd, scratch);
+    cmd.args(args);
+    cmd.stdout(lot::SandboxStdio::Piped);
+    cmd.stderr(lot::SandboxStdio::Piped);
+    cmd
+}
+
 /// Platform-appropriate exec_paths for sandbox policies.
 ///
 /// Windows: empty (AppContainer inherits system binary access).
