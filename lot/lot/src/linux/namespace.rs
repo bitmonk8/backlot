@@ -431,6 +431,7 @@ fn mount_dev_node(new_root: &str, dev_path: &str) -> io::Result<()> {
     create_mount_point_file(&dest)?;
 
     let c_src = to_cstring(dev_path)?;
+    let c_dest = to_cstring(&dest)?;
     // SAFETY: valid CString pointers, bind mounting a device node
     let rc = unsafe {
         libc::mount(

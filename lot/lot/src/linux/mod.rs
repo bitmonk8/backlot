@@ -140,6 +140,21 @@ fn itoa_stack(mut val: u64, buf: &mut [u8; 20]) -> &[u8] {
 }
 
 pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<SandboxedChild> {
+    // Step names are 1-indexed, matching the STEP_* constants in the child.
+    const STEP_NAMES: &[&str] = &[
+        "unshare",                      // 1
+        "user namespace (uid/gid map)", // 2
+        "mount namespace",              // 3
+        "inner fork",                   // 4
+        "dup2 (stdio)",                 // 5
+        "chdir",                        // 6
+        "mount /proc",                  // 7
+        "pivot_root",                   // 8
+        "seccomp",                      // 9
+        "execve",                       // 10
+        "cgroup join",                  // 11
+    ];
+
     // Create cgroup before forking so the helper can move itself into it.
     // If the policy requests resource limits and cgroup setup fails, return
     // an error rather than silently dropping the limits.
@@ -439,21 +454,6 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         unix::close_if_not_std(child_stderr);
     }
 
-    // Check error pipe: if child wrote [step:i32, errno:i32], setup failed.
-    // Step names are 1-indexed, matching the STEP_* constants in the child.
-    const STEP_NAMES: &[&str] = &[
-        "unshare",                      // 1
-        "user namespace (uid/gid map)", // 2
-        "mount namespace",              // 3
-        "inner fork",                   // 4
-        "dup2 (stdio)",                 // 5
-        "chdir",                        // 6
-        "mount /proc",                  // 7
-        "pivot_root",                   // 8
-        "seccomp",                      // 9
-        "execve",                       // 10
-        "cgroup join",                  // 11
-    ];
     // SAFETY: err_pipe_rd is valid, helper_pid is valid
     unsafe {
         unix::check_child_error_pipe(

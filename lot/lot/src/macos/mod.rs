@@ -68,6 +68,16 @@ unsafe fn apply_resource_limits(policy: &SandboxPolicy) -> io::Result<()> {
 }
 
 pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<SandboxedChild> {
+    // Step names are 1-indexed, matching the STEP_* constants in the child.
+    const STEP_NAMES: &[&str] = &[
+        "setsid",                      // 1
+        "seatbelt (sandbox_init)",     // 2
+        "resource limits (setrlimit)", // 3
+        "dup2 (stdio)",                // 4
+        "chdir",                       // 5
+        "execve",                      // 6
+    ];
+
     let program_path = std::path::Path::new(&command.program);
     // Resolve symlinks/firmlinks so the seatbelt profile matches the real path.
     // On macOS 13+, /bin and /usr/bin are firmlinks to /System/Cryptexes/OS/...
@@ -216,16 +226,6 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         unix::close_if_not_std(child_stderr);
     }
 
-    // Check error pipe: if child wrote [step:i32, errno:i32], setup failed.
-    // Step names are 1-indexed, matching the STEP_* constants in the child.
-    const STEP_NAMES: &[&str] = &[
-        "setsid",                      // 1
-        "seatbelt (sandbox_init)",     // 2
-        "resource limits (setrlimit)", // 3
-        "dup2 (stdio)",                // 4
-        "chdir",                       // 5
-        "execve",                      // 6
-    ];
     // SAFETY: err_pipe_rd is valid, child_pid is valid
     unsafe {
         unix::check_child_error_pipe(
