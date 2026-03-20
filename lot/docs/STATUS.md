@@ -7,6 +7,7 @@
 ## Next Work
 
 - First real-world usage / `lot run` testing
+- crates.io publish (metadata ready, needs public repository URL)
 
 ## CI Status
 

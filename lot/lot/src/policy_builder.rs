@@ -8,6 +8,22 @@ use crate::policy::{ResourceLimits, SandboxPolicy};
 /// Paths are canonicalized on insert. Non-existent paths are silently skipped.
 /// If a narrower path is already covered by a broader entry in the same or a
 /// higher-privilege set, the narrower entry is not added.
+///
+/// # Examples
+///
+/// ```no_run
+/// use lot::SandboxPolicyBuilder;
+///
+/// let policy = SandboxPolicyBuilder::new()
+///     .include_platform_exec_paths()
+///     .include_platform_lib_paths()
+///     .include_temp_dirs()
+///     .allow_network(false)
+///     .max_memory_bytes(128 * 1024 * 1024)
+///     .max_processes(8)
+///     .build()
+///     .expect("policy invalid");
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct SandboxPolicyBuilder {
     read_paths: Vec<PathBuf>,
@@ -154,6 +170,8 @@ impl SandboxPolicyBuilder {
     }
 
     /// Consume the builder and produce a validated [`SandboxPolicy`].
+    ///
+    /// # Errors
     ///
     /// Returns [`SandboxError::InvalidPolicy`] if the resulting policy fails
     /// validation (e.g. no paths at all, or zero resource limits).

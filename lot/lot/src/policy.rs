@@ -265,6 +265,11 @@ impl SandboxPolicy {
     /// grant paths, if a grant path is nested under a deny path, or if
     /// resource limits are zero.
     /// Called automatically by [`spawn()`](crate::spawn).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::InvalidPolicy`] with a semicolon-delimited
+    /// description of all validation failures found.
     pub fn validate(&self) -> Result<(), SandboxError> {
         let mut errors: Vec<String> = Vec::new();
 

@@ -5,15 +5,55 @@
 //!
 //! # Supported platforms
 //!
-//! - **Linux** — user/mount/PID/network namespaces, seccomp-BPF, cgroups v2
-//! - **macOS** — Seatbelt (`sandbox_init`) profiles
-//! - **Windows** — `AppContainer` profiles, Job Objects
+//! | Platform | Isolation | Resource Limits |
+//! |----------|-----------|-----------------|
+//! | Linux | User/mount/PID/net/IPC namespaces + seccomp-BPF | cgroups v2 |
+//! | macOS | Seatbelt (`sandbox_init` SBPL profiles) | `setrlimit` |
+//! | Windows | AppContainer + ACLs | Job Objects |
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! use lot::{SandboxPolicyBuilder, SandboxCommand, spawn};
+//!
+//! let policy = SandboxPolicyBuilder::new()
+//!     .include_platform_exec_paths()
+//!     .include_platform_lib_paths()
+//!     .allow_network(false)
+//!     .max_memory_bytes(64 * 1024 * 1024)
+//!     .build()
+//!     .expect("policy invalid");
+//!
+//! # #[cfg(unix)]
+//! let mut cmd = SandboxCommand::new("/bin/echo");
+//! # #[cfg(windows)]
+//! # let mut cmd = SandboxCommand::new("cmd.exe");
+//! # #[cfg(unix)]
+//! cmd.arg("hello from sandbox");
+//! # #[cfg(windows)]
+//! # cmd.args(["/C", "echo hello from sandbox"]);
+//!
+//! let child = spawn(&policy, &cmd).expect("spawn failed");
+//! let output = child.wait_with_output().expect("wait failed");
+//! println!("{}", String::from_utf8_lossy(&output.stdout));
+//! ```
 //!
 //! # Key functions
 //!
 //! - [`spawn()`] — launch a child process inside a sandbox defined by a [`SandboxPolicy`].
 //! - [`probe()`] — detect which sandboxing mechanisms are available on the current platform.
 //! - [`cleanup_stale()`] — restore ACLs from crashed sessions (Windows; no-op elsewhere).
+//!
+//! # Feature flags
+//!
+//! | Flag | Effect |
+//! |------|--------|
+//! | `tokio` | Enables [`SandboxedChild::wait_with_output_timeout`] for async wait with timeout. |
+//!
+//! # CLI and prerequisites
+//!
+//! See the [project README](https://github.com/nicholasgasior/lot) for CLI usage
+//! (`lot run`, `lot setup`, `lot probe`) and Windows AppContainer prerequisites.
 
 mod command;
 mod env_check;
@@ -62,6 +102,22 @@ pub struct PlatformCapabilities {
 }
 
 /// Check what sandboxing mechanisms are available on the current platform.
+///
+/// Returns a [`PlatformCapabilities`] struct indicating which OS-level
+/// sandboxing mechanisms (namespaces, seccomp, seatbelt, AppContainer, etc.)
+/// are available and permitted for the current user.
+///
+/// # Examples
+///
+/// ```no_run
+/// let caps = lot::probe();
+/// if caps.appcontainer {
+///     println!("AppContainer available");
+/// }
+/// if caps.namespaces && caps.seccomp {
+///     println!("Linux namespace + seccomp available");
+/// }
+/// ```
 #[allow(clippy::missing_const_for_fn)]
 pub fn probe() -> PlatformCapabilities {
     #[cfg(target_os = "linux")]
@@ -104,6 +160,41 @@ pub(crate) fn platform_implicit_read_paths() -> Vec<std::path::PathBuf> {
 ///
 /// The caller is never sandboxed. The child process inherits
 /// the sandbox restrictions and cannot escape them.
+///
+/// # Errors
+///
+/// - [`SandboxError::InvalidPolicy`] if policy validation fails.
+/// - [`SandboxError::Setup`] if the OS sandbox mechanism cannot be configured
+///   (e.g. namespaces disabled, AppContainer creation fails).
+/// - [`SandboxError::Unsupported`] on platforms without a sandbox implementation.
+/// - [`SandboxError::PrerequisitesNotMet`] on Windows if AppContainer ACL
+///   prerequisites are missing.
+/// - [`SandboxError::Io`] for underlying OS errors.
+///
+/// # Examples
+///
+/// ```no_run
+/// use lot::{SandboxPolicyBuilder, SandboxCommand, spawn};
+///
+/// let policy = SandboxPolicyBuilder::new()
+///     .include_platform_exec_paths()
+///     .include_platform_lib_paths()
+///     .build()
+///     .expect("policy invalid");
+///
+/// # #[cfg(unix)]
+/// let mut cmd = SandboxCommand::new("/bin/echo");
+/// # #[cfg(windows)]
+/// # let mut cmd = SandboxCommand::new("cmd.exe");
+/// # #[cfg(unix)]
+/// cmd.arg("hello");
+/// # #[cfg(windows)]
+/// # cmd.args(["/C", "echo hello"]);
+///
+/// let child = spawn(&policy, &cmd).expect("spawn failed");
+/// let output = child.wait_with_output().expect("wait failed");
+/// assert!(output.status.success());
+/// ```
 pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<SandboxedChild> {
     policy.validate()?;
     env_check::validate_env_accessibility(policy, command)?;
@@ -126,6 +217,11 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
 /// Restore ACLs from any stale sentinel files left by crashed sessions (Windows).
 /// No-op on other platforms.
+///
+/// # Errors
+///
+/// - [`SandboxError::Cleanup`] if ACL restoration fails.
+/// - [`SandboxError::Io`] for underlying OS errors.
 #[allow(clippy::missing_const_for_fn)] // Not const on Windows.
 pub fn cleanup_stale() -> Result<()> {
     #[cfg(target_os = "windows")]
@@ -135,8 +231,26 @@ pub fn cleanup_stale() -> Result<()> {
     Ok(())
 }
 
+/// Check whether the current process is running with administrator privileges.
+///
+/// Windows only. Use this before calling [`grant_appcontainer_prerequisites`] or
+/// [`grant_appcontainer_prerequisites_for_policy`] to verify elevation.
 #[cfg(target_os = "windows")]
 pub use windows::elevation::is_elevated;
+
+/// Check or grant AppContainer prerequisites.
+///
+/// - [`appcontainer_prerequisites_met`] — check if NUL device and ancestor
+///   traverse ACEs are in place for the given paths.
+/// - [`grant_appcontainer_prerequisites`] — grant those ACEs (requires elevation).
+///
+/// The `_for_policy` variants accept a [`SandboxPolicy`] and check/grant
+/// prerequisites for all paths (including deny paths) referenced by the policy.
+///
+/// # Errors
+///
+/// `grant_appcontainer_prerequisites` and `grant_appcontainer_prerequisites_for_policy`
+/// return [`SandboxError::Setup`] if ACE modification fails (e.g. insufficient privileges).
 #[cfg(target_os = "windows")]
 pub use windows::prerequisites::{
     appcontainer_prerequisites_met, appcontainer_prerequisites_met_for_policy,
@@ -240,6 +354,27 @@ impl SandboxedChild {
     }
 
     /// Wait for the process to exit and collect all stdout/stderr output.
+    ///
+    /// Consumes the handle. Stdout and stderr must be [`SandboxStdio::Piped`]
+    /// (the default) for output to be captured.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use lot::{SandboxPolicyBuilder, SandboxCommand, spawn};
+    /// # let policy = SandboxPolicyBuilder::new()
+    /// #     .include_platform_exec_paths()
+    /// #     .include_platform_lib_paths()
+    /// #     .build().unwrap();
+    /// # #[cfg(unix)]
+    /// # let cmd = SandboxCommand::new("/bin/echo");
+    /// # #[cfg(windows)]
+    /// # let cmd = SandboxCommand::new("cmd.exe");
+    /// let child = spawn(&policy, &cmd).expect("spawn failed");
+    /// let output = child.wait_with_output().expect("wait failed");
+    /// println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    /// println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+    /// ```
     pub fn wait_with_output(self) -> std::io::Result<std::process::Output> {
         platform_dispatch!(
             self,
