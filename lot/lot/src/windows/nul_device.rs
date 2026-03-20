@@ -2,7 +2,9 @@ use crate::error::SandboxError;
 
 const NUL_DEVICE: &str = "\\\\.\\NUL";
 
-use super::acl_helpers::{allocate_app_packages_sid, dacl_has_app_packages_ace};
+use super::acl_helpers::{
+    allocate_app_packages_sid, dacl_has_ace_for_sid, dacl_has_app_packages_ace, read_dacl,
+};
 use super::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 
 use super::to_wide;
@@ -20,39 +22,40 @@ const NUL_ACCESS_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
 /// - The DACL is NULL (unrestricted access -- everyone can access the device), or
 /// - The DACL contains an allow ACE for ALL APPLICATION PACKAGES (`S-1-15-2-1`)
 ///   with at least `FILE_GENERIC_READ | FILE_GENERIC_WRITE`.
-pub fn nul_device_accessible() -> bool {
+pub fn nul_device_accessible() -> Result<bool, SandboxError> {
     let wide = to_wide(NUL_DEVICE);
-    let Some((dacl_ptr, _sd_guard)) = super::acl_helpers::read_dacl(&wide) else {
-        return false;
-    };
+    let (dacl_ptr, _sd_guard) = read_dacl(&wide)?;
     dacl_has_app_packages_ace(dacl_ptr, NUL_ACCESS_MASK)
 }
 
 /// Grant ALL APPLICATION PACKAGES (`S-1-15-2-1`) read/write access to `\\.\NUL`.
 pub fn grant_nul_device() -> crate::Result<()> {
-    if nul_device_accessible() {
+    let wide = to_wide(NUL_DEVICE);
+    let (dacl_ptr, _sd_guard) = read_dacl(&wide)?;
+
+    // Allocate the SID once so it can be reused for both the check and the
+    // ACE insertion, avoiding a redundant second allocation.
+    let app_sid = allocate_app_packages_sid()?;
+
+    if dacl_has_ace_for_sid(dacl_ptr, NUL_ACCESS_MASK, &app_sid)? {
         return Ok(());
     }
-
-    let wide = to_wide(NUL_DEVICE);
-    let Some(app_sid) = allocate_app_packages_sid() else {
-        return Err(SandboxError::Setup(
-            "failed to create ALL APPLICATION PACKAGES SID".into(),
-        ));
-    };
 
     // Device objects have no children -- no inheritance needed.
     super::acl_helpers::apply_dacl(&wide, None, NUL_ACCESS_MASK, 0, app_sid.as_raw())
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn nul_device_accessible_returns_deterministic() {
-        let first: bool = nul_device_accessible();
-        let second: bool = nul_device_accessible();
+        // .unwrap() verifies Ok (no error). We cannot assert the bool value
+        // because it depends on whether `lot setup` has been run on this machine.
+        let first = nul_device_accessible().unwrap();
+        let second = nul_device_accessible().unwrap();
         // System state should not change between two immediate calls.
         assert_eq!(
             first, second,

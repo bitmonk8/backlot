@@ -27,7 +27,7 @@ pub fn grant_appcontainer_prerequisites(paths: &[&Path]) -> crate::Result<()> {
 /// Checks whether all ancestors of each path (up to volume root) have the
 /// ALL APPLICATION PACKAGES traverse ACE, and the NUL device ACE exists.
 pub fn appcontainer_prerequisites_met(paths: &[&Path]) -> bool {
-    if !super::nul_device::nul_device_accessible() {
+    if !super::nul_device::nul_device_accessible().unwrap_or(false) {
         return false;
     }
 
@@ -37,7 +37,7 @@ pub fn appcontainer_prerequisites_met(paths: &[&Path]) -> bool {
     };
     ancestors
         .iter()
-        .all(|a| super::traverse_acl::has_traverse_ace(a))
+        .all(|a| super::traverse_acl::has_traverse_ace(a).unwrap_or(false))
 }
 
 /// Checks prerequisites for all paths referenced by a [`SandboxPolicy`].
@@ -70,7 +70,7 @@ mod tests {
     fn appcontainer_prerequisites_met_empty_paths() {
         // With no paths, only NUL device matters -- no ancestors to check.
         let result: bool = appcontainer_prerequisites_met(&[]);
-        let nul_ok = super::super::nul_device::nul_device_accessible();
+        let nul_ok = super::super::nul_device::nul_device_accessible().unwrap_or(false);
         assert_eq!(
             result, nul_ok,
             "empty paths: prerequisites_met should equal nul_device_accessible"

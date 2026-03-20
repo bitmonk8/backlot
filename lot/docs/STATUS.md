@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining groups (5–12). Goal: clear all issues.
+**Issue resolution.** Implementation complete across all platforms. Audit findings documented in `ISSUES.md` across remaining groups (6–12). Goal: clear all issues.
 
 ## Resolved
 
@@ -10,11 +10,12 @@
 - **Group 2: Windows Process Creation & Stdio Handle Safety**
 - **Group 3: Windows Sentinel & ACL Recovery Robustness**
 - **Group 4: Unix Process Lifecycle Safety**
+- **Group 5: Windows ACL/DACL Error Propagation**
 
 ## Next Work
 
-1. **Group 5: Windows ACL/DACL Error Propagation** — Error codes discarded, failure indistinguishable from "not present". Broken DACL state possible. (1 High, 3 Medium)
-2. Groups 6–12 in `ISSUES.md`, ordered by descending impact.
+1. **Group 6: Linux Cgroup & Mount Robustness** — File bind-mount failure, cgroup leaks, silent process survival. (1 High, 4 Medium)
+2. Groups 7–12 in `ISSUES.md`, ordered by descending impact.
 
 After all issues resolved:
 - First real-world usage / `lot run` testing

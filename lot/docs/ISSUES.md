@@ -4,19 +4,6 @@ Issues grouped by co-fixability, ordered by descending impact.
 
 ---
 
-## Group 5: Windows ACL/DACL Error Propagation
-
-Error codes discarded, failure indistinguishable from "not present". Broken DACL state possible.
-
-| # | File | Lines | Description | Severity |
-|---|------|-------|-------------|----------|
-| 17 | lot/src/windows/traverse_acl.rs | 319-331 | `GetSecurityDescriptorControl` and `SetSecurityDescriptorControl` failures silently ignored. Can produce broken DACL state (missing SE_DACL_AUTO_INHERITED flag). | High |
-| 18 | lot/src/windows/traverse_acl.rs | 90-96 | `has_traverse_ace` returns `false` when `read_dacl` fails. Cannot distinguish "no ACE present" from "query failed." | Medium |
-| 19 | lot/src/windows/acl_helpers.rs | 103, 294-317 | `allocate_app_packages_sid` and `read_dacl` return `Option` discarding Win32 error codes. Callers cannot diagnose failures. | Medium |
-| 20 | lot/src/windows/acl_helpers.rs | 330-352 | `dacl_has_app_packages_ace` returns `false` on SID allocation or ACL query failure. Cannot distinguish "no ACE" from "query failed." | Medium |
-
----
-
 ## Group 6: Linux Cgroup & Mount Robustness
 
 File bind-mount failure, cgroup leaks, silent process survival.

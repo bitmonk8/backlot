@@ -40,8 +40,8 @@ pub const ELEVATION_REQUIRED_MARKER: &str = "elevation required";
 
 // ── RAII wrappers ────────────────────────────────────────────────────
 
-/// RAII wrapper for a `PSID` allocated via `AllocateAndInitializeSid` or
-/// `CreateAppContainerProfile`. Calls `FreeSid` on drop.
+/// RAII wrapper for a `PSID` allocated via `AllocateAndInitializeSid`.
+/// Calls `FreeSid` on drop.
 pub struct OwnedSid(PSID);
 
 impl OwnedSid {
@@ -100,7 +100,7 @@ pub type OwnedAcl = LocalFreeGuard<ACL>;
 
 /// Allocate the ALL APPLICATION PACKAGES SID (`S-1-15-2-1`).
 /// Returns an `OwnedSid` that frees the SID on drop.
-pub fn allocate_app_packages_sid() -> Option<OwnedSid> {
+pub fn allocate_app_packages_sid() -> Result<OwnedSid, SandboxError> {
     let mut sid: PSID = std::ptr::null_mut();
     // SAFETY: Allocating a well-known SID with two sub-authorities.
     let ret = unsafe {
@@ -119,10 +119,13 @@ pub fn allocate_app_packages_sid() -> Option<OwnedSid> {
         )
     };
     if ret == FALSE {
-        None
-    } else {
-        OwnedSid::new(sid)
+        let err = std::io::Error::last_os_error();
+        return Err(SandboxError::Setup(format!(
+            "AllocateAndInitializeSid failed for ALL APPLICATION PACKAGES SID: {err}",
+        )));
     }
+    OwnedSid::new(sid)
+        .ok_or_else(|| SandboxError::Setup("AllocateAndInitializeSid returned null SID".into()))
 }
 
 // ── DACL read-modify-write primitives ────────────────────────────────
@@ -134,7 +137,7 @@ pub fn allocate_app_packages_sid() -> Option<OwnedSid> {
 /// (typically `DACL_SECURITY_INFORMATION`, optionally combined with
 /// `PROTECTED_DACL_SECURITY_INFORMATION`).
 ///
-/// Both `nul_device`, `traverse_acl`, and `appcontainer` build their own
+/// Both `nul_device` and `appcontainer` build their own
 /// `EXPLICIT_ACCESS_W` arrays and delegate to this function.
 pub fn modify_dacl(
     wide_path: &[u16],
@@ -291,7 +294,7 @@ pub(super) fn merge_and_set_dacl(
 /// Read the DACL and security descriptor for a named object.
 /// Returns the DACL pointer and an owned security descriptor.
 /// The DACL pointer points into the security descriptor memory.
-pub fn read_dacl(wide_path: &[u16]) -> Option<(*mut ACL, OwnedSecurityDescriptor)> {
+pub fn read_dacl(wide_path: &[u16]) -> Result<(*mut ACL, OwnedSecurityDescriptor), SandboxError> {
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let mut dacl_ptr: *mut ACL = std::ptr::null_mut();
 
@@ -309,27 +312,33 @@ pub fn read_dacl(wide_path: &[u16]) -> Option<(*mut ACL, OwnedSecurityDescriptor
         )
     };
     if err != ERROR_SUCCESS {
-        return None;
+        let display = String::from_utf16_lossy(wide_path.strip_suffix(&[0]).unwrap_or(wide_path));
+        return Err(SandboxError::Setup(format!(
+            "GetNamedSecurityInfoW failed for {display}: {}",
+            win32_error_msg(err),
+        )));
     }
 
     // sd must not be null for a successful call.
-    let sd_guard = OwnedSecurityDescriptor::new(sd)?;
-    Some((dacl_ptr, sd_guard))
+    let sd_guard = OwnedSecurityDescriptor::new(sd).ok_or_else(|| {
+        SandboxError::Setup("GetNamedSecurityInfoW returned null security descriptor".into())
+    })?;
+    Ok((dacl_ptr, sd_guard))
 }
 
-/// Check if a DACL contains an ACCESS_ALLOWED ACE for ALL APPLICATION PACKAGES
+/// Check if a DACL contains an ACCESS_ALLOWED ACE for a given SID
 /// whose mask includes all bits in `required_mask`.
 ///
 /// A null DACL means unrestricted access (returns `true`).
-pub fn dacl_has_app_packages_ace(dacl: *mut ACL, required_mask: u32) -> bool {
+pub fn dacl_has_ace_for_sid(
+    dacl: *mut ACL,
+    required_mask: u32,
+    sid: &OwnedSid,
+) -> Result<bool, SandboxError> {
     if dacl.is_null() {
         // NULL DACL = unrestricted access, implicitly granted.
-        return true;
+        return Ok(true);
     }
-
-    let Some(app_sid) = allocate_app_packages_sid() else {
-        return false;
-    };
 
     let mut info = ACL_SIZE_INFORMATION {
         AceCount: 0,
@@ -348,10 +357,12 @@ pub fn dacl_has_app_packages_ace(dacl: *mut ACL, required_mask: u32) -> bool {
         )
     };
     if ret == FALSE {
-        return false;
+        let err = std::io::Error::last_os_error();
+        return Err(SandboxError::Setup(format!(
+            "GetAclInformation failed: {err}",
+        )));
     }
 
-    let mut found = false;
     for i in 0..info.AceCount {
         let mut ace_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
@@ -370,15 +381,25 @@ pub fn dacl_has_app_packages_ace(dacl: *mut ACL, required_mask: u32) -> bool {
         // The SID starts at SidStart field offset within the ACE struct.
         let sid_ptr: PSID = (&raw const ace.SidStart).cast_mut().cast();
 
-        // SAFETY: Both SIDs are valid -- one from the ACE, one from AllocateAndInitializeSid.
-        let sids_equal = unsafe { EqualSid(sid_ptr, app_sid.as_raw()) } != FALSE;
+        // SAFETY: Both SIDs are valid -- one from the ACE, one from the caller.
+        let sids_equal = unsafe { EqualSid(sid_ptr, sid.as_raw()) } != FALSE;
         if sids_equal && (ace.Mask & required_mask) == required_mask {
-            found = true;
-            break;
+            return Ok(true);
         }
     }
 
-    found
+    Ok(false)
+}
+
+/// Check if a DACL contains an ACCESS_ALLOWED ACE for ALL APPLICATION PACKAGES
+/// whose mask includes all bits in `required_mask`.
+///
+/// A null DACL means unrestricted access (returns `true`).
+/// Convenience wrapper that allocates the APP PACKAGES SID internally.
+/// When the caller already has an `OwnedSid`, prefer `dacl_has_ace_for_sid`.
+pub fn dacl_has_app_packages_ace(dacl: *mut ACL, required_mask: u32) -> Result<bool, SandboxError> {
+    let app_sid = allocate_app_packages_sid()?;
+    dacl_has_ace_for_sid(dacl, required_mask, &app_sid)
 }
 
 #[cfg(test)]
@@ -397,7 +418,7 @@ mod tests {
         let tmp = TempDir::new_in(&test_tmp).expect("create temp dir");
 
         let wide_path = super::super::path_to_wide(tmp.path());
-        let app_sid = allocate_app_packages_sid().expect("allocate SID");
+        let app_sid = allocate_app_packages_sid().unwrap();
 
         let access_mask = super::super::FILE_GENERIC_READ | super::super::FILE_GENERIC_EXECUTE;
 
@@ -410,16 +431,39 @@ mod tests {
         )
         .expect("apply_dacl");
 
-        let (dacl, _sd) = read_dacl(&wide_path).expect("read_dacl");
+        let (dacl, _sd) = read_dacl(&wide_path).unwrap();
         assert!(
-            dacl_has_app_packages_ace(dacl, access_mask),
+            dacl_has_app_packages_ace(dacl, access_mask).unwrap(),
             "DACL should contain APP_PACKAGES ACE with the granted mask"
         );
 
         let write_mask = super::super::FILE_GENERIC_WRITE;
         assert!(
-            !dacl_has_app_packages_ace(dacl, access_mask | write_mask),
+            !dacl_has_app_packages_ace(dacl, access_mask | write_mask).unwrap(),
             "DACL should NOT have write access"
+        );
+    }
+
+    #[test]
+    fn read_dacl_nonexistent_path_returns_error() {
+        // Encode a device path that cannot exist.
+        let bogus: Vec<u16> = "\\\\.\\NonExistentDevice12345"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        assert!(
+            read_dacl(&bogus).is_err(),
+            "read_dacl on a nonexistent device path must return Err"
+        );
+    }
+
+    #[test]
+    fn dacl_has_app_packages_ace_null_dacl_returns_ok_true() {
+        // A null DACL means unrestricted access -- should return Ok(true).
+        let result = dacl_has_app_packages_ace(std::ptr::null_mut(), 0x1);
+        assert!(
+            result.unwrap(),
+            "null DACL must be treated as unrestricted (Ok(true))"
         );
     }
 }

@@ -5,8 +5,7 @@ use std::os::windows::io::FromRawHandle;
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, FALSE, HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     DENY_ACCESS, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, REVOKE_ACCESS, SET_ACCESS, TRUSTEE_IS_SID,
@@ -53,6 +52,9 @@ use super::acl_helpers::SECURITY_APP_PACKAGE_AUTHORITY;
 const SECURITY_CAPABILITY_INTERNET_CLIENT: u32 = 1;
 const SECURITY_BUILTIN_APP_PACKAGE_RID_COUNT: u8 = 2;
 const SECURITY_CAPABILITY_BASE_RID: u32 = 3;
+// HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) = 0x800700B7
+#[allow(clippy::cast_possible_wrap)]
+const E_ALREADY_EXISTS: i32 = 0x8007_00B7_u32 as i32;
 
 use super::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 
@@ -82,13 +84,21 @@ fn unique_profile_name() -> String {
 }
 
 fn hresult_to_io(hr: HRESULT) -> io::Error {
-    io::Error::from_raw_os_error(hr)
+    // FACILITY_WIN32 mask and value as i32 to avoid cast_possible_wrap.
+    #[allow(clippy::cast_possible_wrap)]
+    const FACILITY_MASK: i32 = 0x1FFF_0000_u32 as i32;
+    const FACILITY_WIN32: i32 = 0x0007_0000;
+    // If facility is FACILITY_WIN32, extract the Win32 error code.
+    if (hr & FACILITY_MASK) == FACILITY_WIN32 {
+        io::Error::from_raw_os_error(hr & 0xFFFF)
+    } else {
+        io::Error::other(format!("HRESULT {hr:#010X}"))
+    }
 }
 
 // ── AppContainer profile lifecycle ───────────────────────────────────
 
 /// Create an `AppContainer` profile. Returns `(profile_name, SID)`.
-/// The SID must be freed with `FreeSid` when done.
 fn create_profile() -> io::Result<(String, PSID)> {
     let name = unique_profile_name();
     let wide_name = to_wide(&name);
@@ -108,10 +118,7 @@ fn create_profile() -> io::Result<(String, PSID)> {
         )
     };
 
-    #[allow(clippy::cast_possible_wrap)]
-    let already_exists = ERROR_ALREADY_EXISTS as i32;
-
-    if hr == already_exists {
+    if hr == E_ALREADY_EXISTS {
         delete_profile(&name)?;
         // SAFETY: Retrying after deleting stale profile.
         let hr2 = unsafe {
@@ -147,7 +154,7 @@ pub fn delete_profile(name: &str) -> io::Result<()> {
 
 /// Add or modify an ACE for `sid` on `path` with the given access mode and mask.
 /// Delegates to the shared `modify_dacl` primitive.
-fn apply_ace(sid: PSID, path: &Path, access_mode: i32, access_mask: u32) -> io::Result<()> {
+fn apply_ace(sid: PSID, path: &Path, access_mode: i32, access_mask: u32) -> crate::Result<()> {
     let wide_path = path_to_wide(path);
     let display = path.display().to_string();
 
@@ -168,10 +175,9 @@ fn apply_ace(sid: PSID, path: &Path, access_mode: i32, access_mask: u32) -> io::
     };
 
     modify_dacl(&wide_path, &display, &[ea], DACL_SECURITY_INFORMATION)
-        .map_err(|e| io::Error::other(e.to_string()))
 }
 
-fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
+fn grant_access(sid: PSID, path: &Path, writable: bool) -> crate::Result<()> {
     let access_mask = if writable {
         FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE
     } else {
@@ -191,7 +197,7 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> io::Result<()> {
 /// inherited ACEs to explicit and blocks further inheritance from the parent.
 /// Then it adds the explicit deny ACE, which `SetEntriesInAclW` places before
 /// explicit allows in canonical DACL order.
-fn deny_all_file_access(sid: PSID, path: &Path) -> io::Result<()> {
+fn deny_all_file_access(sid: PSID, path: &Path) -> crate::Result<()> {
     let access_mask = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
 
     if path.is_dir() {
@@ -207,15 +213,13 @@ fn deny_all_file_access(sid: PSID, path: &Path) -> io::Result<()> {
     }
 
     // Step 3: Add the deny ACE.
-    apply_ace(sid, path, DENY_ACCESS, access_mask)?;
-
-    Ok(())
+    apply_ace(sid, path, DENY_ACCESS, access_mask)
 }
 
 /// Set `PROTECTED_DACL_SECURITY_INFORMATION` on a path, blocking inheritance
 /// from parent directories. Existing inherited ACEs are converted to explicit.
 /// Delegates to `modify_dacl` with an empty entry list and the PROTECTED flag.
-fn protect_dacl(path: &Path) -> io::Result<()> {
+fn protect_dacl(path: &Path) -> crate::Result<()> {
     let wide_path = path_to_wide(path);
     let display = path.display().to_string();
 
@@ -225,7 +229,6 @@ fn protect_dacl(path: &Path) -> io::Result<()> {
         &[],
         DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
     )
-    .map_err(|e| io::Error::other(e.to_string()))
 }
 
 // ── Security capabilities ────────────────────────────────────────────
@@ -505,7 +508,7 @@ fn spawn_inner(
             }
         }
     }
-    let nul_missing = !super::nul_device::nul_device_accessible();
+    let nul_missing = !super::nul_device::nul_device_accessible().unwrap_or(false);
     if !prereq_failed.is_empty() || nul_missing {
         use std::fmt::Write;
         let mut msg = String::new();
@@ -911,7 +914,7 @@ fn create_sandboxed_process(
     Ok((pi, stdin_file, stdout_file, stderr_file))
 }
 
-fn apply_policy_acls(sid: PSID, policy: &SandboxPolicy) -> io::Result<()> {
+fn apply_policy_acls(sid: PSID, policy: &SandboxPolicy) -> crate::Result<()> {
     for path in policy.read_paths() {
         grant_access(sid, path, false)?;
     }

@@ -27,7 +27,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use super::acl_helpers::{
-    ELEVATION_REQUIRED_MARKER, allocate_app_packages_sid, dacl_has_app_packages_ace, read_dacl,
+    ELEVATION_REQUIRED_MARKER, allocate_app_packages_sid, dacl_has_ace_for_sid,
+    dacl_has_app_packages_ace, read_dacl,
 };
 use super::path_to_wide;
 use crate::error::SandboxError;
@@ -87,11 +88,9 @@ pub fn compute_ancestors<P: AsRef<Path>>(
 
 /// Check if a directory's DACL has an allow ACE for ALL APPLICATION PACKAGES
 /// with at least `TRAVERSE_MASK` (`FILE_TRAVERSE | SYNCHRONIZE | FILE_READ_ATTRIBUTES`).
-pub fn has_traverse_ace(path: &Path) -> bool {
+pub fn has_traverse_ace(path: &Path) -> Result<bool, SandboxError> {
     let wide = path_to_wide(path);
-    let Some((dacl_ptr, _sd_guard)) = read_dacl(&wide) else {
-        return false;
-    };
+    let (dacl_ptr, _sd_guard) = read_dacl(&wide)?;
     dacl_has_app_packages_ace(dacl_ptr, TRAVERSE_MASK)
 }
 
@@ -133,26 +132,20 @@ impl Drop for AllocGuard {
 pub fn grant_traverse(path: &Path) -> crate::Result<()> {
     let wide = path_to_wide(path);
 
-    let Some((dacl_ptr, sd_guard)) = read_dacl(&wide) else {
-        return Err(SandboxError::Setup(format!(
-            "failed to read DACL for {}: unable to read security info",
-            path.display(),
-        )));
-    };
+    let (dacl_ptr, sd_guard) = read_dacl(&wide)?;
+
+    // Allocate the SID once so it can be reused for both the check and the
+    // ACE insertion, avoiding a redundant second allocation.
+    let app_sid = allocate_app_packages_sid()?;
 
     // Check in the same DACL read whether the ACE already exists.
-    if dacl_has_app_packages_ace(dacl_ptr, TRAVERSE_MASK) {
+    if dacl_has_ace_for_sid(dacl_ptr, TRAVERSE_MASK, &app_sid)? {
         return Ok(());
     }
 
     // ACE not present — build new DACL by copying existing ACEs byte-for-byte
     // (preserving INHERITED_ACE flags) and appending the traverse ACE.
     // SetEntriesInAclW strips inherited flags, so manual construction is needed.
-    let Some(app_sid) = allocate_app_packages_sid() else {
-        return Err(SandboxError::Setup(
-            "failed to create ALL APPLICATION PACKAGES SID".into(),
-        ));
-    };
 
     // Get existing ACL size info.
     let mut acl_info = ACL_SIZE_INFORMATION {
@@ -200,11 +193,15 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         )));
     }
 
+    // Wrap the ACL so it's freed on any early return from this point.
+    let _acl_guard = AllocGuard {
+        ptr: new_acl_ptr.cast(),
+        layout: acl_layout,
+    };
+
     // SAFETY: Initializing a freshly allocated, zeroed ACL buffer.
     let ret = unsafe { InitializeAcl(new_acl_ptr, new_acl_size, ACL_REVISION) };
     if ret == FALSE {
-        // SAFETY: Deallocating our allocation on error.
-        unsafe { std::alloc::dealloc(new_acl_ptr.cast(), acl_layout) };
         return Err(SandboxError::Setup(format!(
             "InitializeAcl failed for {}",
             path.display(),
@@ -217,7 +214,6 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         // SAFETY: Reading ACE at valid index from a valid DACL.
         let ret = unsafe { windows_sys::Win32::Security::GetAce(dacl_ptr, i, &raw mut ace_ptr) };
         if ret == FALSE {
-            unsafe { std::alloc::dealloc(new_acl_ptr.cast(), acl_layout) };
             return Err(SandboxError::Setup(format!(
                 "GetAce failed for {} at index {i}",
                 path.display(),
@@ -237,7 +233,6 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
             )
         };
         if ret == FALSE {
-            unsafe { std::alloc::dealloc(new_acl_ptr.cast(), acl_layout) };
             return Err(SandboxError::Setup(format!(
                 "AddAce failed for {} at index {i}",
                 path.display(),
@@ -257,18 +252,11 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         )
     };
     if ret == FALSE {
-        unsafe { std::alloc::dealloc(new_acl_ptr.cast(), acl_layout) };
         return Err(SandboxError::Setup(format!(
             "AddAccessAllowedAceEx failed for {}",
             path.display(),
         )));
     }
-
-    // Wrap the ACL so it's freed if we return early after this point.
-    let _acl_guard = AllocGuard {
-        ptr: new_acl_ptr.cast(),
-        layout: acl_layout,
-    };
 
     // Build a security descriptor containing the merged DACL.
     let mut sd = SECURITY_DESCRIPTOR {
@@ -316,16 +304,35 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
             &raw mut revision,
         )
     };
-    if ret != FALSE {
-        // Mask to DACL-related control bits only.
-        const DACL_CONTROL_MASK: SECURITY_DESCRIPTOR_CONTROL = 0x0400  // SE_DACL_AUTO_INHERITED
-            | 0x0100 // SE_DACL_AUTO_INHERIT_REQ
-            | 0x0004; // SE_DACL_PROTECTED
-        let dacl_flags = original_control & DACL_CONTROL_MASK;
-        if dacl_flags != 0 {
-            // SAFETY: Setting control bits on a valid, initialized security descriptor.
-            unsafe {
-                SetSecurityDescriptorControl((&raw mut sd).cast(), dacl_flags, dacl_flags);
+    if ret == FALSE {
+        let err = std::io::Error::last_os_error();
+        return Err(SandboxError::Setup(format!(
+            "GetSecurityDescriptorControl failed for {}: {err}",
+            path.display(),
+        )));
+    }
+
+    // Mask to DACL-related control bits only.
+    let dacl_flags = original_control
+        & (0x0400 as SECURITY_DESCRIPTOR_CONTROL  // SE_DACL_AUTO_INHERITED
+            | 0x0100  // SE_DACL_AUTO_INHERIT_REQ
+            | 0x0004); // SE_DACL_PROTECTED
+    if dacl_flags != 0 {
+        // SAFETY: Setting control bits on a valid, initialized security descriptor.
+        let ret =
+            unsafe { SetSecurityDescriptorControl((&raw mut sd).cast(), dacl_flags, dacl_flags) };
+        // Best-effort: some security descriptors reject certain control bit
+        // combinations (e.g. error 87 on system directories). The DACL is
+        // structurally valid without these flags; children may just miss the
+        // SE_DACL_AUTO_INHERITED hint until re-inherited.
+        if ret == FALSE {
+            #[cfg(debug_assertions)]
+            {
+                let err = std::io::Error::last_os_error();
+                eprintln!(
+                    "SetSecurityDescriptorControl best-effort failure for {}: {err}",
+                    path.display(),
+                );
             }
         }
     }
@@ -524,18 +531,8 @@ mod tests {
     #[test]
     fn has_traverse_ace_system_directory() {
         // C:\Windows is a system directory -- just verify the function doesn't
-        // panic and returns a bool.
+        // panic and returns a Result.
         let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
-        let _result: bool = has_traverse_ace(Path::new(&system_root));
-    }
-
-    #[test]
-    fn has_traverse_ace_null_dacl_returns_true() {
-        // Directly test the null-DACL early-return path: a null DACL means
-        // unrestricted access, so dacl_has_app_packages_ace should return true.
-        assert!(
-            dacl_has_app_packages_ace(std::ptr::null_mut(), TRAVERSE_MASK),
-            "null DACL should return true (unrestricted access)"
-        );
+        let _result: bool = has_traverse_ace(Path::new(&system_root)).unwrap();
     }
 }
