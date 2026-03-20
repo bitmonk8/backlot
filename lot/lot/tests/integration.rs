@@ -279,7 +279,9 @@ fn test_spawn_read_allowed_path() {
 
 /// Grant read access to a single file (not its parent directory) and verify
 /// the sandboxed process can read it. Exercises the file bind-mount path in
-/// `create_mount_target` on Linux.
+/// `create_mount_target` on Linux. Unix-only: Windows AppContainer requires
+/// parent directory access for file reads.
+#[cfg(unix)]
 #[test]
 fn test_spawn_read_single_file() {
     eprintln!("[diag] === test_spawn_read_single_file ===");

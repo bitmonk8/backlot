@@ -514,6 +514,7 @@ fn to_cstring(s: &str) -> io::Result<CString> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
