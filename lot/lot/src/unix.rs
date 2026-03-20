@@ -131,13 +131,26 @@ pub fn make_pipe() -> io::Result<(i32, i32)> {
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }
-        // Set CLOEXEC on both ends so they don't leak to exec'd process
+        // Set CLOEXEC on both ends so they don't leak to exec'd process.
+        // Fail hard if fcntl fails — a leaked fd could reach the child.
+        let close_both = || unsafe {
+            // SAFETY: both fds are valid from pipe()
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        };
         for &fd in &fds {
             // SAFETY: fd is valid from pipe()
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-            if flags >= 0 {
-                // SAFETY: fd is valid, setting FD_CLOEXEC
-                unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+            if flags < 0 {
+                let err = io::Error::last_os_error();
+                close_both();
+                return Err(err);
+            }
+            // SAFETY: fd is valid, setting FD_CLOEXEC
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+                let err = io::Error::last_os_error();
+                close_both();
+                return Err(err);
             }
         }
     }
@@ -395,27 +408,80 @@ pub unsafe fn check_child_error_pipe(
     step_names: &[&str],
 ) -> crate::Result<()> {
     let mut err_buf = [0u8; 8];
-    // SAFETY: err_pipe_rd is valid, err_buf is stack-allocated
-    let n = unsafe { libc::read(err_pipe_rd, err_buf.as_mut_ptr().cast(), 8) };
+    let mut bytes_read: usize = 0;
+    let mut read_err: Option<io::Error> = None;
+
+    // Loop to accumulate exactly 8 bytes, retrying on EINTR.
+    // Pipe writes of <= PIPE_BUF bytes are atomic on POSIX, so short
+    // reads are unlikely in practice, but we handle them for correctness.
+    loop {
+        // SAFETY: err_pipe_rd is valid, writing into remaining portion of err_buf
+        let n = unsafe {
+            libc::read(
+                err_pipe_rd,
+                err_buf.as_mut_ptr().add(bytes_read).cast(),
+                8 - bytes_read,
+            )
+        };
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            read_err = Some(err);
+            break;
+        }
+        if n == 0 {
+            break;
+        }
+        bytes_read += n as usize;
+        if bytes_read >= 8 {
+            break;
+        }
+    }
+
     // SAFETY: valid fd
     unsafe { libc::close(err_pipe_rd) };
 
-    if n == 8 {
+    // Reap child and close parent pipes on any failure path.
+    let reap_and_fail = |msg: String| -> crate::SandboxError {
+        // SAFETY: valid pid; retry on EINTR to avoid leaving a zombie
+        loop {
+            let rc = unsafe { libc::waitpid(child_pid, std::ptr::null_mut(), 0) };
+            if rc >= 0 {
+                break;
+            }
+            if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+        close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
+        crate::SandboxError::Setup(msg)
+    };
+
+    if let Some(err) = read_err {
+        return Err(reap_and_fail(format!(
+            "failed to read child error pipe: {err}"
+        )));
+    }
+
+    if bytes_read == 8 {
         let step = i32::from_ne_bytes([err_buf[0], err_buf[1], err_buf[2], err_buf[3]]);
         let errno = i32::from_ne_bytes([err_buf[4], err_buf[5], err_buf[6], err_buf[7]]);
-        // step_names is 1-indexed: step 1 → index 0
         let step_name = step_names
             .get((step - 1) as usize)
             .copied()
             .unwrap_or("unknown");
-        // Reap the child so we don't leak a zombie
-        // SAFETY: valid pid, null pointer (don't need status)
-        unsafe { libc::waitpid(child_pid, std::ptr::null_mut(), 0) };
-        close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
-        return Err(crate::SandboxError::Setup(format!(
+        return Err(reap_and_fail(format!(
             "child setup failed at step '{}': {}",
             step_name,
             io::Error::from_raw_os_error(errno)
+        )));
+    }
+
+    if bytes_read > 0 {
+        return Err(reap_and_fail(format!(
+            "child error pipe: incomplete error report ({bytes_read} of 8 bytes)"
         )));
     }
 
@@ -507,8 +573,6 @@ impl UnixSandboxedChild {
     }
 
     pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
-        // Atomically claim the reap BEFORE calling waitpid so a concurrent
-        // wait() cannot race and get ECHILD.
         if self
             .waited
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -524,12 +588,10 @@ impl UnixSandboxedChild {
         // SAFETY: valid pid, valid pointer, WNOHANG for non-blocking
         let rc = unsafe { libc::waitpid(self.pid, &raw mut status, libc::WNOHANG) };
         if rc < 0 {
-            // Revert the claim — waitpid failed, child is not reaped.
             self.waited.store(false, Ordering::Release);
             return Err(io::Error::last_os_error());
         }
         if rc == 0 {
-            // Child still running — revert the claim.
             self.waited.store(false, Ordering::Release);
             return Ok(None);
         }
@@ -585,7 +647,14 @@ impl UnixSandboxedChild {
     /// Kill and reap the process. Used by both `kill_and_cleanup`
     /// and `Drop`. Callers must call `close_fds()` first.
     pub fn kill_and_reap(&mut self) {
-        if !self.waited.load(Ordering::Acquire) {
+        // Use CAS to atomically claim the reap, consistent with wait().
+        // &mut self prevents concurrent safe calls, but CAS eliminates
+        // any theoretical TOCTOU if called via unsafe or interior mutability.
+        if self
+            .waited
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
             let _ = self.kill();
             loop {
                 // SAFETY: valid pid; blocking wait reaps the zombie
@@ -598,7 +667,6 @@ impl UnixSandboxedChild {
                 }
                 break;
             }
-            self.waited.store(true, Ordering::Release);
         }
     }
 }

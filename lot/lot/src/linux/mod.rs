@@ -351,6 +351,13 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         if inner_pid == 0 {
             // === INNER CHILD (PID 1 inside namespace) ===
 
+            // Save parent PID before prctl to detect the race where the
+            // helper dies between fork() and prctl(). If that happens,
+            // PR_SET_PDEATHSIG has no effect because the reparenting
+            // already occurred.
+            // SAFETY: getppid has no preconditions
+            let expected_ppid = unsafe { libc::getppid() };
+
             // Ensure the inner child is killed when the helper dies.
             // The helper used unshare(CLONE_NEWPID), so it is NOT PID 1 in the
             // new namespace — the inner child is. Without this, killing the
@@ -359,6 +366,15 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             // SAFETY: PR_SET_PDEATHSIG is a well-known prctl operation.
             // The signal setting is preserved across execve.
             unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+
+            // If the helper died between fork() and prctl(), we were
+            // reparented and the death signal will never fire. Detect by
+            // checking if our parent PID changed.
+            // SAFETY: getppid has no preconditions
+            if unsafe { libc::getppid() } != expected_ppid {
+                // SAFETY: terminates the forked child
+                unsafe { libc::_exit(1) };
+            }
 
             // Set up stdio: dup2 the child fds to 0/1/2
             if child_stdin != 0 {
