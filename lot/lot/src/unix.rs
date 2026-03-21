@@ -538,6 +538,7 @@ pub unsafe fn setup_stdio_fds(
 ///
 /// # Safety
 /// Must only be called from the forked child before exec.
+#[cfg(target_os = "macos")]
 pub unsafe fn apply_resource_limits(policy: &crate::policy::SandboxPolicy) -> io::Result<()> {
     if let Some(max_mem) = policy.limits().max_memory_bytes {
         let rlim = libc::rlimit {
