@@ -272,16 +272,16 @@ fn add_ancestors(path: &Path, set: &mut HashSet<PathBuf>) {
 }
 
 /// Escape a path string for use in SBPL rules.
-/// Replaces `"` with `\"` and rejects null bytes.
-/// Returns an error if the path is not valid UTF-8 — `display()` would
-/// silently replace non-UTF-8 bytes with U+FFFD, corrupting the path in
-/// the generated SBPL profile.
+/// SBPL uses C-style escaping inside double-quoted strings: `\` → `\\`, `"` → `\"`.
+/// Rejects null bytes and non-UTF-8 paths.
 fn escape_sbpl_path(path: &Path) -> std::result::Result<String, &'static str> {
     let s = path.to_str().ok_or("path is not valid UTF-8")?;
     if s.as_bytes().contains(&0) {
         return Err("path contains null byte");
     }
-    Ok(s.replace('"', "\\\"").replace(')', "\\)"))
+    // Escape backslash first (so we don't double-escape the quote escape),
+    // then escape double quotes.
+    Ok(s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Resolve a path through canonicalize, falling back to the original if the
@@ -523,10 +523,25 @@ mod tests {
     }
 
     #[test]
-    fn escape_sbpl_path_paren() {
+    fn escape_sbpl_path_paren_not_escaped() {
         let path = Path::new("/tmp/has)paren");
         let escaped = escape_sbpl_path(path).unwrap();
-        assert_eq!(escaped, "/tmp/has\\)paren");
+        // Parentheses do not need escaping inside double-quoted SBPL strings.
+        assert_eq!(escaped, "/tmp/has)paren");
+    }
+
+    #[test]
+    fn escape_sbpl_path_backslash() {
+        let path = Path::new("/tmp/has\\backslash");
+        let escaped = escape_sbpl_path(path).unwrap();
+        assert_eq!(escaped, "/tmp/has\\\\backslash");
+    }
+
+    #[test]
+    fn escape_sbpl_path_backslash_and_quote() {
+        let path = Path::new("/tmp/a\\\"b");
+        let escaped = escape_sbpl_path(path).unwrap();
+        assert_eq!(escaped, "/tmp/a\\\\\\\"b");
     }
 
     #[test]

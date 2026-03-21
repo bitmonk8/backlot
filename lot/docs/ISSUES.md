@@ -1,21 +1,5 @@
 # Known Issues
 
-## Group 1: Sandbox Enforcement Correctness
-
-### 1.1 [Correctness] `kill_and_reap` deadlock — SIGKILL never sent
-- **File:** `lot/src/unix.rs` lines 653-658
-- **Description:** `kill_and_reap` sets `self.waited` to `true` via CAS (line 653-656), then calls `self.kill()` (line 658). But `kill()` checks `waited` and returns early when true. SIGKILL is never sent. The subsequent `waitpid` blocks indefinitely (or until child exits on its own).
-
-### 1.2 [Correctness] `bind_mount_readonly` submounts remain writable
-- **File:** `lot/src/linux/namespace.rs` lines 374, 388
-- **Description:** Initial bind uses `MS_BIND | MS_REC`, but remount uses `MS_BIND | MS_REMOUNT` without `MS_REC`. On Linux, this only makes the top-level mount read-only — submounts retain original writable flags. Security gap: nested mount points under read-paths remain writable.
-
-### 1.3 [Correctness] `escape_sbpl_path` produces invalid SBPL escapes
-- **File:** `lot/src/macos/seatbelt.rs` line 284
-- **Description:** `escape_sbpl_path` escapes `)` to `\)`, but SBPL string literals don't define `\)` as a valid escape. The backslash becomes literal, causing rule to match wrong path for paths containing `)`. Also does not escape backslash (`\`), which would be interpreted as escape sequence start.
-
----
-
 ## Group 2: Policy Validation & Path Safety
 
 ### 2.1 [Correctness] TEMP and PATH validation ignores deny_paths
@@ -221,10 +205,6 @@
 ### 9.11 [Doc-Mismatch] macOS `kill_and_cleanup` doc describes wrong operation order
 - **File:** `lot/src/macos/mod.rs` lines 321-328
 - **Description:** `kill_and_cleanup` doc says kill/wait/close. Code does close/kill/wait.
-
-### 9.12 [Doc-Mismatch] seatbelt escape doc incomplete
-- **File:** `lot/src/macos/seatbelt.rs` lines 274-275
-- **Description:** Doc says only `"` is escaped. Code also escapes `)`.
 
 ### 9.13 [Doc-Mismatch] path_util.rs doc says "lexical comparison" fallback
 - **File:** `lot/src/path_util.rs` line 9

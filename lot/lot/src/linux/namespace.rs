@@ -360,7 +360,8 @@ fn bind_mount_file_readonly(src: &str, dst: &str) -> io::Result<()> {
 
 /// Bind-mount `src` to `dst`, then remount with the specified flags.
 /// The initial bind uses `MS_BIND | MS_REC`. The remount adds the caller's
-/// `remount_flags` on top of `MS_BIND | MS_REMOUNT`.
+/// `remount_flags` on top of `MS_BIND | MS_REC | MS_REMOUNT` so that flags
+/// apply recursively to all submounts.
 fn bind_mount(src: &str, dst: &str, remount_flags: libc::c_ulong) -> io::Result<()> {
     let c_src = to_cstring(src)?;
     let c_dst = to_cstring(dst)?;
@@ -385,7 +386,7 @@ fn bind_mount(src: &str, dst: &str, remount_flags: libc::c_ulong) -> io::Result<
             std::ptr::null(),
             c_dst.as_ptr(),
             std::ptr::null(),
-            libc::MS_BIND | libc::MS_REMOUNT | remount_flags,
+            libc::MS_BIND | libc::MS_REC | libc::MS_REMOUNT | remount_flags,
             std::ptr::null(),
         )
     };

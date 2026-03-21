@@ -10,15 +10,13 @@ Clear all issues in `docs/ISSUES.md`.
 
 ## Next Work
 
-**Group 1: Sandbox Enforcement Correctness** — three issues affecting sandbox safety:
-- 1.1 `kill_and_reap` deadlock — SIGKILL never sent (`unix.rs`)
-- 1.2 `bind_mount_readonly` submounts remain writable (`linux/namespace.rs`)
-- 1.3 `escape_sbpl_path` produces invalid SBPL escapes (`macos/seatbelt.rs`)
+**Group 2: Policy Validation & Path Safety**
 
 ## Completed
 
 - Full implementation (Linux, macOS, Windows)
 - CI pipeline (format, clippy, build, test on all 3 platforms)
+- Group 1: Sandbox Enforcement Correctness (1.1 kill_and_reap deadlock, 1.2 bind_mount submounts, 1.3 escape_sbpl_path)
 
 ## CI Notes
 

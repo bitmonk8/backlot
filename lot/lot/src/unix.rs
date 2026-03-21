@@ -522,16 +522,22 @@ impl UnixSandboxedChild {
         self.pid as u32
     }
 
-    pub fn kill(&mut self) -> io::Result<()> {
-        if self.waited.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let rc = match self.kill_style {
+    /// Send SIGKILL to the child process (or process group), returning the
+    /// raw libc return code.
+    fn send_sigkill(&self) -> i32 {
+        match self.kill_style {
             // SAFETY: valid pid, SIGKILL is a well-known signal
             KillStyle::KillSingle => unsafe { libc::kill(self.pid, libc::SIGKILL) },
             // SAFETY: pid is a valid PGID after setsid(); SIGKILL is well-defined
             KillStyle::KillProcessGroup => unsafe { libc::killpg(self.pid, libc::SIGKILL) },
-        };
+        }
+    }
+
+    pub fn kill(&mut self) -> io::Result<()> {
+        if self.waited.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let rc = self.send_sigkill();
         if rc != 0 {
             let err = io::Error::last_os_error();
             // ESRCH means the process is already gone — not an error.
@@ -655,7 +661,9 @@ impl UnixSandboxedChild {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            let _ = self.kill();
+            // Send SIGKILL directly — self.kill() would see waited=true and skip.
+            // Ignore errors: we proceed to waitpid regardless.
+            let _ = self.send_sigkill();
             loop {
                 // SAFETY: valid pid; blocking wait reaps the zombie
                 let rc = unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), 0) };
