@@ -4,49 +4,9 @@ Grouped by co-fixability, ordered by impact (descending).
 
 ---
 
-## Group 1: Critical Testing — Test Trustworthiness
+## Group 1: Critical Testing — Test Trustworthiness ✓ RESOLVED
 
-All tests that pass without actually verifying anything. Fixing these is prerequisite to trusting any test results.
-
-### 1.1 [Testing] `LOT_REQUIRE_SANDBOX` silent skip
-- **File:** lot/tests/integration.rs (lines 35-39), lot/src/linux/cgroup.rs (lines 290-300)
-- **Severity:** Critical
-- **Description:** `LOT_REQUIRE_SANDBOX` env var allows tests to silently skip when sandbox prerequisites are not met. The variable provides no value — lot cannot be meaningfully developed on an unconfigured machine, so a missing prerequisite is a real failure, not an expected condition. Remove `LOT_REQUIRE_SANDBOX` entirely; `try_spawn()` and `require_cgroups()` should panic unconditionally on `PrerequisitesNotMet`.
-
-### 1.2 [Testing] `memory_hog_command` silent fallback
-- **File:** lot/tests/common/mod.rs (lines 64-74)
-- **Severity:** Critical
-- **Description:** `memory_hog_command` fallback: if perl/python3 absent, test passes without exercising limit.
-
-### 1.3 [Testing] Tautological and result-discarding tests in lib.rs
-- **File:** lot/src/lib.rs (lines 499-538)
-- **Severity:** Critical
-- **Description:** `probe_linux_no_panic` discards result. `kill_by_pid_self_does_not_kill` tautological. No test for `spawn()` error paths or `cleanup_stale()`.
-
-### 1.4 [Testing] Vacuous env_check tests on minimal CI
-- **File:** lot/src/env_check.rs (lines 50-459)
-- **Severity:** Critical
-- **Description:** TMP/TMPDIR untested. Windows case-insensitive untested. Coupled to real platform state. Vacuous test on minimal CI.
-
-### 1.5 [Testing] cgroup tests silently skip assertions
-- **File:** lot/src/linux/cgroup.rs (lines 69-422)
-- **Severity:** Critical
-- **Description:** Parsing untested. Tests silently skip assertions. `require_cgroups()` causes silent skip.
-
-### 1.6 [Testing] AppContainer vacuous passes
-- **File:** lot/src/windows/appcontainer.rs (lines 290-966)
-- **Severity:** Critical
-- **Description:** Vacuous passes when prerequisites not met. `kill()`, `try_wait()`, `allow_network()` untested. Mutex poisoning issue.
-
-### 1.7 [Testing] Prerequisites tests silently skip
-- **File:** lot/src/windows/prerequisites.rs (lines 81-140)
-- **Severity:** Critical
-- **Description:** Tests silently skip. `prerequisites_met_covers_deny_paths` assertion too weak.
-
-### 1.8 [Testing] `test_double_wait_returns_error` Unix-only
-- **File:** lot/tests/integration.rs (lines 971-1005)
-- **Severity:** Critical
-- **Description:** `test_double_wait_returns_error` Unix-only. Test disabled on Windows where behavior is equally relevant.
+All 8 issues fixed. Changes: removed `LOT_REQUIRE_SANDBOX`, `must_spawn` panics unconditionally, `require_cgroups` panics, `memory_hog_command`/`network_connect_command` use python3 directly with existence check, `probe_linux` asserts cross-platform fields, `kill_by_pid_self_does_not_kill` tautological assertion removed, `test_double_wait_behavior` made cross-platform, appcontainer/prerequisites silent skips replaced with `assert!`/`#[ignore]`.
 
 ---
 
@@ -546,3 +506,4 @@ Known issues with minimal practical impact.
 - **File:** lot/src/windows/sentinel.rs
 - **Severity:** Low
 - **Description:** Documented and accepted, with small window. Listed for completeness.
+

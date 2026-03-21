@@ -498,9 +498,12 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn probe_linux_no_panic() {
-        // Detection must not panic regardless of environment.
-        let _caps = probe();
+    fn probe_linux() {
+        let caps = probe();
+        // Cross-platform fields must be false on Linux.
+        assert!(!caps.seatbelt, "seatbelt should be false on Linux");
+        assert!(!caps.appcontainer, "appcontainer should be false on Linux");
+        assert!(!caps.job_objects, "job_objects should be false on Linux");
     }
 
     #[test]
@@ -528,13 +531,14 @@ mod tests {
         kill_by_pid(0);
     }
 
-    /// Killing our own PID must be silently rejected. Reaching the assertion
-    /// confirms the guard worked — the process is still alive.
+    /// Killing our own PID must be silently rejected. Reaching the end of
+    /// this function confirms the guard worked (a successful self-kill
+    /// would prevent execution from reaching this point).
     #[test]
     #[cfg(feature = "tokio")]
     fn kill_by_pid_self_does_not_kill() {
         kill_by_pid(std::process::id());
-        assert!(std::process::id() > 0, "process still alive");
+        // No assertion needed: reaching this line IS the proof.
     }
 
     /// A nonexistent PID should be silently ignored (best-effort).

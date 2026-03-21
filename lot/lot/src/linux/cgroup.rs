@@ -287,16 +287,8 @@ impl Drop for CgroupGuard {
 mod tests {
     use super::*;
 
-    fn require_cgroups() -> bool {
-        if available() {
-            return true;
-        }
-        assert!(
-            std::env::var("LOT_REQUIRE_SANDBOX").as_deref() != Ok("1"),
-            "LOT_REQUIRE_SANDBOX=1 but cgroups v2 not available"
-        );
-        eprintln!("[skip] cgroups v2 not available");
-        false
+    fn require_cgroups() {
+        assert!(available(), "cgroups v2 not available");
     }
 
     /// RAII guard ensures forked child is killed+reaped on all paths
@@ -318,9 +310,7 @@ mod tests {
 
     #[test]
     fn cgroup_guard_creates_and_cleans_up() {
-        if !require_cgroups() {
-            return;
-        }
+        require_cgroups();
         let limits = ResourceLimits {
             max_memory_bytes: Some(64 * 1024 * 1024),
             max_processes: Some(10),
@@ -347,9 +337,7 @@ mod tests {
 
     #[test]
     fn cgroup_guard_add_process() {
-        if !require_cgroups() {
-            return;
-        }
+        require_cgroups();
         let limits = ResourceLimits::default();
         let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
 
@@ -365,18 +353,16 @@ mod tests {
         let _child_guard = ChildGuard(pid);
 
         // Parent: add the child to the cgroup.
-        if let Err(e) = guard.add_process(pid) {
-            eprintln!("[skip] add_process failed ({e}); cannot test cgroup membership");
-        }
+        guard
+            .add_process(pid)
+            .expect("add_process must succeed when cgroups are available");
         // Guard drop will kill the child and remove the cgroup.
         // ChildGuard drop ensures the zombie is reaped.
     }
 
     #[test]
     fn cgroup_guard_no_limits_creates_empty() {
-        if !require_cgroups() {
-            return;
-        }
+        require_cgroups();
         let limits = ResourceLimits::default();
         let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
         let path = guard.path().to_path_buf();
@@ -387,9 +373,7 @@ mod tests {
 
     #[test]
     fn cgroup_guard_drain_with_live_process() {
-        if !require_cgroups() {
-            return;
-        }
+        require_cgroups();
         let limits = ResourceLimits::default();
         let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
         let path = guard.path().to_path_buf();
@@ -404,11 +388,9 @@ mod tests {
         }
         let _child_guard = ChildGuard(pid);
 
-        // Try adding the child — may fail depending on cgroup config
-        if guard.add_process(pid).is_err() {
-            eprintln!("[skip] add_process failed; cannot test drain");
-            return;
-        }
+        guard
+            .add_process(pid)
+            .expect("add_process must succeed when cgroups are available");
 
         drop(guard);
 

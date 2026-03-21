@@ -63,12 +63,18 @@ pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
-    // Genuinely allocate 1GB via perl or python3 to trigger memory limits.
+    // Allocate 1GB via python3. Panic if python3 is absent so the test
+    // never silently passes without exercising the memory limit.
+    let python3 = ["/usr/bin/python3", "/usr/local/bin/python3"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+        .expect("memory_hog_command requires python3 (checked /usr/bin/python3, /usr/local/bin/python3)");
     (
-        PathBuf::from("/bin/sh"),
+        python3,
         vec![
             "-c".into(),
-            "perl -e '$x = \"A\" x (1024*1024*1024); sleep 1' 2>/dev/null || python3 -c 'x = bytearray(1024*1024*1024); import time; time.sleep(1)'".into(),
+            "x = bytearray(1024*1024*1024); import time; time.sleep(1)".into(),
         ],
     )
 }
@@ -87,12 +93,16 @@ pub fn network_connect_command() -> (PathBuf, Vec<String>) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn network_connect_command() -> (PathBuf, Vec<String>) {
-    // perl is more portable than bash's /dev/tcp pseudo-device.
+    let python3 = ["/usr/bin/python3", "/usr/local/bin/python3"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+        .expect("network_connect_command requires python3 (checked /usr/bin/python3, /usr/local/bin/python3)");
     (
-        PathBuf::from("/bin/sh"),
+        python3,
         vec![
             "-c".into(),
-            "perl -MIO::Socket::INET -e 'IO::Socket::INET->new(PeerAddr=>q(1.1.1.1:80),Timeout=>5) or die' 2>/dev/null || python3 -c 'import socket; socket.create_connection((\"1.1.1.1\",80),timeout=5)' 2>/dev/null || exit 1".into(),
+            "import socket; socket.create_connection(('1.1.1.1', 80), timeout=5)".into(),
         ],
     )
 }

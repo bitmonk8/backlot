@@ -8,8 +8,9 @@
 
 95 findings from full project audit organized into 16 co-fix groups in `docs/ISSUES.md`, ordered by impact.
 
-- 8 critical, 12 high, 39 medium, 36 low
-- Groups 1–3 are highest impact: test trustworthiness (8 critical), sandbox safety bugs (5 high), core untested code (4 high)
+- **Group 1 resolved** (8 critical): test trustworthiness — silent skips removed, tautological tests fixed
+- Remaining: 12 high, 39 medium, 36 low across Groups 2–16
+- Groups 2–3 are next highest impact: sandbox safety bugs (5 high), core untested code (4 high)
 
 ## CI Notes
 

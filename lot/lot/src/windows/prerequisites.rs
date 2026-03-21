@@ -61,7 +61,7 @@ pub fn grant_appcontainer_prerequisites_for_policy(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -85,24 +85,23 @@ mod tests {
         // case grant_traverse succeeds idempotently. Skip in that case.
         let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
         let sys32 = PathBuf::from(format!("{system_root}\\System32"));
-        if !sys32.exists() {
-            eprintln!("[skip] grant_prerequisites_fails_without_elevation: System32 not found");
-            return;
-        }
+        assert!(
+            sys32.exists(),
+            "test requires System32 to exist at {}",
+            sys32.display()
+        );
 
-        if super::super::elevation::is_elevated() {
-            eprintln!("[skip] grant_prerequisites_fails_without_elevation: running elevated");
-            return;
-        }
+        assert!(
+            !super::super::elevation::is_elevated(),
+            "test requires non-elevated context"
+        );
 
         // If prerequisites are already met (e.g., from a prior `lot setup`),
-        // the grant call succeeds idempotently. Skip the test in that case.
-        if appcontainer_prerequisites_met(&[sys32.as_path()]) {
-            eprintln!(
-                "[skip] grant_prerequisites_fails_without_elevation: prerequisites already met"
-            );
-            return;
-        }
+        // the grant call succeeds idempotently and we cannot test the failure path.
+        assert!(
+            !appcontainer_prerequisites_met(&[sys32.as_path()]),
+            "test requires prerequisites not already met (prior `lot setup` detected)"
+        );
 
         let result = grant_appcontainer_prerequisites(&[sys32.as_path()]);
         assert!(
@@ -119,23 +118,24 @@ mod tests {
 
         let tmp = std::env::temp_dir();
         let deny = tmp.join("lot_test_deny_prereq");
-        if deny.exists() || std::fs::create_dir(&deny).is_ok() {
-            let policy = SandboxPolicy::new(
-                vec![tmp.clone()],
-                vec![],
-                vec![],
-                vec![deny.clone()],
-                false,
-                ResourceLimits::default(),
-            );
-            let via_policy = super::appcontainer_prerequisites_met_for_policy(&policy);
-            // Cross-check: calling with the same paths directly should agree.
-            let via_direct = appcontainer_prerequisites_met(&[tmp.as_path(), deny.as_path()]);
-            assert_eq!(
-                via_policy, via_direct,
-                "_for_policy and direct check should agree"
-            );
-            let _ = std::fs::remove_dir(&deny);
+        if !deny.exists() {
+            std::fs::create_dir(&deny).expect("create deny test dir");
         }
+        let policy = SandboxPolicy::new(
+            vec![tmp.clone()],
+            vec![],
+            vec![],
+            vec![deny.clone()],
+            false,
+            ResourceLimits::default(),
+        );
+        let via_policy = super::appcontainer_prerequisites_met_for_policy(&policy);
+        // Cross-check: calling with the same paths directly should agree.
+        let via_direct = appcontainer_prerequisites_met(&[tmp.as_path(), deny.as_path()]);
+        assert_eq!(
+            via_policy, via_direct,
+            "_for_policy and direct check should agree"
+        );
+        let _ = std::fs::remove_dir(&deny);
     }
 }

@@ -278,7 +278,7 @@ Lot does not silently degrade. If a required mechanism is unavailable, `spawn()`
 - Process limit: child fork-bombs, limited by cgroup/job object.
 - Cleanup: after `SandboxedChild` drops, ACLs/cgroups/profiles are removed.
 
-Tests gate on `probe()` results at runtime. When a required mechanism is unavailable, `try_spawn` panics on `PrerequisitesNotMet` — a missing prerequisite is a real failure, not an expected condition to skip.
+Tests gate on `probe()` results at runtime. When a required mechanism is unavailable, `must_spawn` panics on `PrerequisitesNotMet` — a missing prerequisite is a real failure, not an expected condition to skip.
 
 ### CI
 

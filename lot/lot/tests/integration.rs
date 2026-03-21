@@ -19,26 +19,12 @@ use common::{
     platform_exec_paths, set_sandbox_env, sleep_command,
 };
 
-/// Spawn a sandboxed child, returning `None` on `PrerequisitesNotMet`.
-///
-/// When `LOT_REQUIRE_SANDBOX=1` is set (intended for CI), panics instead
-/// of returning `None` so silent skips are caught.
-fn try_spawn(
-    policy: &lot::SandboxPolicy,
-    cmd: &lot::SandboxCommand,
-) -> Option<lot::SandboxedChild> {
+/// Spawn a sandboxed child, panicking on any error including missing prerequisites.
+fn must_spawn(policy: &lot::SandboxPolicy, cmd: &lot::SandboxCommand) -> lot::SandboxedChild {
     match lot::spawn(policy, cmd) {
         Ok(child) => {
             eprintln!("[diag] spawn succeeded, pid={}", child.id());
-            Some(child)
-        }
-        Err(lot::SandboxError::PrerequisitesNotMet(ref msg)) => {
-            assert!(
-                std::env::var("LOT_REQUIRE_SANDBOX").as_deref() != Ok("1"),
-                "LOT_REQUIRE_SANDBOX=1 but prerequisites not met: {msg}"
-            );
-            eprintln!("[diag] SKIPPED: prerequisites not met");
-            None
+            child
         }
         Err(e) => panic!("spawn must succeed: {e}"),
     }
@@ -211,9 +197,7 @@ fn test_spawn_echo() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
@@ -259,9 +243,7 @@ fn test_spawn_read_allowed_path() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
@@ -323,9 +305,7 @@ fn test_spawn_read_single_file() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
@@ -373,9 +353,7 @@ fn test_spawn_disallowed_path_blocked() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
@@ -435,9 +413,7 @@ fn test_spawn_write_to_readonly_blocked() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] exit status: {:?}", output.status);
@@ -491,9 +467,7 @@ fn test_cleanup_after_drop() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let pid = child.id();
     assert!(pid > 0, "pid should be non-zero");
     eprintln!("[diag] child pid={pid}, dropping now");
@@ -555,9 +529,7 @@ fn test_spawn_with_piped_stdin() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(mut child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let mut child = must_spawn(&policy, &cmd);
 
     // Write to stdin, then close it so the child sees EOF.
     {
@@ -609,9 +581,7 @@ fn test_wait_returns_exit_status() {
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = must_spawn(&policy, &cmd);
         let status = child.wait().expect("wait");
         eprintln!(
             "[diag] exit status: {:?}, code: {:?}",
@@ -637,9 +607,7 @@ fn test_wait_returns_exit_status() {
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = must_spawn(&policy, &cmd);
         let status = child.wait().expect("wait");
         eprintln!(
             "[diag] exit status: {:?}, code: {:?}",
@@ -698,9 +666,7 @@ fn test_deny_path_blocks_access_to_subtree() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] denied read exit status: {:?}", output.status);
@@ -733,9 +699,7 @@ fn test_deny_path_blocks_access_to_subtree() {
     pub_cmd.stdout(lot::SandboxStdio::Piped);
     pub_cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(pub_child) = try_spawn(&policy, &pub_cmd) else {
-        return;
-    };
+    let pub_child = must_spawn(&policy, &pub_cmd);
     let pub_output = pub_child.wait_with_output().expect("wait_with_output");
 
     eprintln!("[diag] public read exit status: {:?}", pub_output.status);
@@ -806,9 +770,7 @@ fn test_deny_path_blocks_write() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait");
 
     eprintln!("[diag] denied write exit: {:?}", output.status);
@@ -826,9 +788,7 @@ fn test_deny_path_blocks_write() {
     cmd2.stdout(lot::SandboxStdio::Piped);
     cmd2.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child2) = try_spawn(&policy, &cmd2) else {
-        return;
-    };
+    let child2 = must_spawn(&policy, &cmd2);
     let output2 = child2.wait_with_output().expect("wait");
 
     eprintln!("[diag] allowed write exit: {:?}", output2.status);
@@ -871,9 +831,7 @@ fn test_deny_path_blocks_execution() {
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = must_spawn(&policy, &cmd);
         let output = child.wait_with_output().expect("wait");
 
         assert!(
@@ -907,9 +865,7 @@ fn test_deny_path_blocks_execution() {
         cmd.stdout(lot::SandboxStdio::Piped);
         cmd.stderr(lot::SandboxStdio::Piped);
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = must_spawn(&policy, &cmd);
         let output = child.wait_with_output().expect("wait");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -951,9 +907,7 @@ fn test_symlink_into_deny_path() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -969,9 +923,8 @@ fn test_symlink_into_deny_path() {
 }
 
 #[test]
-#[cfg(unix)]
-fn test_double_wait_returns_error() {
-    eprintln!("[diag] === test_double_wait_returns_error ===");
+fn test_double_wait_behavior() {
+    eprintln!("[diag] === test_double_wait_behavior ===");
 
     let tmp = make_temp_dir();
     let scratch = make_temp_dir();
@@ -986,21 +939,34 @@ fn test_double_wait_returns_error() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
 
     let status = child.wait().expect("first wait should succeed");
     eprintln!("[diag] first wait: {status:?}");
 
-    let err = child.wait().expect_err("second wait should fail");
-    eprintln!("[diag] second wait error: {err}");
-    assert_eq!(
-        err.kind(),
-        std::io::ErrorKind::InvalidInput,
-        "expected InvalidInput, got: {:?}",
-        err.kind()
-    );
+    // Unix: second wait returns InvalidInput (pid already reaped).
+    // Windows: second wait succeeds (WaitForSingleObject on exited handle is idempotent).
+    #[cfg(unix)]
+    {
+        let err = child.wait().expect_err("second wait should fail on Unix");
+        eprintln!("[diag] second wait error: {err}");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "expected InvalidInput, got: {:?}",
+            err.kind()
+        );
+    }
+    #[cfg(windows)]
+    {
+        let status2 = child.wait().expect("second wait should succeed on Windows");
+        eprintln!("[diag] second wait: {status2:?}");
+        assert_eq!(
+            status.code(),
+            status2.code(),
+            "double wait should return same exit code"
+        );
+    }
     eprintln!("[diag] PASSED");
 }
 
@@ -1024,9 +990,7 @@ async fn test_wait_with_output_timeout_completes_before_timeout() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
 
     let result = child
         .wait_with_output_timeout(std::time::Duration::from_secs(10))
@@ -1064,9 +1028,7 @@ async fn test_wait_with_output_timeout_kills_on_timeout() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
 
     let result = child
         .wait_with_output_timeout(std::time::Duration::from_millis(200))
@@ -1101,9 +1063,7 @@ fn test_unix_tmpdir_in_write_paths_succeeds() {
     cmd.env("PATH", "/usr/bin:/bin");
     cmd.args(&args);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait");
     assert!(output.status.success(), "process should succeed");
     eprintln!("[diag] PASSED");
@@ -1157,9 +1117,7 @@ fn test_windows_temp_in_write_paths_succeeds() {
     cmd.stdout(lot::SandboxStdio::Piped);
     cmd.stderr(lot::SandboxStdio::Piped);
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait");
     assert!(output.status.success(), "process should succeed");
     eprintln!("[diag] PASSED");
@@ -1208,9 +1166,7 @@ fn test_try_wait_returns_none_then_some() {
     let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
 
     // Process just started — should not have exited yet.
     let poll = child.try_wait().expect("try_wait");
@@ -1249,9 +1205,7 @@ fn test_kill_terminates_running_process() {
     let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
 
     child.kill().expect("kill should succeed");
     let status = child.wait().expect("wait after kill");
@@ -1274,9 +1228,7 @@ fn test_kill_and_cleanup() {
     let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let pid = child.id();
 
     child
@@ -1325,9 +1277,7 @@ fn test_take_stdout_and_stderr() {
     let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(mut child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let mut child = must_spawn(&policy, &cmd);
 
     let mut stdout_handle = child.take_stdout().expect("take_stdout should return Some");
     let mut stderr_handle = child.take_stderr().expect("take_stderr should return Some");
@@ -1390,9 +1340,7 @@ fn test_sandbox_policy_builder_basic() {
     let (program, args) = echo_command();
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
     eprintln!("[diag] exit status: {:?}", output.status);
 
@@ -1435,15 +1383,11 @@ fn test_memory_limit_enforcement() {
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
     // macOS RLIMIT_AS can fail with EINVAL when the limit is below
-    // current virtual memory usage, so treat Setup errors as skip.
+    // current virtual memory usage, so treat Setup errors as acceptable skip.
     let child = match lot::spawn(&policy, &cmd) {
         Ok(c) => {
             eprintln!("[diag] spawn succeeded, pid={}", c.id());
             c
-        }
-        Err(lot::SandboxError::PrerequisitesNotMet(..)) => {
-            eprintln!("[diag] SKIPPED: prerequisites not met");
-            return;
         }
         Err(lot::SandboxError::Setup(ref msg)) if msg.contains("setrlimit") => {
             eprintln!("[diag] SKIPPED: setrlimit failed (platform limit too low): {msg}");
@@ -1487,9 +1431,7 @@ fn test_allow_network_false_blocks_connections() {
 
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
     eprintln!("[diag] exit status: {:?}", output.status);
     eprintln!(
@@ -1536,9 +1478,7 @@ fn test_symlink_into_deny_path_windows() {
     let (program, args) = cat_command(&symlink_path);
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(child) = try_spawn(&policy, &cmd) else {
-        return;
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait");
 
     let stdout = String::from_utf8_lossy(&output.stdout);

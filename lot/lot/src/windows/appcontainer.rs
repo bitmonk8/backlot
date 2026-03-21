@@ -989,14 +989,10 @@ mod tests {
         cmd.forward_common_env();
     }
 
-    /// Spawn, returning `None` if prerequisites aren't met (non-elevated env).
-    fn try_spawn(policy: &SandboxPolicy, cmd: &SandboxCommand) -> Option<crate::SandboxedChild> {
+    /// Spawn, panicking on any error including missing prerequisites.
+    fn must_spawn(policy: &SandboxPolicy, cmd: &SandboxCommand) -> crate::SandboxedChild {
         match crate::spawn(policy, cmd) {
-            Ok(child) => Some(child),
-            Err(SandboxError::PrerequisitesNotMet(..)) => {
-                eprintln!("[diag] SKIPPED: prerequisites not met");
-                None
-            }
+            Ok(child) => child,
             Err(e) => panic!("spawn failed: {e}"),
         }
     }
@@ -1066,9 +1062,7 @@ mod tests {
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = must_spawn(&policy, &cmd);
         let output = child.wait_with_output().expect("wait_with_output");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -1101,9 +1095,7 @@ mod tests {
         cmd.args(["/C", "type"]);
         cmd.arg(file.as_os_str());
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = must_spawn(&policy, &cmd);
         let output = child.wait_with_output().expect("wait");
 
         assert!(
@@ -1138,9 +1130,7 @@ mod tests {
         let target_str = target.to_string_lossy();
         cmd.args(["/C", &format!("echo overwritten > {target_str}")]);
 
-        let Some(child) = try_spawn(&policy, &cmd) else {
-            return;
-        };
+        let child = must_spawn(&policy, &cmd);
         let output = child.wait_with_output().expect("wait");
         assert!(
             output.status.code().is_some(),
@@ -1176,9 +1166,7 @@ mod tests {
         cmd.args(["/C", "echo done"]);
 
         {
-            let Some(child) = try_spawn(&policy, &cmd) else {
-                return;
-            };
+            let child = must_spawn(&policy, &cmd);
             let _ = child.wait_with_output();
         }
 
@@ -1279,13 +1267,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires non-elevated environment; run manually with --include-ignored"]
     fn prerequisites_not_met_for_system_temp_path() {
         // Verify that spawn() returns PrerequisitesNotMet when a path
         // under system temp is used (ancestors like C:\Users require
-        // elevation for traverse ACE grants). Skip if elevated.
-        if super::super::elevation::is_elevated() {
-            return;
-        }
+        // elevation for traverse ACE grants).
+        assert!(
+            !super::super::elevation::is_elevated(),
+            "test requires non-elevated environment"
+        );
 
         let _guard = TEST_LOCK
             .lock()
