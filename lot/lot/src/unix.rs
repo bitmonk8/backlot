@@ -680,7 +680,7 @@ impl UnixSandboxedChild {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_possible_wrap)]
 mod tests {
     use super::*;
 

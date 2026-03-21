@@ -298,9 +298,10 @@ mod tests {
         if available() {
             return true;
         }
-        if std::env::var("LOT_REQUIRE_SANDBOX").as_deref() == Ok("1") {
-            panic!("LOT_REQUIRE_SANDBOX=1 but cgroups v2 not available");
-        }
+        assert!(
+            std::env::var("LOT_REQUIRE_SANDBOX").as_deref() != Ok("1"),
+            "LOT_REQUIRE_SANDBOX=1 but cgroups v2 not available"
+        );
         eprintln!("[skip] cgroups v2 not available");
         false
     }
@@ -373,7 +374,6 @@ mod tests {
         // Parent: add the child to the cgroup.
         if let Err(e) = guard.add_process(pid) {
             eprintln!("[skip] add_process failed ({e}); cannot test cgroup membership");
-            return;
         }
         // Guard drop will kill the child and remove the cgroup.
         // ChildGuard drop ensures the zombie is reaped.
