@@ -6,10 +6,12 @@ use crate::error::SandboxError;
 /// process.
 ///
 /// Paths in `read_paths`, `write_paths`, `exec_paths`, and `deny_paths` must
-/// exist. Grant paths must not overlap with each other. Each deny path must be
-/// a strict child of a grant path, and no grant path may be nested under a deny
-/// path. Call [`SandboxPolicy::validate`] (or let [`spawn`](crate::spawn) call
-/// it) to check these constraints.
+/// exist. Grant paths must not overlap with each other, except that a write
+/// child under a read parent is allowed (directional overlap for elevated
+/// subdirectory permissions). Each deny path must be a strict child of a grant
+/// path, and no grant path may be nested under a deny path.
+/// Call [`SandboxPolicy::validate`] (or let [`spawn`](crate::spawn) call it)
+/// to check these constraints.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     read_paths: Vec<PathBuf>,

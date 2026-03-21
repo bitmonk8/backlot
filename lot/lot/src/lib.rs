@@ -470,6 +470,7 @@ impl SandboxedChild {
 
 /// Send a kill signal to a process by raw PID. Best-effort; errors are
 /// ignored because the process may have already exited.
+/// Each platform module owns its own guard logic (reject PID 0 / self).
 #[cfg(feature = "tokio")]
 fn kill_by_pid(pid: u32) {
     #[cfg(target_os = "macos")]

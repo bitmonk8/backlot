@@ -124,7 +124,7 @@ process:
   cwd: /project
 ```
 
-All sections are optional. An empty config file means deny-all (valid but most programs will fail immediately).
+All sections are optional except that at least one grant path (read, write, or exec) is required. An empty policy with no paths is rejected by `validate()`. A minimal config with only system paths (via `include_platform_exec: true`) is valid.
 
 ### `lot setup`
 

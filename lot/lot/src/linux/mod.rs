@@ -377,26 +377,11 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             }
 
             // Set up stdio: dup2 the child fds to 0/1/2
-            if child_stdin != 0 {
-                // SAFETY: both fds are valid
-                if unsafe { libc::dup2(child_stdin, 0) } < 0 {
-                    child_bail!(err_pipe_wr, STEP_DUP2, *libc::__errno_location());
-                }
-                unsafe { unix::close_if_not_std(child_stdin) };
-            }
-            if child_stdout != 1 {
-                // SAFETY: both fds are valid
-                if unsafe { libc::dup2(child_stdout, 1) } < 0 {
-                    child_bail!(err_pipe_wr, STEP_DUP2, *libc::__errno_location());
-                }
-                unsafe { unix::close_if_not_std(child_stdout) };
-            }
-            if child_stderr != 2 {
-                // SAFETY: both fds are valid
-                if unsafe { libc::dup2(child_stderr, 2) } < 0 {
-                    child_bail!(err_pipe_wr, STEP_DUP2, *libc::__errno_location());
-                }
-                unsafe { unix::close_if_not_std(child_stderr) };
+            // SAFETY: all fds are valid, single-threaded forked child
+            if let Err(errno) =
+                unsafe { unix::setup_stdio_fds(child_stdin, child_stdout, child_stderr) }
+            {
+                child_bail!(err_pipe_wr, STEP_DUP2, errno);
             }
 
             // Mount /proc — must happen in the inner child (inside PID
@@ -533,37 +518,7 @@ pub struct LinuxSandboxedChild {
 }
 
 impl LinuxSandboxedChild {
-    pub const fn id(&self) -> u32 {
-        self.inner.id()
-    }
-
-    pub fn kill(&self) -> io::Result<()> {
-        self.inner.kill()
-    }
-
-    pub fn wait(&self) -> io::Result<std::process::ExitStatus> {
-        self.inner.wait()
-    }
-
-    pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
-        self.inner.try_wait()
-    }
-
-    pub fn wait_with_output(mut self) -> io::Result<std::process::Output> {
-        self.inner.wait_with_output()
-    }
-
-    pub fn take_stdin(&mut self) -> Option<std::fs::File> {
-        self.inner.take_stdin()
-    }
-
-    pub fn take_stdout(&mut self) -> Option<std::fs::File> {
-        self.inner.take_stdout()
-    }
-
-    pub fn take_stderr(&mut self) -> Option<std::fs::File> {
-        self.inner.take_stderr()
-    }
+    unix::delegate_unix_child_methods!(inner);
 
     /// Kill the helper (and by extension, all namespaced descendants),
     /// wait for it to exit, close fds, and drop the cgroup guard.
@@ -588,12 +543,9 @@ impl LinuxSandboxedChild {
 #[cfg(feature = "tokio")]
 #[allow(unsafe_code)]
 pub fn kill_by_pid(pid: u32) {
-    let Some(pid_i32) = i32::try_from(pid).ok().filter(|&p| p > 0) else {
+    let Some(pid_i32) = unix::kill_by_pid_guard(pid) else {
         return;
     };
-    if pid == std::process::id() {
-        return;
-    }
     // SAFETY: Sending SIGKILL to a valid pid.
     unsafe {
         libc::kill(pid_i32, libc::SIGKILL);

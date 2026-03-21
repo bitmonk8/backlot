@@ -43,51 +43,6 @@ pub const fn probe() -> PlatformCapabilities {
     }
 }
 
-/// Apply resource limits via setrlimit.
-///
-/// Limitation: RLIMIT_AS is a soft limit — processes can bypass it with
-/// MAP_NORESERVE (lazy-commit mappings that don't count against the address
-/// space limit). macOS has no kernel-enforced memory cgroup equivalent.
-///
-/// # Safety
-/// Must only be called from the forked child before exec.
-unsafe fn apply_resource_limits(policy: &SandboxPolicy) -> io::Result<()> {
-    if let Some(max_mem) = policy.limits().max_memory_bytes {
-        let rlim = libc::rlimit {
-            rlim_cur: max_mem,
-            rlim_max: max_mem,
-        };
-        // SAFETY: rlim is a valid rlimit struct
-        if unsafe { libc::setrlimit(libc::RLIMIT_AS, &raw const rlim) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-
-    if let Some(max_procs) = policy.limits().max_processes {
-        let rlim = libc::rlimit {
-            rlim_cur: u64::from(max_procs),
-            rlim_max: u64::from(max_procs),
-        };
-        // SAFETY: rlim is a valid rlimit struct
-        if unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &raw const rlim) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-
-    if let Some(max_cpu) = policy.limits().max_cpu_seconds {
-        let rlim = libc::rlimit {
-            rlim_cur: max_cpu,
-            rlim_max: max_cpu,
-        };
-        // SAFETY: rlim is a valid rlimit struct
-        if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &raw const rlim) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-
-    Ok(())
-}
-
 pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<SandboxedChild> {
     // Step names are 1-indexed, matching the STEP_* constants in the child.
     const STEP_NAMES: &[&str] = &[
@@ -183,7 +138,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 
         // Apply resource limits
         // SAFETY: single-threaded child, before exec
-        if let Err(e) = unsafe { apply_resource_limits(policy) } {
+        if let Err(e) = unsafe { unix::apply_resource_limits(policy) } {
             child_bail!(
                 err_pipe_wr,
                 STEP_RLIMIT,
@@ -192,29 +147,11 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         }
 
         // Set up stdio: dup2 the child fds to 0/1/2
-        if child_stdin != 0 {
-            // SAFETY: both fds are valid
-            if unsafe { libc::dup2(child_stdin, 0) } < 0 {
-                child_bail!(err_pipe_wr, STEP_DUP2, *libc::__error());
-            }
-            // SAFETY: fd is valid
-            unsafe { unix::close_if_not_std(child_stdin) };
-        }
-        if child_stdout != 1 {
-            // SAFETY: both fds are valid
-            if unsafe { libc::dup2(child_stdout, 1) } < 0 {
-                child_bail!(err_pipe_wr, STEP_DUP2, *libc::__error());
-            }
-            // SAFETY: fd is valid
-            unsafe { unix::close_if_not_std(child_stdout) };
-        }
-        if child_stderr != 2 {
-            // SAFETY: both fds are valid
-            if unsafe { libc::dup2(child_stderr, 2) } < 0 {
-                child_bail!(err_pipe_wr, STEP_DUP2, *libc::__error());
-            }
-            // SAFETY: fd is valid
-            unsafe { unix::close_if_not_std(child_stderr) };
+        // SAFETY: all fds are valid, single-threaded forked child
+        if let Err(errno) =
+            unsafe { unix::setup_stdio_fds(child_stdin, child_stdout, child_stderr) }
+        {
+            child_bail!(err_pipe_wr, STEP_DUP2, errno);
         }
 
         // Change working directory if specified
@@ -286,41 +223,11 @@ pub struct MacSandboxedChild {
 }
 
 impl MacSandboxedChild {
-    pub const fn id(&self) -> u32 {
-        self.inner.id()
-    }
+    unix::delegate_unix_child_methods!(inner);
 
-    pub fn kill(&self) -> io::Result<()> {
-        self.inner.kill()
-    }
-
-    pub fn wait(&self) -> io::Result<std::process::ExitStatus> {
-        self.inner.wait()
-    }
-
-    pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
-        self.inner.try_wait()
-    }
-
-    pub fn wait_with_output(mut self) -> io::Result<std::process::Output> {
-        self.inner.wait_with_output()
-    }
-
-    pub fn take_stdin(&mut self) -> Option<std::fs::File> {
-        self.inner.take_stdin()
-    }
-
-    pub fn take_stdout(&mut self) -> Option<std::fs::File> {
-        self.inner.take_stdout()
-    }
-
-    pub fn take_stderr(&mut self) -> Option<std::fs::File> {
-        self.inner.take_stderr()
-    }
-
-    /// Kill the process group (child called setsid), wait for exit, close fds.
+    /// Close fds, kill the process group, wait for exit.
     ///
-    /// macOS seatbelt has no post-exit cleanup, so this is just kill + wait.
+    /// macOS seatbelt has no post-exit cleanup, so this is just close + kill + wait.
     /// Consumes `self`; Drop still runs but sees already-cleaned-up state.
     #[allow(clippy::unnecessary_wraps)] // Signature must match SandboxedChild::kill_and_cleanup
     pub fn kill_and_cleanup(mut self) -> crate::Result<()> {
@@ -335,12 +242,9 @@ impl MacSandboxedChild {
 #[cfg(feature = "tokio")]
 #[allow(unsafe_code)]
 pub fn kill_by_pid(pid: u32) {
-    let Some(pid_i32) = i32::try_from(pid).ok().filter(|&p| p > 0) else {
+    let Some(pid_i32) = unix::kill_by_pid_guard(pid) else {
         return;
     };
-    if pid == std::process::id() {
-        return;
-    }
     // macOS children call setsid(), so PGID == PID — negate to kill
     // the entire process group.
     // SAFETY: Sending SIGKILL to a valid negated PGID.

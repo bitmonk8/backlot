@@ -14,11 +14,11 @@ lot/                           (workspace root)
 │   │   ├── command.rs         — SandboxCommand builder
 │   │   ├── error.rs           — SandboxError
 │   │   ├── env_check.rs       — Pre-spawn env/path validation (TEMP, PATH reachability)
-│   │   ├── path_util.rs       — Shared path utilities (ancestry checks, lexical normalization)
+│   │   ├── path_util.rs       — Shared path utilities (ancestry checks, `canonicalize_existing_prefix`, `canonicalize_best_effort`, lexical normalization)
 │   │   ├── unix.rs            — Shared Unix helpers (pipes, stdio, UnixSandboxedChild lifecycle, child_bail)
 │   │   ├── linux/
 │   │   │   ├── mod.rs         — LinuxSandbox: orchestrates namespace + seccomp + cgroup
-│   │   │   ├── namespace.rs   — fork()+unshare(), pivot_root, bind mounts, uid/gid mapping
+│   │   │   ├── namespace.rs   — Namespace setup: bind mounts, pivot_root, uid/gid mapping (fork+unshare are in mod.rs)
 │   │   │   ├── seccomp.rs     — BPF filter construction and application
 │   │   │   └── cgroup.rs      — cgroup v2 creation, limit writes, cleanup
 │   │   ├── macos/
@@ -88,13 +88,13 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 
 **cgroups v2** enforces resource limits using the sibling cgroup model (to respect the cgroupv2 "no internal processes" constraint):
 - Memory limit (`memory.max`).
-- CPU bandwidth (`cpu.max` — period/quota).
 - PID limit (`pids.max` — prevent fork bombs).
+- CPU bandwidth (`cpu.max`) is **not** written by the code. `cpu.max` controls bandwidth/rate, not total accumulated CPU time, so it is intentionally omitted.
 - Cgroup created per sandbox invocation, cleaned up on drop.
 
 **Filesystem setup:**
 1. Create tmpfs at a temporary mount point.
-2. Bind-mount allowed read-only paths with `MS_RDONLY | MS_NOSUID | MS_NODEV`.
+2. Bind-mount allowed read-only paths with `MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC`.
 3. Bind-mount allowed read-write paths with `MS_NOSUID | MS_NODEV`.
 4. Bind-mount allowed executable paths with `MS_RDONLY | MS_NOSUID | MS_NODEV` (no `MS_NOEXEC`).
 5. Overmount each deny path with an empty read-only tmpfs (`size=0`, `MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC`). Must happen after step 2–4 so the parent grant mount exists. The denied subtree appears as an empty directory; reads/writes/creates fail with ENOENT/EROFS.
@@ -156,7 +156,7 @@ The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `
 
 **Filesystem access:**
 - Before launch, grant the package SID read or read-write ACL entries on allowed paths (`SetEntriesInAcl`, `SetNamedSecurityInfo`).
-- For deny paths, add explicit deny ACEs (`DENY_ACCESS` with `FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE`, `SUB_CONTAINERS_AND_OBJECTS_INHERIT`). Windows evaluates explicit denies before explicit allows, so these override inherited grants from parent directories.
+- For deny paths, add explicit deny ACEs (`DENY_ACCESS` with `FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE`, `SUB_CONTAINERS_AND_OBJECTS_INHERIT`) and set `PROTECTED_DACL_SECURITY_INFORMATION` to prevent inherited allows from overriding explicit denies. Windows evaluates explicit denies before explicit allows, and the protected DACL flag ensures the deny is effective.
 - On cleanup, remove the ACL entries (restore original DACLs from saved SDDL strings).
 
 **Network access:**
@@ -172,7 +172,7 @@ The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `
 **Sentinel file ACL recovery:**
 1. Before granting ACLs, write a manifest of modified paths + original DACLs to a sentinel file.
 2. On normal exit, restore ACLs and delete sentinel.
-3. On next `spawn()`, check for stale sentinels from crashed sessions and restore ACLs before proceeding.
+3. Stale sentinel cleanup from crashed sessions requires an explicit `cleanup_stale()` call; it is not automatic on `spawn()`.
 4. `cleanup_stale()` is exposed as a public function for explicit control.
 
 ---
@@ -252,7 +252,7 @@ Lot does not silently degrade. If a required mechanism is unavailable, `spawn()`
 | Situation | Behavior |
 |---|---|
 | Linux: user namespaces disabled | `SandboxError::Setup` with actionable message |
-| Linux: cgroups v2 not mounted or not delegated | `SandboxError::Setup` with diagnostic (how to enable delegation) |
+| Linux: cgroups v2 not mounted or not delegated | `SandboxError::Setup` with diagnostic — only when resource limits are requested in the policy |
 | Linux: seccomp not available | `SandboxError::Setup` — namespaces without seccomp is too weak |
 | macOS: `sandbox_init` fails | `SandboxError::Setup` — no fallback |
 | Windows: AppContainer profile creation fails | `SandboxError::Setup` |

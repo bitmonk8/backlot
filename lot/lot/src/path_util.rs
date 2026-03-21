@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::error::SandboxError;
 
 /// True if `child` is equal to `parent` or a descendant of it.
-/// Tries canonicalization first; falls back to lexical comparison.
+/// Tries canonicalization first; falls back to partial canonicalization
+/// via `canonicalize_existing_prefix`.
 /// When only one path canonicalizes, resolves the other's existing
 /// ancestor prefix to avoid mismatches from symlinks (e.g.,
 /// `/var` -> `/private/var` on macOS).

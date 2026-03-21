@@ -107,7 +107,7 @@ pub fn open_dev_null(flags: i32) -> io::Result<i32> {
 
 /// Create a pipe pair with `O_CLOEXEC`. Returns `(read_fd, write_fd)`.
 ///
-/// Uses `pipe2` on Linux (atomic), `pipe` + `fcntl` on macOS.
+/// Uses `pipe2` on Linux (atomic), `pipe` + `fcntl` on non-Linux Unix.
 pub fn make_pipe() -> io::Result<(i32, i32)> {
     let mut fds = [0i32; 2];
 
@@ -496,6 +496,152 @@ pub enum KillStyle {
     /// started a new session.
     KillProcessGroup,
 }
+
+/// Dup2 child fds to stdin/stdout/stderr. Returns `Err(errno)` on failure.
+/// Closes original fds if they differ from the target standard fds.
+///
+/// # Safety
+/// All fds must be valid. Must only be called in a forked child.
+pub unsafe fn setup_stdio_fds(
+    child_stdin: i32,
+    child_stdout: i32,
+    child_stderr: i32,
+) -> std::result::Result<(), i32> {
+    if child_stdin != 0 {
+        // SAFETY: both fds are valid
+        if unsafe { libc::dup2(child_stdin, 0) } < 0 {
+            return Err(errno());
+        }
+        // SAFETY: fd is valid
+        unsafe { close_if_not_std(child_stdin) };
+    }
+    if child_stdout != 1 {
+        // SAFETY: both fds are valid
+        if unsafe { libc::dup2(child_stdout, 1) } < 0 {
+            return Err(errno());
+        }
+        // SAFETY: fd is valid
+        unsafe { close_if_not_std(child_stdout) };
+    }
+    if child_stderr != 2 {
+        // SAFETY: both fds are valid
+        if unsafe { libc::dup2(child_stderr, 2) } < 0 {
+            return Err(errno());
+        }
+        // SAFETY: fd is valid
+        unsafe { close_if_not_std(child_stderr) };
+    }
+    Ok(())
+}
+
+/// Apply resource limits via setrlimit. Used by macOS.
+///
+/// # Safety
+/// Must only be called from the forked child before exec.
+pub unsafe fn apply_resource_limits(policy: &crate::policy::SandboxPolicy) -> io::Result<()> {
+    if let Some(max_mem) = policy.limits().max_memory_bytes {
+        let rlim = libc::rlimit {
+            rlim_cur: max_mem,
+            rlim_max: max_mem,
+        };
+        // SAFETY: rlim is a valid rlimit struct
+        if unsafe { libc::setrlimit(libc::RLIMIT_AS, &raw const rlim) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    if let Some(max_procs) = policy.limits().max_processes {
+        let rlim = libc::rlimit {
+            rlim_cur: u64::from(max_procs),
+            rlim_max: u64::from(max_procs),
+        };
+        // SAFETY: rlim is a valid rlimit struct
+        if unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &raw const rlim) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    if let Some(max_cpu) = policy.limits().max_cpu_seconds {
+        let rlim = libc::rlimit {
+            rlim_cur: max_cpu,
+            rlim_max: max_cpu,
+        };
+        // SAFETY: rlim is a valid rlimit struct
+        if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &raw const rlim) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    Ok(())
+}
+
+/// Platform-specific errno accessor. Returns the current errno value.
+#[allow(unsafe_code)]
+pub fn errno() -> i32 {
+    #[cfg(target_os = "linux")]
+    // SAFETY: errno access has no preconditions
+    unsafe {
+        *libc::__errno_location()
+    }
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: errno access has no preconditions
+    unsafe {
+        *libc::__error()
+    }
+}
+
+/// Common guard logic for `kill_by_pid`: reject PID 0, negative PIDs,
+/// and our own PID. Returns `Some(pid_i32)` if the kill should proceed.
+#[cfg(feature = "tokio")]
+pub fn kill_by_pid_guard(pid: u32) -> Option<i32> {
+    let pid_i32 = i32::try_from(pid).ok().filter(|&p| p > 0)?;
+    if pid == std::process::id() {
+        return None;
+    }
+    Some(pid_i32)
+}
+
+/// Generate delegation methods from a platform wrapper to its inner
+/// `UnixSandboxedChild`. Platform wrappers hold platform-specific cleanup
+/// state so they cannot expose `UnixSandboxedChild` directly; this macro
+/// keeps their public API surface identical via delegation.
+macro_rules! delegate_unix_child_methods {
+    ($field:ident) => {
+        pub const fn id(&self) -> u32 {
+            self.$field.id()
+        }
+
+        pub fn kill(&self) -> std::io::Result<()> {
+            self.$field.kill()
+        }
+
+        pub fn wait(&self) -> std::io::Result<std::process::ExitStatus> {
+            self.$field.wait()
+        }
+
+        pub fn try_wait(&self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            self.$field.try_wait()
+        }
+
+        pub fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
+            self.$field.wait_with_output()
+        }
+
+        pub fn take_stdin(&mut self) -> Option<std::fs::File> {
+            self.$field.take_stdin()
+        }
+
+        pub fn take_stdout(&mut self) -> Option<std::fs::File> {
+            self.$field.take_stdout()
+        }
+
+        pub fn take_stderr(&mut self) -> Option<std::fs::File> {
+            self.$field.take_stderr()
+        }
+    };
+}
+
+pub(crate) use delegate_unix_child_methods;
 
 /// Shared lifecycle state for a sandboxed Unix child process.
 ///

@@ -40,9 +40,13 @@ fn is_dir_accessible(
 /// reference directories the sandbox can actually access. Returns
 /// `InvalidPolicy` with actionable guidance if any are unreachable.
 ///
-/// A directory is considered accessible if it falls under a policy grant path
-/// OR under a platform-implicit path (system dirs each platform auto-mounts
-/// or allows by default).
+/// Two different accessibility rules apply:
+/// - **TEMP/TMP/TMPDIR**: must be under a **write path** only (temp dirs need
+///   write access). Grant paths and implicit paths are not sufficient.
+/// - **PATH entries**: must be under a grant path (read, write, or exec) OR
+///   under a platform-implicit path (system dirs each platform auto-mounts).
+///
+/// Both checks reject directories under deny paths.
 pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
 
