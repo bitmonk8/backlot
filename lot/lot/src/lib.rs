@@ -318,7 +318,7 @@ impl SandboxedChild {
     }
 
     /// Forcibly terminate the sandboxed process.
-    pub fn kill(&mut self) -> std::io::Result<()> {
+    pub fn kill(&self) -> std::io::Result<()> {
         platform_dispatch!(
             self,
             kill(),

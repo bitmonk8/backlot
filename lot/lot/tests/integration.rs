@@ -1208,7 +1208,7 @@ fn test_try_wait_returns_none_then_some() {
     let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(mut child) = try_spawn(&policy, &cmd) else {
+    let Some(child) = try_spawn(&policy, &cmd) else {
         return;
     };
 
@@ -1246,7 +1246,7 @@ fn test_kill_terminates_running_process() {
     let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    let Some(mut child) = try_spawn(&policy, &cmd) else {
+    let Some(child) = try_spawn(&policy, &cmd) else {
         return;
     };
 

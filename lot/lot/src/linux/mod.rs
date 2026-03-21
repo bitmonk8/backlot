@@ -537,7 +537,7 @@ impl LinuxSandboxedChild {
         self.inner.id()
     }
 
-    pub fn kill(&mut self) -> io::Result<()> {
+    pub fn kill(&self) -> io::Result<()> {
         self.inner.kill()
     }
 

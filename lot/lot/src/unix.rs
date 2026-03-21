@@ -533,10 +533,7 @@ impl UnixSandboxedChild {
         }
     }
 
-    // &mut self matches the public API (SandboxedChild::kill) even though
-    // the body no longer mutates — callers hold &mut for the wait/reap path.
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    pub fn kill(&mut self) -> io::Result<()> {
+    pub fn kill(&self) -> io::Result<()> {
         if self.waited.load(Ordering::Acquire) {
             return Ok(());
         }

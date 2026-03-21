@@ -287,7 +287,7 @@ impl WindowsSandboxedChild {
         self.pid
     }
 
-    pub fn kill(&mut self) -> io::Result<()> {
+    pub fn kill(&self) -> io::Result<()> {
         // SAFETY: process_handle is valid from CreateProcessW.
         let ret = unsafe { TerminateProcess(self.process_handle, 1) };
         if ret == FALSE {
