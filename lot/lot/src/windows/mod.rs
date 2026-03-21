@@ -42,8 +42,8 @@ pub fn win32_error_msg(code: u32) -> String {
 
 pub use appcontainer::WindowsSandboxedChild;
 
-/// Directories Windows makes accessible to AppContainer processes by default.
-pub fn platform_implicit_read_paths() -> Vec<std::path::PathBuf> {
+/// Directories Windows makes accessible to sandboxed processes (auto-mounted or always-allowed).
+pub fn platform_implicit_paths() -> Vec<std::path::PathBuf> {
     let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
     vec![std::path::PathBuf::from(&sys_root)]
 }

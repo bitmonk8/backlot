@@ -11,8 +11,8 @@ use crate::unix;
 use crate::unix::{KillStyle, UnixSandboxedChild};
 use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
 
-/// Directories macOS makes accessible to sandboxed processes (Seatbelt defaults).
-pub fn platform_implicit_read_paths() -> Vec<std::path::PathBuf> {
+/// Directories macOS makes accessible to sandboxed processes (auto-mounted or always-allowed).
+pub fn platform_implicit_paths() -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
     for p in &[
         "/usr/lib",

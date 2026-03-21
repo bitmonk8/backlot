@@ -82,12 +82,23 @@ fn canon(path: &std::path::Path, which: &str) -> Result<PathBuf, SandboxError> {
     })
 }
 
+/// Controls whether `check_cross_overlap` rejects both nesting directions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OverlapMode {
+    /// Reject nesting in both directions (a-under-b and b-under-a).
+    Symmetric,
+    /// Allow b-children under a-parents (elevated subdirectory under
+    /// lower-privilege parent, e.g. write child under read parent).
+    AllowBUnderA,
+}
+
 /// Check for parent/child overlaps between two named sets of canonicalized paths.
 fn check_cross_overlap(
     a_paths: &[PathBuf],
     a_name: &str,
     b_paths: &[PathBuf],
     b_name: &str,
+    mode: OverlapMode,
 ) -> Result<(), SandboxError> {
     for a in a_paths {
         for b in b_paths {
@@ -97,13 +108,8 @@ fn check_cross_overlap(
                     a.display()
                 )));
             }
-            if crate::path_util::is_strict_parent_of(a, b) {
-                return Err(SandboxError::InvalidPolicy(format!(
-                    "parent/child overlap between {a_name} and {b_name}: {} contains {}",
-                    a.display(),
-                    b.display()
-                )));
-            }
+            // b parent of a: always rejected (a is redundant or lower-priv
+            // child under higher-priv parent).
             if crate::path_util::is_strict_parent_of(b, a) {
                 return Err(SandboxError::InvalidPolicy(format!(
                     "parent/child overlap between {b_name} and {a_name}: {} contains {}",
@@ -111,35 +117,13 @@ fn check_cross_overlap(
                     a.display()
                 )));
             }
-        }
-    }
-    Ok(())
-}
-
-/// Like [`check_cross_overlap`] but allows `higher` (higher-privilege) children
-/// under `lower` (lower-privilege) parents.  Rejects exact duplicates, `lower` children
-/// under `higher` parents (redundant), and `higher` parents over `lower` children.
-fn check_cross_overlap_directional(
-    lower_priv_paths: &[PathBuf],
-    lower_name: &str,
-    higher_priv_paths: &[PathBuf],
-    higher_name: &str,
-) -> Result<(), SandboxError> {
-    for lower in lower_priv_paths {
-        for higher in higher_priv_paths {
-            if lower == higher {
+            // a parent of b: rejected unless directional mode allows it
+            // (elevated subdirectory under lower-privilege parent).
+            if mode == OverlapMode::Symmetric && crate::path_util::is_strict_parent_of(a, b) {
                 return Err(SandboxError::InvalidPolicy(format!(
-                    "path appears in both {lower_name} and {higher_name}: {}",
-                    lower.display()
-                )));
-            }
-            // higher child under lower parent is allowed (elevated subdirectory).
-            // lower child under higher parent is redundant (higher already covers lower).
-            if crate::path_util::is_strict_parent_of(higher, lower) {
-                return Err(SandboxError::InvalidPolicy(format!(
-                    "parent/child overlap between {higher_name} and {lower_name}: {} contains {}",
-                    higher.display(),
-                    lower.display()
+                    "parent/child overlap between {a_name} and {b_name}: {} contains {}",
+                    a.display(),
+                    b.display()
                 )));
             }
         }
@@ -227,10 +211,12 @@ fn canon_collect(paths: &[PathBuf], label: &str, errors: &mut Vec<String>) -> Ve
     result
 }
 
-/// If `result` is an `InvalidPolicy` error, push the message into `errors`.
+/// If `result` is an error, push the message into `errors`.
 fn collect_validation_error(result: Result<(), SandboxError>, errors: &mut Vec<String>) {
-    if let Err(SandboxError::InvalidPolicy(msg)) = result {
-        errors.push(msg);
+    match result {
+        Ok(()) => {}
+        Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
+        Err(other) => errors.push(other.to_string()),
     }
 }
 
@@ -277,9 +263,13 @@ impl SandboxPolicy {
             errors.push("policy must specify at least one path".into());
         }
 
-        // Canonicalize all paths. This also validates existence.
+        // Re-canonicalize even though the builder may have already canonicalized.
+        // This catches paths constructed via `SandboxPolicy::new()` directly and
+        // validates that previously-canonical paths still exist on disk.
         // Collect canonicalization errors but continue with successfully
         // canonicalized paths so subsequent checks can still run.
+        // Paths that fail canonicalization are intentionally excluded from overlap
+        // checks — their non-existence is already reported as an error above.
         let read_canon = canon_collect(&self.read_paths, "read_paths", &mut errors);
         let write_canon = canon_collect(&self.write_paths, "write_paths", &mut errors);
         let exec_canon = canon_collect(&self.exec_paths, "exec_paths", &mut errors);
@@ -301,15 +291,33 @@ impl SandboxPolicy {
         // read-only. The reverse (read child under write parent) is redundant
         // and rejected.
         collect_validation_error(
-            check_cross_overlap_directional(&read_canon, "read_paths", &write_canon, "write_paths"),
+            check_cross_overlap(
+                &read_canon,
+                "read_paths",
+                &write_canon,
+                "write_paths",
+                OverlapMode::AllowBUnderA,
+            ),
             &mut errors,
         );
         collect_validation_error(
-            check_cross_overlap(&read_canon, "read_paths", &exec_canon, "exec_paths"),
+            check_cross_overlap(
+                &read_canon,
+                "read_paths",
+                &exec_canon,
+                "exec_paths",
+                OverlapMode::Symmetric,
+            ),
             &mut errors,
         );
         collect_validation_error(
-            check_cross_overlap(&write_canon, "write_paths", &exec_canon, "exec_paths"),
+            check_cross_overlap(
+                &write_canon,
+                "write_paths",
+                &exec_canon,
+                "exec_paths",
+                OverlapMode::Symmetric,
+            ),
             &mut errors,
         );
 
@@ -671,16 +679,38 @@ mod tests {
     }
 
     #[test]
-    fn exec_paths_parent_child_overlap_rejected() {
+    fn exec_parent_read_child_overlap_rejected() {
         let tmp = make_temp_dir();
         let parent = tmp.path().to_path_buf();
         let child = tmp.path().join("bin");
         std::fs::create_dir(&child).expect("create subdir");
 
-        // exec parent contains read child
         let policy = SandboxPolicy {
             read_paths: vec![child],
             write_paths: Vec::new(),
+            exec_paths: vec![parent],
+            deny_paths: Vec::new(),
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("overlap"),
+            "error should mention overlap: {msg}"
+        );
+    }
+
+    #[test]
+    fn exec_parent_write_child_overlap_rejected() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let child = tmp.path().join("data");
+        std::fs::create_dir(&child).expect("create subdir");
+
+        let policy = SandboxPolicy {
+            read_paths: Vec::new(),
+            write_paths: vec![child],
             exec_paths: vec![parent],
             deny_paths: Vec::new(),
             allow_network: false,

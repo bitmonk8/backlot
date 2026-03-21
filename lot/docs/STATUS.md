@@ -10,13 +10,14 @@ Clear all issues in `docs/ISSUES.md`.
 
 ## Next Work
 
-**Group 2: Policy Validation & Path Safety**
+**Group 4: Linux Cgroup Issues (4.3, 4.4)**
 
 ## Completed
 
 - Full implementation (Linux, macOS, Windows)
 - CI pipeline (format, clippy, build, test on all 3 platforms)
 - Group 1: Sandbox Enforcement Correctness (1.1 kill_and_reap deadlock, 1.2 bind_mount submounts, 1.3 escape_sbpl_path)
+- Group 2: Policy Validation & Path Safety (2.1–2.8)
 - Group 3: CI Test Reliability — Silent Skips (3.1, 3.2, 3.3)
 - Group 4.1: Post-fork `_exit` fix
 - Group 4.2: Test zombie process fix

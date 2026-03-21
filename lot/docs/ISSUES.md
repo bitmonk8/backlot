@@ -1,41 +1,5 @@
 # Known Issues
 
-## Group 2: Policy Validation & Path Safety
-
-### 2.1 [Correctness] TEMP and PATH validation ignores deny_paths
-- **File:** `lot/src/env_check.rs` lines 55-69, 73-88
-- **Description:** TEMP and PATH validation do not account for deny_paths. A TEMP dir under a deny_path that overrides a write_path grant passes validation but fails at runtime. Same issue for PATH entries under deny_paths.
-
-### 2.2 [Correctness] `effective_env` first-match may disagree with spawner semantics
-- **File:** `lot/src/env_check.rs` lines 100-113
-- **Description:** `effective_env` returns first match in `command.env` Vec. If spawner uses last-wins semantics for duplicate keys, validation checks the wrong directory. Requires user misuse (calling `.env()` with same key twice); matches platform `getenv` first-match behavior.
-
-### 2.3 [Correctness] `collect_validation_error` silently discards non-`InvalidPolicy` errors
-- **File:** `lot/src/policy.rs` lines 231-235
-- **Description:** `collect_validation_error` silently discards non-`InvalidPolicy` error variants. Currently all callers only produce `InvalidPolicy`, but a defensive catch-all would guard against future changes.
-
-### 2.4 [Correctness] `validate()` runs checks on partially-canonicalized paths
-- **File:** `lot/src/policy.rs` lines 273-330
-- **Description:** `validate()` runs overlap/coverage checks on partially-canonicalized path sets. Paths that fail canonicalization are omitted from overlap checks, but their errors are still collected. No user-visible incorrect behavior.
-
-### 2.5 [Simplification] Double canonicalization in policy pipeline
-- **Files:** `lot/src/policy.rs`, `lot/src/policy_builder.rs`
-- **Description:** Builder canonicalizes on insert, `validate()` re-canonicalizes.
-
-### 2.6 [Simplification] `check_cross_overlap` logic duplication
-- **File:** `lot/src/policy.rs` lines 86-148
-- **Description:** `check_cross_overlap` and `check_cross_overlap_directional` share most logic. Could unify (~30 lines saved).
-
-### 2.7 [Separation] Platform directory lists maintained independently
-- **Files:** Platform dirs across `linux/mod.rs`, `macos/mod.rs`, `windows/mod.rs`
-- **Description:** Three overlapping platform directory lists maintained independently. Adding a dir to one without updating others could cause validation failures or sandbox escapes.
-
-### 2.8 [Naming] `platform_implicit_read_paths` misnomer
-- **File:** `lot/src/linux/mod.rs` line 21
-- **Description:** `platform_implicit_read_paths` includes executable dirs (`/bin`, `/usr/bin`). Name says "read" but returns exec paths.
-
----
-
 ## Group 4: Linux Cgroup Issues
 
 ### 4.3 [Simplification] Near-identical cgroup blocks and duplicated cgroup.kill

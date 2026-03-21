@@ -12,10 +12,25 @@ use crate::error::SandboxError;
 use crate::path_util::canonicalize_best_effort;
 use crate::policy::SandboxPolicy;
 
-/// Check if `dir` is accessible given pre-canonicalized grant and implicit paths.
+/// True if the resolved path falls under any deny path.
+fn is_denied(resolved: &Path, canon_deny: &[PathBuf]) -> bool {
+    canon_deny.iter().any(|d| resolved.starts_with(d))
+}
+
+/// Check if `dir` is accessible given pre-canonicalized grant, implicit, and deny paths.
 /// Canonicalizes only `dir` (once) instead of re-canonicalizing grants per call.
-fn is_dir_accessible(dir: &Path, canon_grants: &[PathBuf], canon_implicit: &[PathBuf]) -> bool {
+/// A dir under a deny path is inaccessible even if covered by a grant or implicit path.
+fn is_dir_accessible(
+    dir: &Path,
+    canon_grants: &[PathBuf],
+    canon_implicit: &[PathBuf],
+    canon_deny: &[PathBuf],
+) -> bool {
     let resolved_dir = canonicalize_best_effort(dir);
+
+    if is_denied(&resolved_dir, canon_deny) {
+        return false;
+    }
 
     canon_grants.iter().any(|g| resolved_dir.starts_with(g))
         || canon_implicit.iter().any(|g| resolved_dir.starts_with(g))
@@ -31,7 +46,7 @@ fn is_dir_accessible(dir: &Path, canon_grants: &[PathBuf], canon_implicit: &[Pat
 pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
 
-    let implicit = crate::platform_implicit_read_paths();
+    let implicit = crate::platform_implicit_paths();
     let grant_paths = policy.grant_paths();
 
     // Pre-canonicalize grant, implicit, and write paths once to avoid
@@ -49,15 +64,26 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
         .iter()
         .map(|p| canonicalize_best_effort(p))
         .collect();
+    let canon_deny: Vec<PathBuf> = policy
+        .deny_paths()
+        .iter()
+        .map(|p| canonicalize_best_effort(p))
+        .collect();
 
-    // TEMP/TMP/TMPDIR must be under a write path (temp dirs need write access).
-    // Platform-implicit paths are read-only, so they don't satisfy temp.
+    // TEMP/TMP/TMPDIR must be under a write path (temp dirs need write access)
+    // and must not be under a deny path (deny overrides all grants).
     for key in &["TEMP", "TMP", "TMPDIR"] {
         if let Some(val) = effective_env(command, key) {
             let dir = Path::new(&val);
             if !dir.as_os_str().is_empty() {
                 let resolved = canonicalize_best_effort(dir);
-                if !canon_write_paths.iter().any(|wp| resolved.starts_with(wp)) {
+                if is_denied(&resolved, &canon_deny) {
+                    errors.push(format!(
+                        "{key}={} is under a deny_path and will be inaccessible at runtime. \
+                         Override it with SandboxCommand::env(\"{key}\", <a non-denied path>)",
+                        dir.display()
+                    ));
+                } else if !canon_write_paths.iter().any(|wp| resolved.starts_with(wp)) {
                     errors.push(format!(
                         "{key}={} is not covered by any write_path in the policy. \
                          Either add it as a write_path or override it with \
@@ -69,11 +95,12 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
         }
     }
 
-    // PATH entries must be readable (covered by a grant path or platform-implicit).
+    // PATH entries must be readable (covered by a grant path or platform-implicit)
+    // and must not be under a deny path.
     if let Some(val) = effective_env(command, "PATH") {
         let uncovered: Vec<String> = std::env::split_paths(&val)
             .filter(|entry| !entry.as_os_str().is_empty())
-            .filter(|entry| !is_dir_accessible(entry, &canon_grants, &canon_implicit))
+            .filter(|entry| !is_dir_accessible(entry, &canon_grants, &canon_implicit, &canon_deny))
             .map(|entry| entry.display().to_string())
             .collect();
         if !uncovered.is_empty() {
@@ -95,8 +122,13 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
 }
 
 /// Resolve the effective value of an env var as the child will see it.
+///
+/// Uses first-match semantics intentionally: on Unix the env Vec becomes envp
+/// directly (first-in-Vec = first in envp = what getenv returns), and on Windows
+/// `CreateProcessW` also uses the first occurrence in the environment block.
 pub fn effective_env(command: &SandboxCommand, key: &str) -> Option<OsString> {
-    // Explicit override in command.env takes priority.
+    // Explicit override in command.env takes priority (first match = what the
+    // child's getenv/GetEnvironmentVariable will return).
     for (k, v) in &command.env {
         let matches = {
             #[cfg(target_os = "windows")]
@@ -248,6 +280,68 @@ mod tests {
     }
 
     #[test]
+    fn validate_env_rejects_temp_under_deny_path() {
+        let write_dir = tempfile::TempDir::new().expect("create temp dir");
+        let denied = write_dir.path().join("denied");
+        std::fs::create_dir(&denied).expect("create denied dir");
+
+        let policy = SandboxPolicy::new(
+            vec![],
+            vec![write_dir.path().to_path_buf()],
+            vec![],
+            vec![denied.clone()],
+            false,
+            ResourceLimits::default(),
+        );
+
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("TEMP", &denied);
+        #[cfg(target_os = "windows")]
+        {
+            let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+            cmd.env("PATH", format!(r"{sys_root}\System32"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("PATH", "/usr/bin");
+
+        let err = validate_env_accessibility(&policy, &cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("deny_path"),
+            "error should mention deny_path: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_env_rejects_path_entry_under_deny_path() {
+        let grant_dir = tempfile::TempDir::new().expect("create temp dir");
+        let write_dir = tempfile::TempDir::new().expect("create temp dir");
+        let denied = grant_dir.path().join("denied");
+        std::fs::create_dir(&denied).expect("create denied dir");
+
+        let policy = SandboxPolicy::new(
+            vec![grant_dir.path().to_path_buf()],
+            vec![write_dir.path().to_path_buf()],
+            vec![],
+            vec![denied.clone()],
+            false,
+            ResourceLimits::default(),
+        );
+
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("TEMP", write_dir.path());
+        cmd.env("PATH", &denied);
+
+        let err = validate_env_accessibility(&policy, &cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("PATH"), "error should mention PATH: {msg}");
+        assert!(
+            msg.contains("not accessible"),
+            "error should mention inaccessibility: {msg}"
+        );
+    }
+
+    #[test]
     fn effective_env_explicit_override() {
         let mut cmd = SandboxCommand::new("dummy");
         cmd.env("FOO", "bar");
@@ -277,7 +371,7 @@ mod tests {
         let canon = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let child = dir.path().join("sub");
         std::fs::create_dir(&child).expect("create subdir");
-        assert!(is_dir_accessible(&child, &[canon], &[]));
+        assert!(is_dir_accessible(&child, &[canon], &[], &[]));
     }
 
     #[test]
@@ -286,7 +380,7 @@ mod tests {
         let canon = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let child = dir.path().join("sub");
         std::fs::create_dir(&child).expect("create subdir");
-        assert!(is_dir_accessible(&child, &[], &[canon]));
+        assert!(is_dir_accessible(&child, &[], &[canon], &[]));
     }
 
     #[test]
@@ -294,16 +388,57 @@ mod tests {
         let a = tempfile::TempDir::new().expect("create temp dir");
         let b = tempfile::TempDir::new().expect("create temp dir");
         let canon_a = std::fs::canonicalize(a.path()).expect("canonicalize");
-        assert!(!is_dir_accessible(b.path(), &[canon_a], &[]));
+        assert!(!is_dir_accessible(b.path(), &[canon_a], &[], &[]));
     }
 
-    /// Default PATH entries must be a subset of platform_implicit_read_paths,
+    #[test]
+    fn is_dir_accessible_denied_subtree() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let grant = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let denied = dir.path().join("secret");
+        let query = dir.path().join("secret").join("deep");
+        std::fs::create_dir_all(&query).expect("create dirs");
+        let canon_deny = std::fs::canonicalize(&denied).expect("canonicalize");
+        // Grant covers parent, deny carves out subtree — query inside denied subtree.
+        assert!(!is_dir_accessible(
+            &query,
+            std::slice::from_ref(&grant),
+            &[],
+            std::slice::from_ref(&canon_deny),
+        ));
+        // Sibling outside denied subtree is still accessible.
+        let sibling = dir.path().join("allowed");
+        std::fs::create_dir(&sibling).expect("create sibling");
+        assert!(is_dir_accessible(
+            &sibling,
+            std::slice::from_ref(&grant),
+            &[],
+            std::slice::from_ref(&canon_deny),
+        ));
+    }
+
+    #[test]
+    fn is_dir_accessible_denied_overrides_implicit() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let canon = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        let child = dir.path().join("sub");
+        std::fs::create_dir(&child).expect("create subdir");
+        // Implicit but also denied — deny wins.
+        assert!(!is_dir_accessible(
+            &child,
+            &[],
+            std::slice::from_ref(&canon),
+            std::slice::from_ref(&canon),
+        ));
+    }
+
+    /// Default PATH entries must be a subset of platform_implicit_paths,
     /// otherwise validate_env_accessibility would reject empty-env configs.
     #[test]
     #[cfg(unix)]
-    fn default_path_subset_of_implicit_read_paths() {
+    fn default_path_subset_of_implicit_paths() {
         use crate::path_util::is_descendant_or_equal;
-        let implicit = crate::platform_implicit_read_paths();
+        let implicit = crate::platform_implicit_paths();
         for entry in DEFAULT_UNIX_PATH.split(':') {
             let entry_path = Path::new(entry);
             if !entry_path.exists() {
@@ -314,7 +449,7 @@ mod tests {
                 .any(|imp| is_descendant_or_equal(imp, entry_path));
             assert!(
                 covered,
-                "default PATH entry {entry} is not covered by platform_implicit_read_paths"
+                "default PATH entry {entry} is not covered by platform_implicit_paths"
             );
         }
     }

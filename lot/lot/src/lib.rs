@@ -141,16 +141,20 @@ pub fn probe() -> PlatformCapabilities {
 }
 
 /// Directories each platform makes accessible to sandboxed processes
-/// regardless of what the policy grants. Dispatches to platform modules.
-pub(crate) fn platform_implicit_read_paths() -> Vec<std::path::PathBuf> {
+/// regardless of what the policy grants (libraries, executables, system dirs).
+///
+/// Each platform's list is intentionally different — it reflects the dirs that
+/// platform's sandbox mechanism auto-mounts or always allows. The lists are
+/// maintained in each platform module because they have no meaningful overlap.
+pub(crate) fn platform_implicit_paths() -> Vec<std::path::PathBuf> {
     #[cfg(target_os = "linux")]
-    return linux::platform_implicit_read_paths();
+    return linux::platform_implicit_paths();
 
     #[cfg(target_os = "macos")]
-    return macos::platform_implicit_read_paths();
+    return macos::platform_implicit_paths();
 
     #[cfg(target_os = "windows")]
-    return windows::platform_implicit_read_paths();
+    return windows::platform_implicit_paths();
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     return Vec::new();

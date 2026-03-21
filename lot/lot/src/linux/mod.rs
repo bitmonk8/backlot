@@ -17,8 +17,8 @@ use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
 
 use cgroup::CgroupGuard;
 
-/// Directories Linux makes accessible to sandboxed processes (auto-mounted).
-pub fn platform_implicit_read_paths() -> Vec<std::path::PathBuf> {
+/// Directories Linux makes accessible to sandboxed processes (auto-mounted or always-allowed).
+pub fn platform_implicit_paths() -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
     for p in &[
         "/lib",
