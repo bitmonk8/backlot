@@ -740,4 +740,223 @@ mod tests {
             "expected ls /home to fail inside sandbox"
         );
     }
+
+    fn is_fd_open(fd: i32) -> bool {
+        // SAFETY: fcntl F_GETFD is a read-only query
+        unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
+    }
+
+    /// Helper: write bytes to an fd.
+    fn write_fd(fd: i32, data: &[u8]) {
+        // SAFETY: fd is valid, data pointer and len are correct
+        unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
+    }
+
+    /// Helper: read all available bytes from an fd into a String.
+    fn read_fd_to_string(fd: i32) -> String {
+        let mut buf = [0u8; 256];
+        // SAFETY: fd is valid, buf pointer and len are correct
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n <= 0 {
+            return String::new();
+        }
+        String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+    }
+
+    #[test]
+    fn close_inherited_fds_preserves_kept_fds() {
+        let (r1, w1) = crate::unix::make_pipe().expect("pipe");
+        let (r2, w2) = crate::unix::make_pipe().expect("pipe");
+        let (res_r, res_w) = crate::unix::make_pipe().expect("pipe");
+
+        // SAFETY: fork is safe; child only calls async-signal-safe functions.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+
+        if pid == 0 {
+            // SAFETY: closing unused fd
+            unsafe { libc::close(res_r) };
+
+            // SAFETY: closes all fds >= 3 except r1, r2, and the result pipe
+            unsafe { close_inherited_fds(&[r1, r2, res_w]) };
+
+            let r1_open = is_fd_open(r1);
+            let r2_open = is_fd_open(r2);
+            let w1_open = is_fd_open(w1);
+            let w2_open = is_fd_open(w2);
+
+            if r1_open && r2_open && !w1_open && !w2_open {
+                write_fd(res_w, b"OK");
+            } else {
+                write_fd(res_w, b"FAIL");
+            }
+            // SAFETY: closing fd before exit
+            unsafe { libc::close(res_w) };
+            unsafe { libc::_exit(0) };
+        }
+
+        // Parent
+        // SAFETY: closing unused fds
+        unsafe {
+            libc::close(res_w);
+            libc::close(r1);
+            libc::close(w1);
+            libc::close(r2);
+            libc::close(w2);
+        }
+
+        let mut status: i32 = 0;
+        // SAFETY: valid pid, valid pointer
+        unsafe { libc::waitpid(pid, &raw mut status, 0) };
+
+        let result = read_fd_to_string(res_r);
+        // SAFETY: closing fd
+        unsafe { libc::close(res_r) };
+
+        assert_eq!(result, "OK", "child reported: {result}");
+    }
+
+    #[test]
+    fn close_inherited_fds_handles_duplicates() {
+        let (r, w) = crate::unix::make_pipe().expect("pipe");
+        let (res_r, res_w) = crate::unix::make_pipe().expect("pipe");
+
+        // SAFETY: fork is safe; child only calls async-signal-safe functions.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+
+        if pid == 0 {
+            // SAFETY: closing unused fd
+            unsafe { libc::close(res_r) };
+
+            // SAFETY: passing same fd twice should not cause issues
+            unsafe { close_inherited_fds(&[r, r, res_w]) };
+
+            let r_open = is_fd_open(r);
+            let w_open = is_fd_open(w);
+
+            if r_open && !w_open {
+                write_fd(res_w, b"OK");
+            } else {
+                write_fd(res_w, b"FAIL");
+            }
+            // SAFETY: closing fd before exit
+            unsafe { libc::close(res_w) };
+            unsafe { libc::_exit(0) };
+        }
+
+        // Parent
+        // SAFETY: closing unused fds
+        unsafe {
+            libc::close(res_w);
+            libc::close(r);
+            libc::close(w);
+        }
+
+        let mut status: i32 = 0;
+        // SAFETY: valid pid, valid pointer
+        unsafe { libc::waitpid(pid, &raw mut status, 0) };
+
+        let result = read_fd_to_string(res_r);
+        // SAFETY: closing fd
+        unsafe { libc::close(res_r) };
+
+        assert_eq!(result, "OK", "child reported: {result}");
+    }
+
+    #[test]
+    fn close_inherited_fds_empty_keeps() {
+        let (r, w) = crate::unix::make_pipe().expect("pipe");
+        let (res_r, res_w) = crate::unix::make_pipe().expect("pipe");
+
+        // SAFETY: fork is safe; child only calls async-signal-safe functions.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+
+        if pid == 0 {
+            // SAFETY: closing unused fd
+            unsafe { libc::close(res_r) };
+
+            // Keep only the result pipe so we can report back
+            // SAFETY: closes all fds >= 3 except the result pipe
+            unsafe { close_inherited_fds(&[res_w]) };
+
+            let r_open = is_fd_open(r);
+            let w_open = is_fd_open(w);
+
+            if !r_open && !w_open {
+                write_fd(res_w, b"OK");
+            } else {
+                write_fd(res_w, b"FAIL");
+            }
+            // SAFETY: closing fd before exit
+            unsafe { libc::close(res_w) };
+            unsafe { libc::_exit(0) };
+        }
+
+        // Parent
+        // SAFETY: closing unused fds
+        unsafe {
+            libc::close(res_w);
+            libc::close(r);
+            libc::close(w);
+        }
+
+        let mut status: i32 = 0;
+        // SAFETY: valid pid, valid pointer
+        unsafe { libc::waitpid(pid, &raw mut status, 0) };
+
+        let result = read_fd_to_string(res_r);
+        // SAFETY: closing fd
+        unsafe { libc::close(res_r) };
+
+        assert_eq!(result, "OK", "child reported: {result}");
+    }
+
+    #[test]
+    fn close_inherited_fds_ignores_std_fds() {
+        let (r, w) = crate::unix::make_pipe().expect("pipe");
+        let (res_r, res_w) = crate::unix::make_pipe().expect("pipe");
+
+        // SAFETY: fork is safe; child only calls async-signal-safe functions.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+
+        if pid == 0 {
+            // SAFETY: closing unused fd
+            unsafe { libc::close(res_r) };
+
+            // SAFETY: passing std fds should be filtered out
+            unsafe { close_inherited_fds(&[0, 1, 2, r, res_w]) };
+
+            let r_open = is_fd_open(r);
+
+            if r_open {
+                write_fd(res_w, b"OK");
+            } else {
+                write_fd(res_w, b"r_closed");
+            }
+            // SAFETY: closing fd before exit
+            unsafe { libc::close(res_w) };
+            unsafe { libc::_exit(0) };
+        }
+
+        // Parent
+        // SAFETY: closing unused fds
+        unsafe {
+            libc::close(res_w);
+            libc::close(r);
+            libc::close(w);
+        }
+
+        let mut status: i32 = 0;
+        // SAFETY: valid pid, valid pointer
+        unsafe { libc::waitpid(pid, &raw mut status, 0) };
+
+        let result = read_fd_to_string(res_r);
+        // SAFETY: closing fd
+        unsafe { libc::close(res_r) };
+
+        assert_eq!(result, "OK", "child reported: {result}");
+    }
 }

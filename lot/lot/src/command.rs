@@ -192,6 +192,35 @@ mod tests {
     }
 
     #[test]
+    fn forward_common_env_case_sensitivity() {
+        // Verify that pre-set keys with different casing are handled correctly.
+        let mut cmd = SandboxCommand::new("test");
+        cmd.env("path", "lowercase_path");
+        cmd.forward_common_env();
+
+        let path_count = cmd
+            .env
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case(OsStr::new("PATH")))
+            .count();
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            path_count, 1,
+            "Windows: case-insensitive dedup should prevent duplicate"
+        );
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // On Unix, "path" and "PATH" are different keys, so both should exist
+            // (if PATH exists in the environment)
+            if std::env::var("PATH").is_ok() {
+                assert_eq!(path_count, 2, "Unix: case-sensitive, both should exist");
+            }
+        }
+    }
+
+    #[test]
     fn forward_common_env_is_additive() {
         let mut cmd = SandboxCommand::new("test");
         cmd.env("CUSTOM", "value");

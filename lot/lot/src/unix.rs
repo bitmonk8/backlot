@@ -678,3 +678,246 @@ impl UnixSandboxedChild {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_prefork_basic() {
+        let mut cmd = SandboxCommand::new("/bin/echo");
+        cmd.arg("hello");
+        cmd.env("FOO", "bar");
+
+        let data = prepare_prefork(&cmd).expect("prepare_prefork");
+        assert_eq!(data.program.to_str().unwrap(), "/bin/echo");
+        assert_eq!(data.argv.len(), 2); // program + 1 arg
+        assert_eq!(data.argv[1].to_str().unwrap(), "hello");
+        // argv_ptrs = argv.len() + 1 (null terminator)
+        assert_eq!(data.argv_ptrs.len(), 3);
+        assert!(data.argv_ptrs.last().unwrap().is_null());
+        // envp should contain FOO=bar and a default PATH
+        assert!(data.envp.len() >= 2);
+    }
+
+    #[test]
+    fn prepare_prefork_null_byte_rejected() {
+        let cmd = SandboxCommand::new("/bin/\0echo");
+        assert!(prepare_prefork(&cmd).is_err());
+    }
+
+    #[test]
+    fn prepare_prefork_preserves_explicit_path() {
+        let mut cmd = SandboxCommand::new("/bin/sh");
+        cmd.env("PATH", "/custom/bin");
+        let data = prepare_prefork(&cmd).expect("prepare_prefork");
+        // Should have exactly one PATH entry (the explicit one), not the default
+        let path_entries: Vec<_> = data
+            .envp
+            .iter()
+            .filter(|e| e.to_str().unwrap().starts_with("PATH="))
+            .collect();
+        assert_eq!(path_entries.len(), 1);
+        assert_eq!(path_entries[0].to_str().unwrap(), "PATH=/custom/bin");
+    }
+
+    #[test]
+    fn prepare_prefork_with_cwd() {
+        let mut cmd = SandboxCommand::new("/bin/sh");
+        cmd.cwd("/tmp");
+        let data = prepare_prefork(&cmd).expect("prepare_prefork");
+        assert_eq!(data.cwd.as_ref().unwrap().to_str().unwrap(), "/tmp");
+    }
+
+    #[test]
+    fn make_pipe_returns_valid_fds() {
+        let (r, w) = make_pipe().expect("make_pipe");
+        assert!(r >= 0);
+        assert!(w >= 0);
+        assert_ne!(r, w);
+        // Write and read through the pipe
+        let msg = b"test";
+        // SAFETY: w is a valid fd from make_pipe
+        let written = unsafe { libc::write(w, msg.as_ptr().cast(), msg.len()) };
+        assert_eq!(written, msg.len() as isize);
+        // SAFETY: valid fd
+        unsafe { libc::close(w) };
+        let mut buf = [0u8; 16];
+        // SAFETY: r is a valid fd, buf is stack-allocated
+        let n = unsafe { libc::read(r, buf.as_mut_ptr().cast(), buf.len()) };
+        assert_eq!(n, msg.len() as isize);
+        assert_eq!(&buf[..n as usize], msg);
+        // SAFETY: valid fd
+        unsafe { libc::close(r) };
+    }
+
+    #[test]
+    fn open_dev_null_read() {
+        let fd = open_dev_null(libc::O_RDONLY).expect("open /dev/null");
+        assert!(fd >= 0);
+        // Reading from /dev/null returns EOF immediately
+        let mut buf = [0u8; 1];
+        // SAFETY: fd is valid, buf is stack-allocated
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), 1) };
+        assert_eq!(n, 0);
+        // SAFETY: valid fd
+        unsafe { libc::close(fd) };
+    }
+
+    #[test]
+    fn open_dev_null_write() {
+        let fd = open_dev_null(libc::O_WRONLY).expect("open /dev/null");
+        assert!(fd >= 0);
+        let msg = b"discard";
+        // SAFETY: fd is valid, msg is stack-allocated
+        let n = unsafe { libc::write(fd, msg.as_ptr().cast(), msg.len()) };
+        assert_eq!(n, msg.len() as isize);
+        // SAFETY: valid fd
+        unsafe { libc::close(fd) };
+    }
+
+    #[test]
+    fn read_two_fds_both_none() {
+        let (a, b) = read_two_fds(None, None).expect("read_two_fds");
+        assert!(a.is_empty());
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn read_two_fds_one_pipe() {
+        let (r, w) = make_pipe().expect("pipe");
+        let msg = b"hello";
+        // SAFETY: w is a valid fd
+        unsafe { libc::write(w, msg.as_ptr().cast(), msg.len()) };
+        // SAFETY: valid fd
+        unsafe { libc::close(w) };
+
+        let (data, empty) = read_two_fds(Some(r), None).expect("read_two_fds");
+        assert_eq!(data, b"hello");
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn read_two_fds_two_pipes() {
+        let (r1, w1) = make_pipe().expect("pipe1");
+        let (r2, w2) = make_pipe().expect("pipe2");
+        // SAFETY: valid fds
+        unsafe { libc::write(w1, b"aaa".as_ptr().cast(), 3) };
+        unsafe { libc::write(w2, b"bbb".as_ptr().cast(), 3) };
+        unsafe { libc::close(w1) };
+        unsafe { libc::close(w2) };
+
+        let (d1, d2) = read_two_fds(Some(r1), Some(r2)).expect("read_two_fds");
+        assert_eq!(d1, b"aaa");
+        assert_eq!(d2, b"bbb");
+    }
+
+    #[test]
+    fn exit_status_from_raw_zero_is_success() {
+        let status = exit_status_from_raw(0);
+        assert!(status.success());
+    }
+
+    #[test]
+    fn exit_status_from_raw_signal() {
+        // Raw status for killed by SIGKILL (9): signal number in low byte
+        let status = exit_status_from_raw(9);
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn close_if_not_std_skips_standard_fds() {
+        // SAFETY: Should not close stdin/stdout/stderr
+        unsafe {
+            close_if_not_std(0);
+            close_if_not_std(1);
+            close_if_not_std(2);
+        }
+        // If we got here without crashing, the test passes
+    }
+
+    #[test]
+    fn close_if_not_std_closes_non_standard_fd() {
+        let (read_fd, write_fd) = make_pipe().expect("make_pipe");
+        assert!(read_fd > 2);
+
+        // SAFETY: read_fd is a valid open fd from make_pipe()
+        unsafe { close_if_not_std(read_fd) };
+
+        // SAFETY: F_GETFD on a closed fd returns -1
+        let ret = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
+        assert!(ret < 0, "fd {read_fd} should be closed but fcntl succeeded");
+
+        // SAFETY: write_fd is still open; close to avoid leak
+        unsafe { libc::close(write_fd) };
+    }
+
+    #[test]
+    fn setup_stdio_pipes_all_piped() {
+        let mut cmd = SandboxCommand::new("/bin/echo");
+        cmd.stdin(SandboxStdio::Piped);
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+
+        let pipes = setup_stdio_pipes(&cmd).expect("setup_stdio_pipes");
+        assert!(pipes.child_stdin > 2);
+        assert!(pipes.child_stdout > 2);
+        assert!(pipes.child_stderr > 2);
+        assert!(pipes.parent_stdin.is_some());
+        assert!(pipes.parent_stdout.is_some());
+        assert!(pipes.parent_stderr.is_some());
+
+        // Clean up fds
+        // SAFETY: all fds are valid pipe fds from setup_stdio_pipes
+        unsafe {
+            libc::close(pipes.child_stdin);
+            libc::close(pipes.child_stdout);
+            libc::close(pipes.child_stderr);
+            libc::close(pipes.parent_stdin.unwrap());
+            libc::close(pipes.parent_stdout.unwrap());
+            libc::close(pipes.parent_stderr.unwrap());
+        }
+    }
+
+    #[test]
+    fn setup_stdio_pipes_all_null() {
+        let mut cmd = SandboxCommand::new("/bin/echo");
+        cmd.stdin(SandboxStdio::Null);
+        cmd.stdout(SandboxStdio::Null);
+        cmd.stderr(SandboxStdio::Null);
+
+        let pipes = setup_stdio_pipes(&cmd).expect("setup_stdio_pipes");
+        assert!(pipes.child_stdin > 2);
+        assert!(pipes.child_stdout > 2);
+        assert!(pipes.child_stderr > 2);
+        assert!(pipes.parent_stdin.is_none());
+        assert!(pipes.parent_stdout.is_none());
+        assert!(pipes.parent_stderr.is_none());
+
+        // Clean up fds
+        // SAFETY: fds are valid from setup_stdio_pipes
+        unsafe {
+            libc::close(pipes.child_stdin);
+            libc::close(pipes.child_stdout);
+            libc::close(pipes.child_stderr);
+        }
+    }
+
+    #[test]
+    fn setup_stdio_pipes_inherit() {
+        let mut cmd = SandboxCommand::new("/bin/echo");
+        cmd.stdin(SandboxStdio::Inherit);
+        cmd.stdout(SandboxStdio::Inherit);
+        cmd.stderr(SandboxStdio::Inherit);
+
+        let pipes = setup_stdio_pipes(&cmd).expect("setup_stdio_pipes");
+        assert_eq!(pipes.child_stdin, 0);
+        assert_eq!(pipes.child_stdout, 1);
+        assert_eq!(pipes.child_stderr, 2);
+        assert!(pipes.parent_stdin.is_none());
+        assert!(pipes.parent_stdout.is_none());
+        assert!(pipes.parent_stderr.is_none());
+        // No fds to clean up -- these are stdin/stdout/stderr
+    }
+}

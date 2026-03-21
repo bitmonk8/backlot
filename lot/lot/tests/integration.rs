@@ -1217,13 +1217,15 @@ fn test_try_wait_returns_none_then_some() {
     eprintln!("[diag] first try_wait: {poll:?}");
     assert!(poll.is_none(), "process should still be running");
 
-    // Kill, then poll until reaped.
+    // Kill, then poll until reaped -- bounded to prevent CI hang.
     child.kill().expect("kill");
-    loop {
+    let mut reaped = false;
+    for _ in 0..200 {
         match child.try_wait() {
             Ok(Some(status)) => {
                 eprintln!("[diag] try_wait after kill: {status:?}");
                 assert!(!status.success(), "killed process should not succeed");
+                reaped = true;
                 break;
             }
             Ok(None) => {
@@ -1232,6 +1234,7 @@ fn test_try_wait_returns_none_then_some() {
             Err(e) => panic!("try_wait failed: {e}"),
         }
     }
+    assert!(reaped, "process was not reaped within 10s after kill");
     eprintln!("[diag] PASSED");
 }
 

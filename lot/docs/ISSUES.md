@@ -36,31 +36,7 @@
 
 ---
 
-## Group 3: CI Test Reliability — Silent Skips
-
-### 3.1 [Testing] AppContainer tests silently skip when non-elevated
-- **File:** `lot/src/windows/appcontainer.rs` lines 977-986
-- **Description:** `try_spawn` silently returns `None` on `PrerequisitesNotMet`. All spawn-dependent tests could be no-ops in non-elevated CI.
-
-### 3.2 [Testing] Cgroup tests silently skip when unavailable
-- **File:** `lot/src/linux/cgroup.rs` lines 303-420
-- **Description:** All tests silently skip when cgroups unavailable. CI can report 100% pass with 0% execution.
-
-### 3.3 [Testing] Prerequisites test is tautological
-- **File:** `lot/src/windows/prerequisites.rs` lines 69-107
-- **Description:** Tautological test (mirrors production logic) and three early-return skip paths. Test cannot fail independently of the code it tests.
-
----
-
 ## Group 4: Linux Cgroup Issues
-
-### 4.1 [Correctness] Post-fork child calls `std::process::exit` instead of `libc::_exit`
-- **File:** `lot/src/linux/cgroup.rs` line 351, 401
-- **Description:** `std::process::exit(0)` in forked child should be `libc::_exit(0)`. Running Rust destructors in post-fork child is unsafe per POSIX. Practically unreachable (after `libc::pause()`), but the fix is trivial.
-
-### 4.2 [Correctness] Test leaves zombie process
-- **File:** `lot/src/linux/cgroup.rs` lines 346-352
-- **Description:** Test `cgroup_guard_add_process` does not reap forked child, leaving zombie until test process exits. Inconsistent with the `ChildGuard` pattern used in other tests in the same file.
 
 ### 4.3 [Simplification] Near-identical cgroup blocks and duplicated cgroup.kill
 - **File:** `lot/src/linux/cgroup.rs` lines 34-253
@@ -72,19 +48,11 @@
 
 ---
 
-## Group 5: Unix Process Management & Testing
-
-### 5.1 [Testing] `unix.rs` has zero unit tests
-- **File:** `lot/src/unix.rs` lines 1-672
-- **Description:** Entire file has zero unit tests. Pure functions `prepare_prefork`, `read_two_fds`, `check_child_error_pipe`, `exit_status_from_raw` are directly testable but untested.
+## Group 5: Unix Process Management
 
 ### 5.2 [Simplification] `unix.rs` unnecessary intermediate Vec and dead error handler
 - **File:** `lot/src/unix.rs` lines 47-103
 - **Description:** Unnecessary intermediate Vec, match instead of map, dead error handler.
-
-### 5.3 [Correctness] Integration test `try_wait` loop has no iteration bound
-- **File:** `lot/tests/integration.rs` lines 1222-1234
-- **Description:** `test_try_wait_returns_none_then_some` loop has no iteration bound. Could hang in CI if `kill()` fails to terminate the process.
 
 ---
 
@@ -125,38 +93,6 @@
 ### 7.3 [Simplification] Triplicated `kill_by_pid` guard logic
 - **Files:** `lot/src/linux/mod.rs`, `lot/src/macos/mod.rs`, `lot/src/windows/mod.rs`
 - **Description:** Triplicated `kill_by_pid` guard logic.
-
----
-
-## Group 8: Platform-Specific Test Gaps
-
-### 8.1 [Testing] `close_inherited_fds` untested
-- **File:** `lot/src/linux/mod.rs` lines 104-146
-- **Description:** `close_inherited_fds` has no unit tests despite non-trivial sort/dedup/gap-computation logic.
-
-### 8.2 [Testing] Seccomp argument-filtered rules untested
-- **File:** `lot/src/linux/seccomp.rs` lines 206-256
-- **Description:** Argument-filtered prctl/ioctl rules have no integration tests. Most complex filter logic in the seccomp module.
-
-### 8.3 [Testing] macOS spawn error paths untested
-- **File:** `lot/src/macos/mod.rs` lines 91-278
-- **Description:** `spawn` error paths untested: nonexistent program, invalid cwd, seatbelt rejection.
-
-### 8.4 [Testing] `forward_common_env` Windows case-insensitive dedup untested
-- **File:** `lot/src/command.rs` lines 111-153
-- **Description:** `forward_common_env` case-insensitive dedup untested on Windows. Could cause duplicate env vars.
-
-### 8.5 [Testing] Job limit branches untested
-- **File:** `lot/src/windows/job.rs` lines 41-136
-- **Description:** No test exercises individual limit branches. No readback verification. A typo in a limit constant would go undetected.
-
-### 8.6 [Testing] `wait_with_output_timeout` panic/JoinError paths untested
-- **File:** `lot/src/lib.rs` lines 428-464
-- **Description:** `wait_with_output_timeout` panic-resume and JoinError paths untested. Represents real failure modes in production.
-
-### 8.7 [Simplification] Seccomp duplicated prctl/ioctl blocks and test scaffolding
-- **File:** `lot/src/linux/seccomp.rs` lines 208-598
-- **Description:** Duplicate prctl/ioctl blocks, duplicated fork scaffolding in tests.
 
 ---
 

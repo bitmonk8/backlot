@@ -294,6 +294,29 @@ impl Drop for CgroupGuard {
 mod tests {
     use super::*;
 
+    fn require_cgroups() -> bool {
+        if available() {
+            return true;
+        }
+        if std::env::var("LOT_REQUIRE_SANDBOX").as_deref() == Ok("1") {
+            panic!("LOT_REQUIRE_SANDBOX=1 but cgroups v2 not available");
+        }
+        eprintln!("[skip] cgroups v2 not available");
+        false
+    }
+
+    /// RAII guard ensures forked child is killed+reaped on all paths
+    /// (including assertion failures that unwind).
+    struct ChildGuard(i32);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+                libc::waitpid(self.0, std::ptr::null_mut(), 0);
+            }
+        }
+    }
+
     #[test]
     fn cgroup_available_no_panic() {
         let _result = available();
@@ -301,8 +324,7 @@ mod tests {
 
     #[test]
     fn cgroup_guard_creates_and_cleans_up() {
-        if !available() {
-            eprintln!("[skip] cgroup_guard_creates_and_cleans_up: cgroups v2 not available");
+        if !require_cgroups() {
             return;
         }
         let limits = ResourceLimits {
@@ -331,36 +353,35 @@ mod tests {
 
     #[test]
     fn cgroup_guard_add_process() {
-        if !available() {
-            eprintln!("[skip] cgroup_guard_add_process: cgroups v2 not available");
+        if !require_cgroups() {
             return;
         }
         let limits = ResourceLimits::default();
         let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
 
-        // Fork a child that sleeps, add it to the cgroup, then let the guard
-        // kill it on drop. We must not add the test process itself — the
-        // guard's drop would SIGKILL the test runner.
         // SAFETY: fork() is safe in a single-threaded context; the child
         // immediately sleeps and is killed by the guard.
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed");
         if pid == 0 {
-            // Child: sleep until killed.
             unsafe { libc::pause() };
-            std::process::exit(0);
+            // SAFETY: _exit is async-signal-safe; avoids running Rust destructors in forked child.
+            unsafe { libc::_exit(0) };
         }
+        let _child_guard = ChildGuard(pid);
+
         // Parent: add the child to the cgroup.
-        // Writing to cgroup.procs may fail depending on cgroup configuration,
-        // so we just verify the call doesn't panic.
-        drop(guard.add_process(pid));
+        if let Err(e) = guard.add_process(pid) {
+            eprintln!("[skip] add_process failed ({e}); cannot test cgroup membership");
+            return;
+        }
         // Guard drop will kill the child and remove the cgroup.
+        // ChildGuard drop ensures the zombie is reaped.
     }
 
     #[test]
     fn cgroup_guard_no_limits_creates_empty() {
-        if !available() {
-            eprintln!("[skip] cgroup_guard_no_limits_creates_empty: cgroups v2 not available");
+        if !require_cgroups() {
             return;
         }
         let limits = ResourceLimits::default();
@@ -373,20 +394,7 @@ mod tests {
 
     #[test]
     fn cgroup_guard_drain_with_live_process() {
-        // RAII guard ensures forked child is killed+reaped on all paths
-        // (including assertion failures that unwind).
-        struct ChildGuard(i32);
-        impl Drop for ChildGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    libc::kill(self.0, libc::SIGKILL);
-                    libc::waitpid(self.0, std::ptr::null_mut(), 0);
-                }
-            }
-        }
-
-        if !available() {
-            eprintln!("[skip] cgroup_guard_drain_with_live_process: cgroups v2 not available");
+        if !require_cgroups() {
             return;
         }
         let limits = ResourceLimits::default();
@@ -398,7 +406,8 @@ mod tests {
         assert!(pid >= 0, "fork failed");
         if pid == 0 {
             unsafe { libc::pause() };
-            std::process::exit(0);
+            // SAFETY: _exit is async-signal-safe; avoids running Rust destructors in forked child.
+            unsafe { libc::_exit(0) };
         }
         let _child_guard = ChildGuard(pid);
 

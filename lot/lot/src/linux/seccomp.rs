@@ -29,6 +29,20 @@ fn allow_syscalls(rules: &mut BTreeMap<i64, Vec<seccompiler::SeccompRule>>, nrs:
     }
 }
 
+/// Build argument-filtered rules: allow a syscall only when the argument at
+/// `arg_index` matches one of `allowed_values`.
+fn argument_filtered_rules(arg_index: u8, allowed_values: &[u64]) -> io::Result<Vec<SeccompRule>> {
+    let mut rules = Vec::with_capacity(allowed_values.len());
+    for &val in allowed_values {
+        let cond = SeccompCondition::new(arg_index, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, val)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let rule = SeccompRule::new(vec![cond])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        rules.push(rule);
+    }
+    Ok(rules)
+}
+
 /// Build a seccomp-BPF filter from the given sandbox policy.
 ///
 /// The filter defaults to `ERRNO(EPERM)` for any syscall not in the allowlist.
@@ -213,22 +227,17 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
         const PR_SET_TIMERSLACK: u64 = 29;
         const PR_GET_TIMERSLACK: u64 = 30;
 
-        let allowed_ops = [
-            PR_SET_PDEATHSIG,
-            PR_GET_PDEATHSIG,
-            PR_SET_NAME,
-            PR_GET_NAME,
-            PR_SET_TIMERSLACK,
-            PR_GET_TIMERSLACK,
-        ];
-        let mut prctl_rules = Vec::with_capacity(allowed_ops.len());
-        for &op in &allowed_ops {
-            let cond = SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, op)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            let rule = SeccompRule::new(vec![cond])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            prctl_rules.push(rule);
-        }
+        let prctl_rules = argument_filtered_rules(
+            0,
+            &[
+                PR_SET_PDEATHSIG,
+                PR_GET_PDEATHSIG,
+                PR_SET_NAME,
+                PR_GET_NAME,
+                PR_SET_TIMERSLACK,
+                PR_GET_TIMERSLACK,
+            ],
+        )?;
         rules.insert(libc::SYS_prctl, prctl_rules);
     }
 
@@ -243,15 +252,10 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
         const FIOCLEX: u64 = 0x5451; // set close-on-exec
         const FIONCLEX: u64 = 0x5450; // clear close-on-exec
 
-        let allowed_reqs = [TCGETS, TIOCGWINSZ, TIOCGPGRP, FIONREAD, FIOCLEX, FIONCLEX];
-        let mut ioctl_rules = Vec::with_capacity(allowed_reqs.len());
-        for &req in &allowed_reqs {
-            let cond = SeccompCondition::new(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, req)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            let rule = SeccompRule::new(vec![cond])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            ioctl_rules.push(rule);
-        }
+        let ioctl_rules = argument_filtered_rules(
+            1,
+            &[TCGETS, TIOCGWINSZ, TIOCGPGRP, FIONREAD, FIOCLEX, FIONCLEX],
+        )?;
         rules.insert(libc::SYS_ioctl, ioctl_rules);
     }
 
@@ -383,6 +387,17 @@ pub fn apply_filter(program: &BpfProgram) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    fn empty_policy(allow_network: bool) -> SandboxPolicy {
+        SandboxPolicy::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            allow_network,
+            crate::ResourceLimits::default(),
+        )
+    }
+
     #[test]
     fn seccomp_available_no_panic() {
         let _result = available();
@@ -391,15 +406,7 @@ mod tests {
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn build_filter_no_network() {
-        let policy = SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            crate::ResourceLimits::default(),
-        );
-        let bpf = build_filter(&policy);
+        let bpf = build_filter(&empty_policy(false));
         assert!(bpf.is_ok(), "build_filter failed: {:?}", bpf.err());
         assert!(!bpf.unwrap().is_empty());
     }
@@ -407,15 +414,7 @@ mod tests {
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn build_filter_with_network() {
-        let policy = SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            true,
-            crate::ResourceLimits::default(),
-        );
-        let bpf = build_filter(&policy);
+        let bpf = build_filter(&empty_policy(true));
         assert!(bpf.is_ok(), "build_filter failed: {:?}", bpf.err());
         assert!(!bpf.unwrap().is_empty());
     }
@@ -423,24 +422,8 @@ mod tests {
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn build_filter_network_produces_larger_program() {
-        let base_policy = SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            crate::ResourceLimits::default(),
-        );
-        let net_policy = SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            true,
-            crate::ResourceLimits::default(),
-        );
-        let base_bpf = build_filter(&base_policy).unwrap();
-        let net_bpf = build_filter(&net_policy).unwrap();
+        let base_bpf = build_filter(&empty_policy(false)).unwrap();
+        let net_bpf = build_filter(&empty_policy(true)).unwrap();
         // Network-enabled filter has more rules, so more BPF instructions
         assert!(net_bpf.len() > base_bpf.len());
     }
@@ -455,12 +438,12 @@ mod tests {
         (fds[0], fds[1])
     }
 
-    /// Helper: write bytes to an fd.
+    /// Helper: write bytes to an fd. Ignores return value to remain
+    /// async-signal-safe (no panic/assert in forked children).
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn write_fd(fd: i32, data: &[u8]) {
         // SAFETY: fd is valid, data pointer and len are correct
-        let n = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
-        assert_eq!(n, data.len() as isize, "short write to fd {fd}");
+        unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
     }
 
     /// Helper: read all available bytes from an fd into a String.
@@ -475,45 +458,24 @@ mod tests {
         String::from_utf8_lossy(&buf[..n as usize]).into_owned()
     }
 
-    /// Integration test: fork, apply filter, verify getpid() still works.
-    #[test]
+    /// Fork a child, apply a seccomp filter, run `child_body` in the child,
+    /// and return the string the child wrote to the result pipe.
+    ///
+    /// `child_body` receives the BPF program and the write fd for reporting
+    /// results. It must use only async-signal-safe operations and call
+    /// `libc::_exit` when done.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    fn apply_filter_allows_getpid() {
-        let policy = SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            crate::ResourceLimits::default(),
-        );
-        let bpf = build_filter(&policy).unwrap();
-
+    fn fork_with_seccomp(bpf: &BpfProgram, child_body: fn(&BpfProgram, i32) -> !) -> String {
         let (read_fd, write_fd_val) = make_pipe();
 
-        // SAFETY: fork is safe here; child only calls async-signal-safe
-        // functions before _exit.
+        // SAFETY: fork is safe; child only calls async-signal-safe functions.
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed");
 
         if pid == 0 {
             // SAFETY: closing unused fd
             unsafe { libc::close(read_fd) };
-
-            if apply_filter(&bpf).is_err() {
-                write_fd(write_fd_val, b"FILTER_FAIL");
-                unsafe { libc::_exit(1) };
-            }
-            // SAFETY: getpid has no preconditions
-            let my_pid = unsafe { libc::getpid() };
-            if my_pid > 0 {
-                write_fd(write_fd_val, b"OK");
-            } else {
-                write_fd(write_fd_val, b"GETPID_FAIL");
-            }
-            // SAFETY: closing fd before exit
-            unsafe { libc::close(write_fd_val) };
-            unsafe { libc::_exit(0) };
+            child_body(bpf, write_fd_val);
         }
 
         // Parent
@@ -528,36 +490,98 @@ mod tests {
         // SAFETY: closing fd
         unsafe { libc::close(read_fd) };
 
+        result
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn apply_filter_allows_getpid() {
+        fn child_body(bpf: &BpfProgram, w: i32) -> ! {
+            if apply_filter(bpf).is_err() {
+                write_fd(w, b"FILTER_FAIL");
+                unsafe { libc::_exit(1) };
+            }
+            // SAFETY: getpid has no preconditions
+            let my_pid = unsafe { libc::getpid() };
+            write_fd(w, if my_pid > 0 { b"OK" } else { b"GETPID_FAIL" });
+            unsafe { libc::close(w) };
+            unsafe { libc::_exit(0) };
+        }
+
+        let bpf = build_filter(&empty_policy(false)).unwrap();
+        let result = fork_with_seccomp(&bpf, child_body);
         assert_eq!(result, "OK", "child reported: {result}");
     }
 
-    /// Integration test: fork, apply filter with network denied, verify socket() returns EPERM.
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn apply_filter_allows_pr_set_name() {
+        if !available() {
+            eprintln!("[skip] seccomp not available");
+            return;
+        }
+
+        fn child_body(bpf: &BpfProgram, w: i32) -> ! {
+            if apply_filter(bpf).is_err() {
+                write_fd(w, b"FILTER_FAIL");
+                unsafe { libc::_exit(1) };
+            }
+            // PR_SET_NAME (15) should be allowed
+            let name = b"testname\0";
+            // SAFETY: valid prctl call
+            let rc = unsafe { libc::prctl(15, name.as_ptr()) };
+            write_fd(w, if rc == 0 { b"OK" } else { b"FAIL" });
+            unsafe { libc::close(w) };
+            unsafe { libc::_exit(0) };
+        }
+
+        let bpf = build_filter(&empty_policy(false)).unwrap();
+        let result = fork_with_seccomp(&bpf, child_body);
+        assert_eq!(result, "OK", "PR_SET_NAME should be allowed");
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn apply_filter_denies_pr_set_dumpable() {
+        if !available() {
+            eprintln!("[skip] seccomp not available");
+            return;
+        }
+
+        fn child_body(bpf: &BpfProgram, w: i32) -> ! {
+            if apply_filter(bpf).is_err() {
+                write_fd(w, b"FILTER_FAIL");
+                unsafe { libc::_exit(1) };
+            }
+            // PR_SET_DUMPABLE (4) is NOT in the allowed list
+            // SAFETY: valid prctl call; we expect EPERM
+            let rc = unsafe { libc::prctl(4, 0) };
+            let errno = if rc < 0 {
+                // SAFETY: reading thread-local errno
+                unsafe { *libc::__errno_location() }
+            } else {
+                0
+            };
+            if rc < 0 && errno == libc::EPERM {
+                write_fd(w, b"OK");
+            } else {
+                write_fd(w, b"ALLOWED");
+            }
+            unsafe { libc::close(w) };
+            unsafe { libc::_exit(0) };
+        }
+
+        let bpf = build_filter(&empty_policy(false)).unwrap();
+        let result = fork_with_seccomp(&bpf, child_body);
+        assert_eq!(result, "OK", "PR_SET_DUMPABLE should be denied by seccomp");
+    }
+
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn apply_filter_denies_socket_without_network() {
-        let policy = SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            crate::ResourceLimits::default(),
-        );
-        let bpf = build_filter(&policy).unwrap();
-
-        let (read_fd, write_fd_val) = make_pipe();
-
-        // SAFETY: fork is safe here; child only calls async-signal-safe
-        // functions before _exit.
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "fork failed");
-
-        if pid == 0 {
-            // SAFETY: closing unused fd
-            unsafe { libc::close(read_fd) };
-
-            if apply_filter(&bpf).is_err() {
-                write_fd(write_fd_val, b"FILTER_FAIL");
+        fn child_body(bpf: &BpfProgram, w: i32) -> ! {
+            if apply_filter(bpf).is_err() {
+                write_fd(w, b"FILTER_FAIL");
                 unsafe { libc::_exit(1) };
             }
             // SAFETY: syscall args are valid; we expect it to fail with EPERM
@@ -566,34 +590,19 @@ mod tests {
                 // SAFETY: reading thread-local errno
                 let errno = unsafe { *libc::__errno_location() };
                 if errno == libc::EPERM {
-                    write_fd(write_fd_val, b"EPERM");
+                    write_fd(w, b"OK");
                 } else {
-                    // Avoid format!/allocator in forked child — write errno
-                    // as raw bytes to avoid allocator deadlock risk.
-                    write_fd(write_fd_val, b"WRONG_ERRNO:");
-                    let errno_bytes = (errno as u32).to_ne_bytes();
-                    write_fd(write_fd_val, &errno_bytes);
+                    write_fd(w, b"WRONG_ERRNO");
                 }
             } else {
-                write_fd(write_fd_val, b"SOCKET_SUCCEEDED");
+                write_fd(w, b"SOCKET_SUCCEEDED");
             }
-            // SAFETY: closing fd before exit
-            unsafe { libc::close(write_fd_val) };
+            unsafe { libc::close(w) };
             unsafe { libc::_exit(0) };
         }
 
-        // Parent
-        // SAFETY: closing unused fd
-        unsafe { libc::close(write_fd_val) };
-
-        let mut status: i32 = 0;
-        // SAFETY: valid pid, valid pointer
-        unsafe { libc::waitpid(pid, &raw mut status, 0) };
-
-        let result = read_fd_to_string(read_fd);
-        // SAFETY: closing fd
-        unsafe { libc::close(read_fd) };
-
-        assert_eq!(result, "EPERM", "child reported: {result}");
+        let bpf = build_filter(&empty_policy(false)).unwrap();
+        let result = fork_with_seccomp(&bpf, child_body);
+        assert_eq!(result, "OK", "child reported: {result}");
     }
 }

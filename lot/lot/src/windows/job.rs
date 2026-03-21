@@ -198,6 +198,86 @@ mod tests {
         );
     }
 
+    fn query_limits(job: &JobObject) -> JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        use windows_sys::Win32::System::JobObjects::QueryInformationJobObject;
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        #[allow(clippy::cast_possible_truncation)]
+        let info_len = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        let ret = unsafe {
+            QueryInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&raw mut info).cast(),
+                info_len,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            ret,
+            0,
+            "QueryInformationJobObject failed: {}",
+            std::io::Error::last_os_error()
+        );
+        info
+    }
+
+    #[test]
+    fn set_memory_limit_only() {
+        let job = JobObject::new().expect("create job object");
+        let limits = ResourceLimits {
+            max_memory_bytes: Some(50 * 1024 * 1024),
+            max_processes: None,
+            max_cpu_seconds: None,
+        };
+        job.set_limits(&limits).expect("set memory limit");
+        let info = query_limits(&job);
+        assert!(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_PROCESS_MEMORY != 0);
+        assert_eq!(info.ProcessMemoryLimit, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn set_process_limit_only() {
+        let job = JobObject::new().expect("create job object");
+        let limits = ResourceLimits {
+            max_memory_bytes: None,
+            max_processes: Some(3),
+            max_cpu_seconds: None,
+        };
+        job.set_limits(&limits).expect("set process limit");
+        let info = query_limits(&job);
+        assert!(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS != 0);
+        assert_eq!(info.BasicLimitInformation.ActiveProcessLimit, 3);
+    }
+
+    #[test]
+    fn set_cpu_limit_only() {
+        let job = JobObject::new().expect("create job object");
+        let limits = ResourceLimits {
+            max_memory_bytes: None,
+            max_processes: None,
+            max_cpu_seconds: Some(60),
+        };
+        job.set_limits(&limits).expect("set cpu limit");
+        let info = query_limits(&job);
+        assert!(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_TIME != 0);
+        assert_eq!(
+            info.BasicLimitInformation.PerJobUserTimeLimit,
+            60 * 10_000_000
+        );
+    }
+
+    #[test]
+    fn set_no_limits() {
+        let job = JobObject::new().expect("create job object");
+        let limits = ResourceLimits::default();
+        job.set_limits(&limits).expect("set no limits");
+        let info = query_limits(&job);
+        assert_eq!(
+            info.BasicLimitInformation.LimitFlags,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        );
+    }
+
     #[test]
     fn memory_limit_kills_child() {
         use std::process::Stdio;

@@ -86,16 +86,21 @@ mod tests {
         let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
         let sys32 = PathBuf::from(format!("{system_root}\\System32"));
         if !sys32.exists() {
+            eprintln!("[skip] grant_prerequisites_fails_without_elevation: System32 not found");
             return;
         }
 
         if super::super::elevation::is_elevated() {
+            eprintln!("[skip] grant_prerequisites_fails_without_elevation: running elevated");
             return;
         }
 
         // If prerequisites are already met (e.g., from a prior `lot setup`),
         // the grant call succeeds idempotently. Skip the test in that case.
         if appcontainer_prerequisites_met(&[sys32.as_path()]) {
+            eprintln!(
+                "[skip] grant_prerequisites_fails_without_elevation: prerequisites already met"
+            );
             return;
         }
 
@@ -104,5 +109,33 @@ mod tests {
             result.is_err(),
             "grant_appcontainer_prerequisites should fail without elevation"
         );
+    }
+
+    #[test]
+    fn prerequisites_met_covers_deny_paths() {
+        // Verify that the _for_policy variant includes deny paths in its check.
+        use crate::policy::ResourceLimits;
+        use crate::policy::SandboxPolicy;
+
+        let tmp = std::env::temp_dir();
+        let deny = tmp.join("lot_test_deny_prereq");
+        if deny.exists() || std::fs::create_dir(&deny).is_ok() {
+            let policy = SandboxPolicy::new(
+                vec![tmp.clone()],
+                vec![],
+                vec![],
+                vec![deny.clone()],
+                false,
+                ResourceLimits::default(),
+            );
+            let via_policy = super::appcontainer_prerequisites_met_for_policy(&policy);
+            // Cross-check: calling with the same paths directly should agree.
+            let via_direct = appcontainer_prerequisites_met(&[tmp.as_path(), deny.as_path()]);
+            assert_eq!(
+                via_policy, via_direct,
+                "_for_policy and direct check should agree"
+            );
+            let _ = std::fs::remove_dir(&deny);
+        }
     }
 }

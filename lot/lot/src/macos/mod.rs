@@ -474,6 +474,63 @@ mod tests {
     }
 
     #[test]
+    fn spawn_nonexistent_program() {
+        let policy = test_policy(vec![PathBuf::from("/usr")]);
+        let cmd = SandboxCommand::new("/nonexistent/program");
+        let result = spawn(&policy, &cmd);
+        assert!(result.is_err(), "spawning nonexistent program should fail");
+    }
+
+    #[test]
+    fn spawn_invalid_cwd() {
+        let policy = test_policy(vec![PathBuf::from("/usr")]);
+        let mut cmd = SandboxCommand::new("/bin/echo");
+        cmd.cwd("/nonexistent/directory");
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+        let result = spawn(&policy, &cmd);
+        assert!(result.is_err(), "spawning with invalid cwd should fail");
+    }
+
+    #[test]
+    fn spawn_read_outside_sandbox_blocked() {
+        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let allowed = tmp.path().join("allowed");
+        let denied_file = tmp.path().join("secret.txt");
+        std::fs::create_dir(&allowed).expect("create allowed dir");
+        std::fs::write(&denied_file, "secret").expect("write test file");
+
+        let policy = SandboxPolicy::new(
+            vec![allowed.clone()],
+            vec![],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
+
+        let mut cmd = SandboxCommand::new("/bin/cat");
+        cmd.arg(denied_file.to_str().expect("path to str"));
+        cmd.cwd(allowed.to_str().expect("path to str"));
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+
+        match spawn(&policy, &cmd) {
+            Ok(child) => {
+                let output = child.wait_with_output().expect("wait_with_output");
+                // The cat command should fail because the file is outside the sandbox
+                assert!(
+                    !output.stdout.windows(6).any(|w| w == b"secret"),
+                    "sandbox should block reading outside allowed paths"
+                );
+            }
+            Err(e) => {
+                eprintln!("[skip] spawn_read_outside_sandbox_blocked: spawn failed: {e}");
+            }
+        }
+    }
+
+    #[test]
     fn generate_profile_produces_valid_sbpl() {
         let policy = SandboxPolicy::new(
             vec![PathBuf::from("/tmp/read")],
