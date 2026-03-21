@@ -1,25 +1,5 @@
 # Known Issues
 
-## Group 4: Linux Cgroup Issues
-
-### 4.3 [Simplification] Near-identical cgroup blocks and duplicated cgroup.kill
-- **File:** `lot/src/linux/cgroup.rs` lines 34-253
-- **Description:** Near-identical check blocks, duplicated `cgroup.kill` in drop vs `kill_all`.
-
-### 4.4 [Cruft] `#[allow(dead_code)]` references non-existent fork path
-- **File:** `lot/src/linux/cgroup.rs` line 175
-- **Description:** `#[allow(dead_code)]` comment references non-existent "fork path" caller. Method only called from tests.
-
----
-
-## Group 5: Unix Process Management
-
-### 5.2 [Simplification] `unix.rs` unnecessary intermediate Vec and dead error handler
-- **File:** `lot/src/unix.rs` lines 47-103
-- **Description:** Unnecessary intermediate Vec, match instead of map, dead error handler.
-
----
-
 ## Group 6: Windows ACL & Error Handling
 
 ### 6.1 [Correctness] Hardcoded `ACL_REVISION` breaks non-standard DACLs

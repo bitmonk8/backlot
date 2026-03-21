@@ -172,7 +172,7 @@ impl CgroupGuard {
     }
 
     /// Move a process into this cgroup by writing its PID to cgroup.procs.
-    #[allow(dead_code)] // used from the fork path via raw fd writes; kept for testing
+    #[allow(dead_code)] // only used from tests
     pub(crate) fn add_process(&self, pid: i32) -> io::Result<()> {
         fs::write(self.path.join("cgroup.procs"), pid.to_string())
     }
@@ -243,17 +243,10 @@ impl CgroupGuard {
 
 impl Drop for CgroupGuard {
     fn drop(&mut self) {
-        // Try atomic cgroup.kill (kernel 5.14+) for synchronous kill.
-        let kill_path = self.path.join("cgroup.kill");
-        let used_cgroup_kill = fs::write(&kill_path, "1").is_ok();
-
-        if !used_cgroup_kill {
-            // Fallback: kill individually then poll for emptiness.
-            self.kill_all();
-        }
+        // kill_all() tries cgroup.kill first, then falls back to per-PID SIGKILL.
+        self.kill_all();
 
         // Wait for processes to exit so the cgroup directory becomes empty.
-        // With cgroup.kill this should be near-instant; with fallback we poll.
         // Budget: 50 iterations x 20ms = 1s total.
         let mut drained = false;
         for _ in 0..50 {

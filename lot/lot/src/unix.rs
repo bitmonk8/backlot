@@ -44,27 +44,23 @@ pub fn prepare_prefork(command: &SandboxCommand) -> io::Result<PreForkData> {
     }
 
     // Build envp: combine user-supplied env with minimal defaults
-    let mut env_pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut has_path = false;
+    let mut envp: Vec<CString> = Vec::with_capacity(command.env.len() + 1);
     for (k, v) in &command.env {
-        env_pairs.push((k.as_bytes().to_vec(), v.as_bytes().to_vec()));
+        if k == "PATH" {
+            has_path = true;
+        }
+        let mut entry = Vec::with_capacity(k.len() + 1 + v.len());
+        entry.extend_from_slice(k.as_bytes());
+        entry.push(b'=');
+        entry.extend_from_slice(v.as_bytes());
+        envp.push(CString::new(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?);
     }
-    let has_path = env_pairs.iter().any(|(k, _)| k == b"PATH");
     if !has_path {
-        env_pairs.push((
-            b"PATH".to_vec(),
-            crate::env_check::DEFAULT_UNIX_PATH.as_bytes().to_vec(),
-        ));
+        let mut entry = Vec::from(b"PATH=" as &[u8]);
+        entry.extend_from_slice(crate::env_check::DEFAULT_UNIX_PATH.as_bytes());
+        envp.push(CString::new(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?);
     }
-
-    let envp: Vec<CString> = env_pairs
-        .iter()
-        .map(|(k, v)| {
-            let mut entry = k.clone();
-            entry.push(b'=');
-            entry.extend_from_slice(v);
-            CString::new(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
-        })
-        .collect::<io::Result<_>>()?;
 
     let cwd = match &command.cwd {
         Some(p) => Some(
