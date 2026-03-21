@@ -193,7 +193,7 @@ AppContainer sandboxed processes cannot call `fs::metadata()` on ancestor direct
 | Inheritance | `NO_INHERITANCE` |
 | Trustee | ALL APPLICATION PACKAGES (`S-1-15-2-1`) |
 
-Grants are idempotent. `SetEntriesInAclW` merges ACEs, so repeated grants produce identical DACLs. After the first successful spawn, all ancestors have the ACE and subsequent spawns skip the grant.
+Grants are idempotent. `grant_traverse` checks for an existing ACE before writing, so repeated grants are no-ops. Traverse ACE grants use manual ACL construction paired with `NtSetSecurityObject` to avoid O(subtree) inheritance propagation on large directories. Other DACL modifications (policy grant/deny paths) use `SetEntriesInAclW` + `SetNamedSecurityInfoW`.
 
 ### Security impact
 
@@ -256,7 +256,8 @@ Lot does not silently degrade. If a required mechanism is unavailable, `spawn()`
 | Linux: seccomp not available | `SandboxError::Setup` — namespaces without seccomp is too weak |
 | macOS: `sandbox_init` fails | `SandboxError::Setup` — no fallback |
 | Windows: AppContainer profile creation fails | `SandboxError::Setup` |
-| Windows: ACL cleanup fails on drop | Logged, not panic. Stale sentinel enables recovery via `cleanup_stale()` |
+| Windows: ACL cleanup fails via `kill_and_cleanup` | `SandboxError::Cleanup` propagated to caller |
+| Windows: ACL cleanup fails on drop | Best-effort (result ignored). Stale sentinel enables recovery via `cleanup_stale()` |
 
 ---
 

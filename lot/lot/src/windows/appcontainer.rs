@@ -405,17 +405,25 @@ impl WindowsSandboxedChild {
 
         // ACL restoration + SID freeing. cleanup() is idempotent so Drop
         // calling it again is harmless.
-        self.cleanup();
-        Ok(())
+        self.cleanup()
     }
 
-    fn cleanup(&mut self) {
+    /// Restore ACLs, delete the AppContainer profile, and free SIDs.
+    ///
+    /// Returns errors so `kill_and_cleanup` can propagate them. The `Drop`
+    /// impl also calls this but ignores the result — `Drop` cannot propagate
+    /// errors, so best-effort cleanup is the only option there.
+    ///
+    /// Idempotent: second call is a no-op.
+    fn cleanup(&mut self) -> crate::Result<()> {
+        let mut errors: Vec<String> = Vec::new();
+
         if !self.sentinel.profile_name.is_empty() {
             if let Err(e) = restore_acls_and_delete_sentinel(&self.sentinel) {
-                eprintln!("lot: ACL restore failed: {e}");
+                errors.push(format!("ACL restore: {e}"));
             }
             if let Err(e) = delete_profile(&self.sentinel.profile_name) {
-                eprintln!("lot: profile delete failed: {e}");
+                errors.push(format!("profile delete: {e}"));
             }
             self.sentinel.profile_name.clear();
         }
@@ -434,12 +442,20 @@ impl WindowsSandboxedChild {
             }
             self.app_container_sid = std::ptr::null_mut();
         }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::SandboxError::Cleanup(errors.join("; ")))
+        }
     }
 }
 
 impl Drop for WindowsSandboxedChild {
     fn drop(&mut self) {
-        self.cleanup();
+        // Best-effort: Drop cannot propagate errors. Direct callers should
+        // use kill_and_cleanup() to detect cleanup failures.
+        let _ = self.cleanup();
 
         // SAFETY: Closing valid handles from CreateProcessW.
         unsafe {

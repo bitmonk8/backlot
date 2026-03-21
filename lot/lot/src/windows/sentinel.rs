@@ -250,6 +250,8 @@ pub fn find_stale_sentinels_in(dir: &Path) -> Result<Vec<SentinelFile>> {
     let mut stale = Vec::new();
 
     for entry in entries {
+        // Best-effort scan: one unreadable directory entry must not block
+        // cleanup of other stale sentinels.
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -278,8 +280,10 @@ pub fn find_stale_sentinels_in(dir: &Path) -> Result<Vec<SentinelFile>> {
                 // Sentinel was cleaned up concurrently; skip it.
             }
             Err(_) => {
-                // Unreadable sentinel — skip it rather than blocking cleanup
-                // of other stale sentinels. The file will be retried next call.
+                // Unreadable or corrupted sentinel — skip rather than blocking
+                // cleanup of other stale sentinels. One bad file must not
+                // prevent progress on the rest. The file will be retried on
+                // the next cleanup_stale() call.
             }
         }
     }

@@ -10,7 +10,7 @@ Clear all issues in `docs/ISSUES.md`.
 
 ## Next Work
 
-**Group 6: Windows ACL & Error Handling (6.1–6.5)**
+**Group 7: Cross-Platform Code Deduplication (7.1–7.3)** or **Group 9: Documentation Accuracy (12 items)**
 
 ## Completed
 
@@ -21,6 +21,7 @@ Clear all issues in `docs/ISSUES.md`.
 - Group 3: CI Test Reliability — Silent Skips (3.1–3.3)
 - Group 4: Linux Cgroup Issues (4.1–4.4)
 - Group 5: Unix Process Management (5.1–5.3)
+- Group 6: Windows ACL & Error Handling (6.1–6.5)
 - Group 8: Platform-Specific Test Gaps (8.1–8.7)
 
 ## CI Notes

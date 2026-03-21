@@ -1,29 +1,5 @@
 # Known Issues
 
-## Group 6: Windows ACL & Error Handling
-
-### 6.1 [Correctness] Hardcoded `ACL_REVISION` breaks non-standard DACLs
-- **File:** `lot/src/windows/traverse_acl.rs` lines 203, 229, 248
-- **Description:** New ACL hardcodes `ACL_REVISION` (2). If original DACL uses `ACL_REVISION_DS` (4), `AddAce` will fail. Not applicable to file system DACLs in practice, but would break on non-standard DACL configurations.
-
-### 6.2 [Separation] Two parallel DACL-writing codepaths
-- **Files:** `lot/src/windows/traverse_acl.rs`, `lot/src/windows/acl_helpers.rs`
-- **Description:** Two parallel DACL-writing codepaths with different semantics.
-
-### 6.3 [Error-Handling] `cleanup` errors not propagated
-- **File:** `lot/src/windows/appcontainer.rs` lines 412-421
-- **Description:** `cleanup` prints errors to stderr but never propagates them. `kill_and_cleanup` returns `Ok(())`. Errors are logged, and `cleanup()` is also called from `Drop` where propagation is impossible. Defensible design, but callers of `kill_and_cleanup` cannot detect cleanup failures.
-
-### 6.4 [Error-Handling] Sentinel silently skips unreadable directory entries
-- **File:** `lot/src/windows/sentinel.rs` lines 252-253
-- **Description:** `find_stale_sentinels_in` silently skips directory entries that fail to read. Reasonable for a best-effort cleanup scan.
-
-### 6.5 [Error-Handling] Sentinel silently discards non-NotFound parse errors
-- **File:** `lot/src/windows/sentinel.rs` lines 280-283
-- **Description:** `find_stale_sentinels_in` silently discards non-NotFound sentinel parse errors. Prevents one corrupted file from blocking cleanup of others.
-
----
-
 ## Group 7: Cross-Platform Code Deduplication
 
 ### 7.1 [Simplification] Three-layer delegation wrappers

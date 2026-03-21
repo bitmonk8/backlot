@@ -17,10 +17,11 @@ use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, FALSE, HANDLE};
 use windows_sys::Win32::Security::{
-    ACL, ACL_SIZE_INFORMATION, AclSizeInformation, AddAccessAllowedAceEx, AddAce,
-    DACL_SECURITY_INFORMATION, GetAclInformation, GetSecurityDescriptorControl, InitializeAcl,
-    InitializeSecurityDescriptor, SECURITY_DESCRIPTOR, SECURITY_DESCRIPTOR_CONTROL,
-    SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+    ACL, ACL_REVISION_INFORMATION, ACL_SIZE_INFORMATION, AclRevisionInformation,
+    AclSizeInformation, AddAccessAllowedAceEx, AddAce, DACL_SECURITY_INFORMATION,
+    GetAclInformation, GetSecurityDescriptorControl, InitializeAcl, InitializeSecurityDescriptor,
+    SECURITY_DESCRIPTOR, SECURITY_DESCRIPTOR_CONTROL, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, OPEN_EXISTING,
@@ -100,8 +101,34 @@ const WRITE_DAC: u32 = 0x0004_0000;
 const READ_CONTROL: u32 = 0x0002_0000;
 /// SECURITY_DESCRIPTOR_REVISION — required by `InitializeSecurityDescriptor`.
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
-/// ACL_REVISION — required by `InitializeAcl` and `AddAce`.
-const ACL_REVISION: u32 = 2;
+/// Fallback when no existing DACL is present.
+const ACL_REVISION_FALLBACK: u32 = 2;
+
+/// Read the DACL revision from an existing DACL via `GetAclInformation`.
+/// Falls back to `ACL_REVISION` (2) when the DACL is null.
+fn dacl_revision(dacl: *mut ACL, path: &std::path::Path) -> Result<u32, SandboxError> {
+    if dacl.is_null() {
+        return Ok(ACL_REVISION_FALLBACK);
+    }
+    let mut rev_info = ACL_REVISION_INFORMATION { AclRevision: 0 };
+    // SAFETY: Querying revision info from a valid, non-null DACL.
+    #[allow(clippy::cast_possible_truncation)]
+    let ret = unsafe {
+        GetAclInformation(
+            dacl,
+            (&raw mut rev_info).cast(),
+            std::mem::size_of::<ACL_REVISION_INFORMATION>() as u32,
+            AclRevisionInformation,
+        )
+    };
+    if ret == FALSE {
+        return Err(SandboxError::Setup(format!(
+            "GetAclInformation(AclRevisionInformation) failed for {}",
+            path.display(),
+        )));
+    }
+    Ok(rev_info.AclRevision)
+}
 
 /// RAII guard for memory allocated with `std::alloc`. Cannot use `OwnedAcl`
 /// (which uses `LocalFree`) because we allocate with `alloc_zeroed`.
@@ -145,7 +172,20 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
 
     // ACE not present — build new DACL by copying existing ACEs byte-for-byte
     // (preserving INHERITED_ACE flags) and appending the traverse ACE.
-    // SetEntriesInAclW strips inherited flags, so manual construction is needed.
+    //
+    // Cannot use SetEntriesInAclW here for two reasons:
+    // 1. SetEntriesInAclW strips INHERITED_ACE flags from existing ACEs. When
+    //    paired with NtSetSecurityObject (which does NOT re-propagate inheritance),
+    //    the result is a DACL where previously inherited ACEs lose their inherited
+    //    flag, corrupting the inheritance state.
+    // 2. SetEntriesInAclW produces an ACL meant for SetNamedSecurityInfoW, which
+    //    triggers O(subtree) inheritance propagation — exactly what we avoid by
+    //    using NtSetSecurityObject.
+
+    // Read the revision from the existing DACL so the new ACL matches.
+    // Avoids hardcoding ACL_REVISION (2), which would fail if the original
+    // DACL uses ACL_REVISION_DS (4) on non-standard configurations.
+    let dacl_revision = dacl_revision(dacl_ptr, path)?;
 
     // Get existing ACL size info.
     let mut acl_info = ACL_SIZE_INFORMATION {
@@ -200,7 +240,7 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
     };
 
     // SAFETY: Initializing a freshly allocated, zeroed ACL buffer.
-    let ret = unsafe { InitializeAcl(new_acl_ptr, new_acl_size, ACL_REVISION) };
+    let ret = unsafe { InitializeAcl(new_acl_ptr, new_acl_size, dacl_revision) };
     if ret == FALSE {
         return Err(SandboxError::Setup(format!(
             "InitializeAcl failed for {}",
@@ -226,7 +266,7 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         let ret = unsafe {
             AddAce(
                 new_acl_ptr,
-                ACL_REVISION,
+                dacl_revision,
                 u32::MAX, // Append at end.
                 ace_ptr,
                 u32::from(ace_size),
@@ -245,7 +285,7 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
     let ret = unsafe {
         AddAccessAllowedAceEx(
             new_acl_ptr,
-            ACL_REVISION,
+            dacl_revision,
             0,
             TRAVERSE_MASK,
             app_sid.as_raw(),
