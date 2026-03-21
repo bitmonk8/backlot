@@ -530,10 +530,6 @@ mod tests {
             unsafe { libc::_exit(0) };
         }
 
-        if !available() {
-            eprintln!("[skip] seccomp not available");
-            return;
-        }
         let bpf = build_filter(&empty_policy(false)).unwrap();
         let result = fork_with_seccomp(&bpf, child_body);
         assert_eq!(result, "OK", "PR_SET_NAME should be allowed");
@@ -565,10 +561,6 @@ mod tests {
             unsafe { libc::_exit(0) };
         }
 
-        if !available() {
-            eprintln!("[skip] seccomp not available");
-            return;
-        }
         let bpf = build_filter(&empty_policy(false)).unwrap();
         let result = fork_with_seccomp(&bpf, child_body);
         assert_eq!(result, "OK", "PR_SET_DUMPABLE should be denied by seccomp");
