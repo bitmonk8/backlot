@@ -147,6 +147,10 @@ impl CgroupGuard {
         let write_limits = || -> io::Result<()> {
             if let Some(bytes) = limits.max_memory_bytes {
                 fs::write(path.join("memory.max"), bytes.to_string())?;
+                // Disable swap so memory.max is a hard physical limit.
+                // Without this, processes can swap pages and exceed the
+                // intended limit on hosts with swap enabled.
+                let _ = fs::write(path.join("memory.swap.max"), "0");
             }
             if let Some(count) = limits.max_processes {
                 fs::write(path.join("pids.max"), count.to_string())?;

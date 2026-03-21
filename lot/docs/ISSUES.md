@@ -16,6 +16,10 @@ All 8 original issues fixed. Two CI failures exposed by the fixes were also reso
 - **Severity:** Critical
 - **Description:** CI runs elevated, so the `assert!(!is_elevated())` always panics. Fixed: added `#[ignore]` attribute for tests that require non-elevated context.
 
+### 1.11 [Correctness] cgroup `memory.swap.max` not set (FIXED)
+- **Severity:** Critical
+- **Description:** `CgroupGuard::new` wrote `memory.max` but not `memory.swap.max`. On hosts with swap, sandboxed processes could swap pages and exceed the memory limit. Caused `test_memory_limit_enforcement` to pass vacuously on CI. Fixed: write `memory.swap.max = 0` alongside `memory.max`.
+
 ---
 
 ## Group 2: Correctness & Error Handling — Sandbox Safety Bugs
