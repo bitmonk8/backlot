@@ -78,6 +78,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires non-elevated environment; run manually with --include-ignored"]
     fn grant_prerequisites_fails_without_elevation() {
         // System directories (e.g. C:\Windows) require elevation to modify.
         // From a non-elevated context this should return an error — unless the

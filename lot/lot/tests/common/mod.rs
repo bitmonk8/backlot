@@ -74,7 +74,7 @@ pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
         python3,
         vec![
             "-c".into(),
-            "x = bytearray(1024*1024*1024); import time; time.sleep(1)".into(),
+            "import mmap, time; m = mmap.mmap(-1, 1024*1024*1024); m[:] = b'\\x01' * len(m); time.sleep(1)".into(),
         ],
     )
 }
