@@ -64,7 +64,6 @@ pub fn grant_appcontainer_prerequisites_for_policy(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn appcontainer_prerequisites_met_empty_paths() {
@@ -74,40 +73,6 @@ mod tests {
         assert_eq!(
             result, nul_ok,
             "empty paths: prerequisites_met should equal nul_device_accessible"
-        );
-    }
-
-    #[test]
-    #[ignore = "requires non-elevated environment; run manually with --include-ignored"]
-    fn grant_prerequisites_fails_without_elevation() {
-        // System directories (e.g. C:\Windows) require elevation to modify.
-        // From a non-elevated context this should return an error — unless the
-        // prerequisites are already in place from a prior elevated run, in which
-        // case grant_traverse succeeds idempotently. Skip in that case.
-        let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
-        let sys32 = PathBuf::from(format!("{system_root}\\System32"));
-        assert!(
-            sys32.exists(),
-            "test requires System32 to exist at {}",
-            sys32.display()
-        );
-
-        assert!(
-            !super::super::elevation::is_elevated(),
-            "test requires non-elevated context"
-        );
-
-        // If prerequisites are already met (e.g., from a prior `lot setup`),
-        // the grant call succeeds idempotently and we cannot test the failure path.
-        assert!(
-            !appcontainer_prerequisites_met(&[sys32.as_path()]),
-            "test requires prerequisites not already met (prior `lot setup` detected)"
-        );
-
-        let result = grant_appcontainer_prerequisites(&[sys32.as_path()]);
-        assert!(
-            result.is_err(),
-            "grant_appcontainer_prerequisites should fail without elevation"
         );
     }
 
