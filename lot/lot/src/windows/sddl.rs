@@ -164,3 +164,82 @@ pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn test_tmp_base(name: &str) -> std::path::PathBuf {
+        let ws_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        let base = ws_root
+            .join("test_tmp")
+            .join(format!("{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create test_tmp_base");
+        base
+    }
+
+    #[test]
+    fn get_sddl_system_directory() {
+        // Reading SDDL from a known system directory should succeed.
+        let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let sddl = get_sddl(Path::new(&system_root)).expect("get_sddl should succeed");
+        // SDDL strings start with "D:" for DACL.
+        assert!(
+            sddl.starts_with("D:"),
+            "SDDL should start with 'D:': {sddl}"
+        );
+    }
+
+    #[test]
+    fn get_sddl_volume_root() {
+        let sddl = get_sddl(Path::new(r"C:\")).expect("get_sddl on C:\\");
+        assert!(!sddl.is_empty(), "SDDL should not be empty");
+    }
+
+    #[test]
+    fn get_sddl_nonexistent_path_fails() {
+        let result = get_sddl(Path::new(r"C:\NonExistent\Path\12345"));
+        assert!(result.is_err(), "nonexistent path should produce an error");
+    }
+
+    #[test]
+    fn get_sddl_restore_sddl_round_trip() {
+        // Create a temp directory, read its SDDL, restore it, and verify.
+        let base = test_tmp_base("sddl-roundtrip");
+
+        let original_sddl = get_sddl(&base).expect("get_sddl on temp dir");
+        assert!(!original_sddl.is_empty());
+
+        // Restore the same SDDL back.
+        restore_sddl(&base, &original_sddl).expect("restore_sddl should succeed");
+
+        // Read again and verify it matches.
+        let restored_sddl = get_sddl(&base).expect("get_sddl after restore");
+        assert_eq!(
+            original_sddl, restored_sddl,
+            "SDDL should be identical after round-trip"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn restore_sddl_nonexistent_path_fails() {
+        let result = restore_sddl(Path::new(r"C:\NonExistent\Path\12345"), "D:(A;;FA;;;WD)");
+        assert!(result.is_err(), "nonexistent path should fail");
+    }
+
+    #[test]
+    fn restore_sddl_invalid_sddl_string_fails() {
+        let base = test_tmp_base("sddl-invalid");
+
+        let result = restore_sddl(&base, "THIS_IS_NOT_VALID_SDDL");
+        assert!(result.is_err(), "invalid SDDL string should fail");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

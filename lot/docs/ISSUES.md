@@ -4,32 +4,6 @@ Grouped by co-fixability, ordered by impact (descending).
 
 ---
 
-## Group 3: High Testing — Core Untested Code Paths
-
-Critical code with zero test coverage. These are the highest-risk untested functions.
-
-### 3.1 [Testing] `grant_traverse` zero test coverage
-- **File:** lot/src/windows/traverse_acl.rs (lines 92-577)
-- **Severity:** High
-- **Description:** `grant_traverse` has zero test coverage (~15 failure branches). `has_traverse_ace` never verifies return values. Most complex Windows ACL function untested.
-
-### 3.2 [Testing] Unix lifecycle functions untested
-- **File:** lot/src/unix.rs (lines 398-823)
-- **Severity:** High
-- **Description:** Core lifecycle functions (`check_child_error_pipe`, `kill_by_pid_guard`, `UnixSandboxedChild` methods) have no unit tests. Helper functions do have tests. The untested functions are the highest-risk code in the file.
-
-### 3.3 [Testing] sddl.rs entirely untested
-- **File:** lot/src/windows/sddl.rs (lines 1-167)
-- **Severity:** High
-- **Description:** Entire file (3 functions, unsafe FFI) has zero tests. Error paths uncovered.
-
-### 3.4 [Testing] Linux namespace orchestrators untested
-- **File:** lot/src/linux/namespace.rs (lines 21-511)
-- **Severity:** High
-- **Description:** High-level orchestrators (`setup_user_namespace`, `setup_mount_namespace`, `pivot_root`/`do_pivot_root`) have zero coverage. Helper functions do have tests. The untested orchestrators are the critical path.
-
----
-
 ## Group 4: Design vs. Implementation Mismatch
 
 Documentation that does not match the code, or code that does not match the documentation.

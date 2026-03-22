@@ -441,9 +441,21 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn test_tmp_base(name: &str) -> std::path::PathBuf {
+        let ws_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        let base = ws_root
+            .join("test_tmp")
+            .join(format!("{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create test_tmp_base");
+        base
+    }
 
     #[test]
     fn compute_ancestors_empty_input() {
@@ -531,8 +543,8 @@ mod tests {
         // unless a UNC path is guaranteed to exist in the test environment.
         let unc = Path::new(r"\\localhost\C$\Windows\System32");
         let result = compute_ancestors(&[unc]);
-        // Just verify it doesn't panic; result depends on environment.
-        let _ = result;
+        // UNC path resolution depends on environment; just verify no panic.
+        assert!(result.is_ok(), "UNC path should produce Ok: {result:?}");
     }
 
     #[test]
@@ -573,6 +585,95 @@ mod tests {
         // C:\Windows is a system directory -- just verify the function doesn't
         // panic and returns a Result.
         let system_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".to_string());
-        let _result: bool = has_traverse_ace(Path::new(&system_root)).unwrap();
+        let _: bool = has_traverse_ace(Path::new(&system_root)).unwrap();
+    }
+
+    #[test]
+    fn has_traverse_ace_volume_root() {
+        // Volume root should have a readable DACL.
+        let result = has_traverse_ace(Path::new(r"C:\"));
+        assert!(
+            result.is_ok(),
+            "has_traverse_ace on C:\\ should not fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn has_traverse_ace_nonexistent_path() {
+        let result = has_traverse_ace(Path::new(r"C:\NonExistent\Path\12345"));
+        assert!(result.is_err(), "nonexistent path should produce an error");
+    }
+
+    #[test]
+    fn dacl_revision_null_returns_fallback() {
+        let rev = dacl_revision(std::ptr::null_mut(), Path::new(r"C:\test")).unwrap();
+        assert_eq!(rev, ACL_REVISION_FALLBACK);
+    }
+
+    #[test]
+    fn grant_traverse_nonexistent_path_fails() {
+        let result = grant_traverse(Path::new(r"C:\NonExistent\Path\12345"));
+        assert!(
+            result.is_err(),
+            "grant_traverse on nonexistent path should fail"
+        );
+    }
+
+    #[test]
+    fn grant_traverse_temp_directory() {
+        // Create a temp directory and attempt to grant traverse.
+        // This may fail with access denied if not elevated, which is acceptable.
+        let base = test_tmp_base("traverse-grant");
+
+        let result = grant_traverse(&base);
+        // Either succeeds or fails with a setup error (e.g. elevation required).
+        // Should never panic.
+        match &result {
+            Ok(()) => {
+                // Verify the ACE was actually applied.
+                let has_ace = has_traverse_ace(&base).unwrap();
+                assert!(has_ace, "ACE should be present after grant_traverse");
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                // Acceptable failures: elevation required or access denied
+                assert!(
+                    msg.contains("elevation required")
+                        || msg.contains("ACCESS_DENIED")
+                        || msg.contains("Access is denied"),
+                    "unexpected error: {msg}"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn grant_traverse_idempotent() {
+        // Calling grant_traverse twice on the same path should not fail.
+        let base = test_tmp_base("traverse-idempotent");
+
+        let first = grant_traverse(&base);
+        if first.is_ok() {
+            // Second call should detect existing ACE and return Ok immediately.
+            let second = grant_traverse(&base);
+            assert!(
+                second.is_ok(),
+                "idempotent grant_traverse should succeed: {second:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn alloc_guard_drop_does_not_panic() {
+        // Verify AllocGuard frees without panic.
+        let layout = std::alloc::Layout::from_size_align(64, 4).unwrap();
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!ptr.is_null());
+        let _guard = AllocGuard { ptr, layout };
+        // Guard drops here; should not panic or leak.
     }
 }

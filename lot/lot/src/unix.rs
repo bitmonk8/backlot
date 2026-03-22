@@ -1063,4 +1063,377 @@ mod tests {
         assert!(pipes.parent_stderr.is_none());
         // No fds to clean up -- these are stdin/stdout/stderr
     }
+
+    // ── check_child_error_pipe tests ─────────────────────────────────
+
+    /// Helper: fork a child that writes `data` to a pipe, then exits.
+    /// Returns the read end of the pipe and the child PID.
+    fn fork_pipe_writer(data: &[u8]) -> (i32, i32) {
+        let (r, w) = make_pipe().expect("make_pipe");
+        // SAFETY: fork + write + _exit are async-signal-safe
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // Child: close read end, write data, exit
+            unsafe {
+                libc::close(r);
+                if !data.is_empty() {
+                    libc::write(w, data.as_ptr().cast(), data.len());
+                }
+                libc::close(w);
+                libc::_exit(0);
+            }
+        }
+        // Parent: close write end
+        unsafe { libc::close(w) };
+        (r, pid)
+    }
+
+    #[test]
+    fn check_child_error_pipe_empty_pipe_succeeds() {
+        // Empty pipe (EOF) means child started successfully.
+        let (r, pid) = fork_pipe_writer(b"");
+        let step_names = &["step1", "step2"];
+        // SAFETY: r and pid are valid from fork_pipe_writer
+        let result = unsafe { check_child_error_pipe(r, pid, None, None, None, step_names) };
+        assert!(
+            result.is_ok(),
+            "empty pipe should indicate success: {result:?}"
+        );
+        // Reap the child to avoid zombie.
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+    }
+
+    #[test]
+    fn check_child_error_pipe_with_error_data() {
+        // Write 8 bytes: step=1 (i32), errno=2 (ENOENT on most systems)
+        let mut data = [0u8; 8];
+        data[..4].copy_from_slice(&1_i32.to_ne_bytes());
+        data[4..].copy_from_slice(&2_i32.to_ne_bytes());
+
+        let (r, pid) = fork_pipe_writer(&data);
+        let step_names = &["execve", "chdir"];
+        // SAFETY: r and pid are valid
+        let result = unsafe { check_child_error_pipe(r, pid, None, None, None, step_names) };
+        assert!(
+            result.is_err(),
+            "8 bytes of error data should produce an error"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("execve"),
+            "error should mention the step name: {msg}"
+        );
+    }
+
+    #[test]
+    fn check_child_error_pipe_with_partial_data() {
+        // Write fewer than 8 bytes -- should report incomplete error.
+        let partial = [0u8; 5];
+        let (r, pid) = fork_pipe_writer(&partial);
+        let step_names = &["step1"];
+        // SAFETY: r and pid are valid
+        let result = unsafe { check_child_error_pipe(r, pid, None, None, None, step_names) };
+        assert!(result.is_err(), "partial data should produce an error");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("incomplete"),
+            "error should mention incomplete: {msg}"
+        );
+    }
+
+    #[test]
+    fn check_child_error_pipe_unknown_step() {
+        // Step index out of range should produce "unknown" step name.
+        let mut data = [0u8; 8];
+        data[..4].copy_from_slice(&99_i32.to_ne_bytes());
+        data[4..].copy_from_slice(&1_i32.to_ne_bytes());
+
+        let (r, pid) = fork_pipe_writer(&data);
+        let step_names = &["only_one"];
+        // SAFETY: r and pid are valid
+        let result = unsafe { check_child_error_pipe(r, pid, None, None, None, step_names) };
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("unknown"),
+            "out-of-range step should be 'unknown': {msg}"
+        );
+    }
+
+    #[test]
+    fn check_child_error_pipe_closes_parent_pipes_on_error() {
+        // Verify parent pipe fds are closed when error is reported.
+        let mut data = [0u8; 8];
+        data[..4].copy_from_slice(&1_i32.to_ne_bytes());
+        data[4..].copy_from_slice(&1_i32.to_ne_bytes());
+
+        let (r, pid) = fork_pipe_writer(&data);
+        let (extra_r, extra_w) = make_pipe().expect("extra pipe");
+
+        // SAFETY: all fds and pid are valid
+        let result = unsafe {
+            check_child_error_pipe(r, pid, Some(extra_w), Some(extra_r), None, &["step"])
+        };
+        assert!(result.is_err());
+
+        // The parent pipe fds should now be closed.
+        // SAFETY: checking if closed fds are invalid
+        let ret = unsafe { libc::fcntl(extra_r, libc::F_GETFD) };
+        assert!(ret < 0, "parent stdout fd should be closed after error");
+        let ret = unsafe { libc::fcntl(extra_w, libc::F_GETFD) };
+        assert!(ret < 0, "parent stdin fd should be closed after error");
+    }
+
+    // ── kill_by_pid_guard tests ──────────────────────────────────────
+
+    #[cfg(feature = "tokio")]
+    #[test]
+    fn kill_by_pid_guard_rejects_zero() {
+        assert!(kill_by_pid_guard(0).is_none());
+    }
+
+    #[cfg(feature = "tokio")]
+    #[test]
+    fn kill_by_pid_guard_rejects_own_pid() {
+        assert!(kill_by_pid_guard(std::process::id()).is_none());
+    }
+
+    #[cfg(feature = "tokio")]
+    #[test]
+    fn kill_by_pid_guard_accepts_valid_pid() {
+        // Use PID 1 (init) as a known valid PID (we won't actually kill it).
+        let result = kill_by_pid_guard(1);
+        assert_eq!(result, Some(1));
+    }
+
+    #[cfg(feature = "tokio")]
+    #[test]
+    fn kill_by_pid_guard_rejects_overflow() {
+        // u32::MAX cannot fit in i32 as a positive value.
+        assert!(kill_by_pid_guard(u32::MAX).is_none());
+    }
+
+    // ── UnixSandboxedChild tests ─────────────────────────────────────
+
+    /// Create a UnixSandboxedChild from a real forked child that exits immediately.
+    /// Returns the child and a sync fd: reading from the fd blocks until the child exits.
+    fn spawn_trivial_child() -> (UnixSandboxedChild, i32) {
+        let (sync_r, sync_w) = make_pipe().expect("sync pipe");
+        // SAFETY: fork + _exit. The child closes sync_w implicitly via _exit,
+        // causing EOF on sync_r in the parent.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe {
+                libc::close(sync_r);
+                // sync_w closes when the child exits
+                libc::_exit(0);
+            }
+        }
+        // SAFETY: parent closes write-end so only the child holds it.
+        unsafe {
+            libc::close(sync_w);
+        }
+        let child = UnixSandboxedChild {
+            pid,
+            stdin_fd: None,
+            stdout_fd: None,
+            stderr_fd: None,
+            waited: AtomicBool::new(false),
+            kill_style: KillStyle::KillSingle,
+        };
+        (child, sync_r)
+    }
+
+    /// Block until the child exits by reading from the sync pipe fd, then close it.
+    fn wait_for_child_exit(sync_fd: i32) {
+        let mut buf = [0u8; 1];
+        // SAFETY: reading from a valid pipe fd; returns 0 on EOF (child exited).
+        unsafe {
+            libc::read(sync_fd, buf.as_mut_ptr() as *mut libc::c_void, 1);
+            libc::close(sync_fd);
+        }
+    }
+
+    #[test]
+    fn unix_child_id_returns_pid() {
+        let (child, sync_fd) = spawn_trivial_child();
+        assert!(child.id() > 0);
+        wait_for_child_exit(sync_fd);
+        // Reap to avoid zombie
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn unix_child_wait_returns_success() {
+        let (child, sync_fd) = spawn_trivial_child();
+        wait_for_child_exit(sync_fd);
+        let status = child.wait().expect("wait");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn unix_child_double_wait_fails() {
+        let (child, sync_fd) = spawn_trivial_child();
+        wait_for_child_exit(sync_fd);
+        let _ = child.wait().expect("first wait");
+        let result = child.wait();
+        assert!(result.is_err(), "second wait should fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("already waited"),
+            "error should mention already waited: {msg}"
+        );
+    }
+
+    #[test]
+    fn unix_child_try_wait_returns_result() {
+        let (child, sync_fd) = spawn_trivial_child();
+        // Wait for child to exit via pipe EOF.
+        wait_for_child_exit(sync_fd);
+        let result = child.try_wait().expect("try_wait");
+        // Child should have exited by now.
+        assert!(result.is_some(), "child should have exited");
+        assert!(result.unwrap().success());
+    }
+
+    #[test]
+    fn unix_child_kill_already_exited() {
+        let (child, sync_fd) = spawn_trivial_child();
+        // Wait for child to exit via pipe EOF.
+        wait_for_child_exit(sync_fd);
+        // kill() should not fail even if the child already exited.
+        let kill_result = child.kill();
+        assert!(
+            kill_result.is_ok(),
+            "kill on exited child should succeed: {kill_result:?}"
+        );
+        // Reap to avoid zombie.
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn unix_child_kill_and_reap() {
+        // Use a pipe so the child blocks without a long sleep timeout.
+        let (read_end, write_end) = make_pipe().expect("pipe");
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            // SAFETY: child process — close write end, block on read until killed.
+            unsafe {
+                libc::close(write_end);
+                let mut buf = [0u8; 1];
+                libc::read(read_end, buf.as_mut_ptr().cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        // Parent: close read end; keep write end so child stays blocked.
+        unsafe { libc::close(read_end) };
+        let mut child = UnixSandboxedChild {
+            pid,
+            stdin_fd: None,
+            stdout_fd: None,
+            stderr_fd: None,
+            waited: AtomicBool::new(false),
+            kill_style: KillStyle::KillSingle,
+        };
+        child.kill_and_reap();
+        unsafe { libc::close(write_end) };
+        // After kill_and_reap, waited should be true.
+        assert!(child.waited.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn unix_child_close_fds() {
+        let (r1, w1) = make_pipe().expect("pipe");
+        let (r2, w2) = make_pipe().expect("pipe");
+
+        let mut child2 = UnixSandboxedChild {
+            pid: 1,
+            stdin_fd: Some(w1),
+            stdout_fd: Some(r1),
+            stderr_fd: Some(r2),
+            waited: AtomicBool::new(true),
+            kill_style: KillStyle::KillSingle,
+        };
+        // Close w2 manually since we don't use it.
+        unsafe { libc::close(w2) };
+
+        child2.close_fds();
+        assert!(child2.stdin_fd.is_none());
+        assert!(child2.stdout_fd.is_none());
+        assert!(child2.stderr_fd.is_none());
+
+        // Verify fds are actually closed.
+        assert!(unsafe { libc::fcntl(w1, libc::F_GETFD) } < 0);
+        assert!(unsafe { libc::fcntl(r1, libc::F_GETFD) } < 0);
+        assert!(unsafe { libc::fcntl(r2, libc::F_GETFD) } < 0);
+    }
+
+    #[test]
+    fn unix_child_take_stdin_stdout_stderr() {
+        let (r, w) = make_pipe().expect("pipe");
+        let mut child2 = UnixSandboxedChild {
+            pid: 1,
+            stdin_fd: Some(w),
+            stdout_fd: Some(r),
+            stderr_fd: None,
+            waited: AtomicBool::new(true),
+            kill_style: KillStyle::KillSingle,
+        };
+
+        let stdin_file = child2.take_stdin();
+        assert!(stdin_file.is_some());
+        assert!(child2.stdin_fd.is_none());
+        // Second take should return None.
+        assert!(child2.take_stdin().is_none());
+
+        let stdout_file = child2.take_stdout();
+        assert!(stdout_file.is_some());
+        assert!(child2.take_stderr().is_none());
+
+        // Drop files to close fds.
+        drop(stdin_file);
+        drop(stdout_file);
+    }
+
+    #[test]
+    fn unix_child_wait_with_output() {
+        // Fork a child that writes to stdout/stderr pipes, then exits.
+        let (stdout_r, stdout_w) = make_pipe().expect("stdout pipe");
+        let (stderr_r, stderr_w) = make_pipe().expect("stderr pipe");
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::close(stdout_r);
+                libc::close(stderr_r);
+                libc::write(stdout_w, b"out".as_ptr().cast(), 3);
+                libc::write(stderr_w, b"err".as_ptr().cast(), 3);
+                libc::close(stdout_w);
+                libc::close(stderr_w);
+                libc::_exit(0);
+            }
+        }
+        unsafe {
+            libc::close(stdout_w);
+            libc::close(stderr_w);
+        }
+
+        let mut child = UnixSandboxedChild {
+            pid,
+            stdin_fd: None,
+            stdout_fd: Some(stdout_r),
+            stderr_fd: Some(stderr_r),
+            waited: AtomicBool::new(false),
+            kill_style: KillStyle::KillSingle,
+        };
+
+        let output = child.wait_with_output().expect("wait_with_output");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"out");
+        assert_eq!(output.stderr, b"err");
+    }
 }

@@ -538,16 +538,15 @@ mod tests {
 
     #[test]
     fn test_mkdir_p_creates_nested() {
-        let base = std::env::temp_dir().join(format!("lot-test-mkdir-{}", std::process::id()));
-        let nested = format!("{}/a/b/c", base.display());
-        // Clean up from any prior run
-        let _ = std::fs::remove_dir_all(&base);
+        let base = test_tmp_base("mkdir-nested");
+        let nested = base.join("a/b/c");
+        let nested_str = nested.to_str().expect("valid UTF-8 path");
 
         assert!(
-            mkdir_p(&nested).is_ok(),
+            mkdir_p(nested_str).is_ok(),
             "mkdir_p should create nested dirs"
         );
-        assert!(Path::new(&nested).is_dir(), "nested directory should exist");
+        assert!(nested.is_dir(), "nested directory should exist");
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&base);
@@ -620,6 +619,71 @@ mod tests {
         assert!(dest_dir.exists(), "dest should be created as a directory");
         assert!(dest_dir.is_dir(), "dest should be a directory");
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── mkdir_p edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn test_mkdir_p_absolute_root() {
+        // Creating "/" should succeed (already exists).
+        assert!(mkdir_p("/").is_ok());
+    }
+
+    #[test]
+    fn test_mkdir_p_single_component() {
+        let base = test_tmp_base("mkdir-single");
+        let target = format!("{}/single", base.display());
+        mkdir_p(&target).unwrap();
+        assert!(Path::new(&target).is_dir());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_mkdir_p_null_byte_in_path() {
+        let result = mkdir_p("/tmp/lot-test-\0-bad");
+        assert!(result.is_err(), "null byte in path should fail");
+    }
+
+    #[test]
+    fn test_mkdir_p_deeply_nested() {
+        let base = test_tmp_base("mkdir-deep");
+        let target = format!("{}/a/b/c/d/e/f", base.display());
+        mkdir_p(&target).unwrap();
+        assert!(Path::new(&target).is_dir());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── create_mount_point_file tests ────────────────────────────────
+
+    #[test]
+    fn test_create_mount_point_file_creates_empty_file() {
+        let base = test_tmp_base("mount-point-file");
+        let file_path = format!("{}/mount_point", base.display());
+        create_mount_point_file(&file_path).unwrap();
+        assert!(Path::new(&file_path).is_file());
+        // File should be empty.
+        let contents = std::fs::read(&file_path).unwrap();
+        assert!(contents.is_empty(), "mount point file should be empty");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_create_mount_point_file_null_byte() {
+        let result = create_mount_point_file("/tmp/lot-\0-bad");
+        assert!(result.is_err());
+    }
+
+    // ── create_mount_target with nonexistent src ─────────────────────
+
+    #[test]
+    fn test_create_mount_target_nonexistent_src_creates_directory() {
+        // When src does not exist, Path::is_file() returns false, so mkdir_p is called.
+        let base = test_tmp_base("mount-target-noexist");
+        let src = format!("{}/no_such_src", base.display());
+        let dest = format!("{}/dest_dir", base.display());
+        create_mount_target(&src, &dest).unwrap();
+        assert!(Path::new(&dest).is_dir());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

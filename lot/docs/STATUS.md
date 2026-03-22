@@ -4,13 +4,13 @@
 
 **Complete.** Implementation and audit remediation finished across all platforms (Linux, macOS, Windows). CI pipeline covers format, clippy, build, and test on all 3 platforms.
 
-## Issues (2026-03-21)
+## Issues (2026-03-22)
 
-82 findings from full project audit organized into 14 co-fix groups in `docs/ISSUES.md`, ordered by impact (Groups 3–16).
+82 findings from full project audit organized into 14 co-fix groups in `docs/ISSUES.md`, ordered by impact (Groups 4–16).
 
-- Groups 1–2 resolved and removed from ISSUES.md (committed in `b386215`..`db8b8c6`)
-- Remaining: 7 high, 39 medium, 36 low across Groups 3–16
-- Group 3 is next highest impact: core untested code (4 high)
+- Groups 1–3 resolved and removed from ISSUES.md
+- Remaining: 3 high, 39 medium, 36 low across Groups 4–16
+- Group 4 is next highest impact: design vs. implementation mismatch (1 high, 1 medium, 2 low)
 
 ## CI Notes
 
