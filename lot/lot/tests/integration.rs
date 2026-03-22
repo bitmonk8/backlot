@@ -935,82 +935,6 @@ fn test_double_wait_behavior() {
     eprintln!("[diag] PASSED");
 }
 
-// ── Tokio timeout tests ────────────────────────────────────────────
-
-#[cfg(feature = "tokio")]
-#[tokio::test]
-async fn test_wait_with_output_timeout_completes_before_timeout() {
-    eprintln!("[diag] === test_wait_with_output_timeout_completes_before_timeout ===");
-
-    let tmp = make_temp_dir();
-    let scratch = make_temp_dir();
-
-    let (program, args) = echo_command();
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
-
-    let mut cmd = lot::SandboxCommand::new(&program);
-    set_sandbox_env(&mut cmd, scratch.path());
-
-    cmd.args(&args);
-    cmd.stdout(lot::SandboxStdio::Piped);
-    cmd.stderr(lot::SandboxStdio::Piped);
-
-    let child = must_spawn(&policy, &cmd);
-
-    let result = child
-        .wait_with_output_timeout(std::time::Duration::from_secs(10))
-        .await;
-
-    match result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                stdout.contains("hello"),
-                "expected 'hello' in output, got: {stdout}"
-            );
-            eprintln!("[diag] PASSED: completed before timeout");
-        }
-        Err(e) => panic!("expected success, got: {e:?}"),
-    }
-}
-
-#[cfg(feature = "tokio")]
-#[tokio::test]
-async fn test_wait_with_output_timeout_kills_on_timeout() {
-    eprintln!("[diag] === test_wait_with_output_timeout_kills_on_timeout ===");
-
-    let tmp = make_temp_dir();
-    let scratch = make_temp_dir();
-
-    let (program, args) = sleep_command(60);
-
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
-
-    let mut cmd = lot::SandboxCommand::new(&program);
-    set_sandbox_env(&mut cmd, scratch.path());
-
-    cmd.args(&args);
-    cmd.stdout(lot::SandboxStdio::Piped);
-    cmd.stderr(lot::SandboxStdio::Piped);
-
-    let child = must_spawn(&policy, &cmd);
-
-    let result = child
-        .wait_with_output_timeout(std::time::Duration::from_millis(200))
-        .await;
-
-    match result {
-        Err(lot::SandboxError::Timeout(d)) => {
-            assert!(
-                d.as_millis() >= 200,
-                "timeout duration should match requested"
-            );
-            eprintln!("[diag] PASSED: timeout fired and child killed");
-        }
-        other => panic!("expected Timeout error, got: {other:?}"),
-    }
-}
-
 #[test]
 #[cfg(unix)]
 fn test_unix_tmpdir_in_write_paths_succeeds() {
@@ -1539,4 +1463,142 @@ fn test_windows_builder_based_spawn() {
         "stdout should contain 'hello', got: {stdout:?}"
     );
     eprintln!("[diag] PASSED");
+}
+
+// ── Tokio timeout tests ──────────────────────────────────────────────
+
+#[cfg(feature = "tokio")]
+mod tokio_tests {
+    use super::common::{make_temp_dir, set_sandbox_env};
+
+    fn spawn_sleep(seconds: u32) -> (lot::SandboxedChild, Vec<tempfile::TempDir>) {
+        #[cfg(unix)]
+        {
+            let policy = lot::SandboxPolicyBuilder::new()
+                .read_path("/usr")
+                .expect("read_path /usr")
+                .read_path("/bin")
+                .expect("read_path /bin")
+                .build()
+                .expect("build policy");
+            let mut cmd = lot::SandboxCommand::new("/bin/sleep");
+            cmd.arg(seconds.to_string());
+            cmd.stdout(lot::SandboxStdio::Piped);
+            cmd.stderr(lot::SandboxStdio::Piped);
+            (
+                lot::spawn(&policy, &cmd).expect("spawn_sleep must succeed"),
+                vec![],
+            )
+        }
+
+        #[cfg(windows)]
+        {
+            let tmp = make_temp_dir();
+            let scratch = make_temp_dir();
+            let policy = lot::SandboxPolicy::new(
+                vec![tmp.path().to_path_buf()],
+                vec![scratch.path().to_path_buf()],
+                vec![],
+                vec![],
+                false,
+                lot::ResourceLimits::default(),
+            );
+            let mut cmd = lot::SandboxCommand::new("powershell");
+            cmd.args(["-Command", &format!("Start-Sleep -Seconds {seconds}")]);
+            cmd.stdout(lot::SandboxStdio::Piped);
+            cmd.stderr(lot::SandboxStdio::Piped);
+            set_sandbox_env(&mut cmd, scratch.path());
+            (
+                lot::spawn(&policy, &cmd).expect("spawn_sleep must succeed"),
+                vec![tmp, scratch],
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_fires_on_long_running_child() {
+        let (child, _temps) = spawn_sleep(60);
+
+        let result = child
+            .wait_with_output_timeout(std::time::Duration::from_millis(200))
+            .await;
+
+        match result {
+            Err(lot::SandboxError::Timeout(d)) => {
+                assert!(
+                    d.as_millis() >= 200,
+                    "timeout duration should match requested"
+                );
+            }
+            other => panic!("expected Timeout error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_child_completes_before_timeout() {
+        #[cfg(unix)]
+        {
+            let policy = lot::SandboxPolicyBuilder::new()
+                .read_path("/usr")
+                .expect("read_path /usr")
+                .read_path("/bin")
+                .expect("read_path /bin")
+                .build()
+                .expect("build policy");
+            let mut cmd = lot::SandboxCommand::new("/bin/echo");
+            cmd.arg("hello");
+            cmd.stdout(lot::SandboxStdio::Piped);
+            cmd.stderr(lot::SandboxStdio::Piped);
+
+            let child = lot::spawn(&policy, &cmd).expect("spawn must succeed");
+
+            let result = child
+                .wait_with_output_timeout(std::time::Duration::from_secs(10))
+                .await;
+
+            match result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    assert_eq!(stdout.trim(), "hello");
+                }
+                Err(e) => panic!("expected success, got: {e:?}"),
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let tmp = make_temp_dir();
+            let scratch = make_temp_dir();
+            let policy = lot::SandboxPolicy::new(
+                vec![tmp.path().to_path_buf()],
+                vec![scratch.path().to_path_buf()],
+                vec![],
+                vec![],
+                false,
+                lot::ResourceLimits::default(),
+            );
+            let mut cmd = lot::SandboxCommand::new("cmd.exe");
+            cmd.args(["/C", "echo hello"]);
+            cmd.stdout(lot::SandboxStdio::Piped);
+            cmd.stderr(lot::SandboxStdio::Piped);
+            set_sandbox_env(&mut cmd, scratch.path());
+
+            let child = lot::spawn(&policy, &cmd).expect("spawn must succeed");
+
+            let result = child
+                .wait_with_output_timeout(std::time::Duration::from_secs(10))
+                .await;
+
+            match result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    assert!(
+                        stdout.contains("hello"),
+                        "expected 'hello' in output, got: {stdout}"
+                    );
+                }
+                Err(e) => panic!("expected success, got: {e:?}"),
+            }
+        }
+    }
 }

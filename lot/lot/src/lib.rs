@@ -140,8 +140,8 @@ pub fn probe() -> PlatformCapabilities {
     };
 }
 
-/// Directories each platform makes accessible to sandboxed processes
-/// regardless of what the policy grants (libraries, executables, system dirs).
+/// Directories each platform implicitly grants to sandboxed processes
+/// (libraries, executables, system dirs) regardless of policy.
 ///
 /// Each platform's list is intentionally different — it reflects the dirs that
 /// platform's sandbox mechanism auto-mounts or always allows. The lists are
@@ -200,6 +200,8 @@ pub(crate) fn platform_implicit_paths() -> Vec<std::path::PathBuf> {
 /// assert!(output.status.success());
 /// ```
 pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<SandboxedChild> {
+    // Validate here even though SandboxPolicyBuilder::build() also validates,
+    // because callers may construct policies via SandboxPolicy::new() directly.
     policy.validate()?;
     env_check::validate_env_accessibility(policy, command)?;
 
@@ -288,7 +290,7 @@ pub struct SandboxedChild {
     #[cfg(target_os = "linux")]
     inner: linux::LinuxSandboxedChild,
     #[cfg(target_os = "macos")]
-    inner: macos::MacSandboxedChild,
+    inner: macos::MacosSandboxedChild,
 }
 
 impl std::fmt::Debug for SandboxedChild {
@@ -581,178 +583,5 @@ mod tests {
     fn kill_by_pid_nonexistent_does_not_panic() {
         // u32::MAX is extremely unlikely to be a valid PID.
         kill_by_pid(u32::MAX);
-    }
-}
-
-#[cfg(test)]
-#[cfg(feature = "tokio")]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tokio_tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    /// Create temp dir inside the project to avoid system temp ancestors
-    /// (e.g. `C:\Users`) that require elevation for traverse ACE grants.
-    #[cfg(target_os = "windows")]
-    fn make_temp_dir() -> TempDir {
-        let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("workspace root")
-            .join("test_tmp");
-        std::fs::create_dir_all(&test_tmp).expect("create test_tmp dir");
-        TempDir::new_in(&test_tmp).expect("create temp dir")
-    }
-
-    /// Set sandbox-safe env overrides on Windows, no-op on Unix.
-    #[cfg(target_os = "windows")]
-    fn set_sandbox_env(cmd: &mut SandboxCommand, scratch: &std::path::Path) {
-        let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
-        let sys32 = format!(r"{sys_root}\System32");
-        cmd.env("PATH", &sys32);
-        cmd.env("TEMP", scratch);
-        cmd.env("TMP", scratch);
-        cmd.env("TMPDIR", scratch);
-        cmd.forward_common_env();
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[allow(dead_code, clippy::missing_const_for_fn)]
-    fn set_sandbox_env(_cmd: &mut SandboxCommand, _scratch: &std::path::Path) {}
-
-    /// Helper: build a minimal policy and command for timeout tests.
-    /// Returns the child plus temp dir handles that must outlive the child.
-    fn spawn_sleep(seconds: u32) -> (SandboxedChild, Vec<TempDir>) {
-        #[cfg(unix)]
-        {
-            // Grant /usr and /bin via builder so distros where /bin is a
-            // symlink to /usr/bin get it deduplicated automatically.
-            let policy = SandboxPolicyBuilder::new()
-                .read_path("/usr")
-                .expect("read_path /usr")
-                .read_path("/bin")
-                .expect("read_path /bin")
-                .build()
-                .expect("build policy");
-            let mut cmd = SandboxCommand::new("/bin/sleep");
-            cmd.arg(seconds.to_string());
-            cmd.stdout(SandboxStdio::Piped);
-            cmd.stderr(SandboxStdio::Piped);
-            (
-                spawn(&policy, &cmd).expect("spawn_sleep must succeed"),
-                vec![],
-            )
-        }
-
-        #[cfg(windows)]
-        {
-            // On Windows, use `powershell Start-Sleep` as a sleep substitute.
-            let tmp = make_temp_dir();
-            let scratch = make_temp_dir();
-            let policy = SandboxPolicy::new(
-                vec![tmp.path().to_path_buf()],
-                vec![scratch.path().to_path_buf()],
-                vec![],
-                vec![],
-                false,
-                crate::policy::ResourceLimits::default(),
-            );
-            let mut cmd = SandboxCommand::new("powershell");
-            cmd.args(["-Command", &format!("Start-Sleep -Seconds {seconds}")]);
-            cmd.stdout(SandboxStdio::Piped);
-            cmd.stderr(SandboxStdio::Piped);
-            set_sandbox_env(&mut cmd, scratch.path());
-            (
-                spawn(&policy, &cmd).expect("spawn_sleep must succeed"),
-                vec![tmp, scratch],
-            )
-        }
-    }
-
-    #[tokio::test]
-    async fn timeout_fires_on_long_running_child() {
-        let (child, _temps) = spawn_sleep(60);
-
-        let result = child
-            .wait_with_output_timeout(std::time::Duration::from_millis(200))
-            .await;
-
-        match result {
-            Err(SandboxError::Timeout(d)) => {
-                assert!(
-                    d.as_millis() >= 200,
-                    "timeout duration should match requested"
-                );
-            }
-            other => panic!("expected Timeout error, got: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn fast_child_completes_before_timeout() {
-        #[cfg(unix)]
-        {
-            // Grant /usr and /bin via builder for distro portability.
-            let policy = SandboxPolicyBuilder::new()
-                .read_path("/usr")
-                .expect("read_path /usr")
-                .read_path("/bin")
-                .expect("read_path /bin")
-                .build()
-                .expect("build policy");
-            let mut cmd = SandboxCommand::new("/bin/echo");
-            cmd.arg("hello");
-            cmd.stdout(SandboxStdio::Piped);
-            cmd.stderr(SandboxStdio::Piped);
-
-            let child = spawn(&policy, &cmd).expect("spawn must succeed");
-
-            let result = child
-                .wait_with_output_timeout(std::time::Duration::from_secs(10))
-                .await;
-
-            match result {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    assert_eq!(stdout.trim(), "hello");
-                }
-                Err(e) => panic!("expected success, got: {e:?}"),
-            }
-        }
-
-        #[cfg(windows)]
-        {
-            let tmp = make_temp_dir();
-            let scratch = make_temp_dir();
-            let policy = SandboxPolicy::new(
-                vec![tmp.path().to_path_buf()],
-                vec![scratch.path().to_path_buf()],
-                vec![],
-                vec![],
-                false,
-                crate::policy::ResourceLimits::default(),
-            );
-            let mut cmd = SandboxCommand::new("cmd.exe");
-            cmd.args(["/C", "echo hello"]);
-            cmd.stdout(SandboxStdio::Piped);
-            cmd.stderr(SandboxStdio::Piped);
-            set_sandbox_env(&mut cmd, scratch.path());
-
-            let child = spawn(&policy, &cmd).expect("spawn must succeed");
-
-            let result = child
-                .wait_with_output_timeout(std::time::Duration::from_secs(10))
-                .await;
-
-            match result {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    assert!(
-                        stdout.contains("hello"),
-                        "expected 'hello' in output, got: {stdout}"
-                    );
-                }
-                Err(e) => panic!("expected success, got: {e:?}"),
-            }
-        }
     }
 }

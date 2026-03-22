@@ -249,7 +249,7 @@ pub unsafe fn close_if_not_std(fd: i32) {
 }
 
 /// Close optional parent-side pipe fds. Used on error paths after fork.
-pub fn close_parent_pipes(stdin: Option<i32>, stdout: Option<i32>, stderr: Option<i32>) {
+pub fn close_pipe_fds(stdin: Option<i32>, stdout: Option<i32>, stderr: Option<i32>) {
     for fd in [stdin, stdout, stderr].into_iter().flatten() {
         // SAFETY: fd is a valid pipe fd from make_pipe()
         unsafe { libc::close(fd) };
@@ -313,7 +313,7 @@ pub fn read_two_fds(fd1: Option<i32>, fd2: Option<i32>) -> io::Result<(Vec<u8>, 
             if err.raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
-            close_parent_pipes(active1, active2, None);
+            close_pipe_fds(active1, active2, None);
             return Err(err);
         }
 
@@ -327,7 +327,7 @@ pub fn read_two_fds(fd1: Option<i32>, fd2: Option<i32>) -> io::Result<(Vec<u8>, 
                     if err.raw_os_error() == Some(libc::EINTR) {
                         continue 'outer;
                     }
-                    close_parent_pipes(active1, active2, None);
+                    close_pipe_fds(active1, active2, None);
                     return Err(err);
                 }
                 if n == 0 {
@@ -451,7 +451,7 @@ pub unsafe fn check_child_error_pipe(
                 break;
             }
         }
-        close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
+        close_pipe_fds(parent_stdin, parent_stdout, parent_stderr);
         crate::SandboxError::Setup(msg)
     };
 
@@ -491,10 +491,10 @@ pub unsafe fn check_child_error_pipe(
 pub enum KillStyle {
     /// `libc::kill(pid, SIGKILL)` — used on Linux where the helper PID
     /// is the target.
-    KillSingle,
+    Single,
     /// `libc::killpg(pid, SIGKILL)` — used on macOS where the child
     /// started a new session.
-    KillProcessGroup,
+    ProcessGroup,
 }
 
 /// Dup2 child fds to stdin/stdout/stderr. Returns `Err(errno)` on failure.
@@ -594,7 +594,7 @@ pub fn errno() -> i32 {
 /// Common guard logic for `kill_by_pid`: reject PID 0, negative PIDs,
 /// and our own PID. Returns `Some(pid_i32)` if the kill should proceed.
 #[cfg(feature = "tokio")]
-pub fn kill_by_pid_guard(pid: u32) -> Option<i32> {
+pub fn validate_kill_pid(pid: u32) -> Option<i32> {
     let pid_i32 = i32::try_from(pid).ok().filter(|&p| p > 0)?;
     if pid == std::process::id() {
         return None;
@@ -646,7 +646,7 @@ pub(crate) use delegate_unix_child_methods;
 
 /// Shared lifecycle state for a sandboxed Unix child process.
 ///
-/// Both `LinuxSandboxedChild` and `MacSandboxedChild` delegate their
+/// Both `LinuxSandboxedChild` and `MacosSandboxedChild` delegate their
 /// wait/kill/drop/take_stdio methods here. Platform differences (kill
 /// strategy, extra cleanup like cgroup guards) are handled by the
 /// platform-specific wrappers.
@@ -670,9 +670,9 @@ impl UnixSandboxedChild {
     fn send_sigkill(&self) -> i32 {
         match self.kill_style {
             // SAFETY: valid pid, SIGKILL is a well-known signal
-            KillStyle::KillSingle => unsafe { libc::kill(self.pid, libc::SIGKILL) },
+            KillStyle::Single => unsafe { libc::kill(self.pid, libc::SIGKILL) },
             // SAFETY: pid is a valid PGID after setsid(); SIGKILL is well-defined
-            KillStyle::KillProcessGroup => unsafe { libc::killpg(self.pid, libc::SIGKILL) },
+            KillStyle::ProcessGroup => unsafe { libc::killpg(self.pid, libc::SIGKILL) },
         }
     }
 
@@ -1185,33 +1185,33 @@ mod tests {
         assert!(ret < 0, "parent stdin fd should be closed after error");
     }
 
-    // ── kill_by_pid_guard tests ──────────────────────────────────────
+    // ── validate_kill_pid tests ──────────────────────────────────────
 
     #[cfg(feature = "tokio")]
     #[test]
-    fn kill_by_pid_guard_rejects_zero() {
-        assert!(kill_by_pid_guard(0).is_none());
+    fn validate_kill_pid_rejects_zero() {
+        assert!(validate_kill_pid(0).is_none());
     }
 
     #[cfg(feature = "tokio")]
     #[test]
-    fn kill_by_pid_guard_rejects_own_pid() {
-        assert!(kill_by_pid_guard(std::process::id()).is_none());
+    fn validate_kill_pid_rejects_own_pid() {
+        assert!(validate_kill_pid(std::process::id()).is_none());
     }
 
     #[cfg(feature = "tokio")]
     #[test]
-    fn kill_by_pid_guard_accepts_valid_pid() {
+    fn validate_kill_pid_accepts_valid_pid() {
         // Use PID 1 (init) as a known valid PID (we won't actually kill it).
-        let result = kill_by_pid_guard(1);
+        let result = validate_kill_pid(1);
         assert_eq!(result, Some(1));
     }
 
     #[cfg(feature = "tokio")]
     #[test]
-    fn kill_by_pid_guard_rejects_overflow() {
+    fn validate_kill_pid_rejects_overflow() {
         // u32::MAX cannot fit in i32 as a positive value.
-        assert!(kill_by_pid_guard(u32::MAX).is_none());
+        assert!(validate_kill_pid(u32::MAX).is_none());
     }
 
     // ── UnixSandboxedChild tests ─────────────────────────────────────
@@ -1241,7 +1241,7 @@ mod tests {
             stdout_fd: None,
             stderr_fd: None,
             waited: AtomicBool::new(false),
-            kill_style: KillStyle::KillSingle,
+            kill_style: KillStyle::Single,
         };
         (child, sync_r)
     }
@@ -1347,7 +1347,7 @@ mod tests {
             stdout_fd: None,
             stderr_fd: None,
             waited: AtomicBool::new(false),
-            kill_style: KillStyle::KillSingle,
+            kill_style: KillStyle::Single,
         };
         child.kill_and_reap();
         unsafe { libc::close(write_end) };
@@ -1366,7 +1366,7 @@ mod tests {
             stdout_fd: Some(r1),
             stderr_fd: Some(r2),
             waited: AtomicBool::new(true),
-            kill_style: KillStyle::KillSingle,
+            kill_style: KillStyle::Single,
         };
         // Close w2 manually since we don't use it.
         unsafe { libc::close(w2) };
@@ -1391,7 +1391,7 @@ mod tests {
             stdout_fd: Some(r),
             stderr_fd: None,
             waited: AtomicBool::new(true),
-            kill_style: KillStyle::KillSingle,
+            kill_style: KillStyle::Single,
         };
 
         let stdin_file = child2.take_stdin();
@@ -1439,7 +1439,7 @@ mod tests {
             stdout_fd: Some(stdout_r),
             stderr_fd: Some(stderr_r),
             waited: AtomicBool::new(false),
-            kill_style: KillStyle::KillSingle,
+            kill_style: KillStyle::Single,
         };
 
         let output = child.wait_with_output().expect("wait_with_output");

@@ -9,7 +9,7 @@ use seccompiler::{
 use crate::SandboxPolicy;
 
 /// Check whether seccomp-BPF is available.
-pub fn available() -> bool {
+pub fn is_available() -> bool {
     // SAFETY: PR_GET_SECCOMP reads kernel config, no pointers involved,
     // cannot corrupt state.
     //
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn seccomp_available_no_panic() {
-        let _result = available();
+        let _result = is_available();
     }
 
     #[test]

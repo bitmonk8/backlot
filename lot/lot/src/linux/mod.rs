@@ -42,9 +42,9 @@ pub fn platform_implicit_paths() -> Vec<std::path::PathBuf> {
 
 pub fn probe() -> PlatformCapabilities {
     PlatformCapabilities {
-        namespaces: namespace::available(),
-        seccomp: seccomp::available(),
-        cgroups_v2: cgroup::available(),
+        namespaces: namespace::is_available(),
+        seccomp: seccomp::is_available(),
+        cgroups_v2: cgroup::is_available(),
         seatbelt: false,
         appcontainer: false,
         job_objects: false,
@@ -183,7 +183,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     // If the policy requests resource limits and cgroup setup fails, return
     // an error rather than silently dropping the limits.
     let cgroup_guard = if policy.limits().has_any() {
-        if !cgroup::available() {
+        if !cgroup::is_available() {
             return Err(SandboxError::Setup(
                 "resource limits requested but cgroups v2 unavailable".into(),
             ));
@@ -262,7 +262,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         }
 
         // Close parent's stdio pipe ends (not the child's — those are needed for inner child)
-        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
+        unix::close_pipe_fds(parent_stdin, parent_stdout, parent_stderr);
 
         // Close all inherited fds except the ones the helper/inner-child need.
         // This prevents write-open fds from other threads (e.g. std::fs::copy)
@@ -516,7 +516,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 stdout_fd: parent_stdout,
                 stderr_fd: parent_stderr,
                 waited: AtomicBool::new(false),
-                kill_style: KillStyle::KillSingle,
+                kill_style: KillStyle::Single,
             },
             cgroup_guard,
         },
@@ -561,7 +561,7 @@ impl LinuxSandboxedChild {
 #[cfg(feature = "tokio")]
 #[allow(unsafe_code)]
 pub fn kill_by_pid(pid: u32) {
-    let Some(pid_i32) = unix::kill_by_pid_guard(pid) else {
+    let Some(pid_i32) = unix::validate_kill_pid(pid) else {
         return;
     };
     // SAFETY: Sending SIGKILL to a valid pid.

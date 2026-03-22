@@ -19,19 +19,11 @@ pub const FILE_GENERIC_EXECUTE: u32 = 0x0012_00A0;
 // ── Shared Win32 helpers ─────────────────────────────────────────────
 
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
 
-/// Encode a `&str` as a null-terminated UTF-16 string for Win32 APIs.
-pub fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// Encode a `Path` as a null-terminated UTF-16 string for Win32 APIs.
-pub fn path_to_wide(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
+/// Encode an `OsStr`-compatible value as a null-terminated UTF-16 string for Win32 APIs.
+/// Works with `&str`, `&OsStr`, and `&Path` via `AsRef<std::ffi::OsStr>`.
+pub fn to_wide(s: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
+    s.as_ref().encode_wide().chain(std::iter::once(0)).collect()
 }
 
 /// Format a Win32 error code as a human-readable message.
@@ -59,8 +51,8 @@ pub fn probe() -> PlatformCapabilities {
         seccomp: false,
         cgroups_v2: false,
         seatbelt: false,
-        appcontainer: appcontainer::available(),
-        job_objects: job::available(),
+        appcontainer: appcontainer::is_available(),
+        job_objects: job::is_available(),
     }
 }
 
@@ -163,9 +155,9 @@ mod tests {
     }
 
     #[test]
-    fn path_to_wide_round_trips() {
+    fn to_wide_path_round_trips() {
         let path = std::path::Path::new(r"C:\Windows\System32");
-        let wide = path_to_wide(path);
+        let wide = to_wide(path);
         // Must end with null terminator
         assert_eq!(*wide.last().unwrap(), 0u16);
         // Decode back (without null)

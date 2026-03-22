@@ -12,7 +12,7 @@ use windows_sys::Win32::System::Threading::{
 use crate::Result;
 use crate::error::SandboxError;
 
-use super::sddl::{get_sddl, restore_sddl};
+use super::sddl::{apply_sddl, get_sddl};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -41,6 +41,7 @@ fn pid_from_profile_name(name: &str) -> Option<u32> {
 /// reuses the PID and is still running. Full mitigation would require
 /// creation-time comparison, which the sentinel format doesn't currently store.
 fn is_process_alive(pid: u32) -> bool {
+    // Not exported by windows-sys without extra feature flags.
     const SYNCHRONIZE: u32 = 0x0010_0000;
     // SAFETY: Querying process existence. Handle closed immediately.
     // SYNCHRONIZE is required for WaitForSingleObject.
@@ -198,7 +199,7 @@ impl SentinelFile {
     }
 }
 
-pub fn write_sentinel(profile_name: &str, paths: &[PathBuf]) -> io::Result<SentinelFile> {
+pub fn save_sentinel_with_sddl(profile_name: &str, paths: &[PathBuf]) -> io::Result<SentinelFile> {
     let mut sentinel = SentinelFile::new(profile_name.to_owned());
     for path in paths {
         let sddl = get_sddl(path)?;
@@ -217,7 +218,7 @@ pub fn restore_acls_and_delete_sentinel(sentinel: &SentinelFile) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
 
     for (path, sddl) in &sentinel.entries {
-        if let Err(e) = restore_sddl(path, sddl) {
+        if let Err(e) = apply_sddl(path, sddl) {
             errors.push(format!("{}: {e}", path.display()));
         }
     }
@@ -634,10 +635,10 @@ mod tests {
         assert!(stale.is_empty());
     }
 
-    // ── write_sentinel ────────────────────────────────────────────
+    // ── save_sentinel_with_sddl ────────────────────────────────────────────
 
     #[test]
-    fn write_sentinel_creates_file_with_sddl() {
+    fn save_sentinel_with_sddl_creates_file_with_sddl() {
         let dir = make_test_dir();
         let test_path = dir.path().join("testfile.txt");
         std::fs::write(&test_path, "data").expect("write test file");
@@ -687,7 +688,7 @@ mod tests {
     fn restore_acls_and_delete_sentinel_preserves_file_on_failure() {
         let dir = make_test_dir();
         let mut sentinel = SentinelFile::with_dir("lot-999999999-0-0-0".to_owned(), dir.path());
-        // Non-existent path so restore_sddl will fail.
+        // Non-existent path so apply_sddl will fail.
         sentinel.add_entry(
             PathBuf::from(r"C:\nonexistent_lot_test_path_12345"),
             "D:(A;;FA;;;BA)".to_owned(),

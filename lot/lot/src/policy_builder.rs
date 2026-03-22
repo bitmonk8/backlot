@@ -9,8 +9,14 @@ use crate::policy::{ResourceLimits, SandboxPolicy};
 ///
 /// Paths are canonicalized on insert. Non-existent paths are silently skipped;
 /// other canonicalization failures (e.g., permission denied) return an error.
-/// If a narrower path is already covered by a broader entry in the same or a
-/// higher-privilege set, the narrower entry is not added.
+///
+/// **Deduplication and collapse behavior:**
+/// - If a narrower path is already covered by a broader entry in the same or a
+///   higher-privilege set, the narrower entry is not added (forward dedup).
+/// - If a broader path is added after narrower entries in the same or lower-privilege
+///   set, the narrower entries are removed (reverse overlap deduction / intra-set collapse).
+/// - Privilege ordering is read < exec < write. A write path subsumes read and exec
+///   children; an exec path subsumes read children.
 ///
 /// # Examples
 ///
@@ -262,6 +268,10 @@ impl SandboxPolicyBuilder {
 }
 
 /// Platform executable directories (shells, common tools).
+///
+/// Maintained separately from `platform_implicit_paths` and seatbelt always-allowed paths
+/// because each serves a different purpose: builder defaults vs sandbox-mechanism internals.
+/// The lists have no meaningful overlap across platforms.
 fn platform_exec_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {

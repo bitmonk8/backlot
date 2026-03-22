@@ -6,14 +6,36 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_TIME, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject,
+    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 
 use crate::policy::ResourceLimits;
 
+// UI restriction flags for JOB_OBJECT_BASIC_UI_RESTRICTIONS.
+// Values from winnt.h; defined here because windows-sys may not export them
+// without extra feature flags.
+const JOB_OBJECT_UILIMIT_HANDLES: u32 = 0x0001;
+const JOB_OBJECT_UILIMIT_READCLIPBOARD: u32 = 0x0002;
+const JOB_OBJECT_UILIMIT_WRITECLIPBOARD: u32 = 0x0004;
+const JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS: u32 = 0x0008;
+const JOB_OBJECT_UILIMIT_DISPLAYSETTINGS: u32 = 0x0010;
+const JOB_OBJECT_UILIMIT_GLOBALATOMS: u32 = 0x0020;
+const JOB_OBJECT_UILIMIT_DESKTOP: u32 = 0x0040;
+const JOB_OBJECT_UILIMIT_EXITWINDOWS: u32 = 0x0080;
+
+/// All UI restrictions OR'd together (0x00FF).
+const ALL_UI_RESTRICTIONS: u32 = JOB_OBJECT_UILIMIT_HANDLES
+    | JOB_OBJECT_UILIMIT_READCLIPBOARD
+    | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+    | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+    | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+    | JOB_OBJECT_UILIMIT_GLOBALATOMS
+    | JOB_OBJECT_UILIMIT_DESKTOP
+    | JOB_OBJECT_UILIMIT_EXITWINDOWS;
+
 /// Check whether Job objects are available.
-pub const fn available() -> bool {
+pub const fn is_available() -> bool {
     true
 }
 
@@ -82,6 +104,34 @@ impl JobObject {
                 JobObjectExtendedLimitInformation,
                 info_ptr.cast(),
                 info_len,
+            )
+        };
+        if ret == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        self.set_ui_restrictions()
+    }
+
+    /// Apply all UI restrictions: handles, read-clipboard, write-clipboard,
+    /// system parameters, display settings, global atoms, desktop, exit-windows.
+    fn set_ui_restrictions(&self) -> io::Result<()> {
+        let ui_restrict = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+            UIRestrictionsClass: ALL_UI_RESTRICTIONS,
+        };
+
+        let ui_ptr = &raw const ui_restrict;
+        #[allow(clippy::cast_possible_truncation)]
+        let ui_len = std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32;
+
+        // SAFETY: ui_restrict is fully initialized. The pointer and length
+        // match the expected type for JobObjectBasicUIRestrictions.
+        let ret = unsafe {
+            SetInformationJobObject(
+                self.handle,
+                JobObjectBasicUIRestrictions,
+                ui_ptr.cast(),
+                ui_len,
             )
         };
         if ret == 0 {

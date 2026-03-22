@@ -44,7 +44,7 @@ use super::pipe::{
     StdioPipes, close_handle_if_valid, close_optional_handle, resolve_stdio_input,
     resolve_stdio_output,
 };
-use super::sentinel::{SentinelFile, restore_acls_and_delete_sentinel, write_sentinel};
+use super::sentinel::{SentinelFile, restore_acls_and_delete_sentinel, save_sentinel_with_sddl};
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -59,13 +59,13 @@ const E_ALREADY_EXISTS: i32 = 0x8007_00B7_u32 as i32;
 use super::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 
 /// Check whether `AppContainer` is available on this Windows version.
-pub const fn available() -> bool {
+pub const fn is_available() -> bool {
     true
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-use super::{path_to_wide, to_wide};
+use super::to_wide;
 
 fn unique_profile_name() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -155,7 +155,7 @@ pub fn delete_profile(name: &str) -> io::Result<()> {
 /// Add or modify an ACE for `sid` on `path` with the given access mode and mask.
 /// Delegates to the shared `modify_dacl` primitive.
 fn apply_ace(sid: PSID, path: &Path, access_mode: i32, access_mask: u32) -> crate::Result<()> {
-    let wide_path = path_to_wide(path);
+    let wide_path = to_wide(path);
     let display = path.display().to_string();
 
     let trustee = TRUSTEE_W {
@@ -197,7 +197,7 @@ fn grant_access(sid: PSID, path: &Path, writable: bool) -> crate::Result<()> {
 /// inherited ACEs to explicit and blocks further inheritance from the parent.
 /// Then it adds the explicit deny ACE, which `SetEntriesInAclW` places before
 /// explicit allows in canonical DACL order.
-fn deny_all_file_access(sid: PSID, path: &Path) -> crate::Result<()> {
+fn deny_file_access(sid: PSID, path: &Path) -> crate::Result<()> {
     let access_mask = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
 
     if path.is_dir() {
@@ -220,7 +220,7 @@ fn deny_all_file_access(sid: PSID, path: &Path) -> crate::Result<()> {
 /// from parent directories. Existing inherited ACEs are converted to explicit.
 /// Delegates to `modify_dacl` with an empty entry list and the PROTECTED flag.
 fn protect_dacl(path: &Path) -> crate::Result<()> {
-    let wide_path = path_to_wide(path);
+    let wide_path = to_wide(path);
     let display = path.display().to_string();
 
     modify_dacl(
@@ -265,7 +265,6 @@ pub struct WindowsSandboxedChild {
     process_handle: HANDLE,
     thread_handle: HANDLE,
     _job: JobObject,
-    _profile_name: String,
     sentinel: SentinelFile,
     stdin_pipe: Option<std::fs::File>,
     stdout_pipe: Option<std::fs::File>,
@@ -541,7 +540,7 @@ fn spawn_inner(
     }
 
     // Write sentinel with original DACLs before modifying anything.
-    let sentinel = write_sentinel(profile_name, &all_paths)
+    let sentinel = save_sentinel_with_sddl(profile_name, &all_paths)
         .map_err(|e| SandboxError::Setup(format!("write sentinel: {e}")))?;
 
     // From here on, errors must restore ACLs via the sentinel.
@@ -577,12 +576,31 @@ unsafe fn cleanup_attr_and_sids(attr_list: LPPROC_THREAD_ATTRIBUTE_LIST, cap_sid
     }
 }
 
+/// Build capability SIDs based on policy (e.g., network access).
+fn build_capability_sids(
+    policy: &SandboxPolicy,
+) -> io::Result<(Vec<PSID>, Vec<SID_AND_ATTRIBUTES>)> {
+    let mut cap_sids: Vec<PSID> = Vec::new();
+    let mut capabilities: Vec<SID_AND_ATTRIBUTES> = Vec::new();
+
+    if policy.allow_network() {
+        let inet_sid = create_internet_client_sid()?;
+        cap_sids.push(inet_sid);
+        capabilities.push(SID_AND_ATTRIBUTES {
+            Sid: inet_sid,
+            Attributes: 4, // SE_GROUP_ENABLED
+        });
+    }
+
+    Ok((cap_sids, capabilities))
+}
+
 /// Spawn after sentinel is written. Returns sentinel back on error for cleanup.
 #[allow(clippy::too_many_lines)]
 fn spawn_with_sentinel(
     policy: &SandboxPolicy,
     command: &SandboxCommand,
-    profile_name: &str,
+    _profile_name: &str,
     ac_sid: PSID,
     sentinel: SentinelFile,
 ) -> std::result::Result<crate::SandboxedChild, (SentinelFile, SandboxError)> {
@@ -600,21 +618,8 @@ fn spawn_with_sentinel(
     let job = try_setup!(JobObject::new(), "create job object");
     try_setup!(job.set_limits(policy.limits()), "set job limits");
 
-    // Build security capabilities.
-    let mut cap_sids: Vec<PSID> = Vec::new();
-    let mut capabilities: Vec<SID_AND_ATTRIBUTES> = Vec::new();
-
-    if policy.allow_network() {
-        let inet_sid = try_setup!(
-            create_internet_client_sid(),
-            "create internet capability SID"
-        );
-        cap_sids.push(inet_sid);
-        capabilities.push(SID_AND_ATTRIBUTES {
-            Sid: inet_sid,
-            Attributes: 4, // SE_GROUP_ENABLED
-        });
-    }
+    let (cap_sids, mut capabilities) =
+        try_setup!(build_capability_sids(policy), "build capability SIDs");
 
     let mut sec_caps = SECURITY_CAPABILITIES {
         AppContainerSid: ac_sid,
@@ -796,7 +801,6 @@ fn spawn_with_sentinel(
                 process_handle: pi.hProcess,
                 thread_handle: pi.hThread,
                 _job: job,
-                _profile_name: profile_name.to_owned(),
                 sentinel,
                 stdin_pipe: stdin_file,
                 stdout_pipe: stdout_file,
@@ -859,7 +863,7 @@ fn create_sandboxed_process(
         )
     };
 
-    let cwd_wide = command.cwd.as_ref().map(|p| path_to_wide(p));
+    let cwd_wide = command.cwd.as_ref().map(to_wide);
 
     let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
     if env_block.is_some() {
@@ -965,7 +969,7 @@ fn apply_policy_acls(sid: PSID, policy: &SandboxPolicy) -> crate::Result<()> {
     // Deny ACEs are evaluated before allow ACEs by Windows, so these
     // override any inherited allows from parent grant paths.
     for path in policy.deny_paths() {
-        deny_all_file_access(sid, path)?;
+        deny_file_access(sid, path)?;
     }
     Ok(())
 }
@@ -1251,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn deny_all_file_access_adds_deny_ace() {
+    fn deny_file_access_adds_deny_ace() {
         let _guard = TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1264,15 +1268,15 @@ mod tests {
         // Grant parent access first so there is an allow ACE to override.
         grant_access(sid, tmp.path(), false).expect("grant parent");
 
-        // Baseline: no deny ACE on the subdirectory before deny_all_file_access.
+        // Baseline: no deny ACE on the subdirectory before deny_file_access.
         let sddl_before = get_sddl(&subdir).expect("get SDDL before deny");
         assert!(
             !sddl_before.contains("(D;"),
-            "subdirectory should have no deny ACE before deny_all_file_access, got: {sddl_before}"
+            "subdirectory should have no deny ACE before deny_file_access, got: {sddl_before}"
         );
 
         // Apply deny on the subdirectory.
-        deny_all_file_access(sid, &subdir).expect("deny subdir");
+        deny_file_access(sid, &subdir).expect("deny subdir");
 
         // Read back the SDDL and verify a deny ACE (type "D") is present.
         let sddl = get_sddl(&subdir).expect("get SDDL of denied subdir");

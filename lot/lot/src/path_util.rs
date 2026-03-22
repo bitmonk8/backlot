@@ -41,8 +41,10 @@ pub fn is_strict_parent_of(parent: &Path, child: &Path) -> bool {
 ///
 /// # Errors
 ///
-/// Returns `SandboxError::InvalidPolicy` if the path is relative or
-/// contains `..` components that would escape the root.
+/// Returns `SandboxError::InvalidPolicy` only if no ancestor of `path`
+/// can be canonicalized and the fallback `normalize_lexical` fails
+/// (i.e., the path is relative or contains `..` components that escape
+/// the root). Paths where at least one ancestor exists always succeed.
 pub fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, SandboxError> {
     let mut existing = path.to_path_buf();
     let mut suffix_parts = Vec::new();
@@ -105,6 +107,7 @@ pub fn normalize_lexical(path: &Path) -> Result<PathBuf, SandboxError> {
     }
     Ok(out)
 }
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

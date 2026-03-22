@@ -186,7 +186,7 @@ pub fn modify_dacl(
 /// `display_path`: human-readable path for error messages (None for device paths).
 /// `access_mask`: desired access rights for the ACE.
 /// `inheritance`: inheritance flags (0 for no inheritance).
-pub fn apply_dacl(
+pub fn apply_grant_ace(
     wide_path: &[u16],
     display_path: Option<&Path>,
     access_mask: u32,
@@ -417,19 +417,19 @@ mod tests {
         std::fs::create_dir_all(&test_tmp).expect("create test_tmp dir");
         let tmp = TempDir::new_in(&test_tmp).expect("create temp dir");
 
-        let wide_path = super::super::path_to_wide(tmp.path());
+        let wide_path = super::super::to_wide(tmp.path());
         let app_sid = allocate_app_packages_sid().unwrap();
 
         let access_mask = super::super::FILE_GENERIC_READ | super::super::FILE_GENERIC_EXECUTE;
 
-        apply_dacl(
+        apply_grant_ace(
             &wide_path,
             Some(tmp.path()),
             access_mask,
             0,
             app_sid.as_raw(),
         )
-        .expect("apply_dacl");
+        .expect("apply_grant_ace");
 
         let (dacl, _sd) = read_dacl(&wide_path).unwrap();
         assert!(

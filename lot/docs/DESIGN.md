@@ -31,7 +31,7 @@ lot/                           (workspace root)
 │   │       ├── acl_helpers.rs  — Shared DACL manipulation (SID allocation, ACE application)
 │   │       ├── nul_device.rs  — NUL device ACE, prerequisites API
 │   │       ├── traverse_acl.rs — Ancestor traverse ACE management
-│   │       ├── sddl.rs        — SDDL/DACL helpers (get_sddl, restore_sddl)
+│   │       ├── sddl.rs        — SDDL/DACL helpers (get_sddl, apply_sddl)
 │   │       ├── sentinel.rs    — Sentinel file ACL recovery (write, read, restore, find_stale_sentinels)
 │   │       ├── elevation.rs   — is_elevated() check (UAC token inspection)
 │   │       ├── prerequisites.rs — AppContainer prerequisite checking and granting (NUL device, traverse ACEs)
@@ -137,7 +137,7 @@ void sandbox_free_error(char *errorbuf);
 
 ### Shared Unix lifecycle (`unix.rs`)
 
-`UnixSandboxedChild` in `unix.rs` holds the common state (pid, stdio fds, `AtomicBool` waited flag) and implements `wait`, `try_wait`, `wait_with_output`, `kill`, `take_stdin/stdout/stderr`, `close_fds`, and `kill_and_reap`. The kill mechanism differs between Linux (`libc::kill` on helper PID; inner child dies via `PR_SET_PDEATHSIG`) and macOS (`libc::killpg` on child PGID after `setsid`). This is parameterized via `KillStyle` enum. Platform wrappers (`LinuxSandboxedChild`, `MacSandboxedChild`) delegate lifecycle methods and add platform-specific cleanup (cgroup guard on Linux).
+`UnixSandboxedChild` in `unix.rs` holds the common state (pid, stdio fds, `AtomicBool` waited flag) and implements `wait`, `try_wait`, `wait_with_output`, `kill`, `take_stdin/stdout/stderr`, `close_fds`, and `kill_and_reap`. The kill mechanism differs between Linux (`libc::kill` on helper PID; inner child dies via `PR_SET_PDEATHSIG`) and macOS (`libc::killpg` on child PGID after `setsid`). This is parameterized via `KillStyle` enum. Platform wrappers (`LinuxSandboxedChild`, `MacosSandboxedChild`) delegate lifecycle methods and add platform-specific cleanup (cgroup guard on Linux).
 
 The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `[step:i32, errno:i32]` error report to the error pipe and calls `_exit(1)`. Used by both platforms' forked child processes via a thin macro wrapper.
 
@@ -167,7 +167,7 @@ The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `
 - `JOB_OBJECT_LIMIT_PROCESS_MEMORY` — memory cap.
 - `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` — limit child process count.
 - `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — RAII cleanup: closing the job handle kills all processes in the job.
-- UI restrictions: block clipboard, desktop, display settings access.
+- `JOB_OBJECT_BASIC_UI_RESTRICTIONS` — block clipboard, desktop, display settings, exit-windows, global atoms, handle, system parameter, and write-clipboard access via `JOBOBJECT_BASIC_UI_RESTRICTIONS`.
 
 **Sentinel file ACL recovery:**
 1. Before granting ACLs, write a manifest of modified paths + original DACLs to a sentinel file.

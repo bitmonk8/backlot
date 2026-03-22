@@ -37,7 +37,7 @@ pub const fn probe() -> PlatformCapabilities {
         namespaces: false,
         seccomp: false,
         cgroups_v2: false,
-        seatbelt: seatbelt::available(),
+        seatbelt: seatbelt::is_available(),
         appcontainer: false,
         job_objects: false,
     }
@@ -125,7 +125,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         unsafe { libc::close(err_pipe_rd) };
 
         // Close parent's stdio pipe ends
-        unix::close_parent_pipes(parent_stdin, parent_stdout, parent_stderr);
+        unix::close_pipe_fds(parent_stdin, parent_stdout, parent_stderr);
 
         // Apply seatbelt profile — permanent, inherited by exec'd process
         if let Err(e) = seatbelt::apply_profile(&profile) {
@@ -201,14 +201,14 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     }
 
     Ok(SandboxedChild {
-        inner: MacSandboxedChild {
+        inner: MacosSandboxedChild {
             inner: UnixSandboxedChild {
                 pid: child_pid,
                 stdin_fd: parent_stdin,
                 stdout_fd: parent_stdout,
                 stderr_fd: parent_stderr,
                 waited: AtomicBool::new(false),
-                kill_style: KillStyle::KillProcessGroup,
+                kill_style: KillStyle::ProcessGroup,
             },
         },
     })
@@ -218,11 +218,11 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 ///
 /// Wraps `UnixSandboxedChild` for shared lifecycle methods. macOS uses
 /// `killpg` to kill the process group (child called `setsid`).
-pub struct MacSandboxedChild {
+pub struct MacosSandboxedChild {
     inner: UnixSandboxedChild,
 }
 
-impl MacSandboxedChild {
+impl MacosSandboxedChild {
     unix::delegate_unix_child_methods!(inner);
 
     /// Close fds, kill the process group, wait for exit.
@@ -242,7 +242,7 @@ impl MacSandboxedChild {
 #[cfg(feature = "tokio")]
 #[allow(unsafe_code)]
 pub fn kill_by_pid(pid: u32) {
-    let Some(pid_i32) = unix::kill_by_pid_guard(pid) else {
+    let Some(pid_i32) = unix::validate_kill_pid(pid) else {
         return;
     };
     // macOS children call setsid(), so PGID == PID — negate to kill
@@ -253,7 +253,7 @@ pub fn kill_by_pid(pid: u32) {
     }
 }
 
-impl Drop for MacSandboxedChild {
+impl Drop for MacosSandboxedChild {
     fn drop(&mut self) {
         self.inner.close_fds();
         self.inner.kill_and_reap();

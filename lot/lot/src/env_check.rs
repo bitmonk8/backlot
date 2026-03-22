@@ -80,17 +80,22 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
     // TEMP/TMP/TMPDIR must be under a write path (temp dirs need write access)
     // and must not be under a deny path (deny overrides all grants).
     for key in &["TEMP", "TMP", "TMPDIR"] {
-        if let Some(val) = effective_env(command, key) {
+        if let Some(val) = resolve_env_value(command, key) {
             let dir = Path::new(&val);
-            if !dir.as_os_str().is_empty() {
-                let resolved = canonicalize_existing_prefix(dir)?;
+            if !dir.as_os_str().is_empty()
+                && !is_dir_accessible(dir, &canon_write_paths, &[], &canon_deny)
+            {
+                // Distinguish deny-covered from uncovered for actionable diagnostics.
+                let Ok(resolved) = canonicalize_existing_prefix(dir) else {
+                    continue;
+                };
                 if is_denied(&resolved, &canon_deny) {
                     errors.push(format!(
                         "{key}={} is under a deny_path and will be inaccessible at runtime. \
                          Override it with SandboxCommand::env(\"{key}\", <a non-denied path>)",
                         dir.display()
                     ));
-                } else if !canon_write_paths.iter().any(|wp| resolved.starts_with(wp)) {
+                } else {
                     errors.push(format!(
                         "{key}={} is not covered by any write_path in the policy. \
                          Either add it as a write_path or override it with \
@@ -104,7 +109,7 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
 
     // PATH entries must be readable (covered by a grant path or platform-implicit)
     // and must not be under a deny path.
-    if let Some(val) = effective_env(command, "PATH") {
+    if let Some(val) = resolve_env_value(command, "PATH") {
         let uncovered: Vec<String> = std::env::split_paths(&val)
             .filter(|entry| !entry.as_os_str().is_empty())
             .filter(|entry| !is_dir_accessible(entry, &canon_grants, &canon_implicit, &canon_deny))
@@ -130,10 +135,10 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
 
 /// Resolve the effective value of an env var as the child will see it.
 ///
-/// Uses first-match semantics intentionally: on Unix the env Vec becomes envp
-/// directly (first-in-Vec = first in envp = what getenv returns), and on Windows
+/// Uses first-match semantics: on Unix the env Vec becomes envp directly
+/// (first-in-Vec = first in envp = what getenv returns), and on Windows
 /// `CreateProcessW` also uses the first occurrence in the environment block.
-pub fn effective_env(command: &SandboxCommand, key: &str) -> Option<OsString> {
+pub fn resolve_env_value(command: &SandboxCommand, key: &str) -> Option<OsString> {
     // Explicit override in command.env takes priority (first match = what the
     // child's getenv/GetEnvironmentVariable will return).
     for (k, v) in &command.env {
@@ -170,7 +175,7 @@ pub fn effective_env(command: &SandboxCommand, key: &str) -> Option<OsString> {
 
 /// Default PATH for Unix when no env is specified.
 #[cfg(not(target_os = "windows"))]
-pub const DEFAULT_UNIX_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+pub(crate) const DEFAULT_UNIX_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -349,24 +354,24 @@ mod tests {
     }
 
     #[test]
-    fn effective_env_explicit_override() {
+    fn resolve_env_value_explicit_override() {
         let mut cmd = SandboxCommand::new("dummy");
         cmd.env("FOO", "bar");
-        assert_eq!(effective_env(&cmd, "FOO"), Some(OsString::from("bar")));
+        assert_eq!(resolve_env_value(&cmd, "FOO"), Some(OsString::from("bar")));
     }
 
     #[test]
-    fn effective_env_missing_key() {
+    fn resolve_env_value_missing_key() {
         let mut cmd = SandboxCommand::new("dummy");
         cmd.env("OTHER", "val");
-        assert_eq!(effective_env(&cmd, "NONEXISTENT"), None);
+        assert_eq!(resolve_env_value(&cmd, "NONEXISTENT"), None);
     }
 
     #[test]
     #[cfg(not(target_os = "windows"))]
-    fn effective_env_default_path_on_unix() {
+    fn resolve_env_value_default_path_on_unix() {
         let cmd = SandboxCommand::new("dummy");
-        let path = effective_env(&cmd, "PATH");
+        let path = resolve_env_value(&cmd, "PATH");
         assert_eq!(path, Some(OsString::from(DEFAULT_UNIX_PATH)));
     }
 

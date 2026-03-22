@@ -18,7 +18,7 @@ fn path_to_str<'a>(path: &'a Path, label: &str) -> io::Result<&'a str> {
 }
 
 /// Check whether unprivileged user namespaces are available.
-pub fn available() -> bool {
+pub fn is_available() -> bool {
     if is_apparmor_restricted() {
         return false;
     }
@@ -242,7 +242,7 @@ pub fn mount_proc_in_new_root(new_root: &str) -> io::Result<()> {
 
 /// Pivot into the new root and unmount the old root.
 pub fn pivot_root(new_root: &str) -> io::Result<()> {
-    do_pivot_root(new_root)
+    execute_pivot_root(new_root)
 }
 
 /// Create a directory and all parents (like `mkdir -p`), ignoring EEXIST.
@@ -466,7 +466,7 @@ fn mount_dev_node(new_root: &str, dev_path: &str) -> io::Result<()> {
 }
 
 /// Perform pivot_root: switch the root filesystem to `new_root`.
-fn do_pivot_root(new_root: &str) -> io::Result<()> {
+fn execute_pivot_root(new_root: &str) -> io::Result<()> {
     let old_root_path = format!("{new_root}/.old_root");
     mkdir_p(&old_root_path)?;
 
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn namespace_available_no_panic() {
-        let _result = available();
+        let _result = is_available();
     }
 
     #[test]

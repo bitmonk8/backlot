@@ -75,7 +75,10 @@ impl SandboxPolicy {
 }
 
 /// Canonicalize a path, mapping IO errors to `InvalidPolicy` with the list name.
-fn canon(path: &std::path::Path, which: &str) -> Result<PathBuf, SandboxError> {
+fn canonicalize_for_validation(
+    path: &std::path::Path,
+    which: &str,
+) -> Result<PathBuf, SandboxError> {
     std::fs::canonicalize(path).map_err(|e| {
         SandboxError::InvalidPolicy(format!(
             "path does not exist or is inaccessible in {which}: {} ({e})",
@@ -91,7 +94,7 @@ enum OverlapMode {
     Symmetric,
     /// Allow b-children under a-parents (elevated subdirectory under
     /// lower-privilege parent, e.g. write child under read parent).
-    AllowBUnderA,
+    AllowChildUnderParent,
 }
 
 /// Check for parent/child overlaps between two named sets of canonicalized paths.
@@ -159,7 +162,7 @@ fn check_intra_overlap(paths: &[PathBuf], name: &str) -> Result<(), SandboxError
 
 /// Verify that each deny path is a strict child of at least one grant path,
 /// and that no grant path is a child of a deny path (unreachable grant).
-fn check_deny_coverage(
+fn validate_deny_paths(
     deny_paths: &[PathBuf],
     read_paths: &[PathBuf],
     write_paths: &[PathBuf],
@@ -201,10 +204,10 @@ fn check_deny_coverage(
 
 /// Canonicalize a list of paths, collecting errors into `errors` and returning
 /// successfully canonicalized paths.
-fn canon_collect(paths: &[PathBuf], label: &str, errors: &mut Vec<String>) -> Vec<PathBuf> {
+fn canonicalize_collect(paths: &[PathBuf], label: &str, errors: &mut Vec<String>) -> Vec<PathBuf> {
     let mut result = Vec::new();
     for p in paths {
-        match canon(p, label) {
+        match canonicalize_for_validation(p, label) {
             Ok(c) => result.push(c),
             Err(SandboxError::InvalidPolicy(msg)) => errors.push(msg),
             Err(e) => errors.push(e.to_string()),
@@ -221,6 +224,8 @@ fn collect_validation_error(result: Result<(), SandboxError>, errors: &mut Vec<S
         Err(other) => errors.push(other.to_string()),
     }
 }
+
+// ── Path queries and validation ──────────────────────────────────────
 
 impl SandboxPolicy {
     /// Returns the union of `read_paths`, `write_paths`, `exec_paths`, and `deny_paths`.
@@ -272,10 +277,10 @@ impl SandboxPolicy {
         // canonicalized paths so subsequent checks can still run.
         // Paths that fail canonicalization are intentionally excluded from overlap
         // checks — their non-existence is already reported as an error above.
-        let read_canon = canon_collect(&self.read_paths, "read_paths", &mut errors);
-        let write_canon = canon_collect(&self.write_paths, "write_paths", &mut errors);
-        let exec_canon = canon_collect(&self.exec_paths, "exec_paths", &mut errors);
-        let deny_canon = canon_collect(&self.deny_paths, "deny_paths", &mut errors);
+        let read_canon = canonicalize_collect(&self.read_paths, "read_paths", &mut errors);
+        let write_canon = canonicalize_collect(&self.write_paths, "write_paths", &mut errors);
+        let exec_canon = canonicalize_collect(&self.exec_paths, "exec_paths", &mut errors);
+        let deny_canon = canonicalize_collect(&self.deny_paths, "deny_paths", &mut errors);
 
         // Check for intra-set overlaps.
         collect_validation_error(check_intra_overlap(&read_canon, "read_paths"), &mut errors);
@@ -298,7 +303,7 @@ impl SandboxPolicy {
                 "read_paths",
                 &write_canon,
                 "write_paths",
-                OverlapMode::AllowBUnderA,
+                OverlapMode::AllowChildUnderParent,
             ),
             &mut errors,
         );
@@ -326,7 +331,7 @@ impl SandboxPolicy {
         // Each deny path must be a strict child of at least one grant path.
         // Exact matches are rejected — callers should remove the grant instead.
         collect_validation_error(
-            check_deny_coverage(&deny_canon, &read_canon, &write_canon, &exec_canon),
+            validate_deny_paths(&deny_canon, &read_canon, &write_canon, &exec_canon),
             &mut errors,
         );
 
@@ -1016,7 +1021,7 @@ mod tests {
         );
     }
 
-    // ── check_deny_coverage with write/exec grants ────────────────
+    // ── validate_deny_paths with write/exec grants ────────────────
 
     #[test]
     fn deny_path_covered_by_write_grant() {

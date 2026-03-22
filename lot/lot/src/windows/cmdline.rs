@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-use super::path_to_wide;
+use super::to_wide;
 
 // ── Command-line building/quoting ────────────────────────────────────
 
@@ -42,8 +42,7 @@ pub fn build_command_line(program: &OsString, args: &[OsString]) -> Vec<u16> {
         cmd.push(" ");
         append_escaped_arg(&mut cmd, arg);
     }
-    // Reuse path_to_wide which does the same OsStr -> null-terminated UTF-16 conversion.
-    path_to_wide(std::path::Path::new(&cmd))
+    to_wide(&cmd)
 }
 
 const WIDE_SPACE: u16 = b' ' as u16;

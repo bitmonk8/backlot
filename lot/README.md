@@ -29,8 +29,8 @@ lot = "0.1"
 use lot::{SandboxPolicyBuilder, SandboxCommand, spawn};
 
 let policy = SandboxPolicyBuilder::new()
-    .include_platform_exec_paths()
-    .include_platform_lib_paths()
+    .include_platform_exec_paths().expect("exec paths")
+    .include_platform_lib_paths().expect("lib paths")
     .allow_network(false)
     .max_memory_bytes(64 * 1024 * 1024) // 64 MB
     .build()

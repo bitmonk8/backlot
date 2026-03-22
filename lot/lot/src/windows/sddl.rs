@@ -3,7 +3,7 @@
 use std::io;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{ERROR_SUCCESS, FALSE, LocalFree};
+use windows_sys::Win32::Foundation::{ERROR_SUCCESS, FALSE};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1,
@@ -14,7 +14,8 @@ use windows_sys::Win32::Security::{
     PSECURITY_DESCRIPTOR,
 };
 
-use super::{path_to_wide, to_wide};
+use super::acl_helpers::{LocalFreeGuard, OwnedSecurityDescriptor};
+use super::to_wide;
 
 #[allow(clippy::cast_possible_wrap)]
 fn win32_to_io(code: u32) -> io::Error {
@@ -22,7 +23,7 @@ fn win32_to_io(code: u32) -> io::Error {
 }
 
 pub fn get_sddl(path: &Path) -> io::Result<String> {
-    let wide_path = path_to_wide(path);
+    let wide_path = to_wide(path);
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
 
     // SAFETY: Reads the DACL of the named object. sd must be freed with `LocalFree`.
@@ -42,15 +43,11 @@ pub fn get_sddl(path: &Path) -> io::Result<String> {
         return Err(win32_to_io(err));
     }
 
-    let result = sd_to_sddl(sd, DACL_SECURITY_INFORMATION);
+    // RAII guard ensures sd is freed on all exit paths.
+    let _sd_guard = OwnedSecurityDescriptor::new(sd)
+        .ok_or_else(|| io::Error::other("GetNamedSecurityInfoW returned null SD"))?;
 
-    // SAFETY: sd was allocated by `GetNamedSecurityInfoW`.
-    let free_result = unsafe { LocalFree(sd.cast()) };
-    if !free_result.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-
-    result
+    sd_to_sddl(sd, DACL_SECURITY_INFORMATION)
 }
 
 /// Convert a security descriptor to an SDDL string.
@@ -75,6 +72,11 @@ fn sd_to_sddl(sd: PSECURITY_DESCRIPTOR, info: OBJECT_SECURITY_INFORMATION) -> io
         return Err(io::Error::last_os_error());
     }
 
+    // RAII guard ensures sddl_ptr is freed via LocalFree on all exit paths.
+    let _sddl_guard = LocalFreeGuard::new(sddl_ptr).ok_or_else(|| {
+        io::Error::other("ConvertSecurityDescriptorToStringSecurityDescriptorW returned null")
+    })?;
+
     // Walk the null-terminated wide string to find its length.
     // SAFETY: sddl_ptr is a null-terminated wide string allocated by the conversion function.
     let len = unsafe {
@@ -87,27 +89,16 @@ fn sd_to_sddl(sd: PSECURITY_DESCRIPTOR, info: OBJECT_SECURITY_INFORMATION) -> io
     // SAFETY: sddl_ptr points to `len` valid u16 values from the conversion function.
     let sddl_slice = unsafe { std::slice::from_raw_parts(sddl_ptr, len) };
     let sddl = String::from_utf16(sddl_slice).map_err(|e| {
-        // Free before returning the error.
-        // SAFETY: sddl_ptr allocated by the conversion function.
-        unsafe {
-            LocalFree(sddl_ptr.cast());
-        }
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("SDDL UTF-16 decode: {e}"),
         )
     })?;
 
-    // SAFETY: sddl_ptr allocated by the conversion function.
-    let free_result = unsafe { LocalFree(sddl_ptr.cast()) };
-    if !free_result.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-
     Ok(sddl)
 }
 
-pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
+pub fn apply_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     let wide_sddl = to_wide(sddl);
     let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
 
@@ -124,8 +115,14 @@ pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
 
+    // RAII guard ensures sd is freed on all exit paths.
+    let _sd_guard = OwnedSecurityDescriptor::new(sd).ok_or_else(|| {
+        io::Error::other("ConvertStringSecurityDescriptorToSecurityDescriptorW returned null SD")
+    })?;
+
     let mut dacl_present: i32 = FALSE;
     let mut dacl: *mut ACL = std::ptr::null_mut();
+    // Required by GetSecurityDescriptorDacl but not used after the call.
     let mut dacl_defaulted: i32 = FALSE;
 
     // SAFETY: sd is a valid security descriptor from the conversion above.
@@ -137,13 +134,9 @@ pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
             &raw mut dacl_defaulted,
         )
     };
+    let _ = dacl_defaulted; // Required by API but unused.
     if ret == FALSE {
-        let os_err = io::Error::last_os_error();
-        // SAFETY: sd was allocated by the conversion function.
-        unsafe {
-            LocalFree(sd.cast());
-        }
-        return Err(os_err);
+        return Err(io::Error::last_os_error());
     }
 
     let dacl_to_set = if dacl_present == FALSE {
@@ -152,7 +145,7 @@ pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
         dacl
     };
 
-    let wide_path = path_to_wide(path);
+    let wide_path = to_wide(path);
 
     // SAFETY: Setting DACL on a named object. Owner/group/SACL unchanged (null).
     // SetNamedSecurityInfoW re-evaluates inheritance from the parent, which
@@ -169,14 +162,8 @@ pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
         )
     };
 
-    // SAFETY: sd was allocated by the conversion function.
-    let free_result = unsafe { LocalFree(sd.cast()) };
-
     if err != ERROR_SUCCESS {
         return Err(win32_to_io(err));
-    }
-    if !free_result.is_null() {
-        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -223,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn get_sddl_restore_sddl_round_trip() {
+    fn get_sddl_apply_sddl_round_trip() {
         // Create a temp directory, read its SDDL, restore it, and verify.
         let base = test_tmp_base("sddl-roundtrip");
 
@@ -231,7 +218,7 @@ mod tests {
         assert!(!original_sddl.is_empty());
 
         // Restore the same SDDL back.
-        restore_sddl(&base, &original_sddl).expect("restore_sddl should succeed");
+        apply_sddl(&base, &original_sddl).expect("apply_sddl should succeed");
 
         // Read again — SetNamedSecurityInfoW may apply auto-inheritance,
         // changing flags (e.g., D: → D:AI) and adding inherited ACEs.
@@ -246,16 +233,16 @@ mod tests {
     }
 
     #[test]
-    fn restore_sddl_nonexistent_path_fails() {
-        let result = restore_sddl(Path::new(r"C:\NonExistent\Path\12345"), "D:(A;;FA;;;WD)");
+    fn apply_sddl_nonexistent_path_fails() {
+        let result = apply_sddl(Path::new(r"C:\NonExistent\Path\12345"), "D:(A;;FA;;;WD)");
         assert!(result.is_err(), "nonexistent path should fail");
     }
 
     #[test]
-    fn restore_sddl_invalid_sddl_string_fails() {
+    fn apply_sddl_invalid_sddl_string_fails() {
         let base = test_tmp_base("sddl-invalid");
 
-        let result = restore_sddl(&base, "THIS_IS_NOT_VALID_SDDL");
+        let result = apply_sddl(&base, "THIS_IS_NOT_VALID_SDDL");
         assert!(result.is_err(), "invalid SDDL string should fail");
 
         let _ = std::fs::remove_dir_all(&base);

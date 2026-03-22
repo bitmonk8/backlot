@@ -13,7 +13,7 @@
 //! the entire subtree; the kernel API writes only the target object's
 //! security descriptor without any propagation.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, FALSE, HANDLE};
 use windows_sys::Win32::Security::{
@@ -31,7 +31,7 @@ use super::acl_helpers::{
     ELEVATION_REQUIRED_MARKER, allocate_app_packages_sid, dacl_has_ace_for_sid,
     dacl_has_app_packages_ace, read_dacl,
 };
-use super::path_to_wide;
+use super::to_wide;
 use crate::error::SandboxError;
 
 // Raw FFI to ntdll!NtSetSecurityObject — the kernel API that sets an
@@ -52,14 +52,14 @@ const FILE_READ_ATTRIBUTES: u32 = 0x0080;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const TRAVERSE_MASK: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 
-/// Walk parents of each path up to the volume root, deduplicate.
+/// Walk parents of each path up to the root, deduplicate.
 /// Does NOT include the paths themselves -- only their ancestors.
 ///
 /// Returns an error if any path cannot be canonicalized, preventing
 /// vacuous-truth checks when all paths are silently skipped.
-pub fn compute_ancestors<P: AsRef<Path>>(
+pub fn compute_ancestors<P: AsRef<std::path::Path>>(
     paths: &[P],
-) -> std::result::Result<Vec<PathBuf>, SandboxError> {
+) -> Result<Vec<std::path::PathBuf>, SandboxError> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
 
@@ -90,7 +90,7 @@ pub fn compute_ancestors<P: AsRef<Path>>(
 /// Check if a directory's DACL has an allow ACE for ALL APPLICATION PACKAGES
 /// with at least `TRAVERSE_MASK` (`FILE_TRAVERSE | SYNCHRONIZE | FILE_READ_ATTRIBUTES`).
 pub fn has_traverse_ace(path: &Path) -> Result<bool, SandboxError> {
-    let wide = path_to_wide(path);
+    let wide = to_wide(path);
     let (dacl_ptr, _sd_guard) = read_dacl(&wide)?;
     dacl_has_app_packages_ace(dacl_ptr, TRAVERSE_MASK)
 }
@@ -157,7 +157,7 @@ impl Drop for AllocGuard {
 /// the TOCTOU race of separate check-then-modify calls. If the ACE already
 /// exists, no write is attempted.
 pub fn grant_traverse(path: &Path) -> crate::Result<()> {
-    let wide = path_to_wide(path);
+    let wide = to_wide(path);
 
     let (dacl_ptr, sd_guard) = read_dacl(&wide)?;
 
@@ -444,6 +444,7 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn test_tmp_base(name: &str) -> std::path::PathBuf {
         let ws_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

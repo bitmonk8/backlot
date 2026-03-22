@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use crate::SandboxError;
 use crate::policy::SandboxPolicy;
 
+// ── FFI declarations ─────────────────────────────────────────────────
+
 // SAFETY: These are Apple's sandbox API functions, always available on macOS.
 unsafe extern "C" {
     fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
@@ -49,7 +51,7 @@ const EXEC_SYSTEM_PATHS: &[&str] = &[
 ];
 
 /// Check whether Seatbelt (sandbox_init) is available.
-pub const fn available() -> bool {
+pub const fn is_available() -> bool {
     // sandbox_init is available on all supported macOS versions.
     true
 }
@@ -58,6 +60,8 @@ pub const fn available() -> bool {
 ///
 /// `program_path` is the absolute path to the binary that will be exec'd.
 ///
+// ── Profile generation ───────────────────────────────────────────────
+
 /// Returns an error if any policy path cannot be encoded into a valid SBPL rule
 /// (e.g., non-UTF-8 paths or paths containing null bytes). This is intentional:
 /// silently dropping a rule — especially a deny rule — would weaken the sandbox.

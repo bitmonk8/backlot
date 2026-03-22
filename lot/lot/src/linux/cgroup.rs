@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::policy::ResourceLimits;
 
 /// Check whether cgroups v2 delegation is available for the current user.
-pub fn available() -> bool {
-    is_cgroupv2() && has_writable_subtree()
+pub fn is_available() -> bool {
+    is_cgroupv2() && has_writable_delegation()
 }
 
 /// cgroupv2 is mounted when the unified hierarchy controller list exists.
@@ -31,7 +31,7 @@ fn is_writable(path: &Path) -> bool {
 /// with at least one controller. cgroupv2's "no internal processes" rule
 /// means the process's own cgroup cannot have subtree_control with
 /// controllers AND contain processes — so we check the parent.
-fn has_writable_subtree() -> bool {
+fn has_writable_delegation() -> bool {
     let Some(cgroup_path) = current_cgroup_path() else {
         return false;
     };
@@ -208,7 +208,7 @@ impl CgroupGuard {
         // Derive the expected cgroup relative path from our absolute path.
         // Our path is /sys/fs/cgroup/<relative>, and /proc/PID/cgroup
         // contains "0::/<relative>".
-        let expected_suffix = self
+        let cgroup_path_suffix = self
             .path
             .strip_prefix("/sys/fs/cgroup")
             .unwrap_or(&self.path);
@@ -218,7 +218,7 @@ impl CgroupGuard {
                 continue;
             };
             // Verify the PID still belongs to our cgroup before killing.
-            if !Self::pid_in_cgroup(pid, expected_suffix) {
+            if !Self::pid_in_cgroup(pid, cgroup_path_suffix) {
                 continue;
             }
             // SAFETY: kill() with a valid signal number has no UB preconditions.
@@ -230,7 +230,7 @@ impl CgroupGuard {
 
     /// Check whether a PID's cgroupv2 entry matches the expected path.
     /// Returns `false` if the check cannot be performed (process already exited).
-    fn pid_in_cgroup(pid: i32, expected_suffix: &Path) -> bool {
+    fn pid_in_cgroup(pid: i32, cgroup_path_suffix: &Path) -> bool {
         let cgroup_file = format!("/proc/{pid}/cgroup");
         let Ok(contents) = fs::read_to_string(cgroup_file) else {
             return false;
@@ -238,7 +238,7 @@ impl CgroupGuard {
         for line in contents.lines() {
             if let Some(rest) = line.strip_prefix("0::") {
                 let relative = rest.trim_start_matches('/');
-                return Path::new(relative) == expected_suffix;
+                return Path::new(relative) == cgroup_path_suffix;
             }
         }
         false
@@ -292,7 +292,7 @@ mod tests {
     use super::*;
 
     fn require_cgroups() {
-        assert!(available(), "cgroups v2 not available");
+        assert!(is_available(), "cgroups v2 not available");
     }
 
     /// RAII guard ensures forked child is killed+reaped on all paths
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn cgroup_available_no_panic() {
-        let _result = available();
+        let _result = is_available();
     }
 
     #[test]

@@ -8,11 +8,19 @@ use std::path::Path;
 
 /// One-time elevated setup. Grants all ACEs needed for AppContainer sandboxes
 /// to function correctly on Windows:
-///   1. NUL device read/write for ALL APPLICATION PACKAGES
-///   2. Traverse ACEs on each ancestor of the provided paths, up to (and
-///      including) the volume root
+///   1. NUL device read/write ACE for ALL APPLICATION PACKAGES
+///   2. Traverse ACEs (`FILE_TRAVERSE | SYNCHRONIZE | FILE_READ_ATTRIBUTES`)
+///      on each ancestor directory of the provided paths, up to and
+///      including the volume root
 ///
-/// Idempotent -- safe to call multiple times. Requires elevation.
+/// Idempotent -- safe to call multiple times. Requires elevation (run as
+/// administrator). Non-elevated calls fail with [`SandboxError::Setup`]
+/// containing "elevation required".
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Setup`] if ACE modification fails (e.g. insufficient
+/// privileges or I/O errors).
 pub fn grant_appcontainer_prerequisites(paths: &[&Path]) -> crate::Result<()> {
     super::nul_device::grant_nul_device()?;
 
@@ -25,7 +33,11 @@ pub fn grant_appcontainer_prerequisites(paths: &[&Path]) -> crate::Result<()> {
 }
 
 /// Checks whether all ancestors of each path (up to volume root) have the
-/// ALL APPLICATION PACKAGES traverse ACE, and the NUL device ACE exists.
+/// ALL APPLICATION PACKAGES traverse ACE, and the NUL device read/write
+/// ACE exists.
+///
+/// Returns `true` if all prerequisites are in place, `false` otherwise.
+/// Does not require elevation -- read-only check.
 pub fn appcontainer_prerequisites_met(paths: &[&Path]) -> bool {
     if !super::nul_device::nul_device_accessible().unwrap_or(false) {
         return false;

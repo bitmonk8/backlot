@@ -42,7 +42,7 @@ pub fn grant_nul_device() -> crate::Result<()> {
     }
 
     // Device objects have no children -- no inheritance needed.
-    super::acl_helpers::apply_dacl(&wide, None, NUL_ACCESS_MASK, 0, app_sid.as_raw())
+    super::acl_helpers::apply_grant_ace(&wide, None, NUL_ACCESS_MASK, 0, app_sid.as_raw())
 }
 
 #[cfg(test)]
