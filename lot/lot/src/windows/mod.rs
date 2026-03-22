@@ -112,3 +112,68 @@ pub fn kill_by_pid(pid: u32) {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_wide_basic_string() {
+        let result = to_wide("hello");
+        let expected: Vec<u16> = "hello".encode_utf16().chain(std::iter::once(0)).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn to_wide_empty_string() {
+        let result = to_wide("");
+        assert_eq!(result, vec![0u16]);
+    }
+
+    #[test]
+    fn to_wide_unicode() {
+        // U+00E9 = 'e' with acute accent, fits in single UTF-16 code unit
+        let result = to_wide("\u{00E9}");
+        assert_eq!(result, vec![0x00E9, 0]);
+    }
+
+    #[test]
+    fn to_wide_surrogate_pair() {
+        // U+1F389 requires a surrogate pair in UTF-16
+        let result = to_wide("\u{1F389}");
+        assert_eq!(result, vec![0xD83C, 0xDF89, 0]);
+    }
+
+    #[test]
+    fn platform_implicit_paths_returns_system_root() {
+        let paths = platform_implicit_paths();
+        assert!(!paths.is_empty(), "should return at least one path");
+        // Should contain the Windows system root
+        let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.to_string_lossy().eq_ignore_ascii_case(&sys_root)),
+            "should contain SYSTEMROOT: paths={paths:?}"
+        );
+    }
+
+    #[test]
+    fn path_to_wide_round_trips() {
+        let path = std::path::Path::new(r"C:\Windows\System32");
+        let wide = path_to_wide(path);
+        // Must end with null terminator
+        assert_eq!(*wide.last().unwrap(), 0u16);
+        // Decode back (without null)
+        let decoded = String::from_utf16_lossy(&wide[..wide.len() - 1]);
+        assert_eq!(decoded, r"C:\Windows\System32");
+    }
+
+    #[test]
+    fn win32_error_msg_returns_nonempty() {
+        // Error code 2 = ERROR_FILE_NOT_FOUND
+        let msg = win32_error_msg(2);
+        assert!(!msg.is_empty(), "error message should not be empty");
+    }
+}

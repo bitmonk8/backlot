@@ -51,6 +51,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nul_device_path_constant_is_correct() {
+        assert_eq!(NUL_DEVICE, "\\\\.\\NUL");
+    }
+
+    #[test]
+    fn nul_access_mask_includes_read_and_write() {
+        assert_ne!(NUL_ACCESS_MASK & FILE_GENERIC_READ, 0);
+        assert_ne!(NUL_ACCESS_MASK & FILE_GENERIC_WRITE, 0);
+    }
+
+    #[test]
+    fn check_nul_device_access_does_not_error() {
+        // nul_device_accessible reads the DACL on \\.\NUL.
+        // It should succeed regardless of whether ACEs are in place.
+        let result = nul_device_accessible();
+        assert!(
+            result.is_ok(),
+            "reading NUL device DACL should not fail: {result:?}"
+        );
+    }
+
+    #[test]
     fn nul_device_accessible_returns_deterministic() {
         // .unwrap() verifies Ok (no error). We cannot assert the bool value
         // because it depends on whether `lot setup` has been run on this machine.

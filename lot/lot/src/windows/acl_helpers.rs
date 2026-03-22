@@ -458,6 +458,38 @@ mod tests {
     }
 
     #[test]
+    fn elevation_required_marker_is_nonempty() {
+        assert!(!ELEVATION_REQUIRED_MARKER.is_empty());
+    }
+
+    #[test]
+    fn elevation_required_marker_used_in_error_messages() {
+        // Verify the marker string is the expected value used by
+        // appcontainer.rs and traverse_acl.rs for access-denied detection.
+        assert_eq!(ELEVATION_REQUIRED_MARKER, "elevation required");
+    }
+
+    #[test]
+    fn allocate_app_packages_sid_succeeds() {
+        let sid = allocate_app_packages_sid();
+        assert!(sid.is_ok(), "should allocate SID without error");
+        let sid = sid.unwrap();
+        assert!(!sid.as_raw().is_null(), "SID pointer should not be null");
+    }
+
+    #[test]
+    fn owned_sid_new_returns_none_for_null() {
+        let result = OwnedSid::new(std::ptr::null_mut());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn local_free_guard_new_returns_none_for_null() {
+        let result = LocalFreeGuard::<u8>::new(std::ptr::null_mut());
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn dacl_has_app_packages_ace_null_dacl_returns_ok_true() {
         // A null DACL means unrestricted access -- should return Ok(true).
         let result = dacl_has_app_packages_ace(std::ptr::null_mut(), 0x1);

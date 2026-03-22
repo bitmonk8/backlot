@@ -278,6 +278,68 @@ mod tests {
         );
     }
 
+    // ── Overflow/saturation ──────────────────────────────────────────
+
+    #[test]
+    fn set_limits_u64_max_memory_does_not_panic() {
+        let job = JobObject::new().expect("create job object");
+        let limits = ResourceLimits {
+            max_memory_bytes: Some(u64::MAX),
+            max_processes: None,
+            max_cpu_seconds: None,
+        };
+        // Should succeed without panic; the value truncates on 32-bit but
+        // is valid on 64-bit.
+        job.set_limits(&limits)
+            .expect("set limits with u64::MAX memory");
+    }
+
+    #[test]
+    fn set_limits_u64_max_cpu_seconds_does_not_panic() {
+        let job = JobObject::new().expect("create job object");
+        let limits = ResourceLimits {
+            max_memory_bytes: None,
+            max_processes: None,
+            max_cpu_seconds: Some(u64::MAX),
+        };
+        // saturating_mul prevents overflow; the resulting i64 cast wraps
+        // but should not panic.
+        job.set_limits(&limits)
+            .expect("set limits with u64::MAX cpu");
+    }
+
+    #[test]
+    fn set_limits_u32_max_processes_does_not_panic() {
+        let job = JobObject::new().expect("create job object");
+        let limits = ResourceLimits {
+            max_memory_bytes: None,
+            max_processes: Some(u32::MAX),
+            max_cpu_seconds: None,
+        };
+        job.set_limits(&limits)
+            .expect("set limits with u32::MAX processes");
+        let info = query_limits(&job);
+        assert_eq!(info.BasicLimitInformation.ActiveProcessLimit, u32::MAX);
+    }
+
+    #[test]
+    fn set_limits_all_at_max_does_not_panic() {
+        let job = JobObject::new().expect("create job object");
+        let limits = ResourceLimits {
+            max_memory_bytes: Some(u64::MAX),
+            max_processes: Some(u32::MAX),
+            max_cpu_seconds: Some(u64::MAX),
+        };
+        job.set_limits(&limits)
+            .expect("set all limits to max values");
+    }
+
+    // ── memory_limit_kills_child ──────────────────────────────────
+    // Note (12.9): PowerShell's CLR may reserve additional memory beyond
+    // the script's allocation. The 10 MB limit is low enough that even
+    // CLR baseline allocation triggers the job limit. If this test becomes
+    // flaky, increase the limit or switch to a native allocator binary.
+
     #[test]
     fn memory_limit_kills_child() {
         use std::process::Stdio;

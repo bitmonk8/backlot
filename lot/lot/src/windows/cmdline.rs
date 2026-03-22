@@ -100,6 +100,58 @@ fn append_escaped_arg(cmd: &mut OsString, arg: &OsString) {
 mod tests {
     use super::*;
 
+    // ── build_env_block ──────────────────────────────────────────────
+
+    #[test]
+    fn build_env_block_normal_entries() {
+        let env = vec![
+            (OsString::from("KEY1"), OsString::from("value1")),
+            (OsString::from("KEY2"), OsString::from("value2")),
+        ];
+        let block = build_env_block(&env);
+        // Expected: KEY1=value1\0KEY2=value2\0\0
+        let decoded = String::from_utf16_lossy(&block);
+        assert!(decoded.contains("KEY1=value1"));
+        assert!(decoded.contains("KEY2=value2"));
+        // Must end with double null (last two u16 are both 0)
+        assert_eq!(block[block.len() - 1], 0);
+        assert_eq!(block[block.len() - 2], 0);
+    }
+
+    #[test]
+    fn build_env_block_empty_env() {
+        let env: Vec<(OsString, OsString)> = vec![];
+        let block = build_env_block(&env);
+        // Empty env block is just a single null terminator
+        assert_eq!(block, vec![0u16]);
+    }
+
+    #[test]
+    fn build_env_block_unicode_values() {
+        let env = vec![(OsString::from("GREETING"), OsString::from("hello\u{1F389}"))];
+        let block = build_env_block(&env);
+        let decoded = String::from_utf16_lossy(&block);
+        assert!(
+            decoded.contains("GREETING=hello\u{1F389}"),
+            "env block should contain unicode value: {decoded}"
+        );
+    }
+
+    #[test]
+    fn build_env_block_single_entry() {
+        let env = vec![(OsString::from("A"), OsString::from("B"))];
+        let block = build_env_block(&env);
+        // A=B\0\0
+        let expected: Vec<u16> = "A=B"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .chain(std::iter::once(0))
+            .collect();
+        assert_eq!(block, expected);
+    }
+
+    // ── existing tests ───────────────────────────────────────────────
+
     /// Decode a null-terminated wide string back to a Rust String for assertions.
     fn wide_to_string(wide: &[u16]) -> String {
         let without_null = wide.strip_suffix(&[0]).unwrap_or(wide);

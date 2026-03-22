@@ -523,6 +523,35 @@ mod tests {
         );
     }
 
+    // ── Builder-based Windows test ────────────────────
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn builder_produces_valid_windows_policy() {
+        let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("test_tmp");
+        std::fs::create_dir_all(&test_tmp).expect("create test_tmp");
+        let tmp = tempfile::TempDir::new_in(&test_tmp).expect("create temp dir");
+
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(tmp.path())
+            .expect("read_path")
+            .allow_network(false)
+            .max_memory_bytes(256 * 1024 * 1024)
+            .build()
+            .expect("build via builder should succeed on Windows");
+
+        // Verify the produced policy passes validate() independently.
+        policy
+            .validate()
+            .expect("builder-produced policy must validate");
+        assert!(!policy.read_paths().is_empty());
+        assert!(!policy.allow_network());
+        assert_eq!(policy.limits().max_memory_bytes, Some(256 * 1024 * 1024));
+    }
+
     /// PID 0 must be silently rejected. Reaching the end of this test
     /// confirms the guard prevented the OS call (which would be undefined behavior).
     #[test]

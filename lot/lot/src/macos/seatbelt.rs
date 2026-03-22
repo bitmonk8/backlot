@@ -856,6 +856,56 @@ mod tests {
         );
     }
 
+    // ── add_ancestors guard behavior ────────────────────────────────
+
+    #[test]
+    fn add_ancestors_skips_relative_path() {
+        let mut set = HashSet::new();
+        add_ancestors(Path::new("relative/path"), &mut set);
+        assert!(set.is_empty(), "relative paths should be skipped");
+    }
+
+    #[test]
+    fn add_ancestors_stops_at_root() {
+        let mut set = HashSet::new();
+        add_ancestors(Path::new("/a/b/c"), &mut set);
+        assert!(set.contains(&PathBuf::from("/a")));
+        assert!(set.contains(&PathBuf::from("/a/b")));
+        assert!(!set.contains(&PathBuf::from("/")));
+        assert!(!set.contains(&PathBuf::from("/a/b/c")));
+    }
+
+    #[test]
+    fn add_ancestors_single_component() {
+        let mut set = HashSet::new();
+        add_ancestors(Path::new("/a"), &mut set);
+        // /a has only / as parent, which is excluded
+        assert!(set.is_empty());
+    }
+
+    // ── deny-path ancestor metadata rules ─────────────────────────
+
+    #[test]
+    fn deny_path_ancestors_excluded_from_ancestor_dirs() {
+        // Deny paths should NOT contribute to ancestor metadata rules
+        // because collect_ancestor_dirs only iterates read/write/exec paths.
+        let policy = SandboxPolicy::new(
+            vec![PathBuf::from("/tmp/test_read")],
+            vec![],
+            vec![],
+            vec![PathBuf::from("/tmp/test_read/secret/deep")],
+            false,
+            ResourceLimits::default(),
+        );
+        let ancestors = collect_ancestor_dirs(&policy, &test_program());
+        // /tmp/test_read/secret should NOT appear since deny paths don't
+        // contribute to ancestors (they are excluded from all_raw_paths).
+        assert!(
+            !ancestors.contains(&PathBuf::from("/tmp/test_read/secret")),
+            "deny path ancestors should not be in ancestor_dirs"
+        );
+    }
+
     #[test]
     fn ancestor_metadata_before_network() {
         let bp = basic_policy();

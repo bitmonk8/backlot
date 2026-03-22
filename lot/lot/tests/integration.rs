@@ -30,6 +30,19 @@ fn must_spawn(policy: &lot::SandboxPolicy, cmd: &lot::SandboxCommand) -> lot::Sa
     }
 }
 
+/// Log diagnostic output from a sandboxed child for CI debugging.
+fn log_output(output: &std::process::Output) {
+    eprintln!("[diag] exit status: {:?}", output.status);
+    eprintln!(
+        "[diag] stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Platform-appropriate echo command: `cmd /C echo hello` on Windows,
 /// `/bin/echo hello` on Unix.
 #[cfg(target_os = "windows")]
@@ -200,15 +213,7 @@ fn test_spawn_echo() {
     let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
-    eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!(
-        "[diag] stdout: {:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    eprintln!(
-        "[diag] stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    log_output(&output);
 
     assert!(
         output.status.success(),
@@ -246,15 +251,7 @@ fn test_spawn_read_allowed_path() {
     let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
-    eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!(
-        "[diag] stdout: {:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    eprintln!(
-        "[diag] stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    log_output(&output);
 
     assert!(
         output.status.success(),
@@ -308,15 +305,7 @@ fn test_spawn_read_single_file() {
     let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
-    eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!(
-        "[diag] stdout: {:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    eprintln!(
-        "[diag] stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    log_output(&output);
 
     assert!(
         output.status.success(),
@@ -356,15 +345,7 @@ fn test_spawn_disallowed_path_blocked() {
     let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
-    eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!(
-        "[diag] stdout: {:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    eprintln!(
-        "[diag] stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    log_output(&output);
 
     // The command must fail because the file is outside the policy.
     assert!(
@@ -416,15 +397,7 @@ fn test_spawn_write_to_readonly_blocked() {
     let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
 
-    eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!(
-        "[diag] stdout: {:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    eprintln!(
-        "[diag] stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    log_output(&output);
     eprintln!("[diag] file exists after attempt: {}", target.exists());
 
     // Writing to a read-only path should fail.
@@ -539,15 +512,7 @@ fn test_spawn_with_piped_stdin() {
 
     let output = child.wait_with_output().expect("wait_with_output");
 
-    eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!(
-        "[diag] stdout: {:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    eprintln!(
-        "[diag] stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    log_output(&output);
 
     assert!(
         output.status.success(),
@@ -1494,6 +1459,84 @@ fn test_symlink_into_deny_path_windows() {
     assert!(
         !stdout.contains("secret_via_symlink"),
         "symlink into denied path should not expose secret data"
+    );
+    eprintln!("[diag] PASSED");
+}
+
+// ── Integration tests for write-to-allowed-path ────────
+
+#[test]
+fn test_write_to_allowed_path_succeeds() {
+    eprintln!("[diag] === test_write_to_allowed_path_succeeds ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let target = scratch.path().join("allowed_write.txt");
+    let (program, args) = write_command(&target);
+
+    // scratch is in write_paths via make_policy.
+    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+    let child = must_spawn(&policy, &cmd);
+    let output = child.wait_with_output().expect("wait_with_output");
+
+    eprintln!("[diag] exit status: {:?}", output.status);
+    eprintln!(
+        "[diag] stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        output.status.success(),
+        "write to allowed path should succeed, got: {:?}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        target.exists(),
+        "file should exist after writing to allowed path"
+    );
+    eprintln!("[diag] PASSED");
+}
+
+// ── Builder-based Windows integration test ──────────────
+
+#[test]
+#[cfg(target_os = "windows")]
+fn test_windows_builder_based_spawn() {
+    eprintln!("[diag] === test_windows_builder_based_spawn ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let policy = lot::SandboxPolicyBuilder::new()
+        .read_path(tmp.path())
+        .expect("read_path")
+        .write_path(scratch.path())
+        .expect("write_path")
+        .allow_network(false)
+        .build()
+        .expect("build policy via builder");
+
+    let (program, args) = echo_command();
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let child = must_spawn(&policy, &cmd);
+    let output = child.wait_with_output().expect("wait_with_output");
+
+    eprintln!("[diag] exit status: {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "builder-based Windows spawn should succeed: {:?}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello"),
+        "stdout should contain 'hello', got: {stdout:?}"
     );
     eprintln!("[diag] PASSED");
 }

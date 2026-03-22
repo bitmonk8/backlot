@@ -274,6 +274,22 @@ mod tests {
     }
 
     #[test]
+    fn resolve_stdio_output_piped() {
+        use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
+
+        let (child, parent) = resolve_stdio_output(SandboxStdio::Piped, STD_OUTPUT_HANDLE).unwrap();
+        assert_ne!(child, INVALID_HANDLE_VALUE);
+        assert!(!child.is_null());
+        assert!(parent.is_some(), "Piped mode should have a parent handle");
+        let parent_handle = parent.unwrap();
+        assert_ne!(parent_handle, INVALID_HANDLE_VALUE);
+        assert!(!parent_handle.is_null());
+        // Child gets write end, parent gets read end.
+        close_handle_if_valid(child);
+        close_handle_if_valid(parent_handle);
+    }
+
+    #[test]
     fn resolve_stdio_output_null() {
         use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
 

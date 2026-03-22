@@ -831,6 +831,133 @@ mod tests {
         assert_eq!(policy.write_paths().len(), 1);
     }
 
+    // ── Strengthened error assertions ──────────────────────────────
+
+    #[test]
+    fn zero_resource_limit_error_mentions_field() {
+        let tmp = make_temp_dir();
+        let result = SandboxPolicyBuilder::new()
+            .read_path(tmp.path())
+            .unwrap()
+            .max_memory_bytes(0)
+            .build();
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_memory_bytes"),
+            "error should name the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn empty_builder_error_mentions_path() {
+        let result = SandboxPolicyBuilder::new().build();
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("at least one path"),
+            "error should mention missing paths: {msg}"
+        );
+    }
+
+    // ── Platform convenience methods ────────────────────────────────
+
+    #[test]
+    fn include_platform_exec_paths_succeeds() {
+        let tmp = make_temp_dir();
+        let policy = SandboxPolicyBuilder::new()
+            .read_path(tmp.path())
+            .unwrap()
+            .include_platform_exec_paths()
+            .unwrap()
+            .build()
+            .expect("build should succeed");
+        // On all platforms, at least the read_path should exist.
+        assert!(!policy.read_paths().is_empty());
+    }
+
+    #[test]
+    fn include_platform_lib_paths_succeeds() {
+        let tmp = make_temp_dir();
+        let policy = SandboxPolicyBuilder::new()
+            .exec_path(tmp.path())
+            .unwrap()
+            .include_platform_lib_paths()
+            .unwrap()
+            .build()
+            .expect("build should succeed");
+        assert!(!policy.exec_paths().is_empty());
+    }
+
+    // ── Deny path overlap with builder ──────────────────────────────
+
+    #[test]
+    fn deny_path_under_write_parent_via_builder() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let denied = tmp.path().join("secret");
+        std::fs::create_dir(&denied).expect("create denied dir");
+
+        let policy = SandboxPolicyBuilder::new()
+            .write_path(&parent)
+            .unwrap()
+            .deny_path(&denied)
+            .unwrap()
+            .build()
+            .expect("build should succeed");
+
+        assert_eq!(policy.deny_paths().len(), 1);
+        assert_eq!(policy.write_paths().len(), 1);
+    }
+
+    // ── Pure logic helpers: covered_by / remove_covered_by ──────────
+
+    #[test]
+    fn covered_by_exact_match() {
+        let tmp = make_temp_dir();
+        let p = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+        assert!(covered_by(&p, std::slice::from_ref(&p)));
+    }
+
+    #[test]
+    fn covered_by_parent() {
+        let tmp = make_temp_dir();
+        let parent = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+        let child = parent.join("sub");
+        assert!(covered_by(&child, &[parent]));
+    }
+
+    #[test]
+    fn covered_by_unrelated_returns_false() {
+        let a = make_temp_dir();
+        let b = make_temp_dir();
+        let pa = std::fs::canonicalize(a.path()).expect("canonicalize");
+        let pb = std::fs::canonicalize(b.path()).expect("canonicalize");
+        assert!(!covered_by(&pa, &[pb]));
+    }
+
+    #[test]
+    fn remove_covered_by_removes_children() {
+        let tmp = make_temp_dir();
+        let parent = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+        let child = parent.join("sub");
+        let mut set = vec![child];
+        remove_covered_by(&mut set, &parent);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn remove_covered_by_preserves_unrelated() {
+        let a = make_temp_dir();
+        let b = make_temp_dir();
+        let pa = std::fs::canonicalize(a.path()).expect("canonicalize");
+        let pb = std::fs::canonicalize(b.path()).expect("canonicalize");
+        let mut set = vec![pb.clone()];
+        remove_covered_by(&mut set, &pa);
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0], pb);
+    }
+
     #[test]
     fn exec_child_then_exec_parent_collapses() {
         let tmp = make_temp_dir();

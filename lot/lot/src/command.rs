@@ -157,6 +157,76 @@ impl SandboxCommand {
 mod tests {
     use super::*;
 
+    // ── Builder method tests ──────────────────────────────────────
+
+    #[test]
+    fn new_sets_defaults() {
+        let cmd = SandboxCommand::new("test_program");
+        assert_eq!(cmd.program, "test_program");
+        assert!(cmd.args.is_empty());
+        assert!(cmd.env.is_empty());
+        assert!(cmd.cwd.is_none());
+        assert_eq!(cmd.stdin, SandboxStdio::Null);
+        assert_eq!(cmd.stdout, SandboxStdio::Piped);
+        assert_eq!(cmd.stderr, SandboxStdio::Piped);
+    }
+
+    #[test]
+    fn arg_appends_single() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.arg("one");
+        assert_eq!(cmd.args.len(), 1);
+        assert_eq!(cmd.args[0], "one");
+    }
+
+    #[test]
+    fn args_appends_multiple() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.args(["a", "b", "c"]);
+        assert_eq!(cmd.args.len(), 3);
+        assert_eq!(cmd.args[0], "a");
+        assert_eq!(cmd.args[2], "c");
+    }
+
+    #[test]
+    fn env_adds_key_value() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.env("KEY", "VALUE");
+        assert_eq!(cmd.env.len(), 1);
+        assert_eq!(cmd.env[0].0, "KEY");
+        assert_eq!(cmd.env[0].1, "VALUE");
+    }
+
+    #[test]
+    fn cwd_sets_working_directory() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.cwd("/some/path");
+        assert_eq!(cmd.cwd, Some(PathBuf::from("/some/path")));
+    }
+
+    #[test]
+    fn stdin_sets_mode() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.stdin(SandboxStdio::Inherit);
+        assert_eq!(cmd.stdin, SandboxStdio::Inherit);
+    }
+
+    #[test]
+    fn stdout_sets_mode() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.stdout(SandboxStdio::Null);
+        assert_eq!(cmd.stdout, SandboxStdio::Null);
+    }
+
+    #[test]
+    fn stderr_sets_mode() {
+        let mut cmd = SandboxCommand::new("test");
+        cmd.stderr(SandboxStdio::Inherit);
+        assert_eq!(cmd.stderr, SandboxStdio::Inherit);
+    }
+
+    // ── Hermetic forward_common_env tests ─────────────────────────
+
     #[test]
     fn forward_common_env_populates_from_parent() {
         let mut cmd = SandboxCommand::new("test");

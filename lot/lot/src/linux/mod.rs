@@ -578,8 +578,39 @@ impl Drop for LinuxSandboxedChild {
 }
 
 #[cfg(test)]
+pub(crate) mod test_helpers {
+    /// Create a pipe using libc, returns (read_fd, write_fd).
+    pub fn make_pipe() -> (i32, i32) {
+        let mut fds = [0i32; 2];
+        // SAFETY: fds is a valid 2-element array
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "pipe() failed");
+        (fds[0], fds[1])
+    }
+
+    /// Write bytes to an fd. Ignores return value to remain
+    /// async-signal-safe (no panic/assert in forked children).
+    pub fn write_fd(fd: i32, data: &[u8]) {
+        // SAFETY: fd is valid, data pointer and len are correct
+        unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
+    }
+
+    /// Read all available bytes from an fd into a String.
+    pub fn read_fd_to_string(fd: i32) -> String {
+        let mut buf = [0u8; 256];
+        // SAFETY: fd is valid, buf pointer and len are correct
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n <= 0 {
+            return String::new();
+        }
+        String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::test_helpers::{read_fd_to_string, write_fd};
     use super::*;
     use crate::ResourceLimits;
     use crate::command::SandboxStdio;
@@ -714,23 +745,6 @@ mod tests {
     fn is_fd_open(fd: i32) -> bool {
         // SAFETY: fcntl F_GETFD is a read-only query
         unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
-    }
-
-    /// Helper: write bytes to an fd.
-    fn write_fd(fd: i32, data: &[u8]) {
-        // SAFETY: fd is valid, data pointer and len are correct
-        unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
-    }
-
-    /// Helper: read all available bytes from an fd into a String.
-    fn read_fd_to_string(fd: i32) -> String {
-        let mut buf = [0u8; 256];
-        // SAFETY: fd is valid, buf pointer and len are correct
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if n <= 0 {
-            return String::new();
-        }
-        String::from_utf8_lossy(&buf[..n as usize]).into_owned()
     }
 
     #[test]
@@ -881,6 +895,75 @@ mod tests {
         unsafe { libc::close(res_r) };
 
         assert_eq!(result, "OK", "child reported: {result}");
+    }
+
+    // ── itoa_stack ──────────────────────────────────────────────────
+
+    #[test]
+    fn itoa_stack_zero() {
+        let mut buf = [0u8; 20];
+        let result = itoa_stack(0, &mut buf);
+        assert_eq!(result, b"0");
+    }
+
+    #[test]
+    fn itoa_stack_one() {
+        let mut buf = [0u8; 20];
+        let result = itoa_stack(1, &mut buf);
+        assert_eq!(result, b"1");
+    }
+
+    #[test]
+    fn itoa_stack_large_number() {
+        let mut buf = [0u8; 20];
+        let result = itoa_stack(123_456_789, &mut buf);
+        assert_eq!(result, b"123456789");
+    }
+
+    #[test]
+    fn itoa_stack_u64_max() {
+        let mut buf = [0u8; 20];
+        let result = itoa_stack(u64::MAX, &mut buf);
+        assert_eq!(std::str::from_utf8(result).unwrap(), u64::MAX.to_string());
+    }
+
+    #[test]
+    fn itoa_stack_powers_of_ten() {
+        for exp in 0..20u32 {
+            let val = 10u64.checked_pow(exp);
+            if let Some(v) = val {
+                let mut buf = [0u8; 20];
+                let result = itoa_stack(v, &mut buf);
+                assert_eq!(
+                    std::str::from_utf8(result).unwrap(),
+                    v.to_string(),
+                    "failed for 10^{exp}"
+                );
+            }
+        }
+    }
+
+    // ── Drop without cleanup ────────────────────────────────────────
+
+    #[test]
+    fn drop_kills_long_running_child() {
+        let policy = test_policy(vec![PathBuf::from("/usr")]);
+        let mut cmd = SandboxCommand::new("/bin/sleep");
+        cmd.arg("60");
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
+        let pid = child.inner.id();
+        drop(child);
+        // After drop, the process should be gone.
+        let proc_path = format!("/proc/{pid}");
+        // Give the kernel a moment to reap.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !std::path::Path::new(&proc_path).exists(),
+            "process should be gone after drop"
+        );
     }
 
     #[test]

@@ -619,6 +619,55 @@ mod tests {
         assert!(stale.is_empty());
     }
 
+    // ── write_sentinel ────────────────────────────────────────────
+
+    #[test]
+    fn write_sentinel_creates_file_with_sddl() {
+        let dir = make_test_dir();
+        let test_path = dir.path().join("testfile.txt");
+        std::fs::write(&test_path, "data").expect("write test file");
+
+        // Use with_dir to write sentinel to a test-local directory
+        // instead of the system temp directory, avoiding interference
+        // with cleanup_stale() tests.
+        let mut sentinel = SentinelFile::with_dir("lot-77777-0-0-0".to_owned(), dir.path());
+        let sddl = super::get_sddl(&test_path).expect("get_sddl");
+        sentinel.add_entry(test_path.clone(), sddl);
+        sentinel.write().expect("write sentinel");
+
+        assert_eq!(sentinel.profile_name, "lot-77777-0-0-0");
+        assert_eq!(sentinel.entries.len(), 1);
+        assert_eq!(sentinel.entries[0].0, test_path);
+        assert!(!sentinel.entries[0].1.is_empty(), "SDDL should be captured");
+    }
+
+    // ── restore_acls_and_delete_sentinel success path ────────────
+
+    #[test]
+    fn restore_acls_and_delete_sentinel_success_deletes_file() {
+        let dir = make_test_dir();
+        let test_path = dir.path().join("restorable.txt");
+        std::fs::write(&test_path, "data").expect("write test file");
+
+        // Use with_dir to avoid system temp directory.
+        let mut sentinel = SentinelFile::with_dir("lot-88888-0-0-0".to_owned(), dir.path());
+        let sddl = super::get_sddl(&test_path).expect("get_sddl");
+        sentinel.add_entry(test_path, sddl);
+        sentinel.write().expect("write sentinel");
+
+        let expected_path = dir.path().join("lot-sentinel-lot-88888-0-0-0.txt");
+        assert!(expected_path.exists(), "sentinel file should exist");
+
+        // Restore should succeed because the path exists and SDDL is valid
+        restore_acls_and_delete_sentinel(&sentinel).expect("restore should succeed");
+
+        // Sentinel file should be deleted on success
+        assert!(
+            !expected_path.exists(),
+            "sentinel file should be deleted after successful restore"
+        );
+    }
+
     #[test]
     fn restore_acls_and_delete_sentinel_preserves_file_on_failure() {
         let dir = make_test_dir();

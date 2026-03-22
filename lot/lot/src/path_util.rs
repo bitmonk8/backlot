@@ -219,6 +219,48 @@ mod tests {
         ));
     }
 
+    // ── canonicalize_best_effort ────────────────────────────────────
+
+    #[test]
+    fn canonicalize_best_effort_existing_path() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let result = canonicalize_best_effort(dir.path());
+        let expected = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn canonicalize_best_effort_nonexistent_returns_normalized() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let nonexistent = dir.path().join("does_not_exist");
+        let result = canonicalize_best_effort(&nonexistent);
+        let canon_dir = std::fs::canonicalize(dir.path()).expect("canonicalize");
+        assert_eq!(result, canon_dir.join("does_not_exist"));
+    }
+
+    #[test]
+    fn canonicalize_best_effort_totally_bogus_returns_original() {
+        let path = Path::new("relative/path/no/root");
+        let result = canonicalize_best_effort(path);
+        assert_eq!(result, path.to_path_buf());
+    }
+
+    // ── is_descendant_or_equal with symlinks ──────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn descendant_or_equal_through_symlink() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let real = dir.path().join("real");
+        let link = dir.path().join("link");
+        std::fs::create_dir(&real).expect("create real dir");
+        std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+        let child = link.join("child");
+        std::fs::create_dir(&child).expect("create child dir");
+        // child is under link which points to real -- should be descendant of real
+        assert!(is_descendant_or_equal(&real, &child));
+    }
+
     // ── canonicalize_existing_prefix ────────────────────────────────
 
     #[test]

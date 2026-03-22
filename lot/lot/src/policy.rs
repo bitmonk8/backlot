@@ -909,6 +909,155 @@ mod tests {
         assert!(!grant.contains(&deny.as_path()));
     }
 
+    // ── has_any() ──────────────────────────────────────────────────
+
+    #[test]
+    fn has_any_returns_false_for_default() {
+        let limits = ResourceLimits::default();
+        assert!(!limits.has_any());
+    }
+
+    #[test]
+    fn has_any_returns_true_for_memory() {
+        let limits = ResourceLimits {
+            max_memory_bytes: Some(1024),
+            ..ResourceLimits::default()
+        };
+        assert!(limits.has_any());
+    }
+
+    #[test]
+    fn has_any_returns_true_for_processes() {
+        let limits = ResourceLimits {
+            max_processes: Some(5),
+            ..ResourceLimits::default()
+        };
+        assert!(limits.has_any());
+    }
+
+    #[test]
+    fn has_any_returns_true_for_cpu() {
+        let limits = ResourceLimits {
+            max_cpu_seconds: Some(30),
+            ..ResourceLimits::default()
+        };
+        assert!(limits.has_any());
+    }
+
+    #[test]
+    fn has_any_returns_true_for_all_set() {
+        let limits = ResourceLimits {
+            max_memory_bytes: Some(1024),
+            max_processes: Some(5),
+            max_cpu_seconds: Some(30),
+        };
+        assert!(limits.has_any());
+    }
+
+    // ── Strengthened error message assertions ─────────────────────
+
+    #[test]
+    fn empty_policy_error_mentions_at_least_one_path() {
+        let policy = SandboxPolicy {
+            read_paths: Vec::new(),
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("at least one path"),
+            "error should mention missing paths: {msg}"
+        );
+    }
+
+    #[test]
+    fn conflicting_paths_error_mentions_both_sets() {
+        let tmp = make_temp_dir();
+        let p = tmp.path().to_path_buf();
+        let policy = SandboxPolicy {
+            read_paths: vec![p.clone()],
+            write_paths: vec![p],
+            exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("read_paths") && msg.contains("write_paths"),
+            "error should name both conflicting sets: {msg}"
+        );
+    }
+
+    #[test]
+    fn zero_memory_error_mentions_field_name() {
+        let tmp = make_temp_dir();
+        let policy = SandboxPolicy {
+            read_paths: vec![tmp.path().to_path_buf()],
+            write_paths: Vec::new(),
+            exec_paths: Vec::new(),
+            deny_paths: Vec::new(),
+            allow_network: false,
+            limits: ResourceLimits {
+                max_memory_bytes: Some(0),
+                ..ResourceLimits::default()
+            },
+        };
+        let err = policy.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_memory_bytes"),
+            "error should mention field name: {msg}"
+        );
+    }
+
+    // ── check_deny_coverage with write/exec grants ────────────────
+
+    #[test]
+    fn deny_path_covered_by_write_grant() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let denied = tmp.path().join("secrets");
+        std::fs::create_dir(&denied).expect("create denied dir");
+
+        let policy = SandboxPolicy {
+            read_paths: Vec::new(),
+            write_paths: vec![parent],
+            exec_paths: Vec::new(),
+            deny_paths: vec![denied],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        policy
+            .validate()
+            .expect("deny path under write grant should be valid");
+    }
+
+    #[test]
+    fn deny_path_covered_by_exec_grant() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let denied = tmp.path().join("untrusted");
+        std::fs::create_dir(&denied).expect("create denied dir");
+
+        let policy = SandboxPolicy {
+            read_paths: Vec::new(),
+            write_paths: Vec::new(),
+            exec_paths: vec![parent],
+            deny_paths: vec![denied],
+            allow_network: false,
+            limits: ResourceLimits::default(),
+        };
+        policy
+            .validate()
+            .expect("deny path under exec grant should be valid");
+    }
+
     #[test]
     fn validate_reports_multiple_errors() {
         let policy = SandboxPolicy {
