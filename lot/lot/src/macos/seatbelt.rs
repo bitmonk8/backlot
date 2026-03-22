@@ -56,12 +56,12 @@ pub const fn is_available() -> bool {
     true
 }
 
+// ── Profile generation ───────────────────────────────────────────────
+
 /// Generate an SBPL (Seatbelt Profile Language) profile string from a policy.
 ///
 /// `program_path` is the absolute path to the binary that will be exec'd.
 ///
-// ── Profile generation ───────────────────────────────────────────────
-
 /// Returns an error if any policy path cannot be encoded into a valid SBPL rule
 /// (e.g., non-UTF-8 paths or paths containing null bytes). This is intentional:
 /// silently dropping a rule — especially a deny rule — would weaken the sandbox.
