@@ -238,12 +238,13 @@ pub fn restore_acls_and_delete_sentinel(sentinel: &SentinelFile) -> Result<()> {
 
 /// Find stale sentinel files in a specific directory.
 ///
-/// Returns parsed sentinels whose owning process is no longer alive.
+/// Returns parsed sentinels whose owning process is no longer alive, plus
+/// any I/O errors encountered while scanning individual entries.
 /// Does NOT perform any cleanup — the caller orchestrates restore + profile deletion.
-pub fn find_stale_sentinels_in(dir: &Path) -> Result<Vec<SentinelFile>> {
+pub fn find_stale_sentinels_in(dir: &Path) -> Result<(Vec<SentinelFile>, Vec<io::Error>)> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
         Err(e) => {
             return Err(SandboxError::Cleanup(format!(
                 "cannot read sentinel directory {}: {e}",
@@ -253,11 +254,18 @@ pub fn find_stale_sentinels_in(dir: &Path) -> Result<Vec<SentinelFile>> {
     };
 
     let mut stale = Vec::new();
+    let mut skipped_errors = Vec::new();
 
     for entry in entries {
         // Best-effort scan: one unreadable directory entry must not block
         // cleanup of other stale sentinels.
-        let Ok(entry) = entry else { continue };
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                skipped_errors.push(e);
+                continue;
+            }
+        };
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -284,23 +292,23 @@ pub fn find_stale_sentinels_in(dir: &Path) -> Result<Vec<SentinelFile>> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 // Sentinel was cleaned up concurrently; skip it.
             }
-            Err(_) => {
-                // Unreadable or corrupted sentinel — skip rather than blocking
-                // cleanup of other stale sentinels. One bad file must not
-                // prevent progress on the rest. The file will be retried on
-                // the next cleanup_stale() call.
+            Err(e) => {
+                // Unreadable or corrupted sentinel — record the error but
+                // continue scanning. The file will be retried on the next
+                // cleanup_stale() call.
+                skipped_errors.push(e);
             }
         }
     }
 
-    Ok(stale)
+    Ok((stale, skipped_errors))
 }
 
 /// Find stale sentinel files left by crashed sessions.
 ///
 /// Returns parsed sentinels whose owning process is no longer alive.
 /// Does NOT perform any cleanup — the caller orchestrates restore + profile deletion.
-pub fn find_stale_sentinels() -> Result<Vec<SentinelFile>> {
+pub fn find_stale_sentinels() -> Result<(Vec<SentinelFile>, Vec<io::Error>)> {
     find_stale_sentinels_in(&sentinel_dir())
 }
 
@@ -543,9 +551,10 @@ mod tests {
         sentinel.add_entry(PathBuf::from(r"C:\foo"), "D:(A;;FA;;;BA)".to_owned());
         sentinel.write().expect("write");
 
-        let stale = find_stale_sentinels_in(dir.path()).expect("find");
+        let (stale, errors) = find_stale_sentinels_in(dir.path()).expect("find");
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].profile_name, "lot-999999999-0-0-0");
+        assert!(errors.is_empty());
     }
 
     #[test]
@@ -557,7 +566,7 @@ mod tests {
         sentinel.add_entry(PathBuf::from(r"C:\foo"), "D:(A;;FA;;;BA)".to_owned());
         sentinel.write().expect("write");
 
-        let stale = find_stale_sentinels_in(dir.path()).expect("find");
+        let (stale, _) = find_stale_sentinels_in(dir.path()).expect("find");
         assert!(stale.is_empty(), "live process sentinel should be skipped");
     }
 
@@ -568,14 +577,14 @@ mod tests {
         std::fs::write(dir.path().join("not-a-sentinel.txt"), "hello").expect("write");
         std::fs::write(dir.path().join("lot-sentinel-missing-ext"), "hello").expect("write");
 
-        let stale = find_stale_sentinels_in(dir.path()).expect("find");
+        let (stale, _) = find_stale_sentinels_in(dir.path()).expect("find");
         assert!(stale.is_empty());
     }
 
     #[test]
     fn find_stale_sentinels_in_empty_dir() {
         let dir = make_test_dir();
-        let stale = find_stale_sentinels_in(dir.path()).expect("find");
+        let (stale, _) = find_stale_sentinels_in(dir.path()).expect("find");
         assert!(stale.is_empty());
     }
 
@@ -583,15 +592,21 @@ mod tests {
     fn find_stale_sentinels_in_skips_corrupt_sentinel() {
         let dir = make_test_dir();
         // File matches naming pattern but has a malformed entry (no tab separator).
-        // SentinelFile::read will return InvalidData error, which find_stale_sentinels_in skips.
+        // SentinelFile::read will return InvalidData error, which find_stale_sentinels_in
+        // records in the errors vector.
         std::fs::write(
             dir.path().join("lot-sentinel-lot-888888888-0-0-0.txt"),
             "lot-888888888-0-0-0\ncorrupt_line_no_tab\n",
         )
         .expect("write");
 
-        let stale = find_stale_sentinels_in(dir.path()).expect("find");
+        let (stale, errors) = find_stale_sentinels_in(dir.path()).expect("find");
         assert!(stale.is_empty(), "corrupt sentinel should be skipped");
+        assert_eq!(
+            errors.len(),
+            1,
+            "corrupt sentinel error should be collected"
+        );
     }
 
     #[test]
@@ -606,7 +621,7 @@ mod tests {
         )
         .expect("write");
 
-        let stale = find_stale_sentinels_in(dir.path()).expect("find");
+        let (stale, _) = find_stale_sentinels_in(dir.path()).expect("find");
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].profile_name, "custom-profile-name");
     }
@@ -615,7 +630,7 @@ mod tests {
     fn find_stale_sentinels_in_nonexistent_dir() {
         let dir = make_test_dir();
         let nonexistent = dir.path().join("does-not-exist");
-        let stale = find_stale_sentinels_in(&nonexistent).expect("find");
+        let (stale, _) = find_stale_sentinels_in(&nonexistent).expect("find");
         assert!(stale.is_empty());
     }
 

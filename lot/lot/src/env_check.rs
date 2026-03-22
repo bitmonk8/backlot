@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::Result;
 use crate::command::SandboxCommand;
 use crate::error::SandboxError;
-use crate::path_util::canonicalize_best_effort;
+use crate::path_util::canonicalize_existing_prefix;
 use crate::policy::SandboxPolicy;
 
 /// True if the resolved path falls under any deny path.
@@ -26,7 +26,10 @@ fn is_dir_accessible(
     canon_implicit: &[PathBuf],
     canon_deny: &[PathBuf],
 ) -> bool {
-    let resolved_dir = canonicalize_best_effort(dir);
+    // Relative or path-escaping paths cannot match any absolute grant.
+    let Ok(resolved_dir) = canonicalize_existing_prefix(dir) else {
+        return false;
+    };
 
     if is_denied(&resolved_dir, canon_deny) {
         return false;
@@ -57,22 +60,22 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
     // O(P*G) re-canonicalization in inner loops.
     let canon_grants: Vec<PathBuf> = grant_paths
         .iter()
-        .map(|p| canonicalize_best_effort(p))
-        .collect();
+        .map(|p| canonicalize_existing_prefix(p))
+        .collect::<std::result::Result<_, _>>()?;
     let canon_implicit: Vec<PathBuf> = implicit
         .iter()
-        .map(|p| canonicalize_best_effort(p))
-        .collect();
+        .map(|p| canonicalize_existing_prefix(p))
+        .collect::<std::result::Result<_, _>>()?;
     let canon_write_paths: Vec<PathBuf> = policy
         .write_paths()
         .iter()
-        .map(|p| canonicalize_best_effort(p))
-        .collect();
+        .map(|p| canonicalize_existing_prefix(p))
+        .collect::<std::result::Result<_, _>>()?;
     let canon_deny: Vec<PathBuf> = policy
         .deny_paths()
         .iter()
-        .map(|p| canonicalize_best_effort(p))
-        .collect();
+        .map(|p| canonicalize_existing_prefix(p))
+        .collect::<std::result::Result<_, _>>()?;
 
     // TEMP/TMP/TMPDIR must be under a write path (temp dirs need write access)
     // and must not be under a deny path (deny overrides all grants).
@@ -80,7 +83,7 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
         if let Some(val) = effective_env(command, key) {
             let dir = Path::new(&val);
             if !dir.as_os_str().is_empty() {
-                let resolved = canonicalize_best_effort(dir);
+                let resolved = canonicalize_existing_prefix(dir)?;
                 if is_denied(&resolved, &canon_deny) {
                     errors.push(format!(
                         "{key}={} is under a deny_path and will be inaccessible at runtime. \

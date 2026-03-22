@@ -9,9 +9,10 @@
 82 findings from full project audit organized into co-fix groups in `docs/ISSUES.md`, ordered by impact (Groups 4–16).
 
 - Groups 1–3 resolved and removed from ISSUES.md
+- Groups 5, 6, 8 (handle validation, error handling, path correctness) resolved and removed from ISSUES.md
 - Groups 10–13 (testing gaps) resolved and removed from ISSUES.md
 - Group 17 (test infrastructure deduplication) resolved and removed from ISSUES.md
-- Remaining: 3 high, 23 medium, 33 low across Groups 4–9, 14–16
+- Remaining: 3 high, 19 medium, 31 low across Groups 4, 7, 9, 14–16
 - Group 4 is next highest impact: design vs. implementation mismatch (1 high, 1 medium, 2 low)
 
 ## CI Notes

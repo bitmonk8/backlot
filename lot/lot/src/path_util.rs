@@ -26,8 +26,13 @@ pub fn is_descendant_or_equal(parent: &Path, child: &Path) -> bool {
 }
 
 /// Returns true if `parent` is a strict prefix of `child` (directory ancestry).
+/// Canonicalizes both paths before comparison for consistency with
+/// `is_descendant_or_equal`. Falls back to lexical comparison if
+/// canonicalization fails (e.g., non-existent paths).
 pub fn is_strict_parent_of(parent: &Path, child: &Path) -> bool {
-    child.starts_with(parent) && child != parent
+    let p = canonicalize_existing_prefix(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let c = canonicalize_existing_prefix(child).unwrap_or_else(|_| child.to_path_buf());
+    c.starts_with(&p) && c != p
 }
 
 /// Canonicalize the longest existing prefix of `path`, then append
@@ -58,12 +63,6 @@ pub fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, SandboxError
         }
     }
     normalize_lexical(path)
-}
-
-/// Best-effort path resolution: try full canonicalization, fall back to
-/// prefix canonicalization, then to the original path unchanged.
-pub fn canonicalize_best_effort(path: &Path) -> PathBuf {
-    canonicalize_existing_prefix(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Normalize a path lexically: resolve `.` and `..` components, normalize separators.
@@ -217,32 +216,6 @@ mod tests {
             Path::new(if cfg!(windows) { r"C:\a\b" } else { "/a/b" }),
             Path::new(if cfg!(windows) { r"C:\a\bc" } else { "/a/bc" }),
         ));
-    }
-
-    // ── canonicalize_best_effort ────────────────────────────────────
-
-    #[test]
-    fn canonicalize_best_effort_existing_path() {
-        let dir = tempfile::TempDir::new().expect("create temp dir");
-        let result = canonicalize_best_effort(dir.path());
-        let expected = std::fs::canonicalize(dir.path()).expect("canonicalize");
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn canonicalize_best_effort_nonexistent_returns_normalized() {
-        let dir = tempfile::TempDir::new().expect("create temp dir");
-        let nonexistent = dir.path().join("does_not_exist");
-        let result = canonicalize_best_effort(&nonexistent);
-        let canon_dir = std::fs::canonicalize(dir.path()).expect("canonicalize");
-        assert_eq!(result, canon_dir.join("does_not_exist"));
-    }
-
-    #[test]
-    fn canonicalize_best_effort_totally_bogus_returns_original() {
-        let path = Path::new("relative/path/no/root");
-        let result = canonicalize_best_effort(path);
-        assert_eq!(result, path.to_path_buf());
     }
 
     // ── is_descendant_or_equal with symlinks ──────────────────────

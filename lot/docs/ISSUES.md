@@ -30,58 +30,6 @@ Documentation that does not match the code, or code that does not match the docu
 
 ---
 
-## Group 5: Windows Handle & Input Validation
-
-Windows-specific correctness issues around handle lifecycle and input validation.
-
-### 5.1 [Correctness] `GetStdHandle` return unchecked
-- **File:** lot/src/windows/pipe.rs (lines 95, 117)
-- **Severity:** Medium
-- **Description:** `GetStdHandle` return not checked for `INVALID_HANDLE_VALUE` or NULL. Invalid handle silently passed as child stdio.
-
-### 5.2 [Correctness] `PipeHandles`/`StdioPipes` leak handles on early return
-- **File:** lot/src/windows/pipe.rs (lines 19-22, 144-151)
-- **Severity:** Medium
-- **Description:** `PipeHandles` and `StdioPipes` store raw HANDLE with no Drop. Early return/panic leaks handles.
-
-### 5.3 [Correctness] `build_env_block` NUL truncation
-- **File:** lot/src/windows/cmdline.rs (lines 8-17)
-- **Severity:** Medium
-- **Description:** `build_env_block` does not validate for embedded NUL in keys/values. NUL silently truncates env block.
-
-### 5.4 [Correctness] Drop guards missing null check
-- **File:** lot/src/windows/appcontainer.rs (lines 462-466)
-- **Severity:** Low
-- **Description:** Drop guards check `!= INVALID_HANDLE_VALUE` only. Should also check `!is_null()`. Currently benign.
-
----
-
-## Group 6: Error Handling — Silent Failures in Utilities
-
-Functions that silently discard errors, masking failures.
-
-### 6.1 [Error-Handling] path_util silently discards I/O and validation errors
-- **File:** lot/src/path_util.rs (lines 45, 66)
-- **Severity:** Medium
-- **Description:** Silently discards I/O errors and `InvalidPolicy` for relative/escaping paths.
-
-### 6.2 [Error-Handling] sddl.rs `LocalFree` return discarded, lossy conversion
-- **File:** lot/src/windows/sddl.rs (lines 48-159)
-- **Severity:** Medium
-- **Description:** `LocalFree` return discarded in 4 locations. `from_utf16_lossy` masks corruption.
-
-### 6.3 [Error-Handling] `JoinError` converted to string instead of propagating panic
-- **File:** lot/src/lib.rs (lines 446-448)
-- **Severity:** Low
-- **Description:** Success branch converts `JoinError` (thread panic) to `io::Error` string. Timeout branch correctly calls `resume_unwind`. Asymmetry means panics silently become error strings in the non-timeout path.
-
-### 6.4 [Error-Handling] Sentinel scan silently skips unreadable entries
-- **File:** lot/src/windows/sentinel.rs (lines 255, 282-287)
-- **Severity:** Low
-- **Description:** `find_stale_sentinels_in` silently skips unreadable entries. Persistent I/O failures invisible.
-
----
-
 ## Group 7: Code Placement
 
 Code located in the wrong module or crate.
@@ -100,22 +48,6 @@ Code located in the wrong module or crate.
 - **File:** lot/src/env_check.rs (lines 133-170)
 - **Severity:** Low
 - **Description:** `effective_env` pub with no external callers. `DEFAULT_UNIX_PATH` misplaced.
-
----
-
-## Group 8: Correctness — Path Handling
-
-Path comparison and canonicalization inconsistencies.
-
-### 8.1 [Correctness] `is_strict_parent_of` lexical-only comparison
-- **File:** lot/src/path_util.rs (lines 29-31)
-- **Severity:** Medium
-- **Description:** `is_strict_parent_of` does purely lexical comparison without canonicalization. Inconsistent with sibling `is_descendant_or_equal`.
-
-### 8.2 [Correctness] Builder path methods asymmetric overlap handling
-- **File:** lot/src/policy_builder.rs (lines 59-68, 92-101)
-- **Severity:** Low
-- **Description:** Builder path methods have asymmetric overlap handling. Not a bug since `build()` validates, but inconsistent.
 
 ---
 

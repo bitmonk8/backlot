@@ -45,8 +45,9 @@ pub fn get_sddl(path: &Path) -> io::Result<String> {
     let result = sd_to_sddl(sd, DACL_SECURITY_INFORMATION);
 
     // SAFETY: sd was allocated by `GetNamedSecurityInfoW`.
-    unsafe {
-        LocalFree(sd.cast());
+    let free_result = unsafe { LocalFree(sd.cast()) };
+    if !free_result.is_null() {
+        return Err(io::Error::last_os_error());
     }
 
     result
@@ -83,12 +84,24 @@ fn sd_to_sddl(sd: PSECURITY_DESCRIPTOR, info: OBJECT_SECURITY_INFORMATION) -> io
         }
         p.offset_from(sddl_ptr) as usize
     };
+    // SAFETY: sddl_ptr points to `len` valid u16 values from the conversion function.
     let sddl_slice = unsafe { std::slice::from_raw_parts(sddl_ptr, len) };
-    let sddl = String::from_utf16_lossy(sddl_slice);
+    let sddl = String::from_utf16(sddl_slice).map_err(|e| {
+        // Free before returning the error.
+        // SAFETY: sddl_ptr allocated by the conversion function.
+        unsafe {
+            LocalFree(sddl_ptr.cast());
+        }
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("SDDL UTF-16 decode: {e}"),
+        )
+    })?;
 
     // SAFETY: sddl_ptr allocated by the conversion function.
-    unsafe {
-        LocalFree(sddl_ptr.cast());
+    let free_result = unsafe { LocalFree(sddl_ptr.cast()) };
+    if !free_result.is_null() {
+        return Err(io::Error::last_os_error());
     }
 
     Ok(sddl)
@@ -125,10 +138,12 @@ pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
         )
     };
     if ret == FALSE {
+        let os_err = io::Error::last_os_error();
+        // SAFETY: sd was allocated by the conversion function.
         unsafe {
             LocalFree(sd.cast());
         }
-        return Err(io::Error::last_os_error());
+        return Err(os_err);
     }
 
     let dacl_to_set = if dacl_present == FALSE {
@@ -155,12 +170,13 @@ pub fn restore_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     };
 
     // SAFETY: sd was allocated by the conversion function.
-    unsafe {
-        LocalFree(sd.cast());
-    }
+    let free_result = unsafe { LocalFree(sd.cast()) };
 
     if err != ERROR_SUCCESS {
         return Err(win32_to_io(err));
+    }
+    if !free_result.is_null() {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }

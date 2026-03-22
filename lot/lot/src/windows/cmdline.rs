@@ -5,16 +5,32 @@ use super::path_to_wide;
 
 // ── Command-line building/quoting ────────────────────────────────────
 
-pub fn build_env_block(env: &[(OsString, OsString)]) -> Vec<u16> {
+pub fn build_env_block(env: &[(OsString, OsString)]) -> std::io::Result<Vec<u16>> {
     let mut block = Vec::new();
     for (k, v) in env {
-        block.extend(k.as_os_str().encode_wide());
+        // Embedded NUL in keys or values would silently truncate the env block
+        // entry, causing downstream corruption.
+        let k_wide: Vec<u16> = k.as_os_str().encode_wide().collect();
+        let v_wide: Vec<u16> = v.as_os_str().encode_wide().collect();
+        if k_wide.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("env key contains embedded NUL: {k:?}"),
+            ));
+        }
+        if v_wide.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("env value contains embedded NUL for key {k:?}"),
+            ));
+        }
+        block.extend(k_wide);
         block.push(u16::from(b'='));
-        block.extend(v.as_os_str().encode_wide());
+        block.extend(v_wide);
         block.push(0);
     }
     block.push(0);
-    block
+    Ok(block)
 }
 
 pub fn build_command_line(program: &OsString, args: &[OsString]) -> Vec<u16> {
@@ -97,6 +113,7 @@ fn append_escaped_arg(cmd: &mut OsString, arg: &OsString) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -108,7 +125,7 @@ mod tests {
             (OsString::from("KEY1"), OsString::from("value1")),
             (OsString::from("KEY2"), OsString::from("value2")),
         ];
-        let block = build_env_block(&env);
+        let block = build_env_block(&env).unwrap();
         // Expected: KEY1=value1\0KEY2=value2\0\0
         let decoded = String::from_utf16_lossy(&block);
         assert!(decoded.contains("KEY1=value1"));
@@ -121,7 +138,7 @@ mod tests {
     #[test]
     fn build_env_block_empty_env() {
         let env: Vec<(OsString, OsString)> = vec![];
-        let block = build_env_block(&env);
+        let block = build_env_block(&env).unwrap();
         // Empty env block is just a single null terminator
         assert_eq!(block, vec![0u16]);
     }
@@ -129,7 +146,7 @@ mod tests {
     #[test]
     fn build_env_block_unicode_values() {
         let env = vec![(OsString::from("GREETING"), OsString::from("hello\u{1F389}"))];
-        let block = build_env_block(&env);
+        let block = build_env_block(&env).unwrap();
         let decoded = String::from_utf16_lossy(&block);
         assert!(
             decoded.contains("GREETING=hello\u{1F389}"),
@@ -140,7 +157,7 @@ mod tests {
     #[test]
     fn build_env_block_single_entry() {
         let env = vec![(OsString::from("A"), OsString::from("B"))];
-        let block = build_env_block(&env);
+        let block = build_env_block(&env).unwrap();
         // A=B\0\0
         let expected: Vec<u16> = "A=B"
             .encode_utf16()
@@ -148,6 +165,26 @@ mod tests {
             .chain(std::iter::once(0))
             .collect();
         assert_eq!(block, expected);
+    }
+
+    #[test]
+    fn build_env_block_embedded_nul_in_key_rejected() {
+        let env = vec![(
+            OsString::from_wide(&[u16::from(b'A'), 0, u16::from(b'B')]),
+            OsString::from("val"),
+        )];
+        let err = build_env_block(&env).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn build_env_block_embedded_nul_in_value_rejected() {
+        let env = vec![(
+            OsString::from("KEY"),
+            OsString::from_wide(&[u16::from(b'v'), 0, u16::from(b'l')]),
+        )];
+        let err = build_env_block(&env).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     // ── existing tests ───────────────────────────────────────────────

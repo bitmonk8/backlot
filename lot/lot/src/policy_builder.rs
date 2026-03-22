@@ -72,6 +72,10 @@ impl SandboxPolicyBuilder {
     /// Add a read-only path. Canonicalized on insert; silently skipped if
     /// non-existent or already covered by a write, read, or exec entry.
     ///
+    /// Overlap handling follows the privilege ordering read < exec < write:
+    /// - Skips if covered by any same-or-higher privilege set.
+    /// - Removes children from same-or-lower privilege sets.
+    ///
     /// # Errors
     ///
     /// Returns [`SandboxError::Setup`] if canonicalization fails for any
@@ -93,14 +97,21 @@ impl SandboxPolicyBuilder {
     /// Add a read-write path. Canonicalized on insert; silently skipped if
     /// non-existent or already covered by an existing write entry.
     ///
+    /// Overlap handling follows the privilege ordering read < exec < write:
+    /// - Skips if covered by the write set (same privilege level).
+    /// - Removes children from all sets (write supersedes read and exec).
+    ///
     /// # Errors
     ///
     /// Returns [`SandboxError::Setup`] if canonicalization fails for any
     /// reason other than the path not existing.
     pub fn write_path(mut self, path: impl AsRef<Path>) -> crate::Result<Self> {
         if let Some(canon) = try_canonicalize(path.as_ref())? {
+            // Skip if already covered by a write parent (same privilege level).
+            // Unlike read_path, we do NOT skip for read/exec coverage because
+            // write supersedes both.
             if !covered_by(&canon, &self.write_paths) {
-                // Write supersedes read and exec entries it covers.
+                // Write supersedes read and exec entries it covers (children).
                 remove_covered_by(&mut self.read_paths, &canon);
                 remove_covered_by(&mut self.exec_paths, &canon);
                 remove_covered_by(&mut self.write_paths, &canon);
@@ -112,6 +123,10 @@ impl SandboxPolicyBuilder {
 
     /// Add an executable path. Canonicalized on insert; silently skipped if
     /// non-existent or already covered by an existing exec or write entry.
+    ///
+    /// Overlap handling follows the privilege ordering read < exec < write:
+    /// - Skips if covered by exec or write sets (same-or-higher privilege).
+    /// - Removes children from read and exec sets (exec supersedes read).
     ///
     /// # Errors
     ///

@@ -459,10 +459,10 @@ impl Drop for WindowsSandboxedChild {
 
         // SAFETY: Closing valid handles from CreateProcessW.
         unsafe {
-            if self.process_handle != INVALID_HANDLE_VALUE {
+            if self.process_handle != INVALID_HANDLE_VALUE && !self.process_handle.is_null() {
                 CloseHandle(self.process_handle);
             }
-            if self.thread_handle != INVALID_HANDLE_VALUE {
+            if self.thread_handle != INVALID_HANDLE_VALUE && !self.thread_handle.is_null() {
                 CloseHandle(self.thread_handle);
             }
         }
@@ -631,45 +631,54 @@ fn spawn_with_sentinel(
     // Create pipes before the attribute list so child handles can be listed
     // in PROC_THREAD_ATTRIBUTE_HANDLE_LIST, eliminating the race window where
     // another thread could inherit handles between CreatePipe and SetHandleInformation.
+    //
+    // Resolve all three stdio handles before constructing StdioPipes so the
+    // struct is never in a partially-valid state. Intermediate errors must
+    // manually close already-resolved handles since the RAII guard doesn't
+    // exist yet.
     let (child_stdin, parent_stdin) = try_setup!(resolve_stdio_input(command.stdin), "stdin pipe");
+
     let (child_stdout, parent_stdout) =
         match resolve_stdio_output(command.stdout, STD_OUTPUT_HANDLE) {
             Ok(v) => v,
             Err(e) => {
-                close_optional_handle(parent_stdin);
-                // Only close child_stdin if we own it (Piped or Null).
-                // Inherit handles are borrowed from the parent process.
+                // Clean up stdin handles before returning.
                 if command.stdin != SandboxStdio::Inherit {
                     close_handle_if_valid(child_stdin);
                 }
+                close_optional_handle(parent_stdin);
                 return Err((sentinel, SandboxError::Setup(format!("stdout pipe: {e}"))));
             }
         };
+
     let (child_stderr, parent_stderr) = match resolve_stdio_output(command.stderr, STD_ERROR_HANDLE)
     {
         Ok(v) => v,
         Err(e) => {
-            close_optional_handle(parent_stdin);
-            close_optional_handle(parent_stdout);
-            // Only close child handles we own (Piped or Null), not Inherit.
+            // Clean up stdin and stdout handles before returning.
             if command.stdin != SandboxStdio::Inherit {
                 close_handle_if_valid(child_stdin);
             }
+            close_optional_handle(parent_stdin);
             if command.stdout != SandboxStdio::Inherit {
                 close_handle_if_valid(child_stdout);
             }
+            close_optional_handle(parent_stdout);
             return Err((sentinel, SandboxError::Setup(format!("stderr pipe: {e}"))));
         }
     };
 
-    let pipes = StdioPipes {
+    let mut pipes = StdioPipes::new(
         child_stdin,
         parent_stdin,
         child_stdout,
         parent_stdout,
         child_stderr,
         parent_stderr,
-    };
+        command.stdin,
+        command.stdout,
+        command.stderr,
+    );
 
     // Collect child-side handles for the explicit handle inheritance list.
     let mut child_handles: Vec<HANDLE> = Vec::new();
@@ -707,7 +716,6 @@ fn spawn_with_sentinel(
         InitializeProcThreadAttributeList(attr_list, attr_count, 0, &raw mut attr_list_size)
     };
     if ret == FALSE {
-        pipes.close_owned(command.stdin, command.stdout, command.stderr);
         for sid in &cap_sids {
             // SAFETY: Each sid from AllocateAndInitializeSid.
             unsafe {
@@ -737,7 +745,6 @@ fn spawn_with_sentinel(
     };
     if ret == FALSE {
         let e = io::Error::last_os_error();
-        pipes.close_owned(command.stdin, command.stdout, command.stderr);
         // SAFETY: attr_list is initialized; SIDs are from AllocateAndInitializeSid.
         unsafe {
             cleanup_attr_and_sids(attr_list, &cap_sids);
@@ -764,7 +771,6 @@ fn spawn_with_sentinel(
         };
         if ret == FALSE {
             let e = io::Error::last_os_error();
-            pipes.close_owned(command.stdin, command.stdout, command.stderr);
             // SAFETY: attr_list is initialized; SIDs are from AllocateAndInitializeSid.
             unsafe {
                 cleanup_attr_and_sids(attr_list, &cap_sids);
@@ -776,7 +782,7 @@ fn spawn_with_sentinel(
         }
     }
 
-    let result = create_sandboxed_process(command, &job, attr_list, &pipes);
+    let result = create_sandboxed_process(command, &job, attr_list, &mut pipes);
 
     // SAFETY: attr_list must always be freed.
     unsafe {
@@ -817,7 +823,7 @@ fn create_sandboxed_process(
     command: &SandboxCommand,
     job: &JobObject,
     attr_list: LPPROC_THREAD_ATTRIBUTE_LIST,
-    pipes: &StdioPipes,
+    pipes: &mut StdioPipes,
 ) -> std::result::Result<
     (
         PROCESS_INFORMATION,
@@ -847,7 +853,10 @@ fn create_sandboxed_process(
     let env_block = if command.env.is_empty() {
         None
     } else {
-        Some(build_env_block(&command.env))
+        Some(
+            build_env_block(&command.env)
+                .map_err(|e| SandboxError::Setup(format!("build env block: {e}")))?,
+        )
     };
 
     let cwd_wide = command.cwd.as_ref().map(|p| path_to_wide(p));
@@ -880,25 +889,36 @@ fn create_sandboxed_process(
         )
     };
 
+    // Capture the error before CloseHandle calls clobber the thread's last-error code.
+    let create_process_err = if ret == FALSE {
+        Some(io::Error::last_os_error())
+    } else {
+        None
+    };
+
     // Close child-side handles in the parent after CreateProcessW.
     // The child inherited these handles via PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
     // Piped and Null child handles are owned by us; Inherit handles are
     // borrowed from the parent's console and must NOT be closed.
     if command.stdin != SandboxStdio::Inherit {
         close_handle_if_valid(pipes.child_stdin);
+        pipes.child_stdin = std::ptr::null_mut();
     }
     if command.stdout != SandboxStdio::Inherit {
         close_handle_if_valid(pipes.child_stdout);
+        pipes.child_stdout = std::ptr::null_mut();
     }
     if command.stderr != SandboxStdio::Inherit {
         close_handle_if_valid(pipes.child_stderr);
+        pipes.child_stderr = std::ptr::null_mut();
     }
+    // Mark child handles as no longer owned so Drop does not double-close.
+    pipes.stdin_owned = false;
+    pipes.stdout_owned = false;
+    pipes.stderr_owned = false;
 
-    if ret == FALSE {
-        let err = io::Error::last_os_error();
-        close_optional_handle(pipes.parent_stdin);
-        close_optional_handle(pipes.parent_stdout);
-        close_optional_handle(pipes.parent_stderr);
+    if let Some(err) = create_process_err {
+        // Drop will close remaining parent handles.
         return Err(SandboxError::Setup(format!("CreateProcessW: {err}")));
     }
 
@@ -910,21 +930,23 @@ fn create_sandboxed_process(
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
         }
-        close_optional_handle(pipes.parent_stdin);
-        close_optional_handle(pipes.parent_stdout);
-        close_optional_handle(pipes.parent_stderr);
+        // Drop will close remaining parent handles.
         return Err(SandboxError::Setup(format!("assign to job: {e}")));
     }
 
     // SAFETY: Each handle is valid from CreatePipe, ownership transfers to File.
+    // Take the handles so Drop does not close them.
     let stdin_file = pipes
         .parent_stdin
+        .take()
         .map(|h| unsafe { std::fs::File::from_raw_handle(h.cast()) });
     let stdout_file = pipes
         .parent_stdout
+        .take()
         .map(|h| unsafe { std::fs::File::from_raw_handle(h.cast()) });
     let stderr_file = pipes
         .parent_stderr
+        .take()
         .map(|h| unsafe { std::fs::File::from_raw_handle(h.cast()) });
 
     Ok((pi, stdin_file, stdout_file, stderr_file))

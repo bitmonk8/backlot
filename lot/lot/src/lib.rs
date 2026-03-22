@@ -444,7 +444,11 @@ impl SandboxedChild {
         tokio::select! {
             join_result = &mut handle => {
                 let io_result = join_result.unwrap_or_else(|join_err| {
-                    Err(std::io::Error::other(join_err.to_string()))
+                    // Propagate panics instead of converting to string.
+                    if join_err.is_panic() {
+                        std::panic::resume_unwind(join_err.into_panic());
+                    }
+                    Err(std::io::Error::other("task cancelled"))
                 });
                 Ok(io_result?)
             }

@@ -21,6 +21,21 @@ pub struct PipeHandles {
     pub write: HANDLE,
 }
 
+impl PipeHandles {
+    /// Extract both handles, consuming self without running Drop.
+    pub fn into_parts(self) -> (HANDLE, HANDLE) {
+        let this = std::mem::ManuallyDrop::new(self);
+        (this.read, this.write)
+    }
+}
+
+impl Drop for PipeHandles {
+    fn drop(&mut self) {
+        close_handle_if_valid(self.read);
+        close_handle_if_valid(self.write);
+    }
+}
+
 pub fn create_pipe() -> io::Result<PipeHandles> {
     #[allow(clippy::cast_possible_truncation)]
     let mut sa = SECURITY_ATTRIBUTES {
@@ -93,12 +108,21 @@ pub fn resolve_stdio_input(spec: SandboxStdio) -> io::Result<(HANDLE, Option<HAN
         SandboxStdio::Inherit => {
             // SAFETY: Querying the current process's stdin handle.
             let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            if handle.is_null() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no stdin handle available",
+                ));
+            }
             Ok((handle, None))
         }
         SandboxStdio::Piped => {
-            let pipe = create_pipe()?;
+            let (read, write) = create_pipe()?.into_parts();
             // Child reads from read end, parent writes to write end.
-            Ok((pipe.read, Some(pipe.write)))
+            Ok((read, Some(write)))
         }
     }
 }
@@ -115,12 +139,21 @@ pub fn resolve_stdio_output(
         SandboxStdio::Inherit => {
             // SAFETY: Querying the current process's stdout/stderr handle.
             let handle = unsafe { GetStdHandle(std_handle_id) };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            if handle.is_null() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no stdout/stderr handle available",
+                ));
+            }
             Ok((handle, None))
         }
         SandboxStdio::Piped => {
-            let pipe = create_pipe()?;
+            let (read, write) = create_pipe()?.into_parts();
             // Child writes to write end, parent reads from read end.
-            Ok((pipe.write, Some(pipe.read)))
+            Ok((write, Some(read)))
         }
     }
 }
@@ -141,6 +174,8 @@ pub fn close_optional_handle(h: Option<HANDLE>) {
 }
 
 /// Bundle of child and parent pipe handles for stdin/stdout/stderr.
+/// Tracks which child handles are owned (Piped/Null) vs borrowed (Inherit)
+/// so Drop can release resources without leaking or double-closing.
 pub struct StdioPipes {
     pub child_stdin: HANDLE,
     pub parent_stdin: Option<HANDLE>,
@@ -148,31 +183,54 @@ pub struct StdioPipes {
     pub parent_stdout: Option<HANDLE>,
     pub child_stderr: HANDLE,
     pub parent_stderr: Option<HANDLE>,
+    // Tracks which child handles are owned and must be closed on drop.
+    pub(super) stdin_owned: bool,
+    pub(super) stdout_owned: bool,
+    pub(super) stderr_owned: bool,
 }
 
 impl StdioPipes {
-    /// Close only owned handles. Parent handles are always owned (from
-    /// `CreatePipe`) so they are always closed. Child handles are only
-    /// closed for `Piped` and `Null` streams (both owned by us). `Inherit`
-    /// child handles are borrowed from the parent process via `GetStdHandle`
-    /// and must NOT be closed.
-    pub fn close_owned(
-        &self,
+    /// Create a new `StdioPipes` with ownership tracking.
+    /// Child handles from `Piped` or `Null` are owned; `Inherit` handles are borrowed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        child_stdin: HANDLE,
+        parent_stdin: Option<HANDLE>,
+        child_stdout: HANDLE,
+        parent_stdout: Option<HANDLE>,
+        child_stderr: HANDLE,
+        parent_stderr: Option<HANDLE>,
         stdin_spec: SandboxStdio,
         stdout_spec: SandboxStdio,
         stderr_spec: SandboxStdio,
-    ) {
-        close_optional_handle(self.parent_stdin);
-        close_optional_handle(self.parent_stdout);
-        close_optional_handle(self.parent_stderr);
+    ) -> Self {
+        Self {
+            child_stdin,
+            parent_stdin,
+            child_stdout,
+            parent_stdout,
+            child_stderr,
+            parent_stderr,
+            stdin_owned: stdin_spec != SandboxStdio::Inherit,
+            stdout_owned: stdout_spec != SandboxStdio::Inherit,
+            stderr_owned: stderr_spec != SandboxStdio::Inherit,
+        }
+    }
+}
 
-        if stdin_spec != SandboxStdio::Inherit {
+impl Drop for StdioPipes {
+    fn drop(&mut self) {
+        close_optional_handle(self.parent_stdin.take());
+        close_optional_handle(self.parent_stdout.take());
+        close_optional_handle(self.parent_stderr.take());
+
+        if self.stdin_owned {
             close_handle_if_valid(self.child_stdin);
         }
-        if stdout_spec != SandboxStdio::Inherit {
+        if self.stdout_owned {
             close_handle_if_valid(self.child_stdout);
         }
-        if stderr_spec != SandboxStdio::Inherit {
+        if self.stderr_owned {
             close_handle_if_valid(self.child_stderr);
         }
     }
@@ -185,19 +243,19 @@ mod tests {
 
     #[test]
     fn create_pipe_returns_valid_handles() {
-        let pipe = create_pipe().unwrap();
-        assert_ne!(pipe.read, INVALID_HANDLE_VALUE);
-        assert_ne!(pipe.write, INVALID_HANDLE_VALUE);
-        assert!(!pipe.read.is_null());
-        assert!(!pipe.write.is_null());
-        close_handle_if_valid(pipe.read);
-        close_handle_if_valid(pipe.write);
+        let (read, write) = create_pipe().unwrap().into_parts();
+        assert_ne!(read, INVALID_HANDLE_VALUE);
+        assert_ne!(write, INVALID_HANDLE_VALUE);
+        assert!(!read.is_null());
+        assert!(!write.is_null());
+        close_handle_if_valid(read);
+        close_handle_if_valid(write);
     }
 
     #[test]
     fn resolve_stdio_input_null() {
         let (child, parent) = resolve_stdio_input(SandboxStdio::Null).unwrap();
-        // Null now opens a real handle to \\.\NUL instead of INVALID_HANDLE_VALUE.
+        // NUL device yields a real, valid handle.
         assert_ne!(child, INVALID_HANDLE_VALUE);
         assert!(!child.is_null());
         assert!(parent.is_none());
@@ -214,62 +272,60 @@ mod tests {
     }
 
     #[test]
-    fn stdio_pipes_close_owned_piped() {
-        let p1 = create_pipe().unwrap();
-        let p2 = create_pipe().unwrap();
-        let p3 = create_pipe().unwrap();
+    fn stdio_pipes_drop_closes_piped() {
+        let (r1, w1) = create_pipe().unwrap().into_parts();
+        let (r2, w2) = create_pipe().unwrap().into_parts();
+        let (r3, w3) = create_pipe().unwrap().into_parts();
 
-        let pipes = StdioPipes {
-            child_stdin: p1.read,
-            parent_stdin: Some(p1.write),
-            child_stdout: p2.write,
-            parent_stdout: Some(p2.read),
-            child_stderr: p3.write,
-            parent_stderr: Some(p3.read),
-        };
-
-        // All Piped: close_owned closes all six handles.
-        pipes.close_owned(
+        let pipes = StdioPipes::new(
+            r1,
+            Some(w1),
+            w2,
+            Some(r2),
+            w3,
+            Some(r3),
             SandboxStdio::Piped,
             SandboxStdio::Piped,
             SandboxStdio::Piped,
         );
+
+        // All Piped: Drop closes all six handles.
+        drop(pipes);
     }
 
     #[test]
-    fn stdio_pipes_close_owned_skips_inherit() {
+    fn stdio_pipes_drop_skips_inherit() {
         use windows_sys::Win32::Storage::FileSystem::GetFileType;
         use windows_sys::Win32::System::Console::GetStdHandle;
         use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
 
-        let p1 = create_pipe().unwrap();
+        let (r1, w1) = create_pipe().unwrap().into_parts();
         // SAFETY: Querying stdout handle for test purposes.
         let inherited_handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-        let p3 = create_pipe().unwrap();
+        let (r3, w3) = create_pipe().unwrap().into_parts();
 
-        let pipes = StdioPipes {
-            child_stdin: p1.read,
-            parent_stdin: Some(p1.write),
-            child_stdout: inherited_handle,
-            parent_stdout: None,
-            child_stderr: p3.write,
-            parent_stderr: Some(p3.read),
-        };
-
-        // Inherit for stdout: close_owned must NOT close the inherited handle.
-        pipes.close_owned(
+        let pipes = StdioPipes::new(
+            r1,
+            Some(w1),
+            inherited_handle,
+            None,
+            w3,
+            Some(r3),
             SandboxStdio::Piped,
             SandboxStdio::Inherit,
             SandboxStdio::Piped,
         );
 
-        // Verify the inherited handle is still valid after close_owned.
+        // Inherit for stdout: Drop must NOT close the inherited handle.
+        drop(pipes);
+
+        // Verify the inherited handle is still valid after Drop.
         // SAFETY: GetFileType on a handle we know came from GetStdHandle.
         let file_type = unsafe { GetFileType(inherited_handle) };
         // FILE_TYPE_UNKNOWN with no error means closed handle; any other type means valid.
         assert_ne!(
             file_type, 0,
-            "inherited stdout handle should still be valid after close_owned"
+            "inherited stdout handle should still be valid after Drop"
         );
     }
 

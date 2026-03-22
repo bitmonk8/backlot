@@ -69,8 +69,11 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 }
 
 pub fn cleanup_stale() -> Result<()> {
-    let stale = sentinel::find_stale_sentinels()?;
+    let (stale, scan_errors) = sentinel::find_stale_sentinels()?;
     let mut errors = Vec::new();
+    for e in &scan_errors {
+        errors.push(format!("scan: {e}"));
+    }
     for s in &stale {
         if let Err(e) = sentinel::restore_acls_and_delete_sentinel(s) {
             // Sentinel is preserved on restore failure — skip profile

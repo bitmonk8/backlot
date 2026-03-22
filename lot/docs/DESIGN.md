@@ -14,7 +14,7 @@ lot/                           (workspace root)
 │   │   ├── command.rs         — SandboxCommand builder
 │   │   ├── error.rs           — SandboxError
 │   │   ├── env_check.rs       — Pre-spawn env/path validation (TEMP, PATH reachability)
-│   │   ├── path_util.rs       — Shared path utilities (ancestry checks, `canonicalize_existing_prefix`, `canonicalize_best_effort`, lexical normalization)
+│   │   ├── path_util.rs       — Shared path utilities (ancestry checks, `canonicalize_existing_prefix`, lexical normalization)
 │   │   ├── unix.rs            — Shared Unix helpers (pipes, stdio, UnixSandboxedChild lifecycle, child_bail)
 │   │   ├── linux/
 │   │   │   ├── mod.rs         — LinuxSandbox: orchestrates namespace + seccomp + cgroup
