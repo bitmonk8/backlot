@@ -6,10 +6,9 @@
 
 ## Issues (2026-03-21)
 
-95 findings from full project audit organized into 16 co-fix groups in `docs/ISSUES.md`, ordered by impact.
+82 findings from full project audit organized into 14 co-fix groups in `docs/ISSUES.md`, ordered by impact (Groups 3–16).
 
-- **Group 1 resolved** (8 critical): test trustworthiness — silent skips removed, tautological tests fixed
-- **Group 2 resolved** (5 high): sandbox safety bugs — waitpid retry, sentinel preservation, builder error propagation, prctl check, cleanup_stale sequencing
+- Groups 1–2 resolved and removed from ISSUES.md (committed in `b386215`..`db8b8c6`)
 - Remaining: 7 high, 39 medium, 36 low across Groups 3–16
 - Group 3 is next highest impact: core untested code (4 high)
 

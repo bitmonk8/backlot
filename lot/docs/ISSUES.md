@@ -4,55 +4,6 @@ Grouped by co-fixability, ordered by impact (descending).
 
 ---
 
-## Group 1: Critical Testing — Test Trustworthiness ✓ RESOLVED
-
-All 8 original issues fixed. Two CI failures exposed by the fixes were also resolved:
-
-### 1.9 [Testing] `memory_hog_command` did not touch allocated pages (FIXED)
-- **Severity:** Critical
-- **Description:** `bytearray(1GB)` allocates virtual memory but cgroup `memory.max` limits RSS. Python may exit 0 without touching enough pages to trigger OOM. Fixed: switched to `mmap` with explicit page fill (`m[:] = b'\x01' * len(m)`) to force RSS growth.
-
-### 1.10 [Testing] `grant_prerequisites_fails_without_elevation` panics in CI (FIXED)
-- **Severity:** Critical
-- **Description:** CI runs elevated, so the `assert!(!is_elevated())` always panics. Fixed: added `#[ignore]` attribute for tests that require non-elevated context.
-
-### 1.11 [Correctness] cgroup `memory.swap.max` not set (FIXED)
-- **Severity:** Critical
-- **Description:** `CgroupGuard::new` wrote `memory.max` but not `memory.swap.max`. On hosts with swap, sandboxed processes could swap pages and exceed the memory limit. Caused `test_memory_limit_enforcement` to pass vacuously on CI. Fixed: write `memory.swap.max = 0` alongside `memory.max`.
-
----
-
-## Group 2: Correctness & Error Handling — Sandbox Safety Bugs
-
-Actual bugs that affect sandbox safety guarantees. These can silently weaken or break the sandbox.
-
-### 2.1 [Correctness] Unchecked `waitpid` in Linux helper process
-- **File:** lot/src/linux/mod.rs (lines 459-461)
-- **Severity:** High
-- **Description:** If `waitpid` returns -1 (e.g., EINTR), `inner_status` remains 0 and helper exits with 0, masking the inner child's actual exit status.
-
-### 2.2 [Correctness] Sentinel deleted on ACL restore failure
-- **File:** lot/src/windows/sentinel.rs (lines 214-232)
-- **Severity:** High
-- **Description:** `restore_acls_and_delete_sentinel` unconditionally deletes sentinel even when ACL restoration fails. Transient restore failure causes permanent SDDL data loss. DESIGN.md implies sentinel must survive restore failure for `cleanup_stale()` recovery. The unit test `restore_acls_and_delete_sentinel_deletes_file` encodes the buggy behavior as expected. Fix requires: (1) clarify design, (2) skip deletion on restore failure, (3) fix the test.
-
-### 2.3 [Error-Handling] `canonicalize` silently drops errors in policy builder
-- **File:** lot/src/policy_builder.rs (lines 60, 77, 93, 109)
-- **Severity:** High
-- **Description:** `canonicalize` silently drops all I/O errors. Permission denied silently omits path from policy — security-relevant.
-
-### 2.4 [Error-Handling] `prctl(PR_SET_PDEATHSIG)` return discarded
-- **File:** lot/src/linux/mod.rs (line 368)
-- **Severity:** High
-- **Description:** Return value discarded. Silently losing orphan-prevention safety net.
-
-### 2.5 [Error-Handling] `cleanup_stale` deletes profile after ACL restore failure
-- **File:** lot/src/windows/mod.rs (lines 74-80)
-- **Severity:** High
-- **Description:** `cleanup_stale` calls `delete_profile` even when ACL restoration fails. May leave unrecoverable stale ACLs.
-
----
-
 ## Group 3: High Testing — Core Untested Code Paths
 
 Critical code with zero test coverage. These are the highest-risk untested functions.
