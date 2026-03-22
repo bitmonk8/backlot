@@ -231,6 +231,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 ///
 /// - [`SandboxError::Cleanup`] if ACL restoration fails.
 /// - [`SandboxError::Io`] for underlying OS errors.
+#[allow(clippy::missing_const_for_fn)] // Not const on Windows.
 pub fn cleanup_stale(sentinel_dir: Option<&std::path::Path>) -> Result<()> {
     #[cfg(target_os = "windows")]
     return windows::cleanup_stale(sentinel_dir);
