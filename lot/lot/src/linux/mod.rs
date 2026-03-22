@@ -578,7 +578,7 @@ impl Drop for LinuxSandboxedChild {
 }
 
 #[cfg(test)]
-pub(crate) mod test_helpers {
+pub mod test_helpers {
     /// Create a pipe using libc, returns (read_fd, write_fd).
     pub fn make_pipe() -> (i32, i32) {
         let mut fds = [0i32; 2];
