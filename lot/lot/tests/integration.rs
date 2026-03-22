@@ -1325,12 +1325,14 @@ fn test_sandbox_policy_builder_basic() {
 
     let mut builder = lot::SandboxPolicyBuilder::new()
         .read_path(tmp.path())
+        .expect("read_path")
         .write_path(scratch.path())
+        .expect("write_path")
         .allow_network(false);
 
     // Add exec paths individually so the builder can canonicalize and deduplicate.
     for p in platform_exec_paths() {
-        builder = builder.exec_path(p);
+        builder = builder.exec_path(p).expect("exec_path");
     }
 
     let policy = builder

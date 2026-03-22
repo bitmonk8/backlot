@@ -192,7 +192,7 @@ fn cmd_setup(args: &SetupArgs) -> ExitCode {
         let temp_dir = std::env::temp_dir();
         let policy = match lot::SandboxPolicyBuilder::new()
             .write_path(&temp_dir)
-            .build()
+            .and_then(lot::SandboxPolicyBuilder::build)
         {
             Ok(p) => p,
             Err(e) => {

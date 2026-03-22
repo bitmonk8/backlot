@@ -73,7 +73,10 @@ pub fn cleanup_stale() -> Result<()> {
     let mut errors = Vec::new();
     for s in &stale {
         if let Err(e) = sentinel::restore_acls_and_delete_sentinel(s) {
+            // Sentinel is preserved on restore failure — skip profile
+            // deletion so the next cleanup_stale() call can retry.
             errors.push(format!("{}: {e}", s.profile_name));
+            continue;
         }
         if let Err(e) = appcontainer::delete_profile(&s.profile_name) {
             errors.push(format!("delete profile {}: {e}", s.profile_name));

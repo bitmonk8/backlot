@@ -208,7 +208,9 @@ pub fn write_sentinel(profile_name: &str, paths: &[PathBuf]) -> io::Result<Senti
     Ok(sentinel)
 }
 
-/// Restore ACLs from a sentinel file and delete the sentinel.
+/// Restore ACLs from a sentinel file. Deletes the sentinel only when all
+/// restorations succeed; on partial failure the sentinel is preserved so
+/// `cleanup_stale()` can retry.
 ///
 /// Does NOT delete the AppContainer profile — callers own that responsibility.
 pub fn restore_acls_and_delete_sentinel(sentinel: &SentinelFile) -> Result<()> {
@@ -220,15 +222,18 @@ pub fn restore_acls_and_delete_sentinel(sentinel: &SentinelFile) -> Result<()> {
         }
     }
 
-    if let Err(e) = sentinel.delete_file() {
-        errors.push(format!("delete sentinel: {e}"));
+    // Only delete sentinel when ALL ACL restorations succeeded.
+    // On partial failure the sentinel must survive so cleanup_stale()
+    // can retry on the next call.
+    if !errors.is_empty() {
+        return Err(SandboxError::Cleanup(errors.join("; ")));
     }
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(SandboxError::Cleanup(errors.join("; ")))
+    if let Err(e) = sentinel.delete_file() {
+        return Err(SandboxError::Cleanup(format!("delete sentinel: {e}")));
     }
+
+    Ok(())
 }
 
 /// Find stale sentinel files in a specific directory.
@@ -615,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_acls_and_delete_sentinel_deletes_file() {
+    fn restore_acls_and_delete_sentinel_preserves_file_on_failure() {
         let dir = make_test_dir();
         let mut sentinel = SentinelFile::with_dir("lot-999999999-0-0-0".to_owned(), dir.path());
         // Non-existent path so restore_sddl will fail.
@@ -640,10 +645,10 @@ mod tests {
             "error should mention the failed path: {err_msg}"
         );
 
-        // The sentinel file itself should still be deleted despite restore errors.
+        // Sentinel must survive so cleanup_stale() can retry restoration.
         assert!(
-            !expected_path.exists(),
-            "sentinel file should be deleted even when restore fails"
+            expected_path.exists(),
+            "sentinel file must be preserved when ACL restore fails"
         );
     }
 }

@@ -1,11 +1,14 @@
+use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::error::SandboxError;
 use crate::policy::{ResourceLimits, SandboxPolicy};
 
 /// Ergonomic builder for [`SandboxPolicy`] that handles path canonicalization,
 /// overlap deduction, and platform-specific defaults.
 ///
-/// Paths are canonicalized on insert. Non-existent paths are silently skipped.
+/// Paths are canonicalized on insert. Non-existent paths are silently skipped;
+/// other canonicalization failures (e.g., permission denied) return an error.
 /// If a narrower path is already covered by a broader entry in the same or a
 /// higher-privilege set, the narrower entry is not added.
 ///
@@ -15,9 +18,9 @@ use crate::policy::{ResourceLimits, SandboxPolicy};
 /// use lot::SandboxPolicyBuilder;
 ///
 /// let policy = SandboxPolicyBuilder::new()
-///     .include_platform_exec_paths()
-///     .include_platform_lib_paths()
-///     .include_temp_dirs()
+///     .include_platform_exec_paths().expect("exec paths")
+///     .include_platform_lib_paths().expect("lib paths")
+///     .include_temp_dirs().expect("temp dirs")
 ///     .allow_network(false)
 ///     .max_memory_bytes(128 * 1024 * 1024)
 ///     .max_processes(8)
@@ -46,6 +49,19 @@ fn remove_covered_by(set: &mut Vec<PathBuf>, parent: &Path) {
     set.retain(|existing| !existing.starts_with(parent));
 }
 
+/// Canonicalize a path, returning None for NotFound (silently skipped)
+/// and propagating all other I/O errors.
+fn try_canonicalize(path: &Path) -> crate::Result<Option<PathBuf>> {
+    match std::fs::canonicalize(path) {
+        Ok(canon) => Ok(Some(canon)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(SandboxError::Setup(format!(
+            "canonicalize {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
 impl SandboxPolicyBuilder {
     /// Create an empty builder.
     #[must_use]
@@ -55,9 +71,13 @@ impl SandboxPolicyBuilder {
 
     /// Add a read-only path. Canonicalized on insert; silently skipped if
     /// non-existent or already covered by a write, read, or exec entry.
-    #[must_use]
-    pub fn read_path(mut self, path: impl AsRef<Path>) -> Self {
-        if let Ok(canon) = std::fs::canonicalize(path.as_ref()) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Setup`] if canonicalization fails for any
+    /// reason other than the path not existing.
+    pub fn read_path(mut self, path: impl AsRef<Path>) -> crate::Result<Self> {
+        if let Some(canon) = try_canonicalize(path.as_ref())? {
             // Write and exec are supersets of read — skip if already covered.
             if !covered_by(&canon, &self.write_paths)
                 && !covered_by(&canon, &self.read_paths)
@@ -67,14 +87,18 @@ impl SandboxPolicyBuilder {
                 self.read_paths.push(canon);
             }
         }
-        self
+        Ok(self)
     }
 
     /// Add a read-write path. Canonicalized on insert; silently skipped if
     /// non-existent or already covered by an existing write entry.
-    #[must_use]
-    pub fn write_path(mut self, path: impl AsRef<Path>) -> Self {
-        if let Ok(canon) = std::fs::canonicalize(path.as_ref()) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Setup`] if canonicalization fails for any
+    /// reason other than the path not existing.
+    pub fn write_path(mut self, path: impl AsRef<Path>) -> crate::Result<Self> {
+        if let Some(canon) = try_canonicalize(path.as_ref())? {
             if !covered_by(&canon, &self.write_paths) {
                 // Write supersedes read and exec entries it covers.
                 remove_covered_by(&mut self.read_paths, &canon);
@@ -83,14 +107,18 @@ impl SandboxPolicyBuilder {
                 self.write_paths.push(canon);
             }
         }
-        self
+        Ok(self)
     }
 
     /// Add an executable path. Canonicalized on insert; silently skipped if
     /// non-existent or already covered by an existing exec or write entry.
-    #[must_use]
-    pub fn exec_path(mut self, path: impl AsRef<Path>) -> Self {
-        if let Ok(canon) = std::fs::canonicalize(path.as_ref()) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Setup`] if canonicalization fails for any
+    /// reason other than the path not existing.
+    pub fn exec_path(mut self, path: impl AsRef<Path>) -> crate::Result<Self> {
+        if let Some(canon) = try_canonicalize(path.as_ref())? {
             if !covered_by(&canon, &self.exec_paths) && !covered_by(&canon, &self.write_paths) {
                 // Exec subsumes read entries it covers.
                 remove_covered_by(&mut self.read_paths, &canon);
@@ -98,53 +126,76 @@ impl SandboxPolicyBuilder {
                 self.exec_paths.push(canon);
             }
         }
-        self
+        Ok(self)
     }
 
     /// Add a deny path. Canonicalized on insert; silently skipped if
     /// non-existent. No deduplication against grant paths — the deny is
     /// intentional and preserved.
-    #[must_use]
-    pub fn deny_path(mut self, path: impl AsRef<Path>) -> Self {
-        if let Ok(canon) = std::fs::canonicalize(path.as_ref()) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Setup`] if canonicalization fails for any
+    /// reason other than the path not existing.
+    pub fn deny_path(mut self, path: impl AsRef<Path>) -> crate::Result<Self> {
+        if let Some(canon) = try_canonicalize(path.as_ref())? {
             if !self.deny_paths.contains(&canon) {
                 self.deny_paths.push(canon);
             }
         }
-        self
+        Ok(self)
     }
 
     /// Add multiple deny paths. Convenience wrapper around [`deny_path`](Self::deny_path).
-    #[must_use]
-    pub fn deny_paths(mut self, paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Setup`] if canonicalization of any path fails
+    /// for a reason other than the path not existing.
+    pub fn deny_paths(
+        mut self,
+        paths: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> crate::Result<Self> {
         for p in paths {
-            self = self.deny_path(p);
+            self = self.deny_path(p)?;
         }
-        self
+        Ok(self)
     }
 
     /// Add the platform temp directory to write paths.
-    #[must_use]
-    pub fn include_temp_dirs(self) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Setup`] if canonicalization of the temp
+    /// directory fails.
+    pub fn include_temp_dirs(self) -> crate::Result<Self> {
         self.write_path(std::env::temp_dir())
     }
 
     /// Add standard platform executable directories to exec paths.
-    #[must_use]
-    pub fn include_platform_exec_paths(mut self) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Setup`] if canonicalization of any platform
+    /// exec path fails for a reason other than the path not existing.
+    pub fn include_platform_exec_paths(mut self) -> crate::Result<Self> {
         for p in platform_exec_paths() {
-            self = self.exec_path(p);
+            self = self.exec_path(p)?;
         }
-        self
+        Ok(self)
     }
 
     /// Add standard platform library/include directories to read paths.
-    #[must_use]
-    pub fn include_platform_lib_paths(mut self) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError::Setup`] if canonicalization of any platform
+    /// lib path fails for a reason other than the path not existing.
+    pub fn include_platform_lib_paths(mut self) -> crate::Result<Self> {
         for p in platform_lib_paths() {
-            self = self.read_path(p);
+            self = self.read_path(p)?;
         }
-        self
+        Ok(self)
     }
 
     /// Set whether outbound network access is allowed.
@@ -271,6 +322,7 @@ mod tests {
         let tmp = make_temp_dir();
         let policy = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .build()
             .expect("build should succeed");
         assert_eq!(policy.read_paths().len(), 1);
@@ -283,7 +335,9 @@ mod tests {
         let tmp = make_temp_dir();
         let policy = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .read_path("/surely/does/not/exist/xyz")
+            .unwrap()
             .build()
             .expect("build should succeed");
         assert_eq!(policy.read_paths().len(), 1);
@@ -297,7 +351,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(&child)
+            .unwrap()
             .write_path(tmp.path())
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -314,7 +370,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .write_path(tmp.path())
+            .unwrap()
             .read_path(&child)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -327,7 +385,9 @@ mod tests {
         let tmp = make_temp_dir();
         let policy = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .read_path(tmp.path())
+            .unwrap()
             .build()
             .expect("build should succeed");
         assert_eq!(policy.read_paths().len(), 1);
@@ -338,7 +398,9 @@ mod tests {
         let tmp = make_temp_dir();
         let policy = SandboxPolicyBuilder::new()
             .write_path(tmp.path())
+            .unwrap()
             .write_path(tmp.path())
+            .unwrap()
             .build()
             .expect("build should succeed");
         assert_eq!(policy.write_paths().len(), 1);
@@ -352,7 +414,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .read_path(&child)
+            .unwrap()
             .build()
             .expect("build should succeed");
         assert_eq!(policy.read_paths().len(), 1);
@@ -366,7 +430,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(&child)
+            .unwrap()
             .read_path(tmp.path())
+            .unwrap()
             .build()
             .expect("build should succeed");
         assert_eq!(policy.read_paths().len(), 1);
@@ -377,6 +443,7 @@ mod tests {
         let tmp = make_temp_dir();
         let policy = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .allow_network(true)
             .build()
             .expect("build should succeed");
@@ -388,6 +455,7 @@ mod tests {
         let tmp = make_temp_dir();
         let policy = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .max_memory_bytes(1024 * 1024)
             .max_processes(10)
             .max_cpu_seconds(60)
@@ -403,6 +471,7 @@ mod tests {
         let tmp = make_temp_dir();
         let result = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .max_memory_bytes(0)
             .build();
         assert!(result.is_err());
@@ -419,7 +488,9 @@ mod tests {
         let tmp = make_temp_dir();
         let policy = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .include_temp_dirs()
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -442,8 +513,11 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(&read_dir)
+            .unwrap()
             .exec_path(&exec_dir)
+            .unwrap()
             .exec_path(&exec_dir)
+            .unwrap()
             .build()
             .expect("build should succeed");
         assert_eq!(policy.exec_paths().len(), 1);
@@ -459,7 +533,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(&read_dir)
+            .unwrap()
             .write_path(&write_dir)
+            .unwrap()
             .allow_network(false)
             .max_memory_bytes(512 * 1024 * 1024)
             .build()
@@ -478,8 +554,11 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(&parent)
+            .unwrap()
             .deny_path(&denied)
+            .unwrap()
             .deny_path(&denied)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -495,7 +574,9 @@ mod tests {
         let tmp = make_temp_dir();
         let policy = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .deny_path("/surely/does/not/exist/xyz")
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -516,7 +597,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(&parent)
+            .unwrap()
             .deny_paths([&d1, &d2])
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -537,7 +620,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .exec_path(&dir)
+            .unwrap()
             .read_path(&dir)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -557,7 +642,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .exec_path(&parent)
+            .unwrap()
             .read_path(&child)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -573,7 +660,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(&dir)
+            .unwrap()
             .exec_path(&dir)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -593,7 +682,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(&child)
+            .unwrap()
             .exec_path(&parent)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -614,8 +705,11 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(tmp.path())
+            .unwrap()
             .write_path(&dir)
+            .unwrap()
             .exec_path(&dir)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -639,8 +733,11 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .read_path(&read_dir)
+            .unwrap()
             .exec_path(&child)
+            .unwrap()
             .write_path(&parent)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -661,7 +758,9 @@ mod tests {
         // in both read and exec sets, which validate() rejects.
         let policy = SandboxPolicyBuilder::new()
             .read_path(&dir)
+            .unwrap()
             .exec_path(&dir)
+            .unwrap()
             .build()
             .expect("build should succeed — cross-set dedup should prevent overlap");
 
@@ -679,7 +778,9 @@ mod tests {
 
         let result = SandboxPolicyBuilder::new()
             .exec_path(&child)
+            .unwrap()
             .read_path(&parent)
+            .unwrap()
             .build();
 
         assert!(
@@ -697,7 +798,9 @@ mod tests {
 
         let result = SandboxPolicyBuilder::new()
             .write_path(&child)
+            .unwrap()
             .exec_path(&parent)
+            .unwrap()
             .build();
 
         assert!(
@@ -715,7 +818,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .write_path(&parent)
+            .unwrap()
             .exec_path(&child)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -735,7 +840,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .exec_path(&child)
+            .unwrap()
             .exec_path(&parent)
+            .unwrap()
             .build()
             .expect("build should succeed");
 
@@ -751,7 +858,9 @@ mod tests {
 
         let policy = SandboxPolicyBuilder::new()
             .write_path(&child)
+            .unwrap()
             .write_path(&parent)
+            .unwrap()
             .build()
             .expect("build should succeed");
 

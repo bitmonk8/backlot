@@ -9,8 +9,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Platform capabilities: {caps:?}");
 
     let policy = SandboxPolicyBuilder::new()
-        .include_platform_exec_paths()
-        .include_platform_lib_paths()
+        .include_platform_exec_paths()?
+        .include_platform_lib_paths()?
         .allow_network(false)
         .build()?;
 

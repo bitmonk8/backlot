@@ -17,8 +17,8 @@
 //! use lot::{SandboxPolicyBuilder, SandboxCommand, spawn};
 //!
 //! let policy = SandboxPolicyBuilder::new()
-//!     .include_platform_exec_paths()
-//!     .include_platform_lib_paths()
+//!     .include_platform_exec_paths().expect("exec paths")
+//!     .include_platform_lib_paths().expect("lib paths")
 //!     .allow_network(false)
 //!     .max_memory_bytes(64 * 1024 * 1024)
 //!     .build()
@@ -181,8 +181,8 @@ pub(crate) fn platform_implicit_paths() -> Vec<std::path::PathBuf> {
 /// use lot::{SandboxPolicyBuilder, SandboxCommand, spawn};
 ///
 /// let policy = SandboxPolicyBuilder::new()
-///     .include_platform_exec_paths()
-///     .include_platform_lib_paths()
+///     .include_platform_exec_paths().expect("exec paths")
+///     .include_platform_lib_paths().expect("lib paths")
 ///     .build()
 ///     .expect("policy invalid");
 ///
@@ -367,8 +367,8 @@ impl SandboxedChild {
     /// ```no_run
     /// # use lot::{SandboxPolicyBuilder, SandboxCommand, spawn};
     /// # let policy = SandboxPolicyBuilder::new()
-    /// #     .include_platform_exec_paths()
-    /// #     .include_platform_lib_paths()
+    /// #     .include_platform_exec_paths().unwrap()
+    /// #     .include_platform_lib_paths().unwrap()
     /// #     .build().unwrap();
     /// # #[cfg(unix)]
     /// # let cmd = SandboxCommand::new("/bin/echo");
@@ -595,7 +595,9 @@ mod tokio_tests {
             // symlink to /usr/bin get it deduplicated automatically.
             let policy = SandboxPolicyBuilder::new()
                 .read_path("/usr")
+                .expect("read_path /usr")
                 .read_path("/bin")
+                .expect("read_path /bin")
                 .build()
                 .expect("build policy");
             let mut cmd = SandboxCommand::new("/bin/sleep");
@@ -659,7 +661,9 @@ mod tokio_tests {
             // Grant /usr and /bin via builder for distro portability.
             let policy = SandboxPolicyBuilder::new()
                 .read_path("/usr")
+                .expect("read_path /usr")
                 .read_path("/bin")
+                .expect("read_path /bin")
                 .build()
                 .expect("build policy");
             let mut cmd = SandboxCommand::new("/bin/echo");

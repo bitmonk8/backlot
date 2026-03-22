@@ -20,10 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(secrets.join("key.txt"), "secret key")?;
 
     let policy = SandboxPolicyBuilder::new()
-        .include_platform_exec_paths()
-        .include_platform_lib_paths()
-        .read_path(&parent)
-        .deny_path(&secrets)
+        .include_platform_exec_paths()?
+        .include_platform_lib_paths()?
+        .read_path(&parent)?
+        .deny_path(&secrets)?
         .allow_network(false)
         .build()?;
 

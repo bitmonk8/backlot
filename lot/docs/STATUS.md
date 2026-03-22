@@ -9,8 +9,9 @@
 95 findings from full project audit organized into 16 co-fix groups in `docs/ISSUES.md`, ordered by impact.
 
 - **Group 1 resolved** (8 critical): test trustworthiness — silent skips removed, tautological tests fixed
-- Remaining: 12 high, 39 medium, 36 low across Groups 2–16
-- Groups 2–3 are next highest impact: sandbox safety bugs (5 high), core untested code (4 high)
+- **Group 2 resolved** (5 high): sandbox safety bugs — waitpid retry, sentinel preservation, builder error propagation, prctl check, cleanup_stale sequencing
+- Remaining: 7 high, 39 medium, 36 low across Groups 3–16
+- Group 3 is next highest impact: core untested code (4 high)
 
 ## CI Notes
 

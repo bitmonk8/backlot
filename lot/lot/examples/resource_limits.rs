@@ -9,9 +9,9 @@ use lot::{SandboxCommand, SandboxPolicyBuilder, spawn};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let policy = SandboxPolicyBuilder::new()
-        .include_platform_exec_paths()
-        .include_platform_lib_paths()
-        .include_temp_dirs()
+        .include_platform_exec_paths()?
+        .include_platform_lib_paths()?
+        .include_temp_dirs()?
         .allow_network(false)
         .max_memory_bytes(64 * 1024 * 1024) // 64 MB
         .max_processes(4)

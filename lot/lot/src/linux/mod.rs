@@ -176,6 +176,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         "seccomp",                      // 9
         "execve",                       // 10
         "cgroup join",                  // 11
+        "prctl(PR_SET_PDEATHSIG)",      // 12
     ];
 
     // Create cgroup before forking so the helper can move itself into it.
@@ -244,6 +245,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         const STEP_SECCOMP: i32 = 9;
         const STEP_EXEC: i32 = 10;
         const STEP_CGROUP: i32 = 11;
+        const STEP_PDEATHSIG: i32 = 12;
 
         // Macro wrapping unix::child_bail for ergonomic use in the child.
         macro_rules! child_bail {
@@ -365,7 +367,10 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             // instead of collapsing the PID namespace.
             // SAFETY: PR_SET_PDEATHSIG is a well-known prctl operation.
             // The signal setting is preserved across execve.
-            unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
+            if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+                let saved_errno = unsafe { *libc::__errno_location() };
+                child_bail!(err_pipe_wr, STEP_PDEATHSIG, saved_errno);
+            }
 
             // If the helper died between fork() and prctl(), we were
             // reparented and the death signal will never fire. Detect by
@@ -455,10 +460,23 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // SAFETY: valid fd
         unsafe { libc::close(err_pipe_wr) };
 
-        // Wait for inner child
+        // Wait for inner child, retrying on EINTR
         let mut inner_status: libc::c_int = 0;
-        // SAFETY: valid pid, valid pointer
-        unsafe { libc::waitpid(inner_pid, &raw mut inner_status, 0) };
+        loop {
+            // SAFETY: valid pid, valid pointer
+            let ret = unsafe { libc::waitpid(inner_pid, &raw mut inner_status, 0) };
+            if ret != -1 {
+                break;
+            }
+            // SAFETY: reading thread-local errno after failed syscall
+            let e = unsafe { *libc::__errno_location() };
+            if e == libc::EINTR {
+                continue;
+            }
+            // Non-EINTR error — cannot recover the child's status
+            // SAFETY: terminates the helper process
+            unsafe { libc::_exit(127) };
+        }
 
         // Exit with same status as inner child
         if libc::WIFEXITED(inner_status) {

@@ -66,25 +66,25 @@ pub fn build_policy(config: &SandboxConfig) -> lot::Result<lot::SandboxPolicy> {
     let mut builder = lot::SandboxPolicyBuilder::new();
 
     for path in &config.filesystem.read {
-        builder = builder.read_path(path);
+        builder = builder.read_path(path)?;
     }
     for path in &config.filesystem.write {
-        builder = builder.write_path(path);
+        builder = builder.write_path(path)?;
     }
     for path in &config.filesystem.exec {
-        builder = builder.exec_path(path);
+        builder = builder.exec_path(path)?;
     }
     for path in &config.filesystem.deny {
-        builder = builder.deny_path(path);
+        builder = builder.deny_path(path)?;
     }
     if config.filesystem.include_platform_exec {
-        builder = builder.include_platform_exec_paths();
+        builder = builder.include_platform_exec_paths()?;
     }
     if config.filesystem.include_platform_lib {
-        builder = builder.include_platform_lib_paths();
+        builder = builder.include_platform_lib_paths()?;
     }
     if config.filesystem.include_temp {
-        builder = builder.include_temp_dirs();
+        builder = builder.include_temp_dirs()?;
     }
 
     builder = builder.allow_network(config.network.allow);
