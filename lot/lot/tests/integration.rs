@@ -1,13 +1,17 @@
 //! Cross-platform integration tests for the `lot` sandboxing library.
 //!
-//! Run with `--test-threads=1` because some tests modify system state
-//! (ACLs on Windows, cgroups on Linux).
+//! Tests are parallel-safe by design: unique profile names, unique temp
+//! dirs, idempotent ACE grants. Tests that call `cleanup_stale()` use
+//! a shared mutex to serialize only against each other.
 //!
 //! Diagnostic logging: every test prints to stderr what happened (spawn
 //! success/failure, exit status, skip reasons). Run with `--nocapture`
 //! to see this output in CI.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+#[cfg(target_os = "windows")]
+static CLEANUP_STALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod common;
 
@@ -425,6 +429,8 @@ fn test_spawn_write_to_readonly_blocked() {
 
 #[test]
 fn test_cleanup_after_drop() {
+    #[cfg(target_os = "windows")]
+    let _guard = CLEANUP_STALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     eprintln!("[diag] === test_cleanup_after_drop ===");
 
     let tmp = make_temp_dir();
@@ -1108,6 +1114,8 @@ fn test_kill_terminates_running_process() {
 
 #[test]
 fn test_kill_and_cleanup() {
+    #[cfg(target_os = "windows")]
+    let _guard = CLEANUP_STALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     eprintln!("[diag] === test_kill_and_cleanup ===");
 
     let tmp = make_temp_dir();
