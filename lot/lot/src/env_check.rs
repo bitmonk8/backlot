@@ -175,7 +175,7 @@ pub fn resolve_env_value(command: &SandboxCommand, key: &str) -> Option<OsString
 
 /// Default PATH for Unix when no env is specified.
 #[cfg(not(target_os = "windows"))]
-pub(crate) const DEFAULT_UNIX_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+pub const DEFAULT_UNIX_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

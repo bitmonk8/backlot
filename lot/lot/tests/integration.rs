@@ -1469,6 +1469,7 @@ fn test_windows_builder_based_spawn() {
 
 #[cfg(feature = "tokio")]
 mod tokio_tests {
+    #[cfg(target_os = "windows")]
     use super::common::{make_temp_dir, set_sandbox_env};
 
     fn spawn_sleep(seconds: u32) -> (lot::SandboxedChild, Vec<tempfile::TempDir>) {
