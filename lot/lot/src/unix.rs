@@ -1292,10 +1292,21 @@ mod tests {
         let (child, sync_fd) = spawn_trivial_child();
         // Wait for child to exit via pipe EOF.
         wait_for_child_exit(sync_fd);
-        let result = child.try_wait().expect("try_wait");
-        // Child should have exited by now.
-        assert!(result.is_some(), "child should have exited");
-        assert!(result.unwrap().success());
+        // Pipe EOF guarantees _exit() was called, but on macOS there is a
+        // window before the kernel makes the child waitable via waitpid(WNOHANG).
+        // Retry briefly instead of assuming immediate availability.
+        let mut result = None;
+        for _ in 0..50 {
+            match child.try_wait().expect("try_wait") {
+                Some(status) => {
+                    result = Some(status);
+                    break;
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        let status = result.expect("child should have exited within 500ms");
+        assert!(status.success());
     }
 
     #[test]
