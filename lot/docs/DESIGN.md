@@ -173,7 +173,8 @@ The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `
 1. Before granting ACLs, write a manifest of modified paths + original DACLs to a sentinel file.
 2. On normal exit, restore ACLs and delete sentinel.
 3. Stale sentinel cleanup from crashed sessions requires an explicit `cleanup_stale()` call; it is not automatic on `spawn()`.
-4. `cleanup_stale()` is exposed as a public function for explicit control.
+4. `cleanup_stale()` is exposed as a public function for explicit control. It accepts `Option<&Path>` — `None` scans the system temp directory (default), `Some(dir)` scans only that directory.
+5. Sentinel file location is configurable via `SandboxPolicyBuilder::sentinel_dir()`. When set, `spawn()` writes sentinels to that directory instead of `std::env::temp_dir()`. Callers must pass the same directory to `cleanup_stale()`. This enables concurrent sandbox sessions without shared state.
 
 ---
 
