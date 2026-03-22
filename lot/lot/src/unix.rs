@@ -1251,7 +1251,7 @@ mod tests {
         let mut buf = [0u8; 1];
         // SAFETY: reading from a valid pipe fd; returns 0 on EOF (child exited).
         unsafe {
-            libc::read(sync_fd, buf.as_mut_ptr() as *mut libc::c_void, 1);
+            libc::read(sync_fd, buf.as_mut_ptr().cast::<libc::c_void>(), 1);
             libc::close(sync_fd);
         }
     }
