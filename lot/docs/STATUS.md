@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Complete.** Implementation and audit remediation finished across all platforms (Linux, macOS, Windows). CI pipeline covers format, clippy, build, and test on all 3 platforms.
+**Complete.** Implementation and audit remediation finished across all platforms (Linux, macOS, Windows). CI pipeline covers format, clippy, build, and test on all 3 platforms. Tests run in parallel (default thread count).
 
 ## Issues (2026-03-22)
 
