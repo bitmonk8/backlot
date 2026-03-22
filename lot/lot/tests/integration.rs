@@ -430,7 +430,9 @@ fn test_spawn_write_to_readonly_blocked() {
 #[test]
 fn test_cleanup_after_drop() {
     #[cfg(target_os = "windows")]
-    let _guard = CLEANUP_STALE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = CLEANUP_STALE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     eprintln!("[diag] === test_cleanup_after_drop ===");
 
     let tmp = make_temp_dir();
@@ -1115,7 +1117,9 @@ fn test_kill_terminates_running_process() {
 #[test]
 fn test_kill_and_cleanup() {
     #[cfg(target_os = "windows")]
-    let _guard = CLEANUP_STALE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = CLEANUP_STALE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     eprintln!("[diag] === test_kill_and_cleanup ===");
 
     let tmp = make_temp_dir();
