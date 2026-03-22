@@ -41,6 +41,7 @@ pub struct SandboxPolicyBuilder {
     deny_paths: Vec<PathBuf>,
     allow_network: bool,
     limits: ResourceLimits,
+    sentinel_dir: Option<PathBuf>,
 }
 
 /// Returns true if `path` is already covered by any entry in `set` — either
@@ -247,6 +248,17 @@ impl SandboxPolicyBuilder {
         self
     }
 
+    /// Set a custom directory for sentinel files (Windows only).
+    ///
+    /// By default, sentinel files are written to `std::env::temp_dir()`.
+    /// Setting a custom directory scopes sentinel I/O to that path,
+    /// which isolates concurrent sandbox sessions from each other.
+    #[must_use]
+    pub fn sentinel_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.sentinel_dir = Some(dir.into());
+        self
+    }
+
     /// Consume the builder and produce a validated [`SandboxPolicy`].
     ///
     /// # Errors
@@ -254,7 +266,7 @@ impl SandboxPolicyBuilder {
     /// Returns [`SandboxError::InvalidPolicy`] if the resulting policy fails
     /// validation (e.g. no paths at all, or zero resource limits).
     pub fn build(self) -> crate::Result<SandboxPolicy> {
-        let policy = SandboxPolicy::new(
+        let mut policy = SandboxPolicy::new(
             self.read_paths,
             self.write_paths,
             self.exec_paths,
@@ -262,6 +274,7 @@ impl SandboxPolicyBuilder {
             self.allow_network,
             self.limits,
         );
+        policy.sentinel_dir = self.sentinel_dir;
         policy.validate()?;
         Ok(policy)
     }

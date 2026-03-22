@@ -540,7 +540,7 @@ fn spawn_inner(
     }
 
     // Write sentinel with original DACLs before modifying anything.
-    let sentinel = save_sentinel_with_sddl(profile_name, &all_paths)
+    let sentinel = save_sentinel_with_sddl(profile_name, &all_paths, policy.sentinel_dir())
         .map_err(|e| SandboxError::Setup(format!("write sentinel: {e}")))?;
 
     // From here on, errors must restore ACLs via the sentinel.
@@ -1218,8 +1218,9 @@ mod tests {
 
         let original_sddl = get_sddl(tmp.path()).expect("get original SDDL");
 
+        let sentinel_dir = make_temp_dir();
         let (name, sid) = create_profile().expect("create profile");
-        let mut sentinel = SentinelFile::new(name.clone());
+        let mut sentinel = SentinelFile::new(name.clone(), Some(sentinel_dir.path()));
         sentinel.add_entry(tmp.path().to_path_buf(), original_sddl.clone());
         sentinel.write().expect("write sentinel");
 
@@ -1236,7 +1237,7 @@ mod tests {
         // Call restore_acls_and_delete_sentinel directly rather than cleanup_stale.
         // cleanup_stale skips sentinels owned by live processes (this PID),
         // and this test is about the restore logic, not the scanning.
-        let sentinel_file_path = std::env::temp_dir().join(format!("lot-sentinel-{name}.txt"));
+        let sentinel_file_path = sentinel_dir.path().join(format!("lot-sentinel-{name}.txt"));
         let sentinel_read = SentinelFile::read(&sentinel_file_path).expect("read sentinel");
         restore_acls_and_delete_sentinel(&sentinel_read).expect("restore_acls_and_delete_sentinel");
         let _ = delete_profile(&sentinel_read.profile_name);

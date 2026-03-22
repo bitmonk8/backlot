@@ -60,8 +60,8 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
     appcontainer::spawn(policy, command)
 }
 
-pub fn cleanup_stale() -> Result<()> {
-    let (stale, scan_errors) = sentinel::find_stale_sentinels()?;
+pub fn cleanup_stale(dir: Option<&std::path::Path>) -> Result<()> {
+    let (stale, scan_errors) = sentinel::find_stale_sentinels(dir)?;
     let mut errors = Vec::new();
     for e in &scan_errors {
         errors.push(format!("scan: {e}"));

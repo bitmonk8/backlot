@@ -20,6 +20,7 @@ pub struct SandboxPolicy {
     deny_paths: Vec<PathBuf>,
     allow_network: bool,
     limits: ResourceLimits,
+    pub(crate) sentinel_dir: Option<PathBuf>,
 }
 
 impl SandboxPolicy {
@@ -40,6 +41,7 @@ impl SandboxPolicy {
             deny_paths,
             allow_network,
             limits,
+            sentinel_dir: None,
         }
     }
 
@@ -71,6 +73,12 @@ impl SandboxPolicy {
     /// Resource limits.
     pub const fn limits(&self) -> &ResourceLimits {
         &self.limits
+    }
+
+    /// Directory for sentinel files (Windows). When `None`, uses the
+    /// system temp directory.
+    pub fn sentinel_dir(&self) -> Option<&std::path::Path> {
+        self.sentinel_dir.as_deref()
     }
 }
 
@@ -418,6 +426,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         }
     }
 
@@ -437,6 +446,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -451,6 +461,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -465,6 +476,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -485,6 +497,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -505,6 +518,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         policy
             .validate()
@@ -524,6 +538,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -540,6 +555,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -556,6 +572,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -571,6 +588,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         assert!(policy.validate().is_ok());
     }
@@ -589,6 +607,7 @@ mod tests {
                 max_processes: Some(10),
                 max_cpu_seconds: Some(60),
             },
+            sentinel_dir: None,
         };
         assert!(policy.validate().is_ok());
     }
@@ -606,6 +625,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -624,6 +644,7 @@ mod tests {
                 max_memory_bytes: Some(0),
                 ..ResourceLimits::default()
             },
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -642,6 +663,7 @@ mod tests {
                 max_processes: Some(0),
                 ..ResourceLimits::default()
             },
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -660,6 +682,7 @@ mod tests {
                 max_cpu_seconds: Some(0),
                 ..ResourceLimits::default()
             },
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, SandboxError::InvalidPolicy(_)));
@@ -676,6 +699,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -699,6 +723,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -722,6 +747,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -742,6 +768,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -765,6 +792,7 @@ mod tests {
             deny_paths: vec![denied],
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         policy.validate().expect("valid policy with deny path");
     }
@@ -784,6 +812,7 @@ mod tests {
             deny_paths: vec![denied],
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -805,6 +834,7 @@ mod tests {
             deny_paths: vec![p],
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -829,6 +859,7 @@ mod tests {
             deny_paths: vec![deny_parent, deny_child],
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -853,6 +884,7 @@ mod tests {
             deny_paths: vec![denied],
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -880,6 +912,7 @@ mod tests {
             deny_paths: vec![deny.clone()],
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
 
         let all = policy.all_paths();
@@ -906,6 +939,7 @@ mod tests {
             deny_paths: vec![deny.clone()],
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
 
         let grant = policy.grant_paths();
@@ -970,6 +1004,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -990,6 +1025,7 @@ mod tests {
             deny_paths: Vec::new(),
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -1012,6 +1048,7 @@ mod tests {
                 max_memory_bytes: Some(0),
                 ..ResourceLimits::default()
             },
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();
@@ -1037,6 +1074,7 @@ mod tests {
             deny_paths: vec![denied],
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         policy
             .validate()
@@ -1057,6 +1095,7 @@ mod tests {
             deny_paths: vec![denied],
             allow_network: false,
             limits: ResourceLimits::default(),
+            sentinel_dir: None,
         };
         policy
             .validate()
@@ -1076,6 +1115,7 @@ mod tests {
                 max_processes: Some(0),
                 ..ResourceLimits::default()
             },
+            sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
         let msg = err.to_string();

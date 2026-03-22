@@ -291,4 +291,4 @@ Tests gate on `probe()` results at runtime. When a required mechanism is unavail
 | Test (macOS) | macos-latest | None needed |
 | Test (Windows) | windows-latest | `lot setup` for AppContainer prerequisites |
 
-Tests run in parallel (default thread count). Parallel safety relies on unique profile names, unique temp dirs, and idempotent ACE grants. The two integration tests that call `cleanup_stale()` are serialized against each other via a shared mutex on Windows.
+Tests run in parallel (default thread count). Parallel safety relies on unique profile names, unique temp dirs, and idempotent ACE grants. Tests that call `cleanup_stale()` use per-test sentinel directories via `SandboxPolicyBuilder::sentinel_dir()` to avoid shared state.

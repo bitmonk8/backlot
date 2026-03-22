@@ -76,20 +76,13 @@ pub struct SentinelFile {
 }
 
 impl SentinelFile {
-    pub fn new(profile_name: String) -> Self {
-        let file_path = sentinel_path(&profile_name);
-        Self {
-            profile_name,
-            entries: Vec::new(),
-            file_path,
-        }
-    }
-
-    /// Create a sentinel that writes to a custom directory. Used by tests
-    /// to avoid the system temp directory.
-    #[cfg(test)]
-    pub fn with_dir(profile_name: String, dir: &Path) -> Self {
-        let file_path = dir.join(format!("lot-sentinel-{profile_name}.txt"));
+    /// Create a sentinel file. If `dir` is `Some`, the sentinel is written
+    /// there; otherwise it goes to the system temp directory.
+    pub fn new(profile_name: String, dir: Option<&Path>) -> Self {
+        let file_path = dir.map_or_else(
+            || sentinel_path(&profile_name),
+            |d| d.join(format!("lot-sentinel-{profile_name}.txt")),
+        );
         Self {
             profile_name,
             entries: Vec::new(),
@@ -199,8 +192,12 @@ impl SentinelFile {
     }
 }
 
-pub fn save_sentinel_with_sddl(profile_name: &str, paths: &[PathBuf]) -> io::Result<SentinelFile> {
-    let mut sentinel = SentinelFile::new(profile_name.to_owned());
+pub fn save_sentinel_with_sddl(
+    profile_name: &str,
+    paths: &[PathBuf],
+    dir: Option<&Path>,
+) -> io::Result<SentinelFile> {
+    let mut sentinel = SentinelFile::new(profile_name.to_owned(), dir);
     for path in paths {
         let sddl = get_sddl(path)?;
         sentinel.add_entry(path.clone(), sddl);
@@ -307,10 +304,11 @@ pub fn find_stale_sentinels_in(dir: &Path) -> Result<(Vec<SentinelFile>, Vec<io:
 
 /// Find stale sentinel files left by crashed sessions.
 ///
+/// If `dir` is `Some`, scans that directory; otherwise scans the system temp directory.
 /// Returns parsed sentinels whose owning process is no longer alive.
 /// Does NOT perform any cleanup — the caller orchestrates restore + profile deletion.
-pub fn find_stale_sentinels() -> Result<(Vec<SentinelFile>, Vec<io::Error>)> {
-    find_stale_sentinels_in(&sentinel_dir())
+pub fn find_stale_sentinels(dir: Option<&Path>) -> Result<(Vec<SentinelFile>, Vec<io::Error>)> {
+    find_stale_sentinels_in(dir.unwrap_or(&sentinel_dir()))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -511,7 +509,7 @@ mod tests {
     #[test]
     fn sentinel_write_to_dir_round_trip() {
         let dir = make_test_dir();
-        let mut sentinel = SentinelFile::with_dir("lot-42-0-0-0".to_owned(), dir.path());
+        let mut sentinel = SentinelFile::new("lot-42-0-0-0".to_owned(), Some(dir.path()));
         sentinel.add_entry(PathBuf::from(r"C:\100% done"), "D:(A;;FA;;;BA)".to_owned());
         sentinel.add_entry(PathBuf::from("C:\\has\ttab"), "D:(A;;FR;;;WD)".to_owned());
         sentinel.write().expect("write");
@@ -531,7 +529,7 @@ mod tests {
     #[test]
     fn sentinel_delete_file_removes_file() {
         let dir = make_test_dir();
-        let mut sentinel = SentinelFile::with_dir("lot-99-0-0-0".to_owned(), dir.path());
+        let mut sentinel = SentinelFile::new("lot-99-0-0-0".to_owned(), Some(dir.path()));
         sentinel.add_entry(PathBuf::from(r"C:\foo"), "D:(A;;FA;;;BA)".to_owned());
         sentinel.write().expect("write");
 
@@ -548,7 +546,7 @@ mod tests {
     fn find_stale_sentinels_in_finds_dead_process() {
         let dir = make_test_dir();
         // PID 999999999 is almost certainly not running.
-        let mut sentinel = SentinelFile::with_dir("lot-999999999-0-0-0".to_owned(), dir.path());
+        let mut sentinel = SentinelFile::new("lot-999999999-0-0-0".to_owned(), Some(dir.path()));
         sentinel.add_entry(PathBuf::from(r"C:\foo"), "D:(A;;FA;;;BA)".to_owned());
         sentinel.write().expect("write");
 
@@ -563,7 +561,7 @@ mod tests {
         let dir = make_test_dir();
         let pid = std::process::id();
         let profile = format!("lot-{pid}-0-0-0");
-        let mut sentinel = SentinelFile::with_dir(profile, dir.path());
+        let mut sentinel = SentinelFile::new(profile, Some(dir.path()));
         sentinel.add_entry(PathBuf::from(r"C:\foo"), "D:(A;;FA;;;BA)".to_owned());
         sentinel.write().expect("write");
 
@@ -646,7 +644,7 @@ mod tests {
         // Use with_dir to write sentinel to a test-local directory
         // instead of the system temp directory, avoiding interference
         // with cleanup_stale() tests.
-        let mut sentinel = SentinelFile::with_dir("lot-77777-0-0-0".to_owned(), dir.path());
+        let mut sentinel = SentinelFile::new("lot-77777-0-0-0".to_owned(), Some(dir.path()));
         let sddl = super::get_sddl(&test_path).expect("get_sddl");
         sentinel.add_entry(test_path.clone(), sddl);
         sentinel.write().expect("write sentinel");
@@ -666,7 +664,7 @@ mod tests {
         std::fs::write(&test_path, "data").expect("write test file");
 
         // Use with_dir to avoid system temp directory.
-        let mut sentinel = SentinelFile::with_dir("lot-88888-0-0-0".to_owned(), dir.path());
+        let mut sentinel = SentinelFile::new("lot-88888-0-0-0".to_owned(), Some(dir.path()));
         let sddl = super::get_sddl(&test_path).expect("get_sddl");
         sentinel.add_entry(test_path, sddl);
         sentinel.write().expect("write sentinel");
@@ -687,7 +685,7 @@ mod tests {
     #[test]
     fn restore_acls_and_delete_sentinel_preserves_file_on_failure() {
         let dir = make_test_dir();
-        let mut sentinel = SentinelFile::with_dir("lot-999999999-0-0-0".to_owned(), dir.path());
+        let mut sentinel = SentinelFile::new("lot-999999999-0-0-0".to_owned(), Some(dir.path()));
         // Non-existent path so apply_sddl will fail.
         sentinel.add_entry(
             PathBuf::from(r"C:\nonexistent_lot_test_path_12345"),

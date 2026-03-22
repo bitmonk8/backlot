@@ -2,16 +2,13 @@
 //!
 //! Tests are parallel-safe by design: unique profile names, unique temp
 //! dirs, idempotent ACE grants. Tests that call `cleanup_stale()` use
-//! a shared mutex to serialize only against each other.
+//! per-test sentinel directories to avoid shared state.
 //!
 //! Diagnostic logging: every test prints to stderr what happened (spawn
 //! success/failure, exit status, skip reasons). Run with `--nocapture`
 //! to see this output in CI.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-#[cfg(target_os = "windows")]
-static CLEANUP_STALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod common;
 
@@ -140,21 +137,34 @@ fn stdin_echo_command() -> (PathBuf, Vec<String>) {
 /// executables without explicit grants. On Unix, we add `/bin` (and `/usr/bin`
 /// if distinct) so the sandbox can find standard utilities.
 fn make_policy(
-    read_paths: Vec<PathBuf>,
-    write_paths: Vec<PathBuf>,
+    read_paths: impl AsRef<[PathBuf]>,
+    write_paths: impl AsRef<[PathBuf]>,
     scratch: &std::path::Path,
 ) -> lot::SandboxPolicy {
-    let mut write_paths = write_paths;
-    write_paths.push(scratch.to_path_buf());
+    make_policy_with_sentinel_dir(read_paths.as_ref(), write_paths.as_ref(), scratch, None)
+}
 
-    lot::SandboxPolicy::new(
-        read_paths,
-        write_paths,
-        platform_exec_paths(),
-        Vec::new(),
-        false,
-        lot::ResourceLimits::default(),
-    )
+fn make_policy_with_sentinel_dir(
+    read_paths: &[PathBuf],
+    write_paths: &[PathBuf],
+    scratch: &std::path::Path,
+    sentinel_dir: Option<&std::path::Path>,
+) -> lot::SandboxPolicy {
+    let mut builder = lot::SandboxPolicyBuilder::new();
+    for p in read_paths {
+        builder = builder.read_path(p).expect("read_path");
+    }
+    builder = builder.write_path(scratch).expect("write_path scratch");
+    for p in write_paths {
+        builder = builder.write_path(p).expect("write_path");
+    }
+    for p in &platform_exec_paths() {
+        builder = builder.exec_path(p).expect("exec_path");
+    }
+    if let Some(dir) = sentinel_dir {
+        builder = builder.sentinel_dir(dir);
+    }
+    builder.build().expect("build policy")
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -429,17 +439,19 @@ fn test_spawn_write_to_readonly_blocked() {
 
 #[test]
 fn test_cleanup_after_drop() {
-    #[cfg(target_os = "windows")]
-    let _guard = CLEANUP_STALE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     eprintln!("[diag] === test_cleanup_after_drop ===");
 
     let tmp = make_temp_dir();
     let scratch = make_temp_dir();
+    let sentinel_dir = make_temp_dir();
 
     let (program, args) = echo_command();
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+    let policy = make_policy_with_sentinel_dir(
+        &[tmp.path().to_path_buf()],
+        &[],
+        scratch.path(),
+        Some(sentinel_dir.path()),
+    );
 
     let mut cmd = lot::SandboxCommand::new(&program);
     set_sandbox_env(&mut cmd, scratch.path());
@@ -461,7 +473,7 @@ fn test_cleanup_after_drop() {
     {
         // Drop ran restore_acls_and_delete_sentinel. Verify no stale sentinel remains
         // for this child by checking cleanup_stale succeeds without error.
-        let cleanup_result = lot::cleanup_stale();
+        let cleanup_result = lot::cleanup_stale(Some(sentinel_dir.path()));
         assert!(
             cleanup_result.is_ok(),
             "cleanup_stale after drop should succeed: {:?}",
@@ -1116,17 +1128,19 @@ fn test_kill_terminates_running_process() {
 
 #[test]
 fn test_kill_and_cleanup() {
-    #[cfg(target_os = "windows")]
-    let _guard = CLEANUP_STALE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     eprintln!("[diag] === test_kill_and_cleanup ===");
 
     let tmp = make_temp_dir();
     let scratch = make_temp_dir();
+    let sentinel_dir = make_temp_dir();
 
     let (program, args) = sleep_command(60);
-    let policy = make_policy(vec![tmp.path().to_path_buf()], vec![], scratch.path());
+    let policy = make_policy_with_sentinel_dir(
+        &[tmp.path().to_path_buf()],
+        &[],
+        scratch.path(),
+        Some(sentinel_dir.path()),
+    );
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
     let child = must_spawn(&policy, &cmd);
@@ -1157,7 +1171,7 @@ fn test_kill_and_cleanup() {
     {
         // On Windows, kill_and_cleanup closes the job handle which kills
         // all processes. Verify cleanup_stale succeeds.
-        let cleanup_result = lot::cleanup_stale();
+        let cleanup_result = lot::cleanup_stale(Some(sentinel_dir.path()));
         assert!(
             cleanup_result.is_ok(),
             "cleanup_stale after kill_and_cleanup should succeed: {:?}",

@@ -224,17 +224,22 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
 /// Restore ACLs from any stale sentinel files left by crashed sessions (Windows).
 /// No-op on other platforms.
 ///
+/// When `sentinel_dir` is `Some`, scans that directory for stale sentinels.
+/// When `None`, scans the system temp directory (the default location).
+///
 /// # Errors
 ///
 /// - [`SandboxError::Cleanup`] if ACL restoration fails.
 /// - [`SandboxError::Io`] for underlying OS errors.
-#[allow(clippy::missing_const_for_fn)] // Not const on Windows.
-pub fn cleanup_stale() -> Result<()> {
+pub fn cleanup_stale(sentinel_dir: Option<&std::path::Path>) -> Result<()> {
     #[cfg(target_os = "windows")]
-    return windows::cleanup_stale();
+    return windows::cleanup_stale(sentinel_dir);
 
     #[cfg(not(target_os = "windows"))]
-    Ok(())
+    {
+        let _ = sentinel_dir;
+        Ok(())
+    }
 }
 
 /// Check whether the current process is running with administrator privileges.
