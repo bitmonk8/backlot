@@ -244,20 +244,5 @@ Names that do not reflect behavior or are inconsistent.
 - **Files:** lot/src/windows/sddl.rs, lot/src/windows/sentinel.rs
 - **Severity:** Low
 
----
-
-## Group 16: Low Correctness — Accepted Risks
-
-Known issues with minimal practical impact.
-
-### 16.1 [Correctness] TOCTOU race in stale sentinel scan
-- **File:** lot/src/windows/sentinel.rs (lines 267-276)
-- **Severity:** Low
-- **Description:** PID reuse window between check and action.
-
-### 16.2 [Correctness] Inherent TOCTOU in sentinel design
-- **File:** lot/src/windows/sentinel.rs
-- **Severity:** Low
-- **Description:** Documented and accepted, with small window. Listed for completeness.
 
 
