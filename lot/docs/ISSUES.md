@@ -4,19 +4,6 @@
 
 ---
 
-## Group 1: FD-Reuse Race in Unix Tests Under Parallel Execution
-
-### 1.1 [High/Testing] `unix_child_close_fds` flaky under parallel execution — `lot/src/unix.rs:1390`
-Creates pipe fds, calls `close_fds()`, then asserts the raw fd numbers are invalid via `fcntl(fd, F_GETFD)`. Another thread running in parallel can reuse the fd number between close and assertion, causing a spurious failure. Already observed in CI (run 23427291005).
-
-### 1.2 [High/Testing] `close_if_not_std_closes_non_standard_fd` same fd-reuse race — `lot/src/unix.rs:1015`
-Closes a pipe fd via `close_if_not_std`, then asserts it's invalid via `fcntl(F_GETFD)`. Same race as 1.1.
-
-### 1.3 [High/Testing] `check_child_error_pipe_closes_parent_pipes_on_error` same fd-reuse race — `lot/src/unix.rs:1196`
-Calls `check_child_error_pipe()` which closes extra_r and extra_w internally, then asserts both are invalid via `fcntl(F_GETFD)`. Same race as 1.1.
-
----
-
 ## Group 2: Windows ACL/DACL Defensiveness
 
 ### 2.1 [Medium/Correctness] `modify_dacl` missing null check — `lot/src/windows/acl_helpers.rs:170`

@@ -1019,11 +1019,18 @@ mod tests {
         // SAFETY: read_fd is a valid open fd from make_pipe()
         unsafe { close_if_not_std(read_fd) };
 
-        // SAFETY: F_GETFD on a closed fd returns -1
-        let ret = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
-        assert!(ret < 0, "fd {read_fd} should be closed but fcntl succeeded");
-
-        // SAFETY: write_fd is still open; close to avoid leak
+        // Verify close happened: with read end closed, write produces EPIPE.
+        // SAFETY: write_fd is a valid open fd; SIGPIPE is ignored process-wide in tests.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let ret = unsafe { libc::write(write_fd, b"x".as_ptr().cast(), 1) };
+        let err = std::io::Error::last_os_error();
+        assert_eq!(ret, -1, "write should fail when read end is closed");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EPIPE),
+            "expected EPIPE after closing read end"
+        );
+        // SAFETY: write_fd still needs closing to avoid leak
         unsafe { libc::close(write_fd) };
     }
 
@@ -1194,26 +1201,44 @@ mod tests {
 
     #[test]
     fn check_child_error_pipe_closes_parent_pipes_on_error() {
-        // Verify parent pipe fds are closed when error is reported.
         let mut data = [0u8; 8];
         data[..4].copy_from_slice(&1_i32.to_ne_bytes());
         data[4..].copy_from_slice(&1_i32.to_ne_bytes());
 
         let (r, pid) = fork_pipe_writer(&data);
-        let (extra_r, extra_w) = make_pipe().expect("extra pipe");
+
+        // Two separate pipes: pass one end of each as parent_stdin / parent_stdout.
+        // Keep the partner ends to verify closure via pipe behavior.
+        let (witness_r, passed_w) = make_pipe().expect("pipe for stdin witness");
+        let (passed_r, witness_w) = make_pipe().expect("pipe for stdout witness");
 
         // SAFETY: all fds and pid are valid
         let result = unsafe {
-            check_child_error_pipe(r, pid, Some(extra_w), Some(extra_r), None, &["step"])
+            check_child_error_pipe(r, pid, Some(passed_w), Some(passed_r), None, &["step"])
         };
         assert!(result.is_err());
 
-        // The parent pipe fds should now be closed.
-        // SAFETY: checking if closed fds are invalid
-        let ret = unsafe { libc::fcntl(extra_r, libc::F_GETFD) };
-        assert!(ret < 0, "parent stdout fd should be closed after error");
-        let ret = unsafe { libc::fcntl(extra_w, libc::F_GETFD) };
-        assert!(ret < 0, "parent stdin fd should be closed after error");
+        // Verify passed_w (write end) was closed: reading from witness_r returns EOF.
+        // SAFETY: witness_r is a valid fd from make_pipe()
+        let mut buf = [0u8; 1];
+        let ret = unsafe { libc::read(witness_r, buf.as_mut_ptr().cast(), 1) };
+        assert_eq!(ret, 0, "expected EOF — write end should have been closed");
+        // SAFETY: witness_r is a valid fd
+        unsafe { libc::close(witness_r) };
+
+        // Verify passed_r (read end) was closed: writing to witness_w produces EPIPE.
+        // SAFETY: witness_w is a valid fd; SIGPIPE ignored process-wide in tests.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let ret = unsafe { libc::write(witness_w, b"x".as_ptr().cast(), 1) };
+        let err = std::io::Error::last_os_error();
+        assert_eq!(ret, -1, "write should fail when read end is closed");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EPIPE),
+            "expected EPIPE after closing read end"
+        );
+        // SAFETY: witness_w is a valid fd
+        unsafe { libc::close(witness_w) };
     }
 
     // ── validate_kill_pid tests ──────────────────────────────────────
@@ -1388,29 +1413,48 @@ mod tests {
 
     #[test]
     fn unix_child_close_fds() {
-        let (r1, w1) = make_pipe().expect("pipe");
-        let (r2, w2) = make_pipe().expect("pipe");
+        // Three separate pipes so each fd has a witness partner for
+        // race-free closure verification via pipe behavior.
+        let (witness_stdin, fd_stdin) = make_pipe().expect("pipe");
+        let (fd_stdout, witness_stdout) = make_pipe().expect("pipe");
+        let (fd_stderr, witness_stderr) = make_pipe().expect("pipe");
 
         let mut child2 = UnixSandboxedChild {
             pid: 1,
-            stdin_fd: Some(w1),
-            stdout_fd: Some(r1),
-            stderr_fd: Some(r2),
+            stdin_fd: Some(fd_stdin),
+            stdout_fd: Some(fd_stdout),
+            stderr_fd: Some(fd_stderr),
             waited: AtomicBool::new(true),
             kill_style: KillStyle::Single,
         };
-        // Close w2 manually since we don't use it.
-        unsafe { libc::close(w2) };
 
         child2.close_fds();
         assert!(child2.stdin_fd.is_none());
         assert!(child2.stdout_fd.is_none());
         assert!(child2.stderr_fd.is_none());
 
-        // Verify fds are actually closed.
-        assert!(unsafe { libc::fcntl(w1, libc::F_GETFD) } < 0);
-        assert!(unsafe { libc::fcntl(r1, libc::F_GETFD) } < 0);
-        assert!(unsafe { libc::fcntl(r2, libc::F_GETFD) } < 0);
+        // Verify fd_stdin (write end) was closed: read from witness returns EOF.
+        // SAFETY: witness_stdin is a valid fd from make_pipe()
+        let mut buf = [0u8; 1];
+        let ret = unsafe { libc::read(witness_stdin, buf.as_mut_ptr().cast(), 1) };
+        assert_eq!(ret, 0, "expected EOF — stdin write end should be closed");
+        unsafe { libc::close(witness_stdin) };
+
+        // Verify fd_stdout (read end) was closed: write to witness produces EPIPE.
+        // SAFETY: witness_stdout is a valid fd; SIGPIPE ignored process-wide in tests.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let ret = unsafe { libc::write(witness_stdout, b"x".as_ptr().cast(), 1) };
+        let err = std::io::Error::last_os_error();
+        assert_eq!(ret, -1, "write should fail when read end is closed");
+        assert_eq!(err.raw_os_error(), Some(libc::EPIPE), "expected EPIPE");
+        unsafe { libc::close(witness_stdout) };
+
+        // Verify fd_stderr (read end) was closed: write to witness produces EPIPE.
+        let ret = unsafe { libc::write(witness_stderr, b"x".as_ptr().cast(), 1) };
+        let err = std::io::Error::last_os_error();
+        assert_eq!(ret, -1, "write should fail when read end is closed");
+        assert_eq!(err.raw_os_error(), Some(libc::EPIPE), "expected EPIPE");
+        unsafe { libc::close(witness_stderr) };
     }
 
     #[test]
