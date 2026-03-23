@@ -51,31 +51,38 @@ fn is_dir_accessible(
 ///
 /// Both checks reject directories under deny paths.
 pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<()> {
+    // Pre-canonicalize a slice of paths, collecting failures as errors rather
+    // than aborting validation so the user sees all problems at once.
+    fn canonicalize_or_collect<P: AsRef<Path>>(
+        paths: &[P],
+        category: &str,
+        errors: &mut Vec<String>,
+    ) -> Vec<PathBuf> {
+        let mut out = Vec::with_capacity(paths.len());
+        for p in paths {
+            let p = p.as_ref();
+            match canonicalize_existing_prefix(p) {
+                Ok(c) => out.push(c),
+                Err(e) => errors.push(format!(
+                    "{category} path {} could not be canonicalized: {e}",
+                    p.display()
+                )),
+            }
+        }
+        out
+    }
+
     let mut errors: Vec<String> = Vec::new();
 
     let implicit = crate::platform_implicit_paths();
     let grant_paths = policy.grant_paths();
 
-    // Pre-canonicalize grant, implicit, and write paths once to avoid
+    // Pre-canonicalize grant, implicit, write, and deny paths once to avoid
     // O(P*G) re-canonicalization in inner loops.
-    let canon_grants: Vec<PathBuf> = grant_paths
-        .iter()
-        .map(|p| canonicalize_existing_prefix(p))
-        .collect::<std::result::Result<_, _>>()?;
-    let canon_implicit: Vec<PathBuf> = implicit
-        .iter()
-        .map(|p| canonicalize_existing_prefix(p))
-        .collect::<std::result::Result<_, _>>()?;
-    let canon_write_paths: Vec<PathBuf> = policy
-        .write_paths()
-        .iter()
-        .map(|p| canonicalize_existing_prefix(p))
-        .collect::<std::result::Result<_, _>>()?;
-    let canon_deny: Vec<PathBuf> = policy
-        .deny_paths()
-        .iter()
-        .map(|p| canonicalize_existing_prefix(p))
-        .collect::<std::result::Result<_, _>>()?;
+    let canon_grants = canonicalize_or_collect(&grant_paths, "grant", &mut errors);
+    let canon_implicit = canonicalize_or_collect(&implicit, "implicit", &mut errors);
+    let canon_write_paths = canonicalize_or_collect(policy.write_paths(), "write", &mut errors);
+    let canon_deny = canonicalize_or_collect(policy.deny_paths(), "deny", &mut errors);
 
     // TEMP/TMP/TMPDIR must be under a write path (temp dirs need write access)
     // and must not be under a deny path (deny overrides all grants).
@@ -87,6 +94,12 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
             {
                 // Distinguish deny-covered from uncovered for actionable diagnostics.
                 let Ok(resolved) = canonicalize_existing_prefix(dir) else {
+                    errors.push(format!(
+                        "{key}={} could not be resolved and will likely be inaccessible \
+                         at runtime. Either ensure it exists or override it with \
+                         SandboxCommand::env(\"{key}\", <an accessible path>)",
+                        dir.display()
+                    ));
                     continue;
                 };
                 if is_denied(&resolved, &canon_deny) {
@@ -465,5 +478,116 @@ mod tests {
                 "default PATH entry {entry} is not covered by platform_implicit_paths"
             );
         }
+    }
+
+    #[test]
+    fn validate_env_reports_uncanonicalizeable_policy_path() {
+        let write_dir = tempfile::TempDir::new().expect("create temp dir");
+
+        // Relative path triggers canonicalize_existing_prefix failure
+        // (normalize_lexical rejects non-absolute paths).
+        let bogus = PathBuf::from("relative/not/absolute");
+
+        let policy = SandboxPolicy::new(
+            vec![bogus],
+            vec![write_dir.path().to_path_buf()],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
+
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("TEMP", write_dir.path());
+        #[cfg(target_os = "windows")]
+        {
+            let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+            cmd.env("PATH", format!(r"{sys_root}\System32"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("PATH", "/usr/bin");
+
+        let err = validate_env_accessibility(&policy, &cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("could not be canonicalized"),
+            "error should report canonicalization failure: {msg}"
+        );
+        assert!(
+            msg.contains("grant"),
+            "error should identify the path category: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_env_reports_unresolvable_temp() {
+        let write_dir = tempfile::TempDir::new().expect("create temp dir");
+
+        let policy = SandboxPolicy::new(
+            vec![],
+            vec![write_dir.path().to_path_buf()],
+            vec![],
+            vec![],
+            false,
+            ResourceLimits::default(),
+        );
+
+        // Relative TEMP triggers canonicalize_existing_prefix failure in
+        // the re-canonicalization path (is_dir_accessible returns false,
+        // then the diagnostic re-canonicalization also fails).
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("TEMP", "relative/not/absolute");
+        #[cfg(target_os = "windows")]
+        {
+            let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+            cmd.env("PATH", format!(r"{sys_root}\System32"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("PATH", "/usr/bin");
+
+        let err = validate_env_accessibility(&policy, &cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("could not be resolved"),
+            "error should report resolution failure: {msg}"
+        );
+        assert!(msg.contains("TEMP"), "error should mention TEMP: {msg}");
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn resolve_env_value_windows_nonempty_env_suppresses_fallback() {
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("OTHER", "val");
+        // Non-empty env means no parent fallback — SYSTEMROOT should not resolve.
+        assert_eq!(
+            resolve_env_value(&cmd, "SYSTEMROOT"),
+            None,
+            "non-empty env should suppress parent environment fallback"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn resolve_env_value_windows_case_insensitive() {
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("temp", r"C:\MyTemp");
+        // Lookup with uppercase key should match the lowercase entry.
+        assert_eq!(
+            resolve_env_value(&cmd, "TEMP"),
+            Some(OsString::from(r"C:\MyTemp"))
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn resolve_env_value_windows_inherits_parent_env() {
+        // Empty command.env triggers parent-environment fallback on Windows.
+        let cmd = SandboxCommand::new("dummy");
+        let val = resolve_env_value(&cmd, "SYSTEMROOT");
+        assert!(
+            val.is_some(),
+            "SYSTEMROOT should be inherited from the parent environment"
+        );
     }
 }

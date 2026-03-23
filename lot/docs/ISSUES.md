@@ -36,18 +36,6 @@ Mixes attribute list lifecycle, stdio pipe resolution, and spawn orchestration i
 
 ---
 
-## Group 4: `env_check` Validation Robustness
-
-### 4.1 [Medium/Correctness] Inaccessible temp dir silently skipped — `lot/src/env_check.rs:86-91`
-When `is_dir_accessible` returns false and re-canonicalization fails, the code `continue`s, silently dropping the error. Should push an error instead.
-
-### 4.2 [Medium/Correctness] `canonicalize_existing_prefix` aborts all validation — `lot/src/env_check.rs:61-78`
-Failures on policy paths cause early `?` return, aborting all validation instead of reporting which specific path failed.
-
-### 4.3 [Medium/Testing] Windows inherited-env path untested — `lot/src/env_check.rs:141-174`
-No test covers Windows-inherited-env path or case-insensitive matching behavior.
-
----
 
 ## Group 5: Correctness Edge Cases
 
@@ -211,3 +199,4 @@ Same as above.
 
 ### 16.1 [Medium/Testing] Missing TMP/TMPDIR rejection tests — `lot/src/env_check.rs`
 Only `TEMP` rejection is tested in `validate_env_rejects_temp_outside_write_paths`. No test verifies rejection when only `TMP` or only `TMPDIR` is set to an uncovered path. If the validation loop were accidentally changed to only check `TEMP`, no test would catch the regression for `TMP`/`TMPDIR`.
+
