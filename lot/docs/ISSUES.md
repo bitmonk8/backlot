@@ -1,6 +1,6 @@
 # Issues
 
-*50 findings from full project audit (2026-03-22). Grouped by co-fixability, ordered by impact.*
+*30 findings from full project audit (2026-03-22). Grouped by co-fixability, ordered by impact.*
 
 ---
 
@@ -37,50 +37,6 @@ Mixes attribute list lifecycle, stdio pipe resolution, and spawn orchestration i
 ---
 
 
-## Group 5: Correctness Edge Cases
-
-### 5.1 [Medium/Correctness] Program path not fully escaped — `lot/src/windows/cmdline.rs:38-40`
-`build_command_line` quotes program path but does not escape embedded double-quotes or trailing backslashes. Practical impact limited: `"` is illegal in Windows filenames.
-
-### 5.2 [Medium/Correctness] `cpu_secs` overflow to negative — `lot/src/windows/job.rs:87`
-Values above ~922,337,203 produce negative `PerJobUserTimeLimit` after `saturating_mul(10_000_000) as i64`. Has explicit `#[allow]` and comment. No realistic input reaches the threshold.
-
-### 5.3 [Medium/Correctness] Sentinel TOCTOU race — `lot/src/windows/sentinel.rs:278-288`
-Between alive-check and restore, another process could double-restore ACLs. Impact limited: `apply_sddl` is idempotent and `delete_file` handles `NotFound`.
-
-### 5.4 [Medium/Correctness] Malformed step wraps to `usize::MAX` — `lot/src/unix.rs:467-468`
-If `step` is 0 or negative, `(step - 1) as usize` wraps. Falls through to `"unknown"` safely but loses the actual invalid step value.
-
-### 5.5 [Medium/Correctness] `cmd_setup` uses hardcoded policy — `lot-cli/src/main.rs:189-202`
-Checks prerequisites for a hardcoded minimal policy, not the user's actual policy. `lot run` validates at spawn time, so not a gap in production use.
-
----
-
-## Group 6: Cross-Platform Best-Effort Kill/Cleanup Return Values
-
-### 6.1 [Medium/Error-handling] `kill(SIGKILL)` discarded in cgroup cleanup — `lot/src/linux/cgroup.rs:226`
-Best-effort fallback path; kernel kills remaining cgroup members on removal.
-
-### 6.2 [Medium/Error-handling] `kill_by_pid` discards `kill()` — `lot/src/linux/mod.rs:569`
-Documented as best-effort, used in async cancellation paths.
-
-### 6.3 [Medium/Error-handling] `TerminateProcess` discarded — `lot/src/windows/mod.rs:105`
-Consistent with cross-platform best-effort `kill_by_pid` design.
-
-### 6.4 [Medium/Error-handling] `kill(-pid, SIGKILL)` discarded — `lot/src/macos/mod.rs:252`
-Consistent with cross-platform best-effort design.
-
-### 6.5 [Medium/Error-handling] `clock_gettime` discarded — `lot/src/linux/cgroup.rs:120`
-`CLOCK_MONOTONIC` cannot realistically fail on cgroup v2 kernels. Retry loop mitigates collision risk.
-
-### 6.6 [Medium/Error-handling] `close(fd)` discarded — `lot/src/linux/namespace.rs:350`
-Standard practice for close-after-successful-open on an empty file.
-
-### 6.7 [Medium/Error-handling] `delete_profile` discarded on spawn error — `lot/src/windows/appcontainer.rs:486`
-Primary spawn error is more important. Orphaned profile cleaned up by OS.
-
----
-
 ## Group 7: Documentation & Naming
 
 ### 7.1 [Medium/Naming] `kill_by_pid` doc says "signal" on Windows — `lot/src/windows/mod.rs:92`
@@ -95,16 +51,6 @@ Doc claims consistency with `is_descendant_or_equal`, but they use different can
 
 ### 8.1 [Medium/Separation] Deeply nested spawn logic — `lot/src/linux/mod.rs:233-487`
 Helper-process and inner-child logic are deeply nested `if` branches. Post-fork code avoids heap allocation (constraining extraction), but named helper functions would improve readability.
-
----
-
-## Group 10: Test Helper Return Values
-
-### 10.1 [Medium/Error-handling] `write_fd`/`waitpid` discarded in test helpers — `lot/src/linux/mod.rs:593-607,794,842,891,1007`
-`write_fd` intentionally discards for async-signal-safety (documented). `waitpid` not checked; failure unrealistic.
-
-### 10.2 [Medium/Error-handling] `waitpid` discarded in seccomp test — `lot/src/linux/seccomp.rs:458`
-Test-only; failure unrealistic on valid forked PID.
 
 ---
 
