@@ -262,6 +262,11 @@ impl Drop for CgroupGuard {
             let procs_path = self.path.join("cgroup.procs");
             match fs::read_to_string(&procs_path) {
                 Ok(contents) if !contents.trim().is_empty() => {
+                    // Retry kill_all() each iteration so that processes entering
+                    // the cgroup after the initial kill are caught. On the
+                    // primary path (cgroup.kill) this is a no-op atomic write;
+                    // on the fallback path it re-scans and SIGKILLs new PIDs.
+                    self.kill_all();
                     // SAFETY: timespec is valid, null second arg means we don't
                     // care about remaining time.
                     unsafe {
