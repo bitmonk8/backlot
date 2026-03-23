@@ -514,20 +514,21 @@ pub unsafe fn setup_stdio_fds(
     child_stdout: i32,
     child_stderr: i32,
 ) -> std::result::Result<(), i32> {
-    // After dup2+close, the original fd is gone. If another argument
-    // aliases it, we must use the already-assigned standard fd instead.
-    // `effective_fd` resolves an input fd through prior redirections.
-    let mut redirected: [(i32, i32); 3] = [(-1, -1); 3];
-    let mut redir_count = 0usize;
-
+    // Resolve an input fd through prior dup2 redirections. If a previous
+    // step consumed this fd via dup2+close, returns the new standard fd.
     fn effective_fd(fd: i32, redirected: &[(i32, i32); 3], count: usize) -> i32 {
-        for i in 0..count {
-            if redirected[i].0 == fd {
-                return redirected[i].1;
+        for &(orig, target) in &redirected[..count] {
+            if orig == fd {
+                return target;
             }
         }
         fd
     }
+
+    // After dup2+close, the original fd is gone. If another argument
+    // aliases it, we must use the already-assigned standard fd instead.
+    let mut redirected: [(i32, i32); 3] = [(-1, -1); 3];
+    let mut redir_count = 0usize;
 
     if child_stdin != 0 {
         // SAFETY: caller guarantees child_stdin is a valid open fd
