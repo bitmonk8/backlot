@@ -1562,6 +1562,22 @@ mod tokio_tests {
     }
 
     #[tokio::test]
+    async fn zero_timeout_returns_timeout_error() {
+        let (child, _temps) = spawn_sleep(60);
+
+        let result = child
+            .wait_with_output_timeout(std::time::Duration::ZERO)
+            .await;
+
+        match result {
+            Err(lot::SandboxError::Timeout(d)) => {
+                assert_eq!(d, std::time::Duration::ZERO);
+            }
+            other => panic!("expected Timeout error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn fast_child_completes_before_timeout() {
         #[cfg(unix)]
         {

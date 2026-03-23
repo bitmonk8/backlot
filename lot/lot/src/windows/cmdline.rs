@@ -37,6 +37,8 @@ pub fn build_command_line(program: &OsString, args: &[OsString]) -> Vec<u16> {
     let mut cmd = OsString::new();
     cmd.push("\"");
     cmd.push(program);
+    let wide: Vec<u16> = program.as_os_str().encode_wide().collect();
+    double_trailing_backslashes(&mut cmd, &wide);
     cmd.push("\"");
     for arg in args {
         cmd.push(" ");
@@ -49,6 +51,20 @@ const WIDE_SPACE: u16 = b' ' as u16;
 const WIDE_TAB: u16 = b'\t' as u16;
 const WIDE_QUOTE: u16 = b'"' as u16;
 const WIDE_BACKSLASH: u16 = b'\\' as u16;
+
+/// CommandLineToArgvW treats N backslashes before a quote as N/2
+/// literal backslashes + an escaped quote, so trailing backslashes
+/// must be doubled before any closing quote we emit.
+fn double_trailing_backslashes(cmd: &mut OsString, wide: &[u16]) {
+    let count = wide
+        .iter()
+        .rev()
+        .take_while(|&&c| c == WIDE_BACKSLASH)
+        .count();
+    for _ in 0..count {
+        cmd.push("\\");
+    }
+}
 
 /// Escape an argument following `CommandLineToArgvW` rules:
 /// - If the arg contains spaces, tabs, or quotes, wrap in quotes.
@@ -101,12 +117,11 @@ fn append_escaped_arg(cmd: &mut OsString, arg: &OsString) {
         }
     }
     flush_plain(cmd, &mut plain);
-    // Double trailing backslashes before the closing quote — CommandLineToArgvW
-    // treats N backslashes followed by a quote as N/2 backslashes + escaped quote,
-    // so we must emit 2N to get N literal backslashes before the closing quote.
-    for _ in 0..(backslash_count * 2) {
-        cmd.push("\\");
-    }
+    // Flush any remaining backslashes as literal, then double all trailing
+    // backslashes before the closing quote via the shared helper.
+    plain.extend(std::iter::repeat_n(WIDE_BACKSLASH, backslash_count));
+    flush_plain(cmd, &mut plain);
+    double_trailing_backslashes(cmd, &wide);
 
     cmd.push("\"");
 }
@@ -262,6 +277,42 @@ mod tests {
         let wide = build_command_line(&program, &[arg]);
         let result = wide_to_string(&wide);
         assert_eq!(result, "\"test.exe\" hello\u{1F389}world");
+    }
+
+    #[test]
+    fn test_build_command_line_trailing_backslash() {
+        let program = OsString::from("C:\\my dir\\");
+        let args = vec![OsString::from("arg1")];
+        let wide = build_command_line(&program, &args);
+        let result = wide_to_string(&wide);
+        assert_eq!(result, "\"C:\\my dir\\\\\" arg1");
+    }
+
+    #[test]
+    fn test_build_command_line_multiple_trailing_backslashes() {
+        let program = OsString::from("C:\\dir\\\\\\");
+        let args = vec![OsString::from("x")];
+        let wide = build_command_line(&program, &args);
+        let result = wide_to_string(&wide);
+        assert_eq!(result, "\"C:\\dir\\\\\\\\\\\\\" x");
+    }
+
+    #[test]
+    fn test_build_command_line_only_backslashes() {
+        let program = OsString::from("\\\\");
+        let args = vec![OsString::from("a")];
+        let wide = build_command_line(&program, &args);
+        let result = wide_to_string(&wide);
+        assert_eq!(result, "\"\\\\\\\\\" a");
+    }
+
+    #[test]
+    fn test_build_command_line_no_trailing_backslash() {
+        let program = OsString::from("C:\\program files\\app.exe");
+        let args = vec![OsString::from("run")];
+        let wide = build_command_line(&program, &args);
+        let result = wide_to_string(&wide);
+        assert_eq!(result, "\"C:\\program files\\app.exe\" run");
     }
 
     #[test]
