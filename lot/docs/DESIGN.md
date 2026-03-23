@@ -162,7 +162,7 @@ The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `
 
 **Network access:**
 - Denied by default inside AppContainer.
-- Granted by adding `InternetClient` or `InternetClientServer` capability SIDs.
+- Granted by adding the `InternetClient` capability SID.
 
 **Job Objects** enforce resource limits:
 - `JOB_OBJECT_LIMIT_PROCESS_MEMORY` — memory cap.

@@ -248,7 +248,7 @@ impl SandboxPolicy {
     }
 
     /// Returns the union of `read_paths`, `write_paths`, and `exec_paths` (grant paths only).
-    /// Excludes `deny_paths` -- used for computing ancestors that need traverse ACEs.
+    /// Excludes `deny_paths`. Used by `env_check` for PATH reachability validation.
     pub fn grant_paths(&self) -> Vec<&std::path::Path> {
         self.read_paths
             .iter()

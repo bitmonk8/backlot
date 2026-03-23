@@ -708,9 +708,7 @@ impl UnixSandboxedChild {
     }
 
     pub fn kill(&self) -> io::Result<()> {
-        if self.waited.load(Ordering::Acquire) {
-            return Ok(());
-        }
+        // ESRCH from kill() on an already-exited process is treated as success below.
         let rc = self.send_sigkill();
         if rc != 0 {
             let err = io::Error::last_os_error();

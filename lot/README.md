@@ -4,7 +4,7 @@ Cross-platform process sandboxing for Rust. Launch child processes with restrict
 
 [![crates.io](https://img.shields.io/crates/v/lot.svg)](https://crates.io/crates/lot)
 [![docs.rs](https://docs.rs/lot/badge.svg)](https://docs.rs/lot)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 ## Platform Mechanisms
 
@@ -196,4 +196,4 @@ For user-owned directories, `spawn()` grants ancestor traverse ACEs automaticall
 
 ## License
 
-MIT
+MIT OR Apache-2.0 ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE))

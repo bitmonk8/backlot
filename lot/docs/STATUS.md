@@ -6,7 +6,7 @@
 
 ## Issues (2026-03-23)
 
-8 open findings in `docs/ISSUES.md` across 5 groups. All NON-CRITICAL (Groups 4–8).
+2 open findings in `docs/ISSUES.md` across 2 groups (5, 6). All NON-CRITICAL. Groups 4, 7, 8 resolved.
 
 ## CI Notes
 

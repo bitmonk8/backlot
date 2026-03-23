@@ -82,9 +82,9 @@ impl JobObject {
 
         if let Some(cpu_secs) = limits.max_cpu_seconds {
             // PerJobUserTimeLimit is in 100-nanosecond intervals.
-            // Wrapping is acceptable — values that large exceed any real limit.
-            #[allow(clippy::cast_possible_wrap)]
-            let ticks = (cpu_secs.saturating_mul(10_000_000)) as i64;
+            // Clamp to i64::MAX: a negative value would cause immediate termination.
+            #[allow(clippy::cast_possible_wrap)] // .min(i64::MAX) guarantees no wrap
+            let ticks = cpu_secs.saturating_mul(10_000_000).min(i64::MAX as u64) as i64;
             info.BasicLimitInformation.PerJobUserTimeLimit = ticks;
             flags |= JOB_OBJECT_LIMIT_JOB_TIME;
         }
@@ -352,8 +352,7 @@ mod tests {
             max_processes: None,
             max_cpu_seconds: Some(u64::MAX),
         };
-        // saturating_mul prevents overflow; the resulting i64 cast wraps
-        // but should not panic.
+        // saturating_mul prevents overflow; the result is clamped to i64::MAX.
         job.set_limits(&limits)
             .expect("set limits with u64::MAX cpu");
     }
