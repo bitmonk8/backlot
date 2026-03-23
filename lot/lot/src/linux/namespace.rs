@@ -250,12 +250,13 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     // Best-effort cleanup of stale mount point left by a crashed process
     // whose PID was recycled. Errors are ignored — if cleanup fails, the
     // subsequent mkdir_p/mount_tmpfs will produce a clear error.
-    let c_new_root = CString::new(new_root.as_bytes()).unwrap();
-    // SAFETY: c_new_root is a valid NUL-terminated path; umount2 and rmdir
-    // accept any path and are async-signal-safe.
-    unsafe {
-        libc::umount2(c_new_root.as_ptr(), libc::MNT_DETACH);
-        libc::rmdir(c_new_root.as_ptr());
+    if let Ok(c_new_root) = CString::new(new_root.as_bytes()) {
+        // SAFETY: c_new_root is a valid NUL-terminated path; umount2 and rmdir
+        // accept any path and are async-signal-safe.
+        unsafe {
+            libc::umount2(c_new_root.as_ptr(), libc::MNT_DETACH);
+            libc::rmdir(c_new_root.as_ptr());
+        }
     }
 
     mkdir_p(&new_root)?;
