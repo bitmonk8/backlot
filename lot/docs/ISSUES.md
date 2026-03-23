@@ -2,18 +2,6 @@
 
 *Imported from audit findings — 2026-03-23. Verified and triaged 2026-03-23.*
 
-## Group 3 — Seccomp missing syscalls
-
-### 3.1 MUST FIX — [Correctness] `close_range` not in seccomp allowlist
-- **File:** lot/src/linux/seccomp.rs
-- **Description:** `SYS_close_range` is missing. glibc 2.34+ and musl 1.2.4+ use `close_range` internally during `posix_spawn`, `popen`, and `closefrom`. Programs using these functions get `EPERM`. No additional attack surface beyond the already-allowed `SYS_close`.
-
-### 3.2 MUST FIX — [Correctness] `prlimit64` not in seccomp allowlist
-- **File:** lot/src/linux/seccomp.rs
-- **Description:** `SYS_prlimit64` is missing. Modern glibc and musl implement `getrlimit`/`setrlimit` via the `prlimit64` syscall. Programs that query resource limits (including the Rust runtime for stack guard pages) get `EPERM`. Breaks most non-trivial sandboxed processes on contemporary distros.
-
----
-
 ## Group 4 — Unix `try_wait`/`kill` race condition
 
 ### 4.1 NON-CRIT — [Correctness] `try_wait` sets `waited` before `waitpid`, races with `kill`

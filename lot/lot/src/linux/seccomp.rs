@@ -102,6 +102,7 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_pwrite64,
             libc::SYS_lseek,
             libc::SYS_close,
+            libc::SYS_close_range,
             libc::SYS_dup,
             libc::SYS_dup3,
             libc::SYS_fcntl,
@@ -144,6 +145,7 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_getegid,
             libc::SYS_getresuid,
             libc::SYS_getresgid,
+            libc::SYS_prlimit64,
         ],
     );
 
@@ -597,6 +599,77 @@ mod tests {
         let bpf = build_filter(&empty_policy(false)).unwrap();
         let result = fork_with_seccomp(&bpf, child_body);
         assert_eq!(result, "OK", "TCGETS ioctl should be allowed: {result}");
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn apply_filter_allows_close_range() {
+        fn child_body(bpf: &BpfProgram, w: i32) -> ! {
+            if apply_filter(bpf).is_err() {
+                write_fd(w, b"FILTER_FAIL");
+                unsafe { libc::_exit(1) };
+            }
+            // SAFETY: close_range on an empty range (FDs 10000..=10000) is harmless.
+            let rc = unsafe { libc::syscall(libc::SYS_close_range, 10000u32, 10000u32, 0u32) };
+            if rc < 0 {
+                // SAFETY: reading thread-local errno
+                let errno = unsafe { *libc::__errno_location() };
+                if errno == libc::EPERM {
+                    write_fd(w, b"EPERM");
+                } else {
+                    // ENOSYS or EBADF are fine — seccomp allowed the call
+                    write_fd(w, b"OK");
+                }
+            } else {
+                write_fd(w, b"OK");
+            }
+            unsafe { libc::close(w) };
+            unsafe { libc::_exit(0) };
+        }
+
+        let bpf = build_filter(&empty_policy(false)).unwrap();
+        let result = fork_with_seccomp(&bpf, child_body);
+        assert_eq!(result, "OK", "close_range should be allowed: {result}");
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn apply_filter_allows_prlimit64() {
+        fn child_body(bpf: &BpfProgram, w: i32) -> ! {
+            if apply_filter(bpf).is_err() {
+                write_fd(w, b"FILTER_FAIL");
+                unsafe { libc::_exit(1) };
+            }
+            let mut rlim: libc::rlimit64 = unsafe { std::mem::zeroed() };
+            // SAFETY: prlimit64 with pid=0 (self), RLIMIT_NOFILE, no new limit,
+            // valid output pointer.
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_prlimit64,
+                    0i32,
+                    libc::RLIMIT_NOFILE as i32,
+                    std::ptr::null::<libc::rlimit64>(),
+                    &raw mut rlim,
+                )
+            };
+            if rc < 0 {
+                // SAFETY: reading thread-local errno
+                let errno = unsafe { *libc::__errno_location() };
+                if errno == libc::EPERM {
+                    write_fd(w, b"EPERM");
+                } else {
+                    write_fd(w, b"FAIL");
+                }
+            } else {
+                write_fd(w, b"OK");
+            }
+            unsafe { libc::close(w) };
+            unsafe { libc::_exit(0) };
+        }
+
+        let bpf = build_filter(&empty_policy(false)).unwrap();
+        let result = fork_with_seccomp(&bpf, child_body);
+        assert_eq!(result, "OK", "prlimit64 should be allowed: {result}");
     }
 
     #[test]
