@@ -2,18 +2,6 @@
 
 *Imported from audit findings — 2026-03-23. Verified and triaged 2026-03-23.*
 
-## Group 2 — Linux namespace mount correctness
-
-### 2.1 MUST FIX — [Correctness] `MS_REC` ignored on bind-mount remounts
-- **File:** lot/src/linux/namespace.rs:388-389
-- **Description:** `MS_REC` is ignored by the kernel on bind-mount remount operations. The remount only changes flags on the top-level mount point; submounts under a recursively-bound policy path retain their original flags. For `bind_mount_readonly`, submounts remain writable.
-
-### 2.2 NON-CRIT — [Correctness] System symlinks not preserved in mount namespace
-- **File:** lot/src/linux/namespace.rs:95-109
-- **Description:** `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks on modern distros (Fedora, Arch, recent Ubuntu). `bind_mount_exec` creates real directories instead of preserving symlinks, producing redundant bind mounts and altering observable path structure inside the sandbox. Functionally correct for dynamic linking but differs from host layout.
-
----
-
 ## Group 3 — Seccomp missing syscalls
 
 ### 3.1 MUST FIX — [Correctness] `close_range` not in seccomp allowlist
@@ -75,3 +63,4 @@
 ### 8.4 NON-CRIT — [Doc-Mismatch] DESIGN.md claims `InternetClientServer` capability exists
 - **File:** docs/DESIGN.md:164
 - **Description:** DESIGN.md states network access can use `InternetClient` or `InternetClientServer`. The implementation only creates `InternetClient`. `InternetClientServer` is not implemented.
+

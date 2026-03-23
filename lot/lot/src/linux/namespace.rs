@@ -89,23 +89,62 @@ pub fn setup_user_namespace(uid: u32, gid: u32) -> io::Result<()> {
 }
 
 /// Mount system library/binary directories and /etc config files.
+///
+/// Paths that are symlinks on the host (e.g., `/lib` -> `usr/lib` on Fedora/Arch)
+/// are recreated as symlinks rather than bind-mounted as directories.
 fn mount_system_paths(new_root: &str, policy: &SandboxPolicy) -> io::Result<()> {
-    // System library and binary directories: always mounted so the dynamic
-    // linker and shared libraries are available for execve.
-    for sys_path in &["/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/lib32"] {
-        if Path::new(sys_path).exists() {
-            let dest = format!("{new_root}{sys_path}");
-            mkdir_p(&dest)?;
-            bind_mount_exec(sys_path, &dest)?;
+    let system_paths: &[&str] = &[
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/lib32",
+        "/bin",
+        "/usr/bin",
+        "/sbin",
+        "/usr/sbin",
+    ];
+
+    // Two-pass: mount real directories first, then create symlinks. Symlinks
+    // may point into mounted directories (e.g., /lib -> usr/lib), so their
+    // targets must exist before the symlink is created.
+    let mut real_dirs = Vec::new();
+    let mut symlinks = Vec::new();
+
+    for &path in system_paths {
+        let p = Path::new(path);
+        // is_symlink() works even if the target doesn't exist; exists() follows symlinks
+        if !p.exists() && !p.is_symlink() {
+            continue;
+        }
+        if p.is_symlink() {
+            let target = fs::read_link(p)?;
+            symlinks.push((path, target));
+        } else {
+            real_dirs.push(path);
         }
     }
 
-    for bin_path in &["/bin", "/usr/bin", "/sbin", "/usr/sbin"] {
-        if Path::new(bin_path).exists() {
-            let dest = format!("{new_root}{bin_path}");
-            mkdir_p(&dest)?;
-            bind_mount_exec(bin_path, &dest)?;
+    // Mount real directories first
+    for &path in &real_dirs {
+        let dest = format!("{new_root}{path}");
+        mkdir_p(&dest)?;
+        bind_mount_exec(path, &dest)?;
+    }
+
+    // Recreate symlinks for paths that are symlinks on the host
+    for (path, target) in &symlinks {
+        let dest = format!("{new_root}{path}");
+        if let Some(parent) = Path::new(&dest).parent() {
+            mkdir_p(path_to_str(parent, "symlink parent")?)?;
         }
+        std::os::unix::fs::symlink(target, &dest).or_else(|e| {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
     }
 
     // Mount only specific /etc files needed by the dynamic linker and resolver.
@@ -359,9 +398,10 @@ fn bind_mount_file_readonly(src: &str, dst: &str) -> io::Result<()> {
 }
 
 /// Bind-mount `src` to `dst`, then remount with the specified flags.
-/// The initial bind uses `MS_BIND | MS_REC`. The remount adds the caller's
-/// `remount_flags` on top of `MS_BIND | MS_REC | MS_REMOUNT` so that flags
-/// apply recursively to all submounts.
+///
+/// The initial bind uses `MS_BIND | MS_REC`. The kernel ignores `MS_REC` on
+/// remount operations, so we enumerate all submounts under `dst` via
+/// `/proc/self/mountinfo` and remount each individually.
 fn bind_mount(src: &str, dst: &str, remount_flags: libc::c_ulong) -> io::Result<()> {
     let c_src = to_cstring(src)?;
     let c_dst = to_cstring(dst)?;
@@ -380,20 +420,85 @@ fn bind_mount(src: &str, dst: &str, remount_flags: libc::c_ulong) -> io::Result<
         return Err(io::Error::last_os_error());
     }
 
-    // SAFETY: valid CString pointer, remount with caller-specified flags
-    let rc = unsafe {
-        libc::mount(
-            std::ptr::null(),
-            c_dst.as_ptr(),
-            std::ptr::null(),
-            libc::MS_BIND | libc::MS_REC | libc::MS_REMOUNT | remount_flags,
-            std::ptr::null(),
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
+    // Remount each submount individually (MS_REC is ignored on remounts)
+    let mounts = submounts_under(dst)?;
+    for mount_point in &mounts {
+        let c_mp = to_cstring(mount_point)?;
+        // SAFETY: valid CString pointer, remounting individual submount
+        let rc = unsafe {
+            libc::mount(
+                std::ptr::null(),
+                c_mp.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REMOUNT | remount_flags,
+                std::ptr::null(),
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
     Ok(())
+}
+
+/// Decode octal escape sequences in mountinfo paths (`\040` for space, etc.).
+fn decode_mountinfo_path(encoded: &str) -> String {
+    let mut result = String::with_capacity(encoded.len());
+    let bytes = encoded.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            let d0 = bytes[i + 1].wrapping_sub(b'0');
+            let d1 = bytes[i + 2].wrapping_sub(b'0');
+            let d2 = bytes[i + 3].wrapping_sub(b'0');
+            if d0 < 8 && d1 < 8 && d2 < 8 {
+                let ch = (d0 as u32) * 64 + (d1 as u32) * 8 + (d2 as u32);
+                // Octal escapes in mountinfo are single bytes
+                result.push(ch as u8 as char);
+                i += 4;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Parse mountinfo content and return all mount points at or under `prefix`,
+/// sorted by path length (shortest first).
+fn parse_submounts(mountinfo: &str, prefix: &str) -> Vec<String> {
+    let prefix_bytes = prefix.as_bytes();
+
+    let mut mounts = Vec::new();
+    for line in mountinfo.lines() {
+        // mountinfo fields: id parent_id major:minor root mount_point [options...] - fs_type source super_options
+        // Field 4 (0-indexed) is the mount point.
+        let Some(raw_mount) = line.split(' ').nth(4) else {
+            continue;
+        };
+        let mount_point = decode_mountinfo_path(raw_mount);
+
+        // Include exact match or any child path (next char after prefix must be '/')
+        let is_match = mount_point == prefix
+            || (mount_point.as_bytes().len() > prefix_bytes.len()
+                && mount_point.as_bytes().starts_with(prefix_bytes)
+                && mount_point.as_bytes()[prefix_bytes.len()] == b'/');
+        if is_match {
+            mounts.push(mount_point);
+        }
+    }
+
+    // Sort by path length (shortest first) so parents are remounted before children
+    mounts.sort_by_key(|m| m.len());
+    mounts
+}
+
+/// Read `/proc/self/mountinfo` and return all mount points at or under `prefix`,
+/// sorted by path length (shortest first).
+fn submounts_under(prefix: &str) -> io::Result<Vec<String>> {
+    let content = fs::read_to_string("/proc/self/mountinfo")?;
+    Ok(parse_submounts(&content, prefix))
 }
 
 /// Bind-mount `src` to `dst` read-only.
@@ -685,5 +790,169 @@ mod tests {
         create_mount_target(&src, &dest).unwrap();
         assert!(Path::new(&dest).is_dir());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── mountinfo helper tests ──────────────────────────────────────
+
+    #[test]
+    fn test_decode_mountinfo_path_plain() {
+        assert_eq!(decode_mountinfo_path("/mnt/data"), "/mnt/data");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_space() {
+        // \040 is octal for space (0x20 = 32)
+        assert_eq!(decode_mountinfo_path("/mnt/my\\040dir"), "/mnt/my dir");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_tab() {
+        // \011 is octal for tab (0x09 = 9)
+        assert_eq!(decode_mountinfo_path("/mnt/a\\011b"), "/mnt/a\tb");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_backslash() {
+        // \134 is octal for backslash (0x5C = 92)
+        assert_eq!(decode_mountinfo_path("/mnt/a\\134b"), "/mnt/a\\b");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_newline() {
+        // \012 is octal for newline (0x0A = 10)
+        assert_eq!(decode_mountinfo_path("/mnt/a\\012b"), "/mnt/a\nb");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_multiple_escapes() {
+        assert_eq!(decode_mountinfo_path("/mnt/a\\040b\\040c"), "/mnt/a b c");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_trailing_backslash() {
+        // Incomplete escape at end should be passed through
+        assert_eq!(decode_mountinfo_path("/mnt/trail\\"), "/mnt/trail\\");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_non_octal_after_backslash() {
+        // \xyz is not valid octal — pass through as-is
+        assert_eq!(decode_mountinfo_path("/mnt/a\\xyz"), "/mnt/a\\xyz");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_partial_octal_two_digits() {
+        // Backslash + only 2 octal digits — not enough for a complete escape
+        assert_eq!(decode_mountinfo_path("/mnt/a\\04"), "/mnt/a\\04");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_partial_octal_one_digit() {
+        assert_eq!(decode_mountinfo_path("/mnt/a\\0"), "/mnt/a\\0");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_escape_at_exact_end() {
+        // \040 occupying the last 4 bytes — boundary for i + 3 < len check
+        assert_eq!(decode_mountinfo_path("/a\\040"), "/a ");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_high_octal() {
+        // \377 = 255 (0xFF), highest single-byte value
+        assert_eq!(decode_mountinfo_path("/mnt/a\\377b"), "/mnt/a\u{ff}b");
+    }
+
+    #[test]
+    fn test_decode_mountinfo_path_null_octal() {
+        // \000 = NUL byte
+        assert_eq!(decode_mountinfo_path("/mnt/a\\000b"), "/mnt/a\0b");
+    }
+
+    #[test]
+    fn test_submounts_under_parses_mountinfo() {
+        // submounts_under reads /proc/self/mountinfo which exists on Linux.
+        // We can at least verify it returns results containing "/" for the
+        // root mount point.
+        let result = submounts_under("/");
+        assert!(result.is_ok(), "reading mountinfo should succeed");
+        let mounts = result.unwrap();
+        assert!(!mounts.is_empty(), "root should have at least one mount");
+        assert_eq!(mounts[0], "/", "first entry should be / (shortest)");
+    }
+
+    #[test]
+    fn test_submounts_under_nonexistent_prefix() {
+        let result = submounts_under("/nonexistent_prefix_abc123");
+        assert!(result.is_ok());
+        let mounts = result.unwrap();
+        assert!(mounts.is_empty(), "no mounts should match bogus prefix");
+    }
+
+    #[test]
+    fn test_parse_submounts_prefix_matching() {
+        let mountinfo = "\
+36 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw
+37 36 0:6 / /proc rw,nosuid,nodev,noexec shared:5 - proc proc rw
+38 36 0:7 / /sys rw,nosuid,nodev,noexec shared:6 - sysfs sysfs rw
+39 36 8:1 /mnt/data /mnt/data rw,relatime shared:1 - ext4 /dev/sda1 rw
+40 36 0:40 / /pro rw - tmpfs tmpfs rw";
+
+        // "/proc" should match exactly, not "/pro"
+        let result = parse_submounts(mountinfo, "/proc");
+        assert_eq!(result, vec!["/proc"]);
+
+        // "/" should match everything
+        let result = parse_submounts(mountinfo, "/");
+        assert!(result.len() == 5);
+        assert_eq!(result[0], "/");
+
+        // "/mnt/data" exact match
+        let result = parse_submounts(mountinfo, "/mnt/data");
+        assert_eq!(result, vec!["/mnt/data"]);
+
+        // "/nonexistent" matches nothing
+        let result = parse_submounts(mountinfo, "/nonexistent");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_submounts_with_children() {
+        let mountinfo = "\
+36 1 8:1 / /mnt/root rw - ext4 /dev/sda1 rw
+37 36 8:2 / /mnt/root/sub1 rw - ext4 /dev/sda2 rw
+38 36 8:3 / /mnt/root/sub1/deep rw - ext4 /dev/sda3 rw
+39 36 8:4 / /mnt/root/sub2 rw - ext4 /dev/sda4 rw";
+
+        let result = parse_submounts(mountinfo, "/mnt/root");
+        assert_eq!(
+            result,
+            vec![
+                "/mnt/root",
+                "/mnt/root/sub1",
+                "/mnt/root/sub2",
+                "/mnt/root/sub1/deep",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_submounts_with_escaped_paths() {
+        let mountinfo = "36 1 8:1 / /mnt/my\\040dir rw - ext4 /dev/sda1 rw\n\
+37 36 8:2 / /mnt/my\\040dir/child rw - ext4 /dev/sda2 rw";
+
+        let result = parse_submounts(mountinfo, "/mnt/my dir");
+        assert_eq!(result, vec!["/mnt/my dir", "/mnt/my dir/child"]);
+    }
+
+    #[test]
+    fn test_parse_submounts_skips_malformed_lines() {
+        let mountinfo = "this is too short\n\
+36 1 8:1 / /valid rw - ext4 /dev/sda1 rw\n\
+\n\
+37";
+
+        let result = parse_submounts(mountinfo, "/valid");
+        assert_eq!(result, vec!["/valid"]);
     }
 }
