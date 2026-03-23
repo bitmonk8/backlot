@@ -420,7 +420,12 @@ fn bind_mount(src: &str, dst: &str, remount_flags: libc::c_ulong) -> io::Result<
         return Err(io::Error::last_os_error());
     }
 
-    // Remount each submount individually (MS_REC is ignored on remounts)
+    // Remount each submount individually (MS_REC is ignored on remounts).
+    // In a user namespace, mount flags are locked — you cannot relax flags
+    // inherited from the source (e.g., remove MS_NOEXEC from a snap mount).
+    // EINVAL on a submount remount means the requested flags would relax a
+    // locked flag. The submount retains its source flags, which are at least
+    // as restrictive, so skipping is safe.
     let mounts = submounts_under(dst)?;
     for mount_point in &mounts {
         let c_mp = to_cstring(mount_point)?;
@@ -435,7 +440,14 @@ fn bind_mount(src: &str, dst: &str, remount_flags: libc::c_ulong) -> io::Result<
             )
         };
         if rc != 0 {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            // EINVAL on a submount (not the top-level mount) means locked
+            // flags prevent the remount. The submount keeps its existing
+            // (more restrictive) flags — skip it.
+            if err.raw_os_error() == Some(libc::EINVAL) && *mount_point != *dst {
+                continue;
+            }
+            return Err(err);
         }
     }
     Ok(())
@@ -452,7 +464,7 @@ fn decode_mountinfo_path(encoded: &str) -> String {
             let d1 = bytes[i + 2].wrapping_sub(b'0');
             let d2 = bytes[i + 3].wrapping_sub(b'0');
             if d0 < 8 && d1 < 8 && d2 < 8 {
-                let ch = (d0 as u32) * 64 + (d1 as u32) * 8 + (d2 as u32);
+                let ch = u32::from(d0) * 64 + u32::from(d1) * 8 + u32::from(d2);
                 // Octal escapes in mountinfo are single bytes
                 result.push(ch as u8 as char);
                 i += 4;
@@ -479,8 +491,11 @@ fn parse_submounts(mountinfo: &str, prefix: &str) -> Vec<String> {
         };
         let mount_point = decode_mountinfo_path(raw_mount);
 
-        // Include exact match or any child path (next char after prefix must be '/')
+        // Include exact match or any child path. For root prefix "/",
+        // every absolute path is a child. Otherwise require a '/' separator
+        // after the prefix to avoid false matches (e.g., "/pro" vs "/proc").
         let is_match = mount_point == prefix
+            || (prefix == "/" && mount_point.starts_with('/'))
             || (mount_point.as_bytes().len() > prefix_bytes.len()
                 && mount_point.as_bytes().starts_with(prefix_bytes)
                 && mount_point.as_bytes()[prefix_bytes.len()] == b'/');
