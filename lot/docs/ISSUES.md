@@ -1,31 +1,6 @@
 # Issues
 
-*58 findings from full project audit (2026-03-22). Grouped by co-fixability, ordered by impact.*
-
----
-
-## Group 1: Critical & High Severity
-
-### 1.1 [Critical/Correctness] `setup_stdio_fds` fd aliasing corruption — `lot/src/unix.rs:505-533`
-`setup_stdio_fds` can corrupt stdio if caller passes aliased fds (e.g., `child_stdout == child_stderr`). After dup2+close of the first, the second dup2 operates on a closed fd. Function is `pub unsafe` with no documentation of this aliasing precondition.
-
-### 1.2 [High/Correctness] `resolve_env_value` false-negative on Windows — `lot/src/env_check.rs:165-168`
-`resolve_env_value` falls back to `std::env::var_os(key)` only when `command.env.is_empty()`. If caller sets any env var but not TEMP/TMP, those resolve to `None` and validation skips them, even though the child may inherit parent's TEMP/TMP at runtime.
-
-### 1.3 [High/Error-handling] `memory.swap.max` write failure silently discarded — `lot/src/linux/cgroup.rs:153`
-Non-ENOENT errors (e.g., permission denied) leave swap enabled, allowing the sandbox to bypass the memory limit via swap. Should ignore only ENOENT (swap controller not enabled) and propagate other errors.
-
-### 1.4 [High/Testing] `spawn_read_outside_sandbox_blocked` false positive — `lot/src/macos/mod.rs:422-434`
-Test silently passes when `spawn` returns `Err`. Any spawn failure produces a false positive. Should `unwrap()` or `expect()` the spawn result.
-
-### 1.5 [High/Testing] `resolve_path` symlink resolution untested — `lot/src/macos/seatbelt.rs:294-296`
-Fallback behavior (non-existent path) and symlink resolution are untested. Symlink resolution is security-relevant.
-
-### 1.6 [High/Naming] `grant_access` cannot express execute-only — `lot/src/windows/appcontainer.rs:959`
-`grant_access` with `writable: bool` cannot express execute-only. `exec_paths` and `read_paths` both call `grant_access(sid, path, false)`, granting identical ACL masks (`FILE_GENERIC_READ | FILE_GENERIC_EXECUTE`). The `exec_paths` distinction is a no-op at the ACL level.
-
-### 1.7 [High/Doc-mismatch] Deny ACE comment oversimplifies — `lot/src/windows/appcontainer.rs:969-970`
-Comment says "Deny ACEs are evaluated before allow ACEs by Windows" but `deny_file_access` explains this is insufficient and requires PROTECTED_DACL + REVOKE_ACCESS. Comment oversimplifies to the point of being incorrect.
+*50 findings from full project audit (2026-03-22). Grouped by co-fixability, ordered by impact.*
 
 ---
 
@@ -144,19 +119,16 @@ If `grep '^0::'` produces no output, cgroup setup operates on non-cgroup paths. 
 
 ## Group 10: Test Helper Return Values
 
-### 10.1 [Medium/Error-handling] Test swallows spawn `Err` — `lot/src/macos/mod.rs:422-434`
-`spawn_read_outside_sandbox_blocked` swallows `Err` with `eprintln` and `[skip]`. Silently passes on any spawn failure.
-
-### 10.2 [Medium/Error-handling] `libc::write`/`read` discarded in test helpers — `lot/src/unix.rs:935,949-950,1081,1253-1254,1424-1425`
+### 10.1 [Medium/Error-handling] `libc::write`/`read` discarded in test helpers — `lot/src/unix.rs:935,949-950,1081,1253-1254,1424-1425`
 Failed writes could cause false positives in tests.
 
-### 10.3 [Medium/Error-handling] `write_fd`/`waitpid` discarded in test helpers — `lot/src/linux/mod.rs:593-607,794,842,891,1007`
+### 10.2 [Medium/Error-handling] `write_fd`/`waitpid` discarded in test helpers — `lot/src/linux/mod.rs:593-607,794,842,891,1007`
 `write_fd` intentionally discards for async-signal-safety (documented). `waitpid` not checked; failure unrealistic.
 
-### 10.4 [Medium/Error-handling] `waitpid` discarded in seccomp test — `lot/src/linux/seccomp.rs:458`
+### 10.3 [Medium/Error-handling] `waitpid` discarded in seccomp test — `lot/src/linux/seccomp.rs:458`
 Test-only; failure unrealistic on valid forked PID.
 
-### 10.5 [Medium/Error-handling] Test results discarded — `lot/src/windows/appcontainer.rs:1196,1243,1293`
+### 10.4 [Medium/Error-handling] Test results discarded — `lot/src/windows/appcontainer.rs:1196,1243,1293`
 `wait_with_output()` and `delete_profile` results discarded. Silent cleanup failure could affect subsequent runs.
 
 ---
@@ -232,3 +204,10 @@ Same as above.
 
 ### 15.3 [Medium/Testing] `TempDir::new()` in path_util.rs tests — `lot/src/path_util.rs:119-151`
 Same as above.
+
+---
+
+## Group 16: Review-Cycle Findings
+
+### 16.1 [Medium/Testing] Missing TMP/TMPDIR rejection tests — `lot/src/env_check.rs`
+Only `TEMP` rejection is tested in `validate_env_rejects_temp_outside_write_paths`. No test verifies rejection when only `TMP` or only `TMPDIR` is set to an uncovered path. If the validation loop were accidentally changed to only check `TEMP`, no test would catch the regression for `TMP`/`TMPDIR`.

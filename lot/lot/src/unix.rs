@@ -500,36 +500,66 @@ pub enum KillStyle {
 /// Dup2 child fds to stdin/stdout/stderr. Returns `Err(errno)` on failure.
 /// Closes original fds if they differ from the target standard fds.
 ///
+/// Handles fd aliasing: if two or more of the input fds share the same
+/// underlying fd (e.g., `child_stdout == child_stderr`), earlier dup2+close
+/// steps would invalidate the fd before later steps can use it. This is
+/// solved by tracking which fds have already been redirected and using the
+/// new standard fd number instead of the (now-closed) original.
+///
 /// # Safety
-/// All fds must be valid. Must only be called in a forked child.
+/// All fds must be valid open descriptors. Must only be called in a
+/// forked child before exec.
 pub unsafe fn setup_stdio_fds(
     child_stdin: i32,
     child_stdout: i32,
     child_stderr: i32,
 ) -> std::result::Result<(), i32> {
+    // After dup2+close, the original fd is gone. If another argument
+    // aliases it, we must use the already-assigned standard fd instead.
+    // `effective_fd` resolves an input fd through prior redirections.
+    let mut redirected: [(i32, i32); 3] = [(-1, -1); 3];
+    let mut redir_count = 0usize;
+
+    fn effective_fd(fd: i32, redirected: &[(i32, i32); 3], count: usize) -> i32 {
+        for i in 0..count {
+            if redirected[i].0 == fd {
+                return redirected[i].1;
+            }
+        }
+        fd
+    }
+
     if child_stdin != 0 {
-        // SAFETY: both fds are valid
+        // SAFETY: caller guarantees child_stdin is a valid open fd
         if unsafe { libc::dup2(child_stdin, 0) } < 0 {
             return Err(errno());
         }
-        // SAFETY: fd is valid
+        // SAFETY: fd is valid and > 2 check is inside close_if_not_std
         unsafe { close_if_not_std(child_stdin) };
+        redirected[redir_count] = (child_stdin, 0);
+        redir_count += 1;
     }
-    if child_stdout != 1 {
-        // SAFETY: both fds are valid
-        if unsafe { libc::dup2(child_stdout, 1) } < 0 {
+
+    let stdout_fd = effective_fd(child_stdout, &redirected, redir_count);
+    if stdout_fd != 1 {
+        // SAFETY: stdout_fd is valid (either the original or a redirected standard fd)
+        if unsafe { libc::dup2(stdout_fd, 1) } < 0 {
             return Err(errno());
         }
-        // SAFETY: fd is valid
-        unsafe { close_if_not_std(child_stdout) };
+        // SAFETY: fd is valid; close_if_not_std skips fds 0-2
+        unsafe { close_if_not_std(stdout_fd) };
+        redirected[redir_count] = (child_stdout, 1);
+        redir_count += 1;
     }
-    if child_stderr != 2 {
-        // SAFETY: both fds are valid
-        if unsafe { libc::dup2(child_stderr, 2) } < 0 {
+
+    let stderr_fd = effective_fd(child_stderr, &redirected, redir_count);
+    if stderr_fd != 2 {
+        // SAFETY: stderr_fd is valid (either the original or a redirected standard fd)
+        if unsafe { libc::dup2(stderr_fd, 2) } < 0 {
             return Err(errno());
         }
-        // SAFETY: fd is valid
-        unsafe { close_if_not_std(child_stderr) };
+        // SAFETY: fd is valid; close_if_not_std skips fds 0-2
+        unsafe { close_if_not_std(stderr_fd) };
     }
     Ok(())
 }

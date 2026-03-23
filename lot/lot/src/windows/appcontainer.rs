@@ -177,11 +177,22 @@ fn apply_ace(sid: PSID, path: &Path, access_mode: i32, access_mask: u32) -> crat
     modify_dacl(&wide_path, &display, &[ea], DACL_SECURITY_INFORMATION)
 }
 
-fn grant_access(sid: PSID, path: &Path, writable: bool) -> crate::Result<()> {
-    let access_mask = if writable {
-        FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE
-    } else {
-        FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+/// ACL permission level for `grant_access`.
+#[derive(Clone, Copy)]
+enum AccessLevel {
+    /// `FILE_GENERIC_READ`
+    Read,
+    /// `FILE_GENERIC_READ | FILE_GENERIC_WRITE`
+    ReadWrite,
+    /// `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE`
+    Execute,
+}
+
+fn grant_access(sid: PSID, path: &Path, level: AccessLevel) -> crate::Result<()> {
+    let access_mask = match level {
+        AccessLevel::Read => FILE_GENERIC_READ,
+        AccessLevel::ReadWrite => FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        AccessLevel::Execute => FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
     };
     apply_ace(sid, path, SET_ACCESS, access_mask)
 }
@@ -958,16 +969,16 @@ fn create_sandboxed_process(
 
 fn apply_policy_acls(sid: PSID, policy: &SandboxPolicy) -> crate::Result<()> {
     for path in policy.read_paths() {
-        grant_access(sid, path, false)?;
+        grant_access(sid, path, AccessLevel::Read)?;
     }
     for path in policy.write_paths() {
-        grant_access(sid, path, true)?;
+        grant_access(sid, path, AccessLevel::ReadWrite)?;
     }
     for path in policy.exec_paths() {
-        grant_access(sid, path, false)?;
+        grant_access(sid, path, AccessLevel::Execute)?;
     }
-    // Deny ACEs are evaluated before allow ACEs by Windows, so these
-    // override any inherited allows from parent grant paths.
+    // Explicit deny ACE + PROTECTED_DACL prevents inherited allows from
+    // overriding the deny. See `deny_file_access` for the full mechanism.
     for path in policy.deny_paths() {
         deny_file_access(sid, path)?;
     }
@@ -1224,7 +1235,7 @@ mod tests {
         sentinel.add_entry(tmp.path().to_path_buf(), original_sddl.clone());
         sentinel.write().expect("write sentinel");
 
-        grant_access(sid, tmp.path(), false).expect("grant access");
+        grant_access(sid, tmp.path(), AccessLevel::Read).expect("grant access");
 
         // SAFETY: sid was allocated by CreateAppContainerProfile.
         unsafe {
@@ -1267,7 +1278,7 @@ mod tests {
         let (name, sid) = create_profile().expect("create profile");
 
         // Grant parent access first so there is an allow ACE to override.
-        grant_access(sid, tmp.path(), false).expect("grant parent");
+        grant_access(sid, tmp.path(), AccessLevel::Read).expect("grant parent");
 
         // Baseline: no deny ACE on the subdirectory before deny_file_access.
         let sddl_before = get_sddl(&subdir).expect("get SDDL before deny");

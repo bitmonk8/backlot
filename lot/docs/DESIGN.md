@@ -144,7 +144,7 @@ The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `
 ### Windows: AppContainer + Job Objects
 
 **AppContainer** is a Windows kernel security boundary that denies access to all resources by default. Access is granted explicitly via:
-- ACL entries on files/directories/registry keys, granting the AppContainer's package SID read or read-write access.
+- ACL entries on files/directories/registry keys, granting the AppContainer's package SID read, read-write, or read-execute access.
 - Capability SIDs (e.g., `InternetClient` for network access).
 
 **Process model:**
@@ -155,7 +155,7 @@ The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `
 5. The child process runs inside the AppContainer boundary.
 
 **Filesystem access:**
-- Before launch, grant the package SID read or read-write ACL entries on allowed paths (`SetEntriesInAcl`, `SetNamedSecurityInfo`).
+- Before launch, grant the package SID ACL entries on allowed paths (`SetEntriesInAcl`, `SetNamedSecurityInfo`). Access masks match policy intent: `read_paths` get `FILE_GENERIC_READ`, `write_paths` get `FILE_GENERIC_READ | FILE_GENERIC_WRITE`, `exec_paths` get `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE`.
 - For deny paths, add explicit deny ACEs (`DENY_ACCESS` with `FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE`, `SUB_CONTAINERS_AND_OBJECTS_INHERIT`) and set `PROTECTED_DACL_SECURITY_INFORMATION` to prevent inherited allows from overriding explicit denies. Windows evaluates explicit denies before explicit allows, and the protected DACL flag ensures the deny is effective.
 - On cleanup, remove the ACL entries (restore original DACLs from saved SDDL strings).
 

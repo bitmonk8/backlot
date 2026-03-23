@@ -860,6 +860,28 @@ mod tests {
         );
     }
 
+    // ── resolve_path tests ─────────────────────────────────────────
+
+    #[test]
+    fn resolve_path_follows_symlink() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let target = dir.path().join("real_file");
+        std::fs::write(&target, "data").expect("write target");
+        let link = dir.path().join("sym_link");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let resolved = resolve_path(&link);
+        let canonical_target = std::fs::canonicalize(&target).expect("canonicalize target");
+        assert_eq!(resolved, canonical_target);
+    }
+
+    #[test]
+    fn resolve_path_nonexistent_returns_input() {
+        let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        let resolved = resolve_path(&path);
+        assert_eq!(resolved, path);
+    }
+
     // ── add_ancestors guard behavior ────────────────────────────────
 
     #[test]

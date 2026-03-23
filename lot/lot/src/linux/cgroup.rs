@@ -150,7 +150,12 @@ impl CgroupGuard {
                 // Disable swap so memory.max is a hard physical limit.
                 // Without this, processes can swap pages and exceed the
                 // intended limit on hosts with swap enabled.
-                let _ = fs::write(path.join("memory.swap.max"), "0");
+                // NotFound is expected when the swap controller is not enabled.
+                match fs::write(path.join("memory.swap.max"), "0") {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
             }
             if let Some(count) = limits.max_processes {
                 fs::write(path.join("pids.max"), count.to_string())?;

@@ -156,12 +156,13 @@ pub fn resolve_env_value(command: &SandboxCommand, key: &str) -> Option<OsString
             return Some(v.clone());
         }
     }
-    // Inherited env: Windows inherits parent env when command.env is empty.
-    // Unix builds an explicit envp — no inheritance, but a default PATH.
-    // Intentional: on Windows with empty env, this reads the parent's
-    // TEMP/TMP (typically C:\Users\...\AppData\Local\Temp) and requires
-    // it in write_paths. Callers must either add system temp as a
-    // write_path or override TEMP/TMP via SandboxCommand::env().
+    // When command.env is empty on Windows, the child inherits the parent's
+    // full environment (CreateProcessW with lpEnvironment=NULL). Fall back
+    // to the parent's value so validation catches paths the child will use.
+    // On Unix, empty command.env still builds an explicit envp (only a
+    // default PATH); the Unix branch below handles that separately.
+    // When command.env is non-empty on either platform, only those vars
+    // are passed to the child — no parent fallback.
     #[cfg(target_os = "windows")]
     if command.env.is_empty() {
         return std::env::var_os(key);

@@ -419,19 +419,13 @@ mod tests {
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
-        match spawn(&policy, &cmd) {
-            Ok(child) => {
-                let output = child.wait_with_output().expect("wait_with_output");
-                // The cat command should fail because the file is outside the sandbox
-                assert!(
-                    !output.stdout.windows(6).any(|w| w == b"secret"),
-                    "sandbox should block reading outside allowed paths"
-                );
-            }
-            Err(e) => {
-                eprintln!("[skip] spawn_read_outside_sandbox_blocked: spawn failed: {e}");
-            }
-        }
+        let child = spawn(&policy, &cmd).expect("spawn failed");
+        let output = child.wait_with_output().expect("wait_with_output");
+        // The cat command should fail because the file is outside the sandbox
+        assert!(
+            !output.stdout.windows(6).any(|w| w == b"secret"),
+            "sandbox should block reading outside allowed paths"
+        );
     }
 
     #[test]
