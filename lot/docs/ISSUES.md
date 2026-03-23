@@ -4,14 +4,6 @@
 
 ---
 
-## Group 2: Windows test double-close UB
-
-### 2.1 [MUST FIX] `owned_handle_closes_on_drop` double-closes handle
-- **File:** lot/src/windows/mod.rs — lines 233-239
-- Test calls `CloseHandle` on an already-closed handle. The handle could have been recycled by the OS, making this UB.
-
----
-
 ## Group 3: Linux namespace robustness & deduplication
 
 ### 3.1 PID-reuse stale directory collision in `setup_mount_namespace`

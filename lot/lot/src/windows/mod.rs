@@ -188,9 +188,10 @@ mod tests {
     #[test]
     #[allow(unsafe_code)]
     fn owned_handle_closes_on_drop() {
+        use windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE;
         use windows_sys::Win32::Storage::FileSystem::{
             CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_EXISTING,
+            FILE_SHARE_WRITE, GetFileType, OPEN_EXISTING,
         };
 
         // GENERIC_READ lives in Win32::Foundation, not FileSystem.
@@ -230,12 +231,21 @@ mod tests {
             // handle dropped here
         }
 
-        // Closing an already-closed handle should fail.
-        let ret = unsafe { windows_sys::Win32::Foundation::CloseHandle(raw_copy) };
+        // Verify the handle was closed by drop using a non-destructive probe.
+        // GetFileType returns FILE_TYPE_UNKNOWN (0) for invalid handles, and
+        // GetLastError yields ERROR_INVALID_HANDLE when the handle is truly gone.
+        // This avoids the UB of calling CloseHandle on a potentially-recycled handle.
+        // SAFETY: Probing a stale handle value — GetFileType never closes the handle.
+        // Both results captured back-to-back so assert_eq! cannot clobber GetLastError.
+        let file_type = unsafe { GetFileType(raw_copy) };
+        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
         assert_eq!(
-            ret,
-            windows_sys::Win32::Foundation::FALSE,
-            "CloseHandle should fail on an already-closed handle"
+            file_type, 0,
+            "GetFileType should return FILE_TYPE_UNKNOWN for closed handle"
+        );
+        assert_eq!(
+            err, ERROR_INVALID_HANDLE,
+            "last error should be ERROR_INVALID_HANDLE"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
