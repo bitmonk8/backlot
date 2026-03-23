@@ -259,8 +259,11 @@ pub fn setup_mount_namespace(policy: &SandboxPolicy) -> io::Result<String> {
     mkdir_p(&format!("{new_root}/dev"))?;
     mkdir_p(&format!("{new_root}/tmp"))?;
 
-    mount_system_paths(&new_root, policy)?;
+    // Policy paths first, then system paths. System paths (libraries,
+    // binaries) are mounted with exec flags and must overlay any policy
+    // read_path mounts that set MS_NOEXEC on the same subtree.
     mount_policy_paths(&new_root, policy)?;
+    mount_system_paths(&new_root, policy)?;
     mount_deny_paths(&new_root, policy)?;
     mount_dev_nodes(&new_root)?;
 
@@ -496,7 +499,7 @@ fn parse_submounts(mountinfo: &str, prefix: &str) -> Vec<String> {
         // after the prefix to avoid false matches (e.g., "/pro" vs "/proc").
         let is_match = mount_point == prefix
             || (prefix == "/" && mount_point.starts_with('/'))
-            || (mount_point.as_bytes().len() > prefix_bytes.len()
+            || (mount_point.len() > prefix_bytes.len()
                 && mount_point.as_bytes().starts_with(prefix_bytes)
                 && mount_point.as_bytes()[prefix_bytes.len()] == b'/');
         if is_match {
@@ -505,7 +508,7 @@ fn parse_submounts(mountinfo: &str, prefix: &str) -> Vec<String> {
     }
 
     // Sort by path length (shortest first) so parents are remounted before children
-    mounts.sort_by_key(|m| m.len());
+    mounts.sort_by_key(String::len);
     mounts
 }
 

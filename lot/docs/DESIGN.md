@@ -94,12 +94,13 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 
 **Filesystem setup:**
 1. Create tmpfs at a temporary mount point.
-2. Bind-mount allowed read-only paths with `MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC`. The bind mount uses `MS_BIND | MS_REC`, then each submount is enumerated via `/proc/self/mountinfo` and individually remounted with the desired flags (the kernel ignores `MS_REC` on remount operations).
-3. Bind-mount allowed read-write paths with `MS_NOSUID | MS_NODEV`. Same per-submount remount strategy as step 2.
-4. Bind-mount allowed executable paths with `MS_RDONLY | MS_NOSUID | MS_NODEV` (no `MS_NOEXEC`). Same per-submount remount strategy as step 2.
-5. Overmount each deny path with an empty read-only tmpfs (`size=0`, `MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC`). Must happen after step 2–4 so the parent grant mount exists. The denied subtree appears as an empty directory; reads/writes/creates fail with ENOENT/EROFS.
-6. `pivot_root` into the new root. Unmount old root.
-7. Essential paths are always mounted: `/proc` (procfs, `MS_NOSUID | MS_NODEV | MS_NOEXEC`), device nodes `/dev/null`, `/dev/zero`, `/dev/urandom` (bind-mounted with `MS_BIND` only — readable and writable), and dynamic linker paths (`MS_RDONLY | MS_NOSUID | MS_NODEV`). System paths that are symlinks on the host (e.g., `/lib` -> `usr/lib` on Fedora/Arch) are preserved as symlinks in the sandbox rather than being bind-mounted as directories.
+2. Bind-mount policy read-only paths with `MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC`. The bind mount uses `MS_BIND | MS_REC`, then each submount is enumerated via `/proc/self/mountinfo` and individually remounted with the desired flags (the kernel ignores `MS_REC` on remount operations). In a user namespace, submount remounts that would relax locked flags (e.g., removing `MS_NOEXEC` from a snap mount) are skipped — the submount retains its source flags, which are at least as restrictive.
+3. Bind-mount policy read-write paths with `MS_NOSUID | MS_NODEV`. Same per-submount remount strategy as step 2.
+4. Bind-mount policy executable paths with `MS_RDONLY | MS_NOSUID | MS_NODEV` (no `MS_NOEXEC`). Same per-submount remount strategy as step 2.
+5. Mount system library/binary directories with exec flags (`MS_RDONLY | MS_NOSUID | MS_NODEV`, no `MS_NOEXEC`). Mounted AFTER policy paths so system binaries remain executable even when a policy read_path covers the same subtree. System paths that are symlinks on the host (e.g., `/lib` -> `usr/lib` on Fedora/Arch) are preserved as symlinks in the sandbox rather than being bind-mounted as directories.
+6. Overmount each deny path with an empty read-only tmpfs (`size=0`, `MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC`). Must happen after step 2–5 so the parent grant mount exists. The denied subtree appears as an empty directory; reads/writes/creates fail with ENOENT/EROFS.
+7. `pivot_root` into the new root. Unmount old root.
+8. Essential paths are always mounted: `/proc` (procfs, `MS_NOSUID | MS_NODEV | MS_NOEXEC`), device nodes `/dev/null`, `/dev/zero`, `/dev/urandom` (bind-mounted with `MS_BIND` only — readable and writable).
 
 **Single-threaded constraint:** `CLONE_NEWUSER` requires the calling process to be single-threaded. Lot handles this by forking a single-threaded helper process which then calls `unshare()` with namespace flags. The caller (which may be multi-threaded/tokio) never directly enters the namespace. Mount namespace setup is split into two phases (helper + inner child) to correctly mount `/proc` after the PID namespace is active.
 
