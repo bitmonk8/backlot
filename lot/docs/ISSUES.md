@@ -98,26 +98,13 @@ Helper-process and inner-child logic are deeply nested `if` branches. Post-fork 
 
 ---
 
-## Group 9: CI Robustness
-
-### 9.1 [Medium/Correctness] Cgroup path guard missing — `.github/workflows/ci.yml:63-97`
-If `grep '^0::'` produces no output, cgroup setup operates on non-cgroup paths. Should guard with `[ -n "$cgroup_path" ]`. Mitigated by GitHub Actions runners always having cgroup v2.
-
----
-
 ## Group 10: Test Helper Return Values
 
-### 10.1 [Medium/Error-handling] `libc::write`/`read` discarded in test helpers — `lot/src/unix.rs:935,949-950,1081,1253-1254,1424-1425`
-Failed writes could cause false positives in tests.
-
-### 10.2 [Medium/Error-handling] `write_fd`/`waitpid` discarded in test helpers — `lot/src/linux/mod.rs:593-607,794,842,891,1007`
+### 10.1 [Medium/Error-handling] `write_fd`/`waitpid` discarded in test helpers — `lot/src/linux/mod.rs:593-607,794,842,891,1007`
 `write_fd` intentionally discards for async-signal-safety (documented). `waitpid` not checked; failure unrealistic.
 
-### 10.3 [Medium/Error-handling] `waitpid` discarded in seccomp test — `lot/src/linux/seccomp.rs:458`
+### 10.2 [Medium/Error-handling] `waitpid` discarded in seccomp test — `lot/src/linux/seccomp.rs:458`
 Test-only; failure unrealistic on valid forked PID.
-
-### 10.4 [Medium/Error-handling] Test results discarded — `lot/src/windows/appcontainer.rs:1196,1243,1293`
-`wait_with_output()` and `delete_profile` results discarded. Silent cleanup failure could affect subsequent runs.
 
 ---
 

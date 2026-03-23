@@ -60,7 +60,12 @@ jobs:
       - name: Run tests with delegated cgroup
         run: |
           # Find the current cgroup (e.g., /system.slice/hosted-compute-agent.service)
-          current_cg="/sys/fs/cgroup$(cat /proc/self/cgroup | grep '^0::' | cut -d: -f3)"
+          cgroup_rel=$(cat /proc/self/cgroup | grep '^0::' | cut -d: -f3)
+          if [ -z "$cgroup_rel" ]; then
+            echo "::error::cgroup v2 not available (grep '^0::' returned empty)"
+            exit 1
+          fi
+          current_cg="/sys/fs/cgroup${cgroup_rel}"
           parent_cg="$(dirname "$current_cg")"
 
           # Enable memory+pids controllers from root down to the parent.

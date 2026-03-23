@@ -916,14 +916,14 @@ mod tests {
         let written = unsafe { libc::write(w, msg.as_ptr().cast(), msg.len()) };
         assert_eq!(written, msg.len() as isize);
         // SAFETY: valid fd
-        unsafe { libc::close(w) };
+        assert_eq!(unsafe { libc::close(w) }, 0, "close write end");
         let mut buf = [0u8; 16];
         // SAFETY: r is a valid fd, buf is stack-allocated
         let n = unsafe { libc::read(r, buf.as_mut_ptr().cast(), buf.len()) };
         assert_eq!(n, msg.len() as isize);
         assert_eq!(&buf[..n as usize], msg);
         // SAFETY: valid fd
-        unsafe { libc::close(r) };
+        assert_eq!(unsafe { libc::close(r) }, 0, "close read end");
     }
 
     #[test]
@@ -936,7 +936,7 @@ mod tests {
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), 1) };
         assert_eq!(n, 0);
         // SAFETY: valid fd
-        unsafe { libc::close(fd) };
+        assert_eq!(unsafe { libc::close(fd) }, 0, "close /dev/null");
     }
 
     #[test]
@@ -948,7 +948,7 @@ mod tests {
         let n = unsafe { libc::write(fd, msg.as_ptr().cast(), msg.len()) };
         assert_eq!(n, msg.len() as isize);
         // SAFETY: valid fd
-        unsafe { libc::close(fd) };
+        assert_eq!(unsafe { libc::close(fd) }, 0, "close /dev/null");
     }
 
     #[test]
@@ -963,9 +963,10 @@ mod tests {
         let (r, w) = make_pipe().expect("pipe");
         let msg = b"hello";
         // SAFETY: w is a valid fd
-        unsafe { libc::write(w, msg.as_ptr().cast(), msg.len()) };
+        let n = unsafe { libc::write(w, msg.as_ptr().cast(), msg.len()) };
+        assert_eq!(n, msg.len() as isize, "write to pipe failed");
         // SAFETY: valid fd
-        unsafe { libc::close(w) };
+        assert_eq!(unsafe { libc::close(w) }, 0, "close write end");
 
         let (data, empty) = read_two_fds(Some(r), None).expect("read_two_fds");
         assert_eq!(data, b"hello");
@@ -977,10 +978,12 @@ mod tests {
         let (r1, w1) = make_pipe().expect("pipe1");
         let (r2, w2) = make_pipe().expect("pipe2");
         // SAFETY: valid fds
-        unsafe { libc::write(w1, b"aaa".as_ptr().cast(), 3) };
-        unsafe { libc::write(w2, b"bbb".as_ptr().cast(), 3) };
-        unsafe { libc::close(w1) };
-        unsafe { libc::close(w2) };
+        let n1 = unsafe { libc::write(w1, b"aaa".as_ptr().cast(), 3) };
+        assert_eq!(n1, 3, "write to pipe1 failed");
+        let n2 = unsafe { libc::write(w2, b"bbb".as_ptr().cast(), 3) };
+        assert_eq!(n2, 3, "write to pipe2 failed");
+        assert_eq!(unsafe { libc::close(w1) }, 0, "close w1");
+        assert_eq!(unsafe { libc::close(w2) }, 0, "close w2");
 
         let (d1, d2) = read_two_fds(Some(r1), Some(r2)).expect("read_two_fds");
         assert_eq!(d1, b"aaa");
@@ -1031,7 +1034,7 @@ mod tests {
             "expected EPIPE after closing read end"
         );
         // SAFETY: write_fd still needs closing to avoid leak
-        unsafe { libc::close(write_fd) };
+        assert_eq!(unsafe { libc::close(write_fd) }, 0, "close write_fd");
     }
 
     #[test]
@@ -1052,12 +1055,24 @@ mod tests {
         // Clean up fds
         // SAFETY: all fds are valid pipe fds from setup_stdio_pipes
         unsafe {
-            libc::close(pipes.child_stdin);
-            libc::close(pipes.child_stdout);
-            libc::close(pipes.child_stderr);
-            libc::close(pipes.parent_stdin.unwrap());
-            libc::close(pipes.parent_stdout.unwrap());
-            libc::close(pipes.parent_stderr.unwrap());
+            assert_eq!(libc::close(pipes.child_stdin), 0, "close child_stdin");
+            assert_eq!(libc::close(pipes.child_stdout), 0, "close child_stdout");
+            assert_eq!(libc::close(pipes.child_stderr), 0, "close child_stderr");
+            assert_eq!(
+                libc::close(pipes.parent_stdin.unwrap()),
+                0,
+                "close parent_stdin"
+            );
+            assert_eq!(
+                libc::close(pipes.parent_stdout.unwrap()),
+                0,
+                "close parent_stdout"
+            );
+            assert_eq!(
+                libc::close(pipes.parent_stderr.unwrap()),
+                0,
+                "close parent_stderr"
+            );
         }
     }
 
@@ -1079,9 +1094,9 @@ mod tests {
         // Clean up fds
         // SAFETY: fds are valid from setup_stdio_pipes
         unsafe {
-            libc::close(pipes.child_stdin);
-            libc::close(pipes.child_stdout);
-            libc::close(pipes.child_stderr);
+            assert_eq!(libc::close(pipes.child_stdin), 0, "close child_stdin");
+            assert_eq!(libc::close(pipes.child_stdout), 0, "close child_stdout");
+            assert_eq!(libc::close(pipes.child_stderr), 0, "close child_stderr");
         }
     }
 
@@ -1123,7 +1138,7 @@ mod tests {
             }
         }
         // Parent: close write end
-        unsafe { libc::close(w) };
+        assert_eq!(unsafe { libc::close(w) }, 0, "close write end in parent");
         (r, pid)
     }
 
@@ -1139,7 +1154,10 @@ mod tests {
             "empty pipe should indicate success: {result:?}"
         );
         // Reap the child to avoid zombie.
-        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+        assert!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } > 0,
+            "waitpid"
+        );
     }
 
     #[test]
@@ -1224,7 +1242,7 @@ mod tests {
         let ret = unsafe { libc::read(witness_r, buf.as_mut_ptr().cast(), 1) };
         assert_eq!(ret, 0, "expected EOF — write end should have been closed");
         // SAFETY: witness_r is a valid fd
-        unsafe { libc::close(witness_r) };
+        assert_eq!(unsafe { libc::close(witness_r) }, 0, "close witness_r");
 
         // Verify passed_r (read end) was closed: writing to witness_w produces EPIPE.
         // SAFETY: witness_w is a valid fd; SIGPIPE ignored process-wide in tests.
@@ -1238,7 +1256,7 @@ mod tests {
             "expected EPIPE after closing read end"
         );
         // SAFETY: witness_w is a valid fd
-        unsafe { libc::close(witness_w) };
+        assert_eq!(unsafe { libc::close(witness_w) }, 0, "close witness_w");
     }
 
     // ── validate_kill_pid tests ──────────────────────────────────────
@@ -1288,9 +1306,7 @@ mod tests {
             }
         }
         // SAFETY: parent closes write-end so only the child holds it.
-        unsafe {
-            libc::close(sync_w);
-        }
+        assert_eq!(unsafe { libc::close(sync_w) }, 0, "close sync_w");
         let child = UnixSandboxedChild {
             pid,
             stdin_fd: None,
@@ -1306,10 +1322,9 @@ mod tests {
     fn wait_for_child_exit(sync_fd: i32) {
         let mut buf = [0u8; 1];
         // SAFETY: reading from a valid pipe fd; returns 0 on EOF (child exited).
-        unsafe {
-            libc::read(sync_fd, buf.as_mut_ptr().cast::<libc::c_void>(), 1);
-            libc::close(sync_fd);
-        }
+        let n = unsafe { libc::read(sync_fd, buf.as_mut_ptr().cast::<libc::c_void>(), 1) };
+        assert_eq!(n, 0, "expected EOF from sync pipe");
+        assert_eq!(unsafe { libc::close(sync_fd) }, 0, "close sync_fd");
     }
 
     #[test]
@@ -1396,7 +1411,7 @@ mod tests {
             }
         }
         // Parent: close read end; keep write end so child stays blocked.
-        unsafe { libc::close(read_end) };
+        assert_eq!(unsafe { libc::close(read_end) }, 0, "close read_end");
         let mut child = UnixSandboxedChild {
             pid,
             stdin_fd: None,
@@ -1406,7 +1421,7 @@ mod tests {
             kill_style: KillStyle::Single,
         };
         child.kill_and_reap();
-        unsafe { libc::close(write_end) };
+        assert_eq!(unsafe { libc::close(write_end) }, 0, "close write_end");
         // After kill_and_reap, waited should be true.
         assert!(child.waited.load(Ordering::Acquire));
     }
@@ -1438,7 +1453,11 @@ mod tests {
         let mut buf = [0u8; 1];
         let ret = unsafe { libc::read(witness_stdin, buf.as_mut_ptr().cast(), 1) };
         assert_eq!(ret, 0, "expected EOF — stdin write end should be closed");
-        unsafe { libc::close(witness_stdin) };
+        assert_eq!(
+            unsafe { libc::close(witness_stdin) },
+            0,
+            "close witness_stdin"
+        );
 
         // Verify fd_stdout (read end) was closed: write to witness produces EPIPE.
         // SAFETY: witness_stdout is a valid fd; SIGPIPE ignored process-wide in tests.
@@ -1447,14 +1466,22 @@ mod tests {
         let err = std::io::Error::last_os_error();
         assert_eq!(ret, -1, "write should fail when read end is closed");
         assert_eq!(err.raw_os_error(), Some(libc::EPIPE), "expected EPIPE");
-        unsafe { libc::close(witness_stdout) };
+        assert_eq!(
+            unsafe { libc::close(witness_stdout) },
+            0,
+            "close witness_stdout"
+        );
 
         // Verify fd_stderr (read end) was closed: write to witness produces EPIPE.
         let ret = unsafe { libc::write(witness_stderr, b"x".as_ptr().cast(), 1) };
         let err = std::io::Error::last_os_error();
         assert_eq!(ret, -1, "write should fail when read end is closed");
         assert_eq!(err.raw_os_error(), Some(libc::EPIPE), "expected EPIPE");
-        unsafe { libc::close(witness_stderr) };
+        assert_eq!(
+            unsafe { libc::close(witness_stderr) },
+            0,
+            "close witness_stderr"
+        );
     }
 
     #[test]
@@ -1504,8 +1531,8 @@ mod tests {
             }
         }
         unsafe {
-            libc::close(stdout_w);
-            libc::close(stderr_w);
+            assert_eq!(libc::close(stdout_w), 0, "close stdout_w");
+            assert_eq!(libc::close(stderr_w), 0, "close stderr_w");
         }
 
         let mut child = UnixSandboxedChild {

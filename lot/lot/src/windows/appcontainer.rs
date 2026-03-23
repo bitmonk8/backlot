@@ -1204,7 +1204,7 @@ mod tests {
 
         {
             let child = must_spawn(&policy, &cmd);
-            let _ = child.wait_with_output();
+            child.wait_with_output().expect("wait_with_output");
         }
 
         let restored_sddl = get_sddl(tmp.path()).expect("get restored SDDL");
@@ -1251,7 +1251,7 @@ mod tests {
         let sentinel_file_path = sentinel_dir.path().join(format!("lot-sentinel-{name}.txt"));
         let sentinel_read = SentinelFile::read(&sentinel_file_path).expect("read sentinel");
         restore_acls_and_delete_sentinel(&sentinel_read).expect("restore_acls_and_delete_sentinel");
-        let _ = delete_profile(&sentinel_read.profile_name);
+        delete_profile(&sentinel_read.profile_name).expect("delete_profile");
 
         let restored_sddl = get_sddl(tmp.path()).expect("get restored SDDL");
         assert_eq!(
@@ -1301,7 +1301,7 @@ mod tests {
         unsafe {
             FreeSid(sid);
         }
-        let _ = delete_profile(&name);
+        delete_profile(&name).expect("delete_profile");
     }
 
     #[test]
