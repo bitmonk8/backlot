@@ -117,7 +117,11 @@ impl CgroupGuard {
             tv_nsec: 0,
         };
         // SAFETY: ts is a valid timespec on the stack; CLOCK_MONOTONIC is always available.
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
+        let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
+        if ret == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // Both fields are non-negative for CLOCK_MONOTONIC.
         let nanos = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
 
         let base_name = format!("lot-sandbox-{pid}-{nanos}");
@@ -186,12 +190,14 @@ impl CgroupGuard {
         fs::write(self.path.join("cgroup.procs"), pid.to_string())
     }
 
-    /// Kill all processes remaining in the cgroup.
+    /// Send SIGKILL to all processes in the cgroup. Does not wait for
+    /// processes to exit.
     ///
-    /// Prefers `cgroup.kill` (kernel 5.14+) which atomically kills all processes.
-    /// Falls back to reading `cgroup.procs` and sending SIGKILL to each PID,
-    /// with a `/proc/{pid}/cgroup` membership check to mitigate PID recycling.
-    fn kill_all(&self) {
+    /// Prefers `cgroup.kill` (kernel 5.14+) which atomically signals all
+    /// processes. Falls back to reading `cgroup.procs` and sending SIGKILL
+    /// to each PID, with a `/proc/{pid}/cgroup` membership check to mitigate
+    /// PID recycling.
+    fn signal_all(&self) {
         // Try atomic cgroup.kill first (available since kernel 5.14).
         let kill_path = self.path.join("cgroup.kill");
         if fs::write(&kill_path, "1").is_ok() {
@@ -252,8 +258,8 @@ impl CgroupGuard {
 
 impl Drop for CgroupGuard {
     fn drop(&mut self) {
-        // kill_all() tries cgroup.kill first, then falls back to per-PID SIGKILL.
-        self.kill_all();
+        // signal_all() tries cgroup.kill first, then falls back to per-PID SIGKILL.
+        self.signal_all();
 
         // Wait for processes to exit so the cgroup directory becomes empty.
         // Budget: 50 iterations x 20ms = 1s total.
@@ -262,11 +268,11 @@ impl Drop for CgroupGuard {
             let procs_path = self.path.join("cgroup.procs");
             match fs::read_to_string(&procs_path) {
                 Ok(contents) if !contents.trim().is_empty() => {
-                    // Retry kill_all() each iteration so that processes entering
+                    // Retry signal_all() each iteration so that processes entering
                     // the cgroup after the initial kill are caught. On the
                     // primary path (cgroup.kill) this is a no-op atomic write;
                     // on the fallback path it re-scans and SIGKILLs new PIDs.
-                    self.kill_all();
+                    self.signal_all();
                     // SAFETY: timespec is valid, null second arg means we don't
                     // care about remaining time.
                     unsafe {
@@ -277,8 +283,15 @@ impl Drop for CgroupGuard {
                         libc::nanosleep(&raw const ts, std::ptr::null_mut());
                     }
                 }
-                _ => {
+                Ok(_) => {
                     drained = true;
+                    break;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "lot: I/O error reading cgroup.procs during drain: {e}: {}",
+                        procs_path.display()
+                    );
                     break;
                 }
             }
@@ -353,7 +366,12 @@ mod tests {
     fn cgroup_guard_add_process() {
         require_cgroups();
         let limits = ResourceLimits::default();
+
+        // Declare _child_guard before guard so guard drops first (LIFO),
+        // exercising drain while the child is still alive.
+        let _child_guard;
         let guard = CgroupGuard::new(&limits).expect("CgroupGuard::new must succeed");
+        let path = guard.path().to_path_buf();
 
         // SAFETY: fork() is safe in a single-threaded context; the child
         // immediately sleeps and is killed by the guard.
@@ -364,14 +382,27 @@ mod tests {
             // SAFETY: _exit is async-signal-safe; avoids running Rust destructors in forked child.
             unsafe { libc::_exit(0) };
         }
-        let _child_guard = ChildGuard(pid);
+        _child_guard = ChildGuard(pid);
 
         // Parent: add the child to the cgroup.
         guard
             .add_process(pid)
             .expect("add_process must succeed when cgroups are available");
-        // Guard drop will kill the child and remove the cgroup.
-        // ChildGuard drop ensures the zombie is reaped.
+
+        // Verify the child PID appears in cgroup.procs.
+        let procs = fs::read_to_string(path.join("cgroup.procs")).expect("read cgroup.procs");
+        assert!(
+            procs.lines().any(|l| l.trim() == pid.to_string()),
+            "child PID should appear in cgroup.procs"
+        );
+
+        // guard drops first (kills cgroup processes, drains, removes dir),
+        // then _child_guard drops (reaps zombie).
+        drop(guard);
+        assert!(
+            !path.exists(),
+            "cgroup directory should be removed after drop"
+        );
     }
 
     #[test]

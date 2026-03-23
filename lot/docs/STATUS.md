@@ -6,7 +6,7 @@
 
 ## Issues (2026-03-23)
 
-All audit findings resolved. Groups 4, 5, 6, 7, 8, 10 closed.
+All audit findings resolved. Groups 1, 4, 5, 6, 7, 8, 10 closed.
 
 ## CI Notes
 

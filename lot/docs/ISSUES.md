@@ -4,26 +4,6 @@
 
 ---
 
-## Group 1: Linux cgroup correctness & robustness
-
-### 1.1 [MUST FIX] I/O error on cgroup.procs treated as "drained"
-- **File:** lot/src/linux/cgroup.rs — lines 280-282
-- When `fs::read_to_string` of `cgroup.procs` fails, the code treats it as drained (`drained = true; break`). An I/O error is not the same as an empty procs file.
-
-### 1.2 Unchecked `clock_gettime` return value
-- **File:** lot/src/linux/cgroup.rs — lines 120-121
-- If `clock_gettime` fails, `ts` remains zero-initialized, producing `nanos` = 0 and a deterministic cgroup name that collides across calls. Additionally, `ts.tv_nsec` is `i64` on Linux; casting to `u64` via `as` wraps negative values silently.
-
-### 1.3 `kill_all` doc comment over-promises
-- **File:** lot/src/linux/cgroup.rs — lines 197-199
-- `kill_all` returns immediately after writing `cgroup.kill` without waiting or verifying processes actually exited. The `Drop` impl's drain loop handles verification. Doc comment "Kill all processes remaining in the cgroup" over-promises; it sends kill signals but does not wait for exit.
-
-### 1.4 Test `cgroup_guard_add_process` never exercises drain with live process
-- **File:** lot/src/linux/cgroup.rs — lines 353-375
-- `_child_guard` (declared after `guard`) drops before `guard` (Rust LIFO drop order), so the child is already dead when the guard's kill-and-drain runs. A separate test `cgroup_guard_drain_with_live_process` does cover this, but this test is misleading.
-
----
-
 ## Group 2: Windows test double-close UB
 
 ### 2.1 [MUST FIX] `owned_handle_closes_on_drop` double-closes handle
