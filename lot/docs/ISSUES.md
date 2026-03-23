@@ -1,16 +1,6 @@
 # Issues
 
-*4 findings remaining from full project audit (2026-03-22). Low-severity findings removed 2026-03-23.*
-
----
-
-## Group 1: Windows ACL/DACL Defensiveness
-
-### 1.1 [Medium/Correctness] HANDLE leak in `traverse_acl.rs` — `lot/src/windows/traverse_acl.rs:417-423`
-HANDLE from `CreateFileW` not in RAII guard. Leaks on panic or early return between open and `CloseHandle`.
-
-### 1.2 [Medium/Error-handling] NTSTATUS formatted incorrectly — `lot/src/windows/traverse_acl.rs:425-437`
-Negative NTSTATUS formatted as i32 hex produces wrong output (e.g., `0xC0000022` renders as `-0x3FFFFDDE`). Should cast to u32 before formatting.
+*2 findings remaining from full project audit (2026-03-22). Low-severity findings removed 2026-03-23.*
 
 ---
 

@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, FALSE, HANDLE};
+use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, FALSE, HANDLE};
 use windows_sys::Win32::Security::{
     ACL, ACL_REVISION_INFORMATION, ACL_SIZE_INFORMATION, AclRevisionInformation,
     AclSizeInformation, AddAccessAllowedAceEx, AddAce, DACL_SECURITY_INFORMATION,
@@ -27,6 +27,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, OPEN_EXISTING,
 };
 
+use super::OwnedHandle;
 use super::acl_helpers::{
     ELEVATION_REQUIRED_MARKER, allocate_app_packages_sid, dacl_has_ace_for_sid,
     dacl_has_app_packages_ace, read_dacl,
@@ -409,18 +410,17 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
         )));
     }
 
+    // Wrap in RAII guard so the handle is closed on any exit path.
+    let handle = OwnedHandle(handle);
+
     // SAFETY: NtSetSecurityObject is the kernel API that writes the
     // security descriptor directly without user-mode inheritance
     // propagation. Unlike SetNamedSecurityInfoW and SetSecurityInfo,
     // it does not walk the subtree to re-evaluate inherited ACEs on
     // descendants. Inherited ACE flags in the DACL are preserved exactly.
-    let ntstatus =
-        unsafe { nt_set_security_object(handle, DACL_SECURITY_INFORMATION, (&raw mut sd).cast()) };
-
-    // SAFETY: Closing a valid handle obtained from CreateFileW.
-    unsafe {
-        CloseHandle(handle);
-    }
+    let ntstatus = unsafe {
+        nt_set_security_object(handle.0, DACL_SECURITY_INFORMATION, (&raw mut sd).cast())
+    };
 
     if ntstatus < 0 {
         // STATUS_ACCESS_DENIED = 0xC0000022
@@ -432,8 +432,9 @@ pub fn grant_traverse(path: &Path) -> crate::Result<()> {
             )));
         }
         return Err(SandboxError::Setup(format!(
-            "NtSetSecurityObject failed for {} (NTSTATUS: {ntstatus:#010X})",
+            "NtSetSecurityObject failed for {} (NTSTATUS: {:#010X})",
             path.display(),
+            ntstatus as u32,
         )));
     }
 
@@ -666,6 +667,15 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ntstatus_formats_as_unsigned_hex() {
+        // STATUS_ACCESS_DENIED = 0xC0000022 stored as i32
+        #[allow(clippy::cast_possible_wrap)]
+        let ntstatus: i32 = 0xC000_0022_u32 as i32;
+        let formatted = format!("{:#010X}", ntstatus as u32);
+        assert_eq!(formatted, "0xC0000022");
     }
 
     #[test]

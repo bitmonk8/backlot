@@ -4,10 +4,12 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{CloseHandle, FALSE, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{FALSE, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
+
+use super::OwnedHandle;
 
 use crate::Result;
 use crate::error::SandboxError;
@@ -52,12 +54,9 @@ fn is_process_alive(pid: u32) -> bool {
         // (e.g., elevated process). Conservatively assume alive.
         return io::Error::last_os_error().raw_os_error() == Some(5);
     }
+    let handle = OwnedHandle(handle);
     // SAFETY: Valid handle from OpenProcess. Timeout=0 for non-blocking check.
-    let wait_result = unsafe { WaitForSingleObject(handle, 0) };
-    // SAFETY: Handle from OpenProcess.
-    unsafe {
-        CloseHandle(handle);
-    }
+    let wait_result = unsafe { WaitForSingleObject(handle.0, 0) };
     // WAIT_TIMEOUT means the process hasn't exited yet (still alive).
     // WAIT_OBJECT_0 means it has exited. Any other result is treated as dead.
     wait_result == WAIT_TIMEOUT

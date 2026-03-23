@@ -32,6 +32,19 @@ pub fn win32_error_msg(code: u32) -> String {
     std::io::Error::from_raw_os_error(code as i32).to_string()
 }
 
+/// RAII wrapper for a Win32 HANDLE. Calls `CloseHandle` on drop.
+#[allow(unsafe_code)]
+pub struct OwnedHandle(pub(super) windows_sys::Win32::Foundation::HANDLE);
+
+#[allow(unsafe_code)]
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: The handle was obtained from a Win32 API and validated
+        // as non-null and not INVALID_HANDLE_VALUE before wrapping.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
 pub use appcontainer::WindowsSandboxedChild;
 
 /// Directories Windows makes accessible to sandboxed processes (auto-mounted or always-allowed).
@@ -102,8 +115,8 @@ pub fn kill_by_pid(pid: u32) {
             pid,
         );
         if !h.is_null() {
-            windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
-            windows_sys::Win32::Foundation::CloseHandle(h);
+            let h = OwnedHandle(h);
+            windows_sys::Win32::System::Threading::TerminateProcess(h.0, 1);
         }
     }
 }
@@ -170,5 +183,61 @@ mod tests {
         // Error code 2 = ERROR_FILE_NOT_FOUND
         let msg = win32_error_msg(2);
         assert!(!msg.is_empty(), "error message should not be empty");
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn owned_handle_closes_on_drop() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+
+        // GENERIC_READ lives in Win32::Foundation, not FileSystem.
+        const GENERIC_READ: u32 = 0x8000_0000;
+
+        let ws_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root");
+        let dir = ws_root
+            .join("test_tmp")
+            .join(format!("owned-handle-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        let wide = to_wide(&dir);
+
+        // SAFETY: Opening an existing directory with FILE_FLAG_BACKUP_SEMANTICS.
+        let raw = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            !raw.is_null() && raw != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+            "CreateFileW should succeed on test dir"
+        );
+
+        // Stash the raw value before OwnedHandle consumes it.
+        let raw_copy = raw;
+        {
+            let _handle = OwnedHandle(raw);
+            // handle dropped here
+        }
+
+        // Closing an already-closed handle should fail.
+        let ret = unsafe { windows_sys::Win32::Foundation::CloseHandle(raw_copy) };
+        assert_eq!(
+            ret,
+            windows_sys::Win32::Foundation::FALSE,
+            "CloseHandle should fail on an already-closed handle"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
