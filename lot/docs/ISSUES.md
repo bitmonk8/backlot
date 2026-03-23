@@ -6,10 +6,6 @@
 
 ## Group 3: Linux namespace robustness & deduplication
 
-### 3.1 PID-reuse stale directory collision in `setup_mount_namespace`
-- **File:** lot/src/linux/namespace.rs — line 248
-- Creates tmpfs at `/tmp/lot-newroot-{pid}`. PIDs recycle, so a prior crash could leave a stale directory. On collision, `mkdir_p` or `mount` would fail and propagate as `SandboxError::Setup`.
-
 ### 3.2 `mount_tmpfs` / `mount_empty_tmpfs` duplication
 - **File:** lot/src/linux/namespace.rs — lines 319-362
 - Both functions share identical structure. A single helper with parameters would eliminate duplication.
