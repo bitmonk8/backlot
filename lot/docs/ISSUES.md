@@ -2,14 +2,6 @@
 
 *Imported from audit findings — 2026-03-23. Verified and triaged 2026-03-23.*
 
-## Group 5 — Windows ACL error handling
-
-### 5.1 NON-CRIT — [Error-Handling] `GetAce` failure silently swallowed
-- **File:** lot/src/windows/acl_helpers.rs:371-372
-- **Description:** `GetAce` failure is silently continued. `dacl_has_ace_for_sid` returns `Ok(false)`, causing `grant_traverse` to add a duplicate ACE instead of surfacing the error. In practice, `GetAce` with a valid DACL and in-range index should not fail — failure implies memory corruption, making any behavior unreliable regardless.
-
----
-
 ## Group 6 — Linux cgroup cleanup leak (fallback path only)
 
 ### 6.1 NON-CRIT — [Correctness] Cgroup drain loop can leak cgroup directory on fallback path

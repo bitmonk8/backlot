@@ -369,7 +369,10 @@ pub fn dacl_has_ace_for_sid(
         // SAFETY: Reading ACE at valid index from a valid DACL.
         let ret = unsafe { GetAce(dacl, i, &raw mut ace_ptr) };
         if ret == FALSE {
-            continue;
+            let err = std::io::Error::last_os_error();
+            return Err(SandboxError::Setup(format!(
+                "GetAce failed for index {i}: {err}",
+            )));
         }
 
         // SAFETY: ace_ptr points to a valid ACE header within the DACL buffer.
