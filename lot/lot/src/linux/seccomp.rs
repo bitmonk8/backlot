@@ -362,7 +362,7 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     let filter = SeccompFilter::new(
         rules,
         SeccompAction::Errno(libc::EPERM as u32),
-        SeccompAction::Allow,
+        SeccompAction::Errno(libc::EPERM as u32),
         arch,
     )
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
