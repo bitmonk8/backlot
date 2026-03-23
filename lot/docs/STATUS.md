@@ -6,7 +6,7 @@
 
 ## Issues (2026-03-23)
 
-3 open findings in `docs/ISSUES.md` across 3 groups (5, 6, 10). Group 10 is CRITICAL (flaky test). Groups 5, 6 are NON-CRITICAL. Groups 4, 7, 8 resolved.
+2 open findings in `docs/ISSUES.md` across 2 groups (5, 6). Both NON-CRITICAL. Groups 4, 7, 8, 10 resolved.
 
 ## CI Notes
 

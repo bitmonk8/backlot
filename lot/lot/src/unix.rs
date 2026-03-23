@@ -908,7 +908,10 @@ mod tests {
         assert!(r >= 0);
         assert!(w >= 0);
         assert_ne!(r, w);
-        // Write and read through the pipe
+        // Write data before closing so it's buffered in the kernel.
+        // FD-number reuse after close(w) is harmless: the pipe's write-end
+        // file description is already released, and read sees buffered data + EOF
+        // regardless of what the recycled FD number now points to.
         let msg = b"test";
         // SAFETY: w is a valid fd from make_pipe
         let written = unsafe { libc::write(w, msg.as_ptr().cast(), msg.len()) };
@@ -963,6 +966,9 @@ mod tests {
         // SAFETY: w is a valid fd
         let n = unsafe { libc::write(w, msg.as_ptr().cast(), msg.len()) };
         assert_eq!(n, msg.len() as isize, "write to pipe failed");
+        // Data is buffered before close; FD-number reuse after close(w) is
+        // harmless -- the pipe's write-end file description is released and
+        // read_two_fds sees buffered data + EOF regardless.
         // SAFETY: valid fd
         assert_eq!(unsafe { libc::close(w) }, 0, "close write end");
 
@@ -975,6 +981,8 @@ mod tests {
     fn read_two_fds_two_pipes() {
         let (r1, w1) = make_pipe().expect("pipe1");
         let (r2, w2) = make_pipe().expect("pipe2");
+        // Write all data before closing so it's buffered in the kernel.
+        // FD-number reuse after close is harmless (see make_pipe_returns_valid_fds).
         // SAFETY: valid fds
         let n1 = unsafe { libc::write(w1, b"aaa".as_ptr().cast(), 3) };
         assert_eq!(n1, 3, "write to pipe1 failed");
@@ -1020,18 +1028,34 @@ mod tests {
         // SAFETY: read_fd is a valid open fd from make_pipe()
         unsafe { close_if_not_std(read_fd) };
 
-        // Verify close happened: with read end closed, write produces EPIPE.
-        // SAFETY: write_fd is a valid open fd; SIGPIPE is ignored process-wide in tests.
-        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
-        let ret = unsafe { libc::write(write_fd, b"x".as_ptr().cast(), 1) };
-        let err = std::io::Error::last_os_error();
-        assert_eq!(ret, -1, "write should fail when read end is closed");
-        assert_eq!(
-            err.raw_os_error(),
-            Some(libc::EPIPE),
-            "expected EPIPE after closing read end"
-        );
-        // SAFETY: write_fd still needs closing to avoid leak
+        // Verify close: F_GETFD on a closed FD returns -1/EBADF.
+        // SAFETY: fcntl on any integer fd is defined (returns EBADF if invalid).
+        let ret = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
+        if ret == -1 {
+            let err = std::io::Error::last_os_error();
+            assert_eq!(
+                err.raw_os_error(),
+                Some(libc::EBADF),
+                "expected EBADF on closed fd"
+            );
+        } else {
+            // FD number was recycled between close and fcntl. Fall back to
+            // EPIPE check: FD-number reuse doesn't reopen the pipe's read end,
+            // so write must still fail with EPIPE if close_if_not_std worked.
+            // SAFETY: SIGPIPE must be ignored to get EPIPE instead of a signal.
+            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+            // SAFETY: write_fd is a valid open fd from make_pipe()
+            let w = unsafe { libc::write(write_fd, b"x".as_ptr().cast(), 1) };
+            let werr = std::io::Error::last_os_error();
+            assert_eq!(w, -1, "write should fail (EPIPE) after read end closed");
+            assert_eq!(
+                werr.raw_os_error(),
+                Some(libc::EPIPE),
+                "expected EPIPE after closing read end"
+            );
+        }
+
+        // SAFETY: write_fd is still open and needs closing to avoid leak
         assert_eq!(unsafe { libc::close(write_fd) }, 0, "close write_fd");
     }
 
