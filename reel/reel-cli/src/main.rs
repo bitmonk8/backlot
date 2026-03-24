@@ -155,7 +155,7 @@ fn build_dry_run_output(
             serde_json::json!({
                 "name": t.name(),
                 "description": t.description(),
-                "parameters": t.parameters()
+                "input_schema": t.input_schema()
             })
         }).collect::<Vec<_>>(),
     })

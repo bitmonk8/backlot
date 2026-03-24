@@ -419,7 +419,7 @@ dependencies = [
 [[package]]
 name = "flick"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/flick?rev=287bfbd#287bfbd08742e16e419c23fd634549f5f49a0aeb"
+source = "git+https://github.com/bitmonk8/flick?rev=c827fda#c827fdae945a375ae0bfff9b323ef4764825fb4b"
 dependencies = [
  "chacha20poly1305",
  "hex",
@@ -430,6 +430,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "url",
  "windows",
  "xxhash-rust",
  "zeroize",
@@ -901,7 +902,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "lot"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/lot?rev=c3cc94d#c3cc94dc8daa89c7c9f1ebdfed78e50fc0a1262a"
+source = "git+https://github.com/bitmonk8/lot?rev=331bb56#331bb568dba24a44985104cde71db735fa7d3bd3"
 dependencies = [
  "libc",
  "seccompiler",

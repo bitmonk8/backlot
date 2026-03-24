@@ -729,13 +729,13 @@ fn build_nu_sandbox_policy(
     session_temp_dir: &Path,
 ) -> lot::Result<lot::SandboxPolicy> {
     let mut builder = SandboxPolicyBuilder::new()
-        .write_path(session_temp_dir)
+        .write_path(session_temp_dir)?
         .allow_network(grant.contains(ToolGrant::NETWORK));
 
     if grant.contains(ToolGrant::WRITE) {
-        builder = builder.write_path(project_root);
+        builder = builder.write_path(project_root)?;
     } else {
-        builder = builder.read_path(project_root);
+        builder = builder.read_path(project_root)?;
     }
 
     // Grant exec access to the tool directory so nu can read config files
@@ -743,10 +743,24 @@ fn build_nu_sandbox_policy(
     // platforms (Linux: MS_RDONLY without MS_NOEXEC, macOS: file-read* +
     // process-exec, Windows: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE).
     if let Some(dir) = tool_dir {
-        builder = builder.exec_path(dir);
+        builder = builder.exec_path(dir)?;
     }
 
     builder.build()
+}
+
+/// Minimal PATH containing only platform system directories. These are
+/// covered by lot's `platform_implicit_paths` so they pass env validation.
+fn minimal_sandbox_path() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+        format!(r"{sys_root}\System32")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()
+    }
 }
 
 /// Spawn a `nu --mcp` process inside a lot sandbox and perform the MCP
@@ -803,12 +817,20 @@ async fn spawn_nu_process(
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
         cmd.stdin(SandboxStdio::Piped);
-        // Override TEMP/TMP before forward_common_env — explicit env takes
-        // precedence over forwarded values. This redirects nu's temp I/O to
-        // the per-session dir under the project root, keeping it within the
-        // sandbox write policy.
+        // Override TEMP/TMP/TMPDIR before forward_common_env — explicit env
+        // takes precedence over forwarded values. This redirects nu's temp
+        // I/O to the per-session dir under the project root, keeping it
+        // within the sandbox write policy.
         cmd.env("TEMP", session_temp_dir.path());
         cmd.env("TMP", session_temp_dir.path());
+        cmd.env("TMPDIR", session_temp_dir.path());
+        // Override PATH with a minimal system-only value. The parent's PATH
+        // contains entries (cargo, rustup, build artifacts) that are not
+        // covered by the sandbox policy or platform implicit paths, and lot
+        // now validates PATH accessibility at spawn time. Nu is invoked by
+        // absolute path and rg is resolved via REEL_RG_PATH, so nu does not
+        // need the parent's full PATH.
+        cmd.env("PATH", minimal_sandbox_path());
         cmd.forward_common_env();
 
         // Set REEL_RG_PATH so reel_config.nu can invoke rg by absolute path,
@@ -917,7 +939,7 @@ mod tests {
         let canon = tmp.path().canonicalize().unwrap();
 
         let covered_by_write = policy
-            .write_paths
+            .write_paths()
             .iter()
             .any(|w| canon.starts_with(w) || w.starts_with(&canon));
         assert!(
@@ -925,7 +947,7 @@ mod tests {
             "project root should be writable when WRITE granted"
         );
         assert!(
-            !policy.read_paths.contains(&canon),
+            !policy.read_paths().contains(&canon),
             "project root should NOT be in read_paths when WRITE granted"
         );
         // Session temp dir writability is tested by the no_write_grant variant,
@@ -940,14 +962,17 @@ mod tests {
 
         // Without WRITE grant: project root is read-only, session temp is writable.
         assert!(
-            policy.read_paths.contains(&canon),
+            policy.read_paths().contains(&canon),
             "project root should be in read_paths when WRITE not granted"
         );
         assert!(
-            !policy.write_paths.contains(&canon),
+            !policy.write_paths().contains(&canon),
             "project root should NOT be in write_paths when WRITE not granted"
         );
-        let has_sess_write = policy.write_paths.iter().any(|w| sess_canon.starts_with(w));
+        let has_sess_write = policy
+            .write_paths()
+            .iter()
+            .any(|w| sess_canon.starts_with(w));
         assert!(
             has_sess_write,
             "session temp dir should be writable regardless of grant"
@@ -958,7 +983,7 @@ mod tests {
     fn test_build_nu_sandbox_policy_denies_network_by_default() {
         let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS);
         assert!(
-            !policy.allow_network,
+            !policy.allow_network(),
             "network should be denied when NETWORK grant is absent"
         );
     }
@@ -967,7 +992,7 @@ mod tests {
     fn test_build_nu_sandbox_policy_allows_network_with_grant() {
         let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS | ToolGrant::NETWORK);
         assert!(
-            policy.allow_network,
+            policy.allow_network(),
             "network should be allowed when NETWORK grant is present"
         );
     }
@@ -976,7 +1001,7 @@ mod tests {
     fn test_build_nu_sandbox_policy_no_exec_paths_without_tool_dir() {
         let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS);
         assert!(
-            policy.exec_paths.is_empty(),
+            policy.exec_paths().is_empty(),
             "exec_paths should be empty when no tool dir provided"
         );
     }
@@ -997,7 +1022,7 @@ mod tests {
 
         let tool_canon = tool.path().canonicalize().unwrap();
         let has_tool_exec = policy
-            .exec_paths
+            .exec_paths()
             .iter()
             .any(|p| p == &tool_canon || tool_canon.starts_with(p));
         assert!(
