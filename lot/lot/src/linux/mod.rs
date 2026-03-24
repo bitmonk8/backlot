@@ -629,7 +629,7 @@ mod tests {
             .lines()
             .skip(2) // skip "Inter-|" and "face |" header lines
             .filter_map(|line| line.split(':').next())
-            .map(|name| name.trim())
+            .map(str::trim)
             .filter(|name| !name.is_empty())
             .collect();
         assert!(
