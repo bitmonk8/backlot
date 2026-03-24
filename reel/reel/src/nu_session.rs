@@ -1711,6 +1711,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn integration_diagnose_config_loading() {
+        skip_no_nu!();
+        let tmp = tmp_sandbox_project();
+        let (session, _tool) = isolated_session();
+        // Check if nu loaded our config by querying the config path and
+        // testing whether 'reel' is a known command.
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+        let result = try_eval(
+            &session,
+            "$nu.config-path",
+            30,
+            tmp.path(),
+            grant,
+        )
+        .await;
+        let out = result.unwrap();
+        eprintln!("config-path: is_error={} content={}", out.is_error, out.content);
+        if let Some(ref stderr) = out.stderr {
+            eprintln!("config-path stderr: {stderr}");
+        }
+
+        let result2 = try_eval(
+            &session,
+            "help commands | where name == 'reel' | length",
+            30,
+            tmp.path(),
+            grant,
+        )
+        .await;
+        let out2 = result2.unwrap();
+        eprintln!("reel-commands: is_error={} content={}", out2.is_error, out2.content);
+        if let Some(ref stderr) = out2.stderr {
+            eprintln!("reel-commands stderr: {stderr}");
+        }
+
+        // Check if the config file exists from nu's perspective
+        let result3 = try_eval(
+            &session,
+            "ls ($nu.config-path) | get name",
+            30,
+            tmp.path(),
+            grant,
+        )
+        .await;
+        let out3 = result3.unwrap();
+        eprintln!("config-ls: is_error={} content={}", out3.is_error, out3.content);
+    }
+
+    #[tokio::test]
     async fn integration_evaluate_error_command() {
         skip_no_nu!();
         let tmp = tmp_sandbox_project();
