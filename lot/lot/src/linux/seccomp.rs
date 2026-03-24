@@ -224,19 +224,39 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
     }
 
     // --- ioctl (argument-filtered on arg1: request number) ---
-    // Only allow terminal and fd-flag ioctls needed by standard runtimes.
+    // Only allow benign terminal, fd-flag, and session/process-group ioctls
+    // needed by standard runtimes (ncurses, crossterm, shells).
     // Values from asm-generic/ioctls.h — same on x86_64 and aarch64.
+    //
+    // Deliberately excluded (security-sensitive):
+    //   TIOCSTI (0x5412)  — terminal input injection
+    //   TIOCSCTTY (0x540E) — steal controlling terminal
+    //   TIOCCONS (0x541D)  — console redirect
+    //   TIOCLINUX (0x541C) — console input injection
+    //   TIOCSETD (0x5423)  — line discipline change
     {
         const TCGETS: u64 = 0x5401; // get terminal attributes
-        const TIOCGWINSZ: u64 = 0x5413; // get window size
+        const TCSETS: u64 = 0x5402; // set terminal attributes (immediate)
+        const TCSETSW: u64 = 0x5403; // set terminal attributes (drain first)
+        const TCSETSF: u64 = 0x5404; // set terminal attributes (drain+flush)
+        const TCFLSH: u64 = 0x540B; // flush buffers
         const TIOCGPGRP: u64 = 0x540F; // get process group
+        const TIOCSPGRP: u64 = 0x5410; // set foreground process group
+        const TIOCOUTQ: u64 = 0x5411; // output queue size
+        const TIOCGWINSZ: u64 = 0x5413; // get window size
+        const TIOCSWINSZ: u64 = 0x5414; // set window size
         const FIONREAD: u64 = 0x541B; // bytes available for reading
-        const FIOCLEX: u64 = 0x5451; // set close-on-exec
+        const FIONBIO: u64 = 0x5421; // set non-blocking I/O
+        const TIOCGSID: u64 = 0x5429; // get session ID
         const FIONCLEX: u64 = 0x5450; // clear close-on-exec
+        const FIOCLEX: u64 = 0x5451; // set close-on-exec
 
         let ioctl_rules = argument_filtered_rules(
             1,
-            &[TCGETS, TIOCGWINSZ, TIOCGPGRP, FIONREAD, FIOCLEX, FIONCLEX],
+            &[
+                TCGETS, TCSETS, TCSETSW, TCSETSF, TCFLSH, TIOCGPGRP, TIOCSPGRP, TIOCOUTQ,
+                TIOCGWINSZ, TIOCSWINSZ, FIONREAD, FIONBIO, TIOCGSID, FIONCLEX, FIOCLEX,
+            ],
         )?;
         rules.insert(libc::SYS_ioctl, ioctl_rules);
     }

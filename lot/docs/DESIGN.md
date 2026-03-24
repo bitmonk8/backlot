@@ -83,7 +83,7 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 - Default action: `EPERM` (not `SIGKILL` — debuggable).
 - Conditional rules: network syscalls gated on policy.
 - `prctl` filtered by arg0: only `PR_SET_NAME`, `PR_GET_NAME`, `PR_SET_PDEATHSIG`, `PR_GET_PDEATHSIG`, `PR_SET_TIMERSLACK`, `PR_GET_TIMERSLACK` allowed.
-- `ioctl` filtered by arg1: only `TCGETS`, `TIOCGWINSZ`, `TIOCGPGRP`, `FIONREAD`, `FIOCLEX`, `FIONCLEX` allowed.
+- `ioctl` filtered by arg1: only `TCGETS`, `TCSETS`, `TCSETSW`, `TCSETSF`, `TCFLSH`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCOUTQ`, `TIOCGWINSZ`, `TIOCSWINSZ`, `FIONREAD`, `FIONBIO`, `TIOCGSID`, `FIONCLEX`, `FIOCLEX` allowed. Security-sensitive ioctls (`TIOCSTI`, `TIOCSCTTY`, `TIOCCONS`, `TIOCLINUX`, `TIOCSETD`) are explicitly excluded.
 
 **Filesystem setup:**
 1. Create tmpfs at a temporary mount point.
