@@ -6,44 +6,32 @@
 
 ## Issues (2026-03-24)
 
-New audit completed. 88 active findings across 21 groups in `docs/ISSUES.md` (19 false positives removed).
+96 active findings across 21 groups in `docs/ISSUES.md` (19 false positives removed during triage).
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (28):** Groups 3–4, 7–8, 11 — silent cleanup failures, missing test coverage, weak assertions, placement
-- **NIT (60):** Groups 1–2, 5–6, 9–10, 12–15, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, separation of concerns, test helper error handling, duplication/simplification, naming, test boilerplate, doc mismatches, architectural cleanup
+- **NON-CRITICAL (19):** Groups 1–5 — missing security-critical test coverage, weak assertions, lifecycle test gaps, silent cleanup failures, placement
+- **NIT (77):** Groups 6–21 — TOCTOU (mitigated), canonicalization fallback, correctness, error handling, incorrect comments, doc mismatches, separation of concerns, architectural simplification, naming, code duplication, minor cleanup, test boilerplate, NIT test coverage gaps
 
-Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
+Groups reordered and renumbered by impact (2026-03-24). NON-CRITICAL first, then NIT by category: correctness > error handling > docs > architecture > naming > simplification > testing.
 
 ### Review notes (2026-03-24)
-- **Group 1 downgraded NIT:** The "Rust 2024 unsafe soundness" claim is wrong. `macro_rules!` textual substitution places the errno dereference inside the macro's `unsafe` block. Code compiles cleanly. Finding is a style inconsistency, not a correctness issue.
-- **Group 2 items 3–5 downgraded NIT:** Wrong comments, not wrong behavior. No security impact.
-- **Group 3 item #8 removed (false positive):** `kill_and_reap` returns `()`, not `Result`. No error to propagate. The `Ok(())` exists for API consistency.
-- **Group 3 item #7 downgraded NIT:** Inside `Drop` impl — cannot propagate errors. Deliberate design.
-- **Group 4 item #13 downgraded NIT:** `connect`/`bind`/`sendto` share the same conditional block as `socket`. Existing deny test covers the code path.
-- **Group 5 item #18 downgraded NIT:** TOCTOU race exists but is operationally harmless — `setup_mount_namespace` runs after `unshare(CLONE_NEWNS)`, so mount operations are namespace-private.
-- **Group 6 item #19 downgraded NIT:** `is_strict_parent_of` fallback is harmless; all callers pass pre-canonicalized paths from `policy.rs` validation.
-- **Group 6 item #20 removed (false positive):** Progressive prefix fallback is the function's stated algorithm, not error swallowing. Tries `/a/b/c` → `/a/b` → `/a` → `/` by design.
-- **Group 6 item #21 removed (false positive):** Five canonicalization functions (not four) across four files, each serving a distinct purpose: permissive (builder), strict (validation), partial (ancestry), and two batch wrappers. Not redundant.
-- **Group 7 item #23 line range corrected:** `apply_resource_limits` is at lines 589-604, not 572-604. Description updated to note `set_rlimit_nofile_succeeds` tests a different resource.
-- **Group 7 item #24 removed (false positive):** `validate_kill_pid` is `#[cfg(feature = "tokio")]` — tests must be feature-gated to compile. CI runs all tests with `--features tokio` (ci.yml lines 103, 121, 141). Tests are never skipped.
-- **Group 7 item #25 removed (false positive):** `wait_with_output_timeout` has integration tests in `tokio_tests` module (integration.rs lines 1552-1654).
-- **Group 8 item #30 removed (false positive):** `probe_linux` test explicitly asserts `!caps.seatbelt`, `!caps.appcontainer`, `!caps.job_objects`. Finding's blanket claim was wrong.
-- **Group 8 item #31 downgraded NIT:** `validate()` is well-tested in policy.rs (28+ tests). Risk of spawn() not propagating it is low.
-- **Group 8 item #34 removed (false positive):** `require_cgroups()` uses `assert!` which panics (fails the test), not silently passes. Finding described the opposite behavior.
-- **Group 8 item #35 description corrected:** Not silent — prints `[diag] SKIPPED:` to stdout/stderr. Real issue is reporting as passed instead of skipped.
-- **Group 8 item #36 description corrected:** Windows path does assert `!status.success()`. Finding scoped to Unix path only.
-- **Group 8 item #39 downgraded NIT:** All three env var keys (`TEMP`, `TMP`, `TMPDIR`) share identical handling in a trivial loop.
-- **Group 9 #40 downgraded NIT:** `fork_with_seccomp` is a test helper, not production seccomp code. SIGSYS would not go unnoticed — child can't write "OK" to pipe, so test assertion fails. Group description corrected to remove misleading "seccomp enforcement" framing.
-- **Group 10 #42, #43, #44 downgraded NIT:** All three are minor code hygiene simplifications in small functions. Three explicit mount loops (~7 lines each) are clear; five `.map_err` calls are repetitive but trivial; `has_writable_delegation` duplication is minor in a ~30-line function.
-- **Group 11 #46 confirmed NON-CRITICAL:** Both `set_rlimit` and `apply_resource_limits` are `#[cfg(target_os = "macos")]` and only called from `macos/mod.rs`. Placement issue is real.
-- **Group 12 #47 downgraded NIT:** Only `Unsupported` variant is relevant to Graceful Degradation (mechanism unavailability). `Timeout` and `Io` are runtime/generic errors — correctly excluded from that table. Description corrected.
-- **Group 12 #49 removed (false positive):** DESIGN.md line 13 is a terse directory-listing comment. Overlap deduction is documented in source code (policy_builder.rs lines 7-19). Not a doc mismatch.
-- **Group 14 #58 downgraded NIT:** Mount namespace is ~200 lines (not ~500). User NS mapping (~12 lines) and pivot_root (~10 lines) are trivial. Real issue is mount namespace size, not 4-way concern split.
-- **Group 14 #60 removed (false positive):** Linux spawn is ~360 lines but fork semantics require unified control flow. Splitting would obscure critical fork/child boundaries.
-- **Group 14 #64 removed (false positive):** `acl_helpers.rs`, `sddl.rs`, `traverse_acl.rs` have distinct, properly layered responsibilities with no overlap. `acl_helpers` = low-level DACL primitives, `sddl` = string representation for logging/rollback, `traverse_acl` = specialized AppContainer traverse ACE logic.
-- **Group 15 #65 removed (false positive):** `getrlimit(RLIMIT_NOFILE)` effectively never fails. Test validates `set_rlimit` behavior, not `getrlimit`. If getrlimit did fail (returning 0), set_rlimit(0) would likely fail and the assertion would catch it.
-- **Group 15 #69 removed (false positive):** Dest is constructed from `format!("{new_root}{s}")` where both parts are `&str`, so `to_str()` always succeeds. Code comment documents this. Also not a test helper — misplaced in this group.
-- **Group 15 #70 description corrected:** Production code, not a test helper. Finding is valid (unchecked `close(fd)`) but was misclassified.
+- **Old Group 1 (now 15) downgraded NIT:** The "Rust 2024 unsafe soundness" claim is wrong. `macro_rules!` textual substitution places the errno dereference inside the macro's `unsafe` block. Code compiles cleanly. Finding is a style inconsistency, not a correctness issue.
+- **Old Group 2 (now 11) items downgraded NIT:** Wrong comments, not wrong behavior. No security impact.
+- **Old Group 3 (now 4) item removed (false positive):** `kill_and_reap` returns `()`, not `Result`. No error to propagate. The `Ok(())` exists for API consistency.
+- **Old Group 3 (now 4) item downgraded NIT:** Inside `Drop` impl — cannot propagate errors. Deliberate design.
+- **Old Group 4 (now 1) item downgraded NIT:** `connect`/`bind`/`sendto` share the same conditional block as `socket`. Existing deny test covers the code path.
+- **Old Group 5 (now 6) item downgraded NIT:** TOCTOU race exists but is operationally harmless — `setup_mount_namespace` runs after `unshare(CLONE_NEWNS)`, so mount operations are namespace-private.
+- **Old Group 6 (now 7) item downgraded NIT:** `is_strict_parent_of` fallback is harmless; all callers pass pre-canonicalized paths from `policy.rs` validation.
+- **Old Group 6 items removed (false positives):** Progressive prefix fallback is the function's stated algorithm. Five canonicalization functions across four files each serve a distinct purpose.
+- **Old Group 7 (now 3) item corrected:** `apply_resource_limits` is at lines 589-604, not 572-604. Description updated to note `set_rlimit_nofile_succeeds` tests a different resource.
+- **Old Group 7 items removed (false positives):** `validate_kill_pid` is `#[cfg(feature = "tokio")]` — CI runs all tests with `--features tokio`. `wait_with_output_timeout` has integration tests in `tokio_tests` module.
+- **Old Group 8 (now 2) items removed (false positives):** `probe_linux` test explicitly asserts cross-platform flags. `require_cgroups()` uses `assert!` which panics. Various items downgraded or corrected.
+- **Old Group 9 (now 9) downgraded NIT:** `fork_with_seccomp` is a test helper. SIGSYS would not go unnoticed — child can't write "OK" to pipe.
+- **Old Group 10 (now 17) downgraded NIT:** All three are minor code hygiene simplifications in small functions.
+- **Old Group 11 (now 5) confirmed NON-CRITICAL:** Both `set_rlimit` and `apply_resource_limits` are `#[cfg(target_os = "macos")]` and only called from `macos/mod.rs`.
+- **Old Group 12 (now 12) downgraded NIT:** Only `Unsupported` variant is relevant to Graceful Degradation. Doc mismatch item removed (false positive).
+- **Old Group 14 (now 13) items downgraded/removed:** Mount namespace is ~200 lines (not ~500). Linux spawn fork semantics require unified control flow. Windows ACL modules have distinct responsibilities.
+- **Old Group 15 (now 10) items removed/corrected:** `getrlimit(RLIMIT_NOFILE)` effectively never fails. `to_str()` always succeeds on `format!`-constructed paths. `close(fd)` finding is production code, not a test helper.
 
 ## CI Notes
 
