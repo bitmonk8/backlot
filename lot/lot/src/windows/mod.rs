@@ -62,7 +62,6 @@ pub fn probe() -> PlatformCapabilities {
     PlatformCapabilities {
         namespaces: false,
         seccomp: false,
-        cgroups_v2: false,
         seatbelt: false,
         appcontainer: appcontainer::is_available(),
         job_objects: job::is_available(),

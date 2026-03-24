@@ -15,8 +15,6 @@ mod common;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-#[cfg(not(target_os = "macos"))]
-use common::memory_hog_command;
 use common::{
     make_sandbox_cmd, make_temp_dir, network_connect_command, platform_exec_paths, set_sandbox_env,
     sleep_command,
@@ -176,13 +174,8 @@ fn test_probe_returns_platform_capabilities() {
     eprintln!("[diag] === test_probe_returns_platform_capabilities ===");
     let caps = lot::probe();
     eprintln!(
-        "[diag] probe() = appcontainer={}, namespaces={}, seccomp={}, cgroups_v2={}, seatbelt={}, job_objects={}",
-        caps.appcontainer,
-        caps.namespaces,
-        caps.seccomp,
-        caps.cgroups_v2,
-        caps.seatbelt,
-        caps.job_objects
+        "[diag] probe() = appcontainer={}, namespaces={}, seccomp={}, seatbelt={}, job_objects={}",
+        caps.appcontainer, caps.namespaces, caps.seccomp, caps.seatbelt, caps.job_objects
     );
 
     #[cfg(target_os = "windows")]
@@ -308,7 +301,6 @@ fn test_spawn_read_single_file() {
         platform_exec_paths(),
         Vec::new(),
         false,
-        lot::ResourceLimits::default(),
     );
 
     let mut cmd = lot::SandboxCommand::new(&program);
@@ -467,7 +459,7 @@ fn test_cleanup_after_drop() {
     assert!(pid > 0, "pid should be non-zero");
     eprintln!("[diag] child pid={pid}, dropping now");
 
-    // Drop triggers cleanup (ACL restore on Windows, cgroup removal on Linux).
+    // Drop triggers cleanup (ACL restore on Windows, process termination on Unix).
     drop(child);
 
     // Platform-specific verification:
@@ -642,7 +634,6 @@ fn test_deny_path_blocks_access_to_subtree() {
         platform_exec_paths(),
         vec![denied_dir_canon],
         false,
-        lot::ResourceLimits::default(),
     );
 
     // Part 1: reading a file inside the denied subtree must fail.
@@ -728,7 +719,6 @@ fn make_deny_policy(
         platform_exec_paths(),
         vec![denied_canon],
         false,
-        lot::ResourceLimits::default(),
     )
 }
 
@@ -1276,98 +1266,6 @@ fn test_sandbox_policy_builder_basic() {
     eprintln!("[diag] PASSED");
 }
 
-// macOS: RLIMIT_AS (aliased to RLIMIT_RSS) returns EINVAL from setrlimit when
-// the limit is below the forked child's inherited virtual memory size, which on
-// Apple Silicon includes the dyld shared cache (often >4 GB). Memory limit
-// enforcement via RLIMIT_AS is unreliable on macOS — see Known Limitations in
-// README.md. This test is Linux + Windows only; macOS gets a separate test below.
-#[test]
-#[cfg(not(target_os = "macos"))]
-fn test_memory_limit_enforcement() {
-    eprintln!("[diag] === test_memory_limit_enforcement ===");
-
-    let tmp = make_temp_dir();
-    let scratch = make_temp_dir();
-
-    let (program, args) = memory_hog_command();
-
-    // 512 MB limit — below the 1 GB allocation the child attempts.
-    let policy = lot::SandboxPolicy::new(
-        vec![tmp.path().to_path_buf()],
-        vec![scratch.path().to_path_buf()],
-        platform_exec_paths(),
-        Vec::new(),
-        false,
-        lot::ResourceLimits {
-            max_memory_bytes: Some(512 * 1024 * 1024),
-            ..lot::ResourceLimits::default()
-        },
-    );
-
-    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
-
-    let child = must_spawn(&policy, &cmd);
-    let output = child.wait_with_output().expect("wait_with_output");
-    eprintln!("[diag] exit status: {:?}", output.status);
-    eprintln!(
-        "[diag] stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // The child should fail or be killed due to memory limit.
-    assert!(
-        !output.status.success(),
-        "process exceeding memory limit should fail, got: {:?}",
-        output.status
-    );
-    eprintln!("[diag] PASSED");
-}
-
-// macOS: setrlimit(RLIMIT_AS) fails with EINVAL when the limit is below the
-// process's inherited virtual memory size. Verify lot surfaces the error.
-#[test]
-#[cfg(target_os = "macos")]
-fn test_memory_limit_returns_error_on_macos() {
-    eprintln!("[diag] === test_memory_limit_returns_error_on_macos ===");
-
-    let tmp = make_temp_dir();
-    let scratch = make_temp_dir();
-
-    let (program, _args) = sleep_command(10);
-
-    // 512 MB — almost certainly below inherited VM on Apple Silicon.
-    let policy = lot::SandboxPolicy::new(
-        vec![tmp.path().to_path_buf()],
-        vec![scratch.path().to_path_buf()],
-        platform_exec_paths(),
-        Vec::new(),
-        false,
-        lot::ResourceLimits {
-            max_memory_bytes: Some(512 * 1024 * 1024),
-            ..lot::ResourceLimits::default()
-        },
-    );
-
-    let cmd = make_sandbox_cmd(&program, &[], scratch.path());
-
-    match lot::spawn(&policy, &cmd) {
-        Err(lot::SandboxError::Setup(msg)) => {
-            assert!(
-                msg.contains("setrlimit"),
-                "setup error should mention setrlimit: {msg}"
-            );
-            eprintln!("[diag] PASSED: got expected SandboxError::Setup — {msg}");
-        }
-        Err(e) => panic!("expected SandboxError::Setup, got: {e}"),
-        Ok(child) => {
-            // If setrlimit somehow succeeds (e.g., low baseline VM), that is
-            // also acceptable — the limit was applied. Clean up.
-            eprintln!("[diag] setrlimit succeeded unexpectedly (low baseline VM); accepting");
-            drop(child);
-        }
-    }
-}
-
 #[test]
 fn test_allow_network_false_blocks_connections() {
     eprintln!("[diag] === test_allow_network_false_blocks_connections ===");
@@ -1383,7 +1281,6 @@ fn test_allow_network_false_blocks_connections() {
         platform_exec_paths(),
         Vec::new(),
         false, // network denied
-        lot::ResourceLimits::default(),
     );
 
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
@@ -1431,7 +1328,6 @@ fn test_allow_network_true_has_resolv_conf() {
         platform_exec_paths(),
         Vec::new(),
         true, // network allowed
-        lot::ResourceLimits::default(),
     );
 
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
@@ -1619,7 +1515,6 @@ mod tokio_tests {
                 vec![],
                 vec![],
                 false,
-                lot::ResourceLimits::default(),
             );
             let mut cmd = lot::SandboxCommand::new("powershell");
             cmd.args(["-Command", &format!("Start-Sleep -Seconds {seconds}")]);
@@ -1709,7 +1604,6 @@ mod tokio_tests {
                 vec![],
                 vec![],
                 false,
-                lot::ResourceLimits::default(),
             );
             let mut cmd = lot::SandboxCommand::new("cmd.exe");
             cmd.args(["/C", "echo hello"]);

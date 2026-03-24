@@ -57,50 +57,8 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           # Sysctl may not exist on kernels that always allow user namespaces.
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-      - name: Run tests with delegated cgroup
-        run: |
-          # Find the current cgroup (e.g., /system.slice/hosted-compute-agent.service)
-          cgroup_rel=$(cat /proc/self/cgroup | grep '^0::' | cut -d: -f3)
-          if [ -z "$cgroup_rel" ]; then
-            echo "::error::cgroup v2 not available (grep '^0::' returned empty)"
-            exit 1
-          fi
-          current_cg="/sys/fs/cgroup${cgroup_rel}"
-          parent_cg="$(dirname "$current_cg")"
-
-          # Enable memory+pids controllers from root down to the parent.
-          p="/sys/fs/cgroup"
-          while [ "$p" != "$parent_cg" ] && [ "$p" != "/" ]; do
-            if [ -f "$p/cgroup.subtree_control" ]; then
-              echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" > /dev/null
-            fi
-            # Walk toward parent_cg by appending the next path component
-            next="$(echo "$parent_cg" | sed "s|^$p/||" | cut -d/ -f1)"
-            # Guard against infinite loop if sed/cut produce empty component
-            if [ -z "$next" ]; then
-              break
-            fi
-            p="$p/$next"
-          done
-          if [ -f "$parent_cg/cgroup.subtree_control" ]; then
-            echo '+memory +pids' | sudo tee "$parent_cg/cgroup.subtree_control" > /dev/null
-          fi
-
-          # Create lot-test under the same parent as our current cgroup.
-          # Layout:
-          #   parent/
-          #     hosted-compute-agent.service/   (current, being vacated)
-          #     lot-test/                        subtree_control: +memory +pids
-          #       runner/                        test process (leaf)
-          #       lot-sandbox-*/                 CgroupGuard creates these
-          cg="$parent_cg/lot-test"
-          sudo mkdir -p "$cg/runner"
-          sudo chown -R "$(id -u):$(id -g)" "$cg"
-          echo '+memory +pids' > "$cg/cgroup.subtree_control"
-
-          # Move ourselves into the runner leaf.
-          echo $$ | sudo tee "$cg/runner/cgroup.procs"
-          cargo test -p lot --features tokio -- --nocapture
+      - name: Run tests
+        run: cargo test -p lot --features tokio -- --nocapture
       - name: Run lot-cli tests
         run: cargo test -p lot-cli
 

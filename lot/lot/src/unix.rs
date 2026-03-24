@@ -565,44 +565,6 @@ pub unsafe fn setup_stdio_fds(
     Ok(())
 }
 
-/// Set a single resource limit via setrlimit.
-///
-/// # Safety
-/// Must only be called from the forked child before exec.
-#[cfg(target_os = "macos")]
-unsafe fn set_rlimit(resource: i32, value: u64) -> io::Result<()> {
-    let rlim = libc::rlimit {
-        rlim_cur: value,
-        rlim_max: value,
-    };
-    // SAFETY: rlim is a valid rlimit struct, caller is in forked child
-    if unsafe { libc::setrlimit(resource, &raw const rlim) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Apply resource limits via setrlimit. Used by macOS.
-///
-/// # Safety
-/// Must only be called from the forked child before exec.
-#[cfg(target_os = "macos")]
-pub unsafe fn apply_resource_limits(policy: &crate::policy::SandboxPolicy) -> io::Result<()> {
-    if let Some(max_mem) = policy.limits().max_memory_bytes {
-        // SAFETY: caller guarantees forked child context
-        unsafe { set_rlimit(libc::RLIMIT_AS, max_mem)? };
-    }
-    if let Some(max_procs) = policy.limits().max_processes {
-        // SAFETY: caller guarantees forked child context
-        unsafe { set_rlimit(libc::RLIMIT_NPROC, u64::from(max_procs))? };
-    }
-    if let Some(max_cpu) = policy.limits().max_cpu_seconds {
-        // SAFETY: caller guarantees forked child context
-        unsafe { set_rlimit(libc::RLIMIT_CPU, max_cpu)? };
-    }
-    Ok(())
-}
-
 /// Platform-specific errno accessor. Returns the current errno value.
 #[allow(unsafe_code)]
 pub fn errno() -> i32 {
@@ -675,7 +637,7 @@ pub(crate) use delegate_unix_child_methods;
 ///
 /// Both `LinuxSandboxedChild` and `MacosSandboxedChild` delegate their
 /// wait/kill/drop/take_stdio methods here. Platform differences (kill
-/// strategy, extra cleanup like cgroup guards) are handled by the
+/// strategy) are handled by the
 /// platform-specific wrappers.
 pub struct UnixSandboxedChild {
     pub(crate) pid: i32,
@@ -1566,22 +1528,5 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout, b"out");
         assert_eq!(output.stderr, b"err");
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn set_rlimit_nofile_succeeds() {
-        let mut current = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: querying current RLIMIT_NOFILE into a valid rlimit struct
-        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut current) };
-        // SAFETY: setting limit to current soft limit (effectively a no-op)
-        let result = unsafe { set_rlimit(libc::RLIMIT_NOFILE, current.rlim_cur) };
-        assert!(
-            result.is_ok(),
-            "set_rlimit to current soft limit should succeed: {result:?}"
-        );
     }
 }

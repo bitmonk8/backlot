@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::error::SandboxError;
 
-/// Defines the filesystem, network, and resource constraints for a sandboxed
+/// Defines the filesystem and network constraints for a sandboxed
 /// process.
 ///
 /// Paths in `read_paths`, `write_paths`, `exec_paths`, and `deny_paths` must
@@ -19,7 +19,6 @@ pub struct SandboxPolicy {
     exec_paths: Vec<PathBuf>,
     deny_paths: Vec<PathBuf>,
     allow_network: bool,
-    limits: ResourceLimits,
     pub(crate) sentinel_dir: Option<PathBuf>,
 }
 
@@ -32,7 +31,6 @@ impl SandboxPolicy {
         exec_paths: Vec<PathBuf>,
         deny_paths: Vec<PathBuf>,
         allow_network: bool,
-        limits: ResourceLimits,
     ) -> Self {
         Self {
             read_paths,
@@ -40,7 +38,6 @@ impl SandboxPolicy {
             exec_paths,
             deny_paths,
             allow_network,
-            limits,
             sentinel_dir: None,
         }
     }
@@ -68,11 +65,6 @@ impl SandboxPolicy {
     /// Whether outbound network access is allowed.
     pub const fn allow_network(&self) -> bool {
         self.allow_network
-    }
-
-    /// Resource limits.
-    pub const fn limits(&self) -> &ResourceLimits {
-        &self.limits
     }
 
     /// Directory for sentinel files (Windows). When `None`, uses the
@@ -263,8 +255,7 @@ impl SandboxPolicy {
     /// Returns [`SandboxError::InvalidPolicy`] containing all validation
     /// errors (not just the first) if any path does not exist, if grant paths
     /// overlap across or within sets, if deny paths are not strict children of
-    /// grant paths, if a grant path is nested under a deny path, or if
-    /// resource limits are zero.
+    /// grant paths, or if a grant path is nested under a deny path.
     /// Called automatically by [`spawn()`](crate::spawn).
     ///
     /// # Errors
@@ -343,73 +334,10 @@ impl SandboxPolicy {
             &mut errors,
         );
 
-        collect_validation_error(self.limits.validate(), &mut errors);
-
         if errors.is_empty() {
             Ok(())
         } else {
             Err(SandboxError::InvalidPolicy(errors.join("; ")))
-        }
-    }
-}
-
-/// Optional resource constraints (memory, processes, CPU time) for the
-/// sandboxed process. All fields default to `None` (no limit).
-///
-/// Platform enforcement varies:
-/// - **Windows**: all limits enforced via Job Objects.
-/// - **macOS**: memory and process limits via `setrlimit`; CPU time via `RLIMIT_CPU`.
-/// - **Linux**: memory and process limits via cgroupv2; CPU time is **not enforced**
-///   (cgroupv2 `cpu.max` controls bandwidth/rate, not total accumulated time).
-#[derive(Debug, Clone, Default)]
-pub struct ResourceLimits {
-    /// Maximum memory in bytes. None = no limit.
-    ///
-    /// On macOS, this uses `setrlimit(RLIMIT_AS)` which limits virtual address
-    /// space. `setrlimit` returns `EINVAL` if the limit is below the forked
-    /// child's inherited VM size (often >4 GB on Apple Silicon due to the dyld
-    /// shared cache). `spawn()` returns `SandboxError::Setup` in this case.
-    /// Linux (cgroups v2) and Windows (job objects) are not affected.
-    pub max_memory_bytes: Option<u64>,
-    /// Maximum number of child processes. None = no limit.
-    pub max_processes: Option<u32>,
-    /// Maximum CPU time in seconds. None = no limit.
-    ///
-    /// Enforced on Windows (Job Objects) and macOS (`RLIMIT_CPU`).
-    /// **Not enforced on Linux** — cgroupv2 `cpu.max` controls CPU bandwidth
-    /// (rate limiting), not total accumulated CPU time.
-    pub max_cpu_seconds: Option<u64>,
-}
-
-impl ResourceLimits {
-    /// Returns `true` if any resource limit is set.
-    ///
-    /// Uses destructuring so adding a field to `ResourceLimits` without
-    /// updating this function produces a compile error.
-    pub const fn has_any(&self) -> bool {
-        let Self {
-            max_memory_bytes,
-            max_processes,
-            max_cpu_seconds,
-        } = self;
-        max_memory_bytes.is_some() || max_processes.is_some() || max_cpu_seconds.is_some()
-    }
-
-    fn validate(&self) -> Result<(), SandboxError> {
-        let mut msgs: Vec<&str> = Vec::new();
-        if self.max_memory_bytes == Some(0) {
-            msgs.push("max_memory_bytes must not be zero");
-        }
-        if self.max_processes == Some(0) {
-            msgs.push("max_processes must not be zero");
-        }
-        if self.max_cpu_seconds == Some(0) {
-            msgs.push("max_cpu_seconds must not be zero");
-        }
-        if msgs.is_empty() {
-            Ok(())
-        } else {
-            Err(SandboxError::InvalidPolicy(msgs.join("; ")))
         }
     }
 }
@@ -430,15 +358,7 @@ mod tests {
     }
 
     fn valid_policy(path: PathBuf) -> SandboxPolicy {
-        SandboxPolicy {
-            read_paths: vec![path],
-            write_paths: Vec::new(),
-            exec_paths: Vec::new(),
-            deny_paths: Vec::new(),
-            allow_network: false,
-            limits: ResourceLimits::default(),
-            sentinel_dir: None,
-        }
+        SandboxPolicy::new(vec![path], Vec::new(), Vec::new(), Vec::new(), false)
     }
 
     #[test]
@@ -456,7 +376,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -471,7 +390,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -486,7 +404,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -507,7 +424,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -528,7 +444,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         policy
@@ -548,7 +463,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -565,7 +479,6 @@ mod tests {
             exec_paths: vec![p],
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -582,7 +495,6 @@ mod tests {
             exec_paths: vec![p],
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -598,26 +510,6 @@ mod tests {
             exec_paths: vec![tmp.path().to_path_buf()],
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
-            sentinel_dir: None,
-        };
-        assert!(policy.validate().is_ok());
-    }
-
-    #[test]
-    fn valid_nonzero_resource_limits_pass() {
-        let tmp = make_temp_dir();
-        let policy = SandboxPolicy {
-            read_paths: vec![tmp.path().to_path_buf()],
-            write_paths: Vec::new(),
-            exec_paths: Vec::new(),
-            deny_paths: Vec::new(),
-            allow_network: false,
-            limits: ResourceLimits {
-                max_memory_bytes: Some(1024 * 1024),
-                max_processes: Some(10),
-                max_cpu_seconds: Some(60),
-            },
             sentinel_dir: None,
         };
         assert!(policy.validate().is_ok());
@@ -635,64 +527,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
-            sentinel_dir: None,
-        };
-        let err = policy.validate().unwrap_err();
-        assert!(matches!(err, SandboxError::InvalidPolicy(_)));
-    }
-
-    #[test]
-    fn zero_memory_limit_rejected() {
-        let tmp = make_temp_dir();
-        let policy = SandboxPolicy {
-            read_paths: vec![tmp.path().to_path_buf()],
-            write_paths: Vec::new(),
-            exec_paths: Vec::new(),
-            deny_paths: Vec::new(),
-            allow_network: false,
-            limits: ResourceLimits {
-                max_memory_bytes: Some(0),
-                ..ResourceLimits::default()
-            },
-            sentinel_dir: None,
-        };
-        let err = policy.validate().unwrap_err();
-        assert!(matches!(err, SandboxError::InvalidPolicy(_)));
-    }
-
-    #[test]
-    fn zero_processes_limit_rejected() {
-        let tmp = make_temp_dir();
-        let policy = SandboxPolicy {
-            read_paths: vec![tmp.path().to_path_buf()],
-            write_paths: Vec::new(),
-            exec_paths: Vec::new(),
-            deny_paths: Vec::new(),
-            allow_network: false,
-            limits: ResourceLimits {
-                max_processes: Some(0),
-                ..ResourceLimits::default()
-            },
-            sentinel_dir: None,
-        };
-        let err = policy.validate().unwrap_err();
-        assert!(matches!(err, SandboxError::InvalidPolicy(_)));
-    }
-
-    #[test]
-    fn zero_cpu_limit_rejected() {
-        let tmp = make_temp_dir();
-        let policy = SandboxPolicy {
-            read_paths: vec![tmp.path().to_path_buf()],
-            write_paths: Vec::new(),
-            exec_paths: Vec::new(),
-            deny_paths: Vec::new(),
-            allow_network: false,
-            limits: ResourceLimits {
-                max_cpu_seconds: Some(0),
-                ..ResourceLimits::default()
-            },
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -709,7 +543,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -733,7 +566,6 @@ mod tests {
             exec_paths: vec![parent],
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -757,7 +589,6 @@ mod tests {
             exec_paths: vec![parent],
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -778,7 +609,6 @@ mod tests {
             exec_paths: vec![p.clone(), p],
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -802,7 +632,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![denied],
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         policy.validate().expect("valid policy with deny path");
@@ -822,7 +651,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![denied],
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -844,7 +672,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![p],
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -869,7 +696,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![deny_parent, deny_child],
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -894,7 +720,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![denied],
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -922,7 +747,6 @@ mod tests {
             exec_paths: vec![exec.clone()],
             deny_paths: vec![deny.clone()],
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
 
@@ -949,7 +773,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![deny.clone()],
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
 
@@ -957,51 +780,6 @@ mod tests {
         assert_eq!(grant.len(), 1);
         assert!(grant.contains(&read.as_path()));
         assert!(!grant.contains(&deny.as_path()));
-    }
-
-    // ── has_any() ──────────────────────────────────────────────────
-
-    #[test]
-    fn has_any_returns_false_for_default() {
-        let limits = ResourceLimits::default();
-        assert!(!limits.has_any());
-    }
-
-    #[test]
-    fn has_any_returns_true_for_memory() {
-        let limits = ResourceLimits {
-            max_memory_bytes: Some(1024),
-            ..ResourceLimits::default()
-        };
-        assert!(limits.has_any());
-    }
-
-    #[test]
-    fn has_any_returns_true_for_processes() {
-        let limits = ResourceLimits {
-            max_processes: Some(5),
-            ..ResourceLimits::default()
-        };
-        assert!(limits.has_any());
-    }
-
-    #[test]
-    fn has_any_returns_true_for_cpu() {
-        let limits = ResourceLimits {
-            max_cpu_seconds: Some(30),
-            ..ResourceLimits::default()
-        };
-        assert!(limits.has_any());
-    }
-
-    #[test]
-    fn has_any_returns_true_for_all_set() {
-        let limits = ResourceLimits {
-            max_memory_bytes: Some(1024),
-            max_processes: Some(5),
-            max_cpu_seconds: Some(30),
-        };
-        assert!(limits.has_any());
     }
 
     // ── Strengthened error message assertions ─────────────────────
@@ -1014,7 +792,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -1035,7 +812,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -1043,29 +819,6 @@ mod tests {
         assert!(
             msg.contains("read_paths") && msg.contains("write_paths"),
             "error should name both conflicting sets: {msg}"
-        );
-    }
-
-    #[test]
-    fn zero_memory_error_mentions_field_name() {
-        let tmp = make_temp_dir();
-        let policy = SandboxPolicy {
-            read_paths: vec![tmp.path().to_path_buf()],
-            write_paths: Vec::new(),
-            exec_paths: Vec::new(),
-            deny_paths: Vec::new(),
-            allow_network: false,
-            limits: ResourceLimits {
-                max_memory_bytes: Some(0),
-                ..ResourceLimits::default()
-            },
-            sentinel_dir: None,
-        };
-        let err = policy.validate().unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("max_memory_bytes"),
-            "error should mention field name: {msg}"
         );
     }
 
@@ -1084,7 +837,6 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![denied],
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         policy
@@ -1105,39 +857,10 @@ mod tests {
             exec_paths: vec![parent],
             deny_paths: vec![denied],
             allow_network: false,
-            limits: ResourceLimits::default(),
             sentinel_dir: None,
         };
         policy
             .validate()
             .expect("deny path under exec grant should be valid");
-    }
-
-    #[test]
-    fn validate_reports_multiple_errors() {
-        let policy = SandboxPolicy {
-            read_paths: Vec::new(),
-            write_paths: Vec::new(),
-            exec_paths: Vec::new(),
-            deny_paths: Vec::new(),
-            allow_network: false,
-            limits: ResourceLimits {
-                max_memory_bytes: Some(0),
-                max_processes: Some(0),
-                ..ResourceLimits::default()
-            },
-            sentinel_dir: None,
-        };
-        let err = policy.validate().unwrap_err();
-        let msg = err.to_string();
-        // Should contain both "at least one path" and a resource limit error.
-        assert!(
-            msg.contains("at least one path"),
-            "should report empty policy: {msg}"
-        );
-        assert!(
-            msg.contains("max_memory_bytes") && msg.contains("max_processes"),
-            "should report resource limit errors: {msg}"
-        );
     }
 }

@@ -9,7 +9,7 @@ lot/                           (workspace root)
 │   ├── Cargo.toml
 │   ├── src/
 │   │   ├── lib.rs             — Public API: spawn(), probe(), types
-│   │   ├── policy.rs          — SandboxPolicy, ResourceLimits, validation
+│   │   ├── policy.rs          — SandboxPolicy, validation
 │   │   ├── policy_builder.rs  — SandboxPolicyBuilder (auto-canonicalization, platform defaults)
 │   │   ├── command.rs         — SandboxCommand builder
 │   │   ├── error.rs           — SandboxError
@@ -17,17 +17,16 @@ lot/                           (workspace root)
 │   │   ├── path_util.rs       — Shared path utilities (ancestry checks, `canonicalize_existing_prefix`, lexical normalization)
 │   │   ├── unix.rs            — Shared Unix helpers (pipes, stdio, UnixSandboxedChild lifecycle, child_bail)
 │   │   ├── linux/
-│   │   │   ├── mod.rs         — LinuxSandbox: orchestrates namespace + seccomp + cgroup
+│   │   │   ├── mod.rs         — LinuxSandbox: orchestrates namespace + seccomp
 │   │   │   ├── namespace.rs   — Namespace setup: bind mounts, pivot_root, uid/gid mapping (fork+unshare are in mod.rs)
-│   │   │   ├── seccomp.rs     — BPF filter construction and application
-│   │   │   └── cgroup.rs      — cgroup v2 creation, limit writes, cleanup
+│   │   │   └── seccomp.rs     — BPF filter construction and application
 │   │   ├── macos/
-│   │   │   ├── mod.rs         — MacSandbox: fork + seatbelt + rlimit
+│   │   │   ├── mod.rs         — MacSandbox: fork + seatbelt
 │   │   │   └── seatbelt.rs    — SBPL profile generation, sandbox_init FFI
 │   │   └── windows/
 │   │       ├── mod.rs         — WindowsSandbox: AppContainer + job object
 │   │       ├── appcontainer.rs — Profile lifecycle, capability assembly, ACL management, process creation
-│   │       ├── job.rs         — Job object creation, resource limits
+│   │       ├── job.rs         — Job object creation, KILL_ON_JOB_CLOSE and UI restrictions
 │   │       ├── acl_helpers.rs  — Shared DACL manipulation (SID allocation, ACE application)
 │   │       ├── nul_device.rs  — NUL device ACE, prerequisites API
 │   │       ├── traverse_acl.rs — Ancestor traverse ACE management
@@ -55,7 +54,7 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 
 | Crate | Platform | Purpose |
 |---|---|---|
-| `libc` | Linux, macOS | Syscall wrappers (`fork`, `unshare`, `setrlimit`, `prctl`, etc.) |
+| `libc` | Linux, macOS | Syscall wrappers (`fork`, `unshare`, `prctl`, etc.) |
 | `seccompiler` | Linux | seccomp-BPF filter construction |
 | `windows-sys` | Windows | Win32 API bindings (AppContainer, Job Objects, ACL) |
 | `thiserror` | All | Error derive |
@@ -67,7 +66,7 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 
 ## Platform Mechanisms
 
-### Linux: Namespaces + seccomp-BPF + cgroups v2
+### Linux: Namespaces + seccomp-BPF
 
 **Namespaces** provide the primary isolation boundary:
 
@@ -85,12 +84,6 @@ The workspace pattern (library + CLI) follows the same structure as sibling proj
 - Conditional rules: network syscalls gated on policy.
 - `prctl` filtered by arg0: only `PR_SET_NAME`, `PR_GET_NAME`, `PR_SET_PDEATHSIG`, `PR_GET_PDEATHSIG`, `PR_SET_TIMERSLACK`, `PR_GET_TIMERSLACK` allowed.
 - `ioctl` filtered by arg1: only `TCGETS`, `TIOCGWINSZ`, `TIOCGPGRP`, `FIONREAD`, `FIOCLEX`, `FIONCLEX` allowed.
-
-**cgroups v2** enforces resource limits using the sibling cgroup model (to respect the cgroupv2 "no internal processes" constraint):
-- Memory limit (`memory.max`).
-- PID limit (`pids.max` — prevent fork bombs).
-- CPU bandwidth (`cpu.max`) is **not** written by the code. `cpu.max` controls bandwidth/rate, not total accumulated CPU time, so it is intentionally omitted.
-- Cgroup created per sandbox invocation, cleaned up on drop.
 
 **Filesystem setup:**
 1. Create tmpfs at a temporary mount point.
@@ -132,15 +125,11 @@ void sandbox_free_error(char *errorbuf);
 
 **Process model:** Fork the child directly (single fork), call `setsid()` so the child becomes its own process group leader (enabling `killpg` to kill all descendants on drop/timeout), apply `sandbox_init` in the child (permanent, no undo), then exec the target. No intermediate helper process — the helper pattern is Linux-only. The parent is never sandboxed.
 
-**Resource limits:** `setrlimit(RLIMIT_AS, ...)` for memory, `setrlimit(RLIMIT_NPROC, ...)` for process count, `setrlimit(RLIMIT_CPU, ...)` for CPU time. No cgroup equivalent on macOS.
-
-**RLIMIT_AS caveat:** `RLIMIT_AS` is aliased to `RLIMIT_RSS` on macOS (both resource #5). `setrlimit` returns `EINVAL` if the new limit is below the forked child's inherited virtual memory size. On Apple Silicon, the dyld shared cache and system frameworks push baseline VM well above 4 GB, making low memory limits unreliable. `spawn()` returns `SandboxError::Setup` when `setrlimit` fails. `RLIMIT_NPROC` and `RLIMIT_CPU` are not affected.
-
 **Deprecation note:** Apple deprecated `sandbox_init` but has not removed it. It is still used by major applications (Chrome, Firefox) and the underlying kernel sandbox is actively maintained. No replacement API exists for third-party use.
 
 ### Shared Unix lifecycle (`unix.rs`)
 
-`UnixSandboxedChild` in `unix.rs` holds the common state (pid, stdio fds, `AtomicBool` waited flag) and implements `wait`, `try_wait`, `wait_with_output`, `kill`, `take_stdin/stdout/stderr`, `close_fds`, and `kill_and_reap`. The kill mechanism differs between Linux (`libc::kill` on helper PID; inner child dies via `PR_SET_PDEATHSIG`) and macOS (`libc::killpg` on child PGID after `setsid`). This is parameterized via `KillStyle` enum. Platform wrappers (`LinuxSandboxedChild`, `MacosSandboxedChild`) delegate lifecycle methods and add platform-specific cleanup (cgroup guard on Linux).
+`UnixSandboxedChild` in `unix.rs` holds the common state (pid, stdio fds, `AtomicBool` waited flag) and implements `wait`, `try_wait`, `wait_with_output`, `kill`, `take_stdin/stdout/stderr`, `close_fds`, and `kill_and_reap`. The kill mechanism differs between Linux (`libc::kill` on helper PID; inner child dies via `PR_SET_PDEATHSIG`) and macOS (`libc::killpg` on child PGID after `setsid`). This is parameterized via `KillStyle` enum. Platform wrappers (`LinuxSandboxedChild`, `MacosSandboxedChild`) delegate lifecycle methods.
 
 The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `[step:i32, errno:i32]` error report to the error pipe and calls `_exit(1)`. Used by both platforms' forked child processes via a thin macro wrapper.
 
@@ -166,9 +155,7 @@ The `child_bail` function (async-signal-safe, no allocations) writes an 8-byte `
 - Denied by default inside AppContainer.
 - Granted by adding the `InternetClient` capability SID.
 
-**Job Objects** enforce resource limits:
-- `JOB_OBJECT_LIMIT_PROCESS_MEMORY` — memory cap.
-- `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` — limit child process count.
+**Job Objects** provide RAII cleanup and UI restrictions:
 - `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — RAII cleanup: closing the job handle kills all processes in the job.
 - `JOB_OBJECT_BASIC_UI_RESTRICTIONS` — block clipboard, desktop, display settings, exit-windows, global atoms, handle, system parameter, and write-clipboard access via `JOBOBJECT_BASIC_UI_RESTRICTIONS`.
 
@@ -256,7 +243,6 @@ Lot does not silently degrade. If a required mechanism is unavailable, `spawn()`
 | Situation | Behavior |
 |---|---|
 | Linux: user namespaces disabled | `SandboxError::Setup` with actionable message |
-| Linux: cgroups v2 not mounted or not delegated | `SandboxError::Setup` with diagnostic — only when resource limits are requested in the policy |
 | Linux: seccomp not available | `SandboxError::Setup` — namespaces without seccomp is too weak |
 | macOS: `sandbox_init` fails | `SandboxError::Setup` — no fallback |
 | Windows: AppContainer profile creation fails | `SandboxError::Setup` |
@@ -278,9 +264,7 @@ Lot does not silently degrade. If a required mechanism is unavailable, `spawn()`
 - Verify it cannot read disallowed paths or write to read-only paths.
 - Deny paths: verify denied subtrees block reads while sibling paths remain accessible.
 - Network denied: verify `connect()` fails.
-- Memory limit: child exceeds limit, gets killed.
-- Process limit: child fork-bombs, limited by cgroup/job object.
-- Cleanup: after `SandboxedChild` drops, ACLs/cgroups/profiles are removed.
+- Cleanup: after `SandboxedChild` drops, ACLs/profiles are removed.
 
 Tests gate on `probe()` results at runtime. When a required mechanism is unavailable, `must_spawn` panics on `PrerequisitesNotMet` — a missing prerequisite is a real failure, not an expected condition to skip.
 
@@ -291,7 +275,7 @@ Tests gate on `probe()` results at runtime. When a required mechanism is unavail
 | Format | ubuntu-latest | `cargo fmt --all --check` |
 | Clippy | ubuntu-latest, macos-latest, windows-latest (matrix) | `cargo clippy --workspace --all-targets --features tokio` |
 | Build | ubuntu-latest | `cargo build --workspace` |
-| Test (Linux) | ubuntu-latest | `sysctl apparmor_restrict_unprivileged_userns=0`, cgroup delegation |
+| Test (Linux) | ubuntu-latest | `sysctl apparmor_restrict_unprivileged_userns=0` |
 | Test (macOS) | macos-latest | None needed |
 | Test (Windows) | windows-latest | `lot setup` for AppContainer prerequisites |
 

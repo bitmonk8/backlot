@@ -1,12 +1,10 @@
 #![allow(unsafe_code)]
 
-mod cgroup;
 mod namespace;
 mod seccomp;
 
 use std::ffi::CString;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::AtomicBool;
 
 use crate::command::SandboxCommand;
@@ -14,8 +12,6 @@ use crate::policy::SandboxPolicy;
 use crate::unix;
 use crate::unix::{KillStyle, UnixSandboxedChild};
 use crate::{PlatformCapabilities, Result, SandboxError, SandboxedChild};
-
-use cgroup::CgroupGuard;
 
 /// Directories Linux makes accessible to sandboxed processes (auto-mounted or always-allowed).
 pub fn platform_implicit_paths() -> Vec<std::path::PathBuf> {
@@ -44,7 +40,6 @@ pub fn probe() -> PlatformCapabilities {
     PlatformCapabilities {
         namespaces: namespace::is_available(),
         seccomp: seccomp::is_available(),
-        cgroups_v2: cgroup::is_available(),
         seatbelt: false,
         appcontainer: false,
         job_objects: false,
@@ -56,38 +51,17 @@ struct LinuxPreForkData {
     base: unix::PreForkData,
     uid: u32,
     gid: u32,
-    /// Path to cgroup.procs file, pre-converted for the helper to use.
-    cgroup_procs_path: Option<CString>,
 }
 
 /// Build all C strings and data structures before forking.
-fn prepare_prefork(
-    command: &SandboxCommand,
-    cgroup_guard: Option<&CgroupGuard>,
-) -> io::Result<LinuxPreForkData> {
+fn prepare_prefork(command: &SandboxCommand) -> io::Result<LinuxPreForkData> {
     let base = unix::prepare_prefork(command)?;
 
     // SAFETY: getuid/getgid have no preconditions
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 
-    let cgroup_procs_path = match cgroup_guard {
-        Some(g) => {
-            let procs = g.path().join("cgroup.procs");
-            Some(
-                CString::new(procs.as_os_str().as_bytes())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
-            )
-        }
-        None => None,
-    };
-
-    Ok(LinuxPreForkData {
-        base,
-        uid,
-        gid,
-        cgroup_procs_path,
-    })
+    Ok(LinuxPreForkData { base, uid, gid })
 }
 
 /// Close all file descriptors >= 3 except those in `keep_fds`, using the
@@ -148,6 +122,7 @@ unsafe fn close_inherited_fds(keep_fds: &[i32]) {
 /// Convert a u64 to ASCII digits in a caller-provided stack buffer.
 /// Returns the slice of `buf` containing the ASCII digits.
 /// Does not allocate — safe to call post-fork.
+#[cfg(test)]
 fn itoa_stack(mut val: u64, buf: &mut [u8; 20]) -> &[u8] {
     if val == 0 {
         buf[19] = b'0';
@@ -175,28 +150,10 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         "pivot_root",                   // 8
         "seccomp",                      // 9
         "execve",                       // 10
-        "cgroup join",                  // 11
-        "prctl(PR_SET_PDEATHSIG)",      // 12
+        "prctl(PR_SET_PDEATHSIG)",      // 11
     ];
 
-    // Create cgroup before forking so the helper can move itself into it.
-    // If the policy requests resource limits and cgroup setup fails, return
-    // an error rather than silently dropping the limits.
-    let cgroup_guard = if policy.limits().has_any() {
-        if !cgroup::is_available() {
-            return Err(SandboxError::Setup(
-                "resource limits requested but cgroups v2 unavailable".into(),
-            ));
-        }
-        Some(
-            CgroupGuard::new(policy.limits())
-                .map_err(|e| SandboxError::Setup(format!("cgroup creation failed: {e}")))?,
-        )
-    } else {
-        None
-    };
-
-    let prefork = prepare_prefork(command, cgroup_guard.as_ref())
+    let prefork = prepare_prefork(command)
         .map_err(|e| SandboxError::Setup(format!("pre-fork preparation: {e}")))?;
 
     // Build seccomp filter before forking (allocates)
@@ -244,8 +201,7 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         const STEP_PIVOT_ROOT: i32 = 8;
         const STEP_SECCOMP: i32 = 9;
         const STEP_EXEC: i32 = 10;
-        const STEP_CGROUP: i32 = 11;
-        const STEP_PDEATHSIG: i32 = 12;
+        const STEP_PDEATHSIG: i32 = 11;
 
         // Macro wrapping unix::child_bail for ergonomic use in the child.
         macro_rules! child_bail {
@@ -313,34 +269,6 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 );
             }
         };
-
-        // Move helper into the cgroup so both helper and inner child inherit
-        // the resource limits. Uses pre-built CString path to avoid allocation.
-        // Failure is fatal: the cgroup was successfully created and the
-        // process should join it to enforce the requested resource limits.
-        if let Some(ref procs_path) = prefork.cgroup_procs_path {
-            // SAFETY: getpid has no preconditions
-            let my_pid = unsafe { libc::getpid() };
-            // Stack-based integer-to-ASCII to avoid heap allocation post-fork.
-            let mut buf = [0u8; 20];
-            let pid_bytes = itoa_stack(my_pid as u64, &mut buf);
-            // SAFETY: open() with a valid CString path
-            let fd = unsafe { libc::open(procs_path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
-            if fd < 0 {
-                let saved_errno = unsafe { *libc::__errno_location() };
-                child_bail!(err_pipe_wr, STEP_CGROUP, saved_errno);
-            }
-            // SAFETY: fd is valid, pid_bytes points into stack-allocated buf
-            let written = unsafe { libc::write(fd, pid_bytes.as_ptr().cast(), pid_bytes.len()) };
-            // Save errno before close() can clobber it.
-            // SAFETY: errno access has no preconditions
-            let write_errno = unsafe { *libc::__errno_location() };
-            // SAFETY: fd is valid
-            unsafe { libc::close(fd) };
-            if written < 0 {
-                child_bail!(err_pipe_wr, STEP_CGROUP, write_errno);
-            }
-        }
 
         // Fork again to enter the PID namespace (inner child gets PID 1 inside)
         // SAFETY: standard fork, helper is single-threaded
@@ -518,39 +446,30 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
                 waited: AtomicBool::new(false),
                 kill_style: KillStyle::Single,
             },
-            cgroup_guard,
         },
     })
 }
 
 /// A running sandboxed process on Linux.
 ///
-/// Wraps `UnixSandboxedChild` for shared lifecycle methods and adds
-/// Linux-specific cgroup cleanup. The helper PID is the target for
-/// kill/wait; the inner child dies via `PR_SET_PDEATHSIG` when the
-/// helper exits.
+/// Wraps `UnixSandboxedChild` for shared lifecycle methods. The helper
+/// PID is the target for kill/wait; the inner child dies via
+/// `PR_SET_PDEATHSIG` when the helper exits.
 pub struct LinuxSandboxedChild {
     inner: UnixSandboxedChild,
-    /// Held until drop to enforce resource limits and clean up the cgroup.
-    cgroup_guard: Option<CgroupGuard>,
 }
 
 impl LinuxSandboxedChild {
     unix::delegate_unix_child_methods!(inner);
 
     /// Kill the helper (and by extension, all namespaced descendants),
-    /// wait for it to exit, close fds, and drop the cgroup guard.
+    /// wait for it to exit, and close fds.
     ///
     /// Consumes `self`; Drop still runs but sees already-cleaned-up state.
     #[allow(clippy::unnecessary_wraps)] // Signature must match SandboxedChild::kill_and_cleanup
     pub fn kill_and_cleanup(mut self) -> crate::Result<()> {
         self.inner.close_fds();
         self.inner.kill_and_reap();
-
-        // CgroupGuard::drop handles kill + rmdir when self is dropped.
-        // Taking it here and dropping explicitly makes the ordering clear.
-        drop(self.cgroup_guard.take());
-
         Ok(())
     }
 }
@@ -612,19 +531,11 @@ pub mod test_helpers {
 mod tests {
     use super::test_helpers::{read_fd_to_string, write_fd};
     use super::*;
-    use crate::ResourceLimits;
     use crate::command::SandboxStdio;
     use std::path::PathBuf;
 
     fn test_policy(read_paths: Vec<PathBuf>) -> SandboxPolicy {
-        SandboxPolicy::new(
-            read_paths,
-            vec![],
-            vec![],
-            vec![],
-            false,
-            ResourceLimits::default(),
-        )
+        SandboxPolicy::new(read_paths, vec![], vec![], vec![], false)
     }
 
     #[test]

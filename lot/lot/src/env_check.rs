@@ -203,7 +203,6 @@ pub const DEFAULT_UNIX_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbi
 mod tests {
     use super::*;
     use crate::command::SandboxCommand;
-    use crate::policy::ResourceLimits;
 
     fn make_temp_dir() -> tempfile::TempDir {
         let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -225,7 +224,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("dummy");
@@ -255,7 +253,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("dummy");
@@ -284,7 +281,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("dummy");
@@ -308,7 +304,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("dummy");
@@ -333,7 +328,6 @@ mod tests {
             vec![],
             vec![denied.clone()],
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("dummy");
@@ -367,7 +361,6 @@ mod tests {
             vec![],
             vec![denied.clone()],
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("dummy");
@@ -510,7 +503,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("dummy");
@@ -545,7 +537,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
 
         // Relative TEMP triggers canonicalize_existing_prefix failure:

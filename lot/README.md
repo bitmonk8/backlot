@@ -1,6 +1,6 @@
 # lot
 
-Cross-platform process sandboxing for Rust. Launch child processes with restricted filesystem, network, and resource access using native OS mechanisms.
+Cross-platform process sandboxing for Rust. Launch child processes with restricted filesystem and network access using native OS mechanisms.
 
 [![crates.io](https://img.shields.io/crates/v/lot.svg)](https://crates.io/crates/lot)
 [![docs.rs](https://docs.rs/lot/badge.svg)](https://docs.rs/lot)
@@ -8,11 +8,11 @@ Cross-platform process sandboxing for Rust. Launch child processes with restrict
 
 ## Platform Mechanisms
 
-| Platform | Isolation | Resource Limits |
-|----------|-----------|-----------------|
-| Linux | User/mount/PID/net/IPC namespaces + seccomp-BPF | cgroups v2 |
-| macOS | Seatbelt (`sandbox_init` SBPL profiles) | `setrlimit` |
-| Windows | AppContainer + ACLs | Job Objects |
+| Platform | Isolation |
+|----------|-----------|
+| Linux | User/mount/PID/net/IPC namespaces + seccomp-BPF |
+| macOS | Seatbelt (`sandbox_init` SBPL profiles) |
+| Windows | AppContainer + ACLs + Job Objects |
 
 All enforcement is kernel-level. No in-process hooking, no TOCTOU races. Only the child process is sandboxed -- the caller is never restricted. Works without root/admin.
 
@@ -32,7 +32,6 @@ let policy = SandboxPolicyBuilder::new()
     .include_platform_exec_paths().expect("exec paths")
     .include_platform_lib_paths().expect("lib paths")
     .allow_network(false)
-    .max_memory_bytes(64 * 1024 * 1024) // 64 MB
     .build()
     .expect("policy invalid");
 
@@ -106,12 +105,6 @@ filesystem:
 network:
   allow: false
 
-# Resource limits. All optional -- omitted = no limit.
-limits:
-  max_memory_bytes: 536870912    # 512 MB
-  max_processes: 10
-  max_cpu_seconds: 60
-
 # Environment variables for the child process.
 environment:
   forward_common: true           # Forward PATH, HOME, USER, LANG, etc.
@@ -149,7 +142,6 @@ appcontainer=true
 job_objects=true
 namespaces=false
 seccomp=false
-cgroups_v2=false
 seatbelt=false
 ```
 
@@ -180,8 +172,6 @@ For user-owned directories, `spawn()` grants ancestor traverse ACEs automaticall
 
 ## Known Limitations
 
-- `max_cpu_seconds` is not enforced on Linux (cgroups v2 `cpu.max` controls bandwidth, not total time). Enforced on Windows and macOS.
-- `max_memory_bytes` on macOS uses `setrlimit(RLIMIT_AS)`, which limits virtual address space. On Apple Silicon, the forked child inherits a large virtual memory footprint from the parent (dyld shared cache, system frameworks), often exceeding several GB. `setrlimit` returns `EINVAL` if the requested limit is below the inherited VM size. This makes low memory limits unreliable on macOS. `spawn()` returns `SandboxError::Setup` when this happens. Linux (cgroups v2 `memory.max`) and Windows (job objects) do not have this limitation.
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (restricting it breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
 - Windows: AppContainer processes cannot access `\\.\NUL` without a one-time system fix (see above).
@@ -191,7 +181,7 @@ For user-owned directories, `spawn()` grants ancestor traverse ACEs automaticall
 ## Requirements
 
 - Rust 1.85+ (edition 2024)
-- Linux: kernel 5.15+, unprivileged user namespaces enabled, cgroups v2 with user delegation (for resource limits)
+- Linux: kernel 5.15+, unprivileged user namespaces enabled
 - macOS: Seatbelt support (all recent macOS versions)
 - Windows: Windows 10+ (AppContainer support)
 

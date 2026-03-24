@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::error::SandboxError;
-use crate::policy::{ResourceLimits, SandboxPolicy};
+use crate::policy::SandboxPolicy;
 
 /// Ergonomic builder for [`SandboxPolicy`] that handles path canonicalization,
 /// overlap deduction, and platform-specific defaults.
@@ -28,8 +28,6 @@ use crate::policy::{ResourceLimits, SandboxPolicy};
 ///     .include_platform_lib_paths().expect("lib paths")
 ///     .include_temp_dirs().expect("temp dirs")
 ///     .allow_network(false)
-///     .max_memory_bytes(128 * 1024 * 1024)
-///     .max_processes(8)
 ///     .build()
 ///     .expect("policy invalid");
 /// ```
@@ -40,7 +38,6 @@ pub struct SandboxPolicyBuilder {
     exec_paths: Vec<PathBuf>,
     deny_paths: Vec<PathBuf>,
     allow_network: bool,
-    limits: ResourceLimits,
     sentinel_dir: Option<PathBuf>,
 }
 
@@ -227,31 +224,6 @@ impl SandboxPolicyBuilder {
         self
     }
 
-    /// Set the maximum memory limit in bytes.
-    ///
-    /// **macOS caveat:** uses `setrlimit(RLIMIT_AS)`. Fails with
-    /// `SandboxError::Setup` if the limit is below the child's inherited VM
-    /// size (often >4 GB on Apple Silicon). See [`ResourceLimits::max_memory_bytes`].
-    #[must_use]
-    pub const fn max_memory_bytes(mut self, bytes: u64) -> Self {
-        self.limits.max_memory_bytes = Some(bytes);
-        self
-    }
-
-    /// Set the maximum number of child processes.
-    #[must_use]
-    pub const fn max_processes(mut self, n: u32) -> Self {
-        self.limits.max_processes = Some(n);
-        self
-    }
-
-    /// Set the maximum CPU time in seconds.
-    #[must_use]
-    pub const fn max_cpu_seconds(mut self, seconds: u64) -> Self {
-        self.limits.max_cpu_seconds = Some(seconds);
-        self
-    }
-
     /// Set a custom directory for sentinel files (Windows only).
     ///
     /// By default, sentinel files are written to `std::env::temp_dir()`.
@@ -268,7 +240,7 @@ impl SandboxPolicyBuilder {
     /// # Errors
     ///
     /// Returns [`SandboxError::InvalidPolicy`] if the resulting policy fails
-    /// validation (e.g. no paths at all, or zero resource limits).
+    /// validation (e.g. no paths at all).
     pub fn build(self) -> crate::Result<SandboxPolicy> {
         let mut policy = SandboxPolicy::new(
             self.read_paths,
@@ -276,7 +248,6 @@ impl SandboxPolicyBuilder {
             self.exec_paths,
             self.deny_paths,
             self.allow_network,
-            self.limits,
         );
         policy.sentinel_dir = self.sentinel_dir;
         policy.validate()?;
@@ -498,33 +469,6 @@ mod tests {
     }
 
     #[test]
-    fn resource_limits_set() {
-        let tmp = make_temp_dir();
-        let policy = SandboxPolicyBuilder::new()
-            .read_path(tmp.path())
-            .unwrap()
-            .max_memory_bytes(1024 * 1024)
-            .max_processes(10)
-            .max_cpu_seconds(60)
-            .build()
-            .expect("build should succeed");
-        assert_eq!(policy.limits().max_memory_bytes, Some(1024 * 1024));
-        assert_eq!(policy.limits().max_processes, Some(10));
-        assert_eq!(policy.limits().max_cpu_seconds, Some(60));
-    }
-
-    #[test]
-    fn zero_resource_limit_rejected() {
-        let tmp = make_temp_dir();
-        let result = SandboxPolicyBuilder::new()
-            .read_path(tmp.path())
-            .unwrap()
-            .max_memory_bytes(0)
-            .build();
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn empty_builder_rejected() {
         let result = SandboxPolicyBuilder::new().build();
         assert!(result.is_err());
@@ -584,7 +528,6 @@ mod tests {
             .write_path(&write_dir)
             .unwrap()
             .allow_network(false)
-            .max_memory_bytes(512 * 1024 * 1024)
             .build()
             .expect("build should succeed");
 
@@ -879,22 +822,6 @@ mod tests {
     }
 
     // ── Strengthened error assertions ──────────────────────────────
-
-    #[test]
-    fn zero_resource_limit_error_mentions_field() {
-        let tmp = make_temp_dir();
-        let result = SandboxPolicyBuilder::new()
-            .read_path(tmp.path())
-            .unwrap()
-            .max_memory_bytes(0)
-            .build();
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("max_memory_bytes"),
-            "error should name the field: {msg}"
-        );
-    }
 
     #[test]
     fn empty_builder_error_mentions_path() {

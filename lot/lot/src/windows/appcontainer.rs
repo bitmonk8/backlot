@@ -613,7 +613,7 @@ fn spawn_with_sentinel(
     try_setup!(apply_policy_acls(ac_sid, policy), "apply policy ACLs");
 
     let job = try_setup!(JobObject::new(), "create job object");
-    try_setup!(job.set_limits(policy.limits()), "set job limits");
+    try_setup!(job.configure(), "configure job object");
 
     let (cap_sids, mut capabilities) =
         try_setup!(build_capability_sids(policy), "build capability SIDs");
@@ -978,7 +978,7 @@ fn apply_policy_acls(sid: PSID, policy: &SandboxPolicy) -> crate::Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::policy::{ResourceLimits, SandboxPolicy};
+    use crate::policy::SandboxPolicy;
     use std::fs;
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -1078,7 +1078,6 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("cmd.exe");
@@ -1111,7 +1110,6 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("cmd.exe");
@@ -1144,7 +1142,6 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("cmd.exe");
@@ -1182,7 +1179,6 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("cmd.exe");
@@ -1317,7 +1313,6 @@ mod tests {
             Vec::new(),
             Vec::new(),
             false,
-            ResourceLimits::default(),
         );
 
         let mut cmd = SandboxCommand::new("cmd.exe");

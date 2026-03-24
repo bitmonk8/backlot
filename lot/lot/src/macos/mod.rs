@@ -36,7 +36,6 @@ pub const fn probe() -> PlatformCapabilities {
     PlatformCapabilities {
         namespaces: false,
         seccomp: false,
-        cgroups_v2: false,
         seatbelt: seatbelt::is_available(),
         appcontainer: false,
         job_objects: false,
@@ -46,12 +45,11 @@ pub const fn probe() -> PlatformCapabilities {
 pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<SandboxedChild> {
     // Step names are 1-indexed, matching the STEP_* constants in the child.
     const STEP_NAMES: &[&str] = &[
-        "setsid",                      // 1
-        "seatbelt (sandbox_init)",     // 2
-        "resource limits (setrlimit)", // 3
-        "dup2 (stdio)",                // 4
-        "chdir",                       // 5
-        "execve",                      // 6
+        "setsid",                  // 1
+        "seatbelt (sandbox_init)", // 2
+        "dup2 (stdio)",            // 3
+        "chdir",                   // 4
+        "execve",                  // 5
     ];
 
     let program_path = std::path::Path::new(&command.program);
@@ -98,10 +96,9 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
         // Step constants for error reporting via child_bail protocol
         const STEP_SETSID: i32 = 1;
         const STEP_SEATBELT: i32 = 2;
-        const STEP_RLIMIT: i32 = 3;
-        const STEP_DUP2: i32 = 4;
-        const STEP_CHDIR: i32 = 5;
-        const STEP_EXEC: i32 = 6;
+        const STEP_DUP2: i32 = 3;
+        const STEP_CHDIR: i32 = 4;
+        const STEP_EXEC: i32 = 5;
 
         // Macro wrapping unix::child_bail for ergonomic use in the child.
         macro_rules! child_bail {
@@ -132,16 +129,6 @@ pub fn spawn(policy: &SandboxPolicy, command: &SandboxCommand) -> Result<Sandbox
             child_bail!(
                 err_pipe_wr,
                 STEP_SEATBELT,
-                e.raw_os_error().unwrap_or(libc::EPERM)
-            );
-        }
-
-        // Apply resource limits
-        // SAFETY: single-threaded child, before exec
-        if let Err(e) = unsafe { unix::apply_resource_limits(policy) } {
-            child_bail!(
-                err_pipe_wr,
-                STEP_RLIMIT,
                 e.raw_os_error().unwrap_or(libc::EPERM)
             );
         }
@@ -265,18 +252,10 @@ impl Drop for MacosSandboxedChild {
 mod tests {
     use super::*;
     use crate::command::SandboxStdio;
-    use crate::policy::ResourceLimits;
     use std::path::PathBuf;
 
     fn test_policy(read_paths: Vec<PathBuf>) -> SandboxPolicy {
-        SandboxPolicy::new(
-            read_paths,
-            vec![],
-            vec![],
-            vec![],
-            false,
-            ResourceLimits::default(),
-        )
+        SandboxPolicy::new(read_paths, vec![], vec![], vec![], false)
     }
 
     #[test]
@@ -334,7 +313,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
         let mut cmd = SandboxCommand::new("/bin/cat");
         cmd.arg(test_file.to_str().expect("path to str"));
@@ -404,14 +382,7 @@ mod tests {
         std::fs::create_dir(&allowed).expect("create allowed dir");
         std::fs::write(&denied_file, "secret").expect("write test file");
 
-        let policy = SandboxPolicy::new(
-            vec![allowed.clone()],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            ResourceLimits::default(),
-        );
+        let policy = SandboxPolicy::new(vec![allowed.clone()], vec![], vec![], vec![], false);
 
         let mut cmd = SandboxCommand::new("/bin/cat");
         cmd.arg(denied_file.to_str().expect("path to str"));
@@ -436,7 +407,6 @@ mod tests {
             vec![PathBuf::from("/usr/bin")],
             vec![],
             true,
-            ResourceLimits::default(),
         );
         let program = std::path::PathBuf::from("/usr/bin/test");
         let profile = seatbelt::generate_profile(&policy, &program).unwrap();

@@ -91,7 +91,6 @@ mod tests {
     #[test]
     fn prerequisites_met_covers_deny_paths() {
         // Verify that the _for_policy variant includes deny paths in its check.
-        use crate::policy::ResourceLimits;
         use crate::policy::SandboxPolicy;
 
         let tmp = std::env::temp_dir();
@@ -99,14 +98,8 @@ mod tests {
         if !deny.exists() {
             std::fs::create_dir(&deny).expect("create deny test dir");
         }
-        let policy = SandboxPolicy::new(
-            vec![tmp.clone()],
-            vec![],
-            vec![],
-            vec![deny.clone()],
-            false,
-            ResourceLimits::default(),
-        );
+        let policy =
+            SandboxPolicy::new(vec![tmp.clone()], vec![], vec![], vec![deny.clone()], false);
         let via_policy = super::appcontainer_prerequisites_met_for_policy(&policy);
         // Cross-check: calling with the same paths directly should agree.
         let via_direct = appcontainer_prerequisites_met(&[tmp.as_path(), deny.as_path()]);

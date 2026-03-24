@@ -378,14 +378,7 @@ mod tests {
     use super::*;
 
     fn empty_policy(allow_network: bool) -> SandboxPolicy {
-        SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            allow_network,
-            crate::ResourceLimits::default(),
-        )
+        SandboxPolicy::new(vec![], vec![], vec![], vec![], allow_network)
     }
 
     #[test]

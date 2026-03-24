@@ -251,7 +251,6 @@ fn cmd_probe() -> ExitCode {
     println!("job_objects={}", caps.job_objects);
     println!("namespaces={}", caps.namespaces);
     println!("seccomp={}", caps.seccomp);
-    println!("cgroups_v2={}", caps.cgroups_v2);
     println!("seatbelt={}", caps.seatbelt);
     ExitCode::SUCCESS
 }

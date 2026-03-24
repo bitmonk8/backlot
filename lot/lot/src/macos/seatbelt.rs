@@ -365,7 +365,7 @@ pub fn apply_profile(profile: &str) -> io::Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::policy::{ResourceLimits, SandboxPolicy};
+    use crate::policy::SandboxPolicy;
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     use std::path::PathBuf;
@@ -381,7 +381,6 @@ mod tests {
             vec![PathBuf::from("/opt/mybin")],
             Vec::new(),
             false,
-            ResourceLimits::default(),
         )
     }
 
@@ -396,7 +395,6 @@ mod tests {
             vec![PathBuf::from("/opt/mybin")],
             vec![PathBuf::from("/tmp/test_read/secret")],
             false,
-            ResourceLimits::default(),
         )
     }
 
@@ -495,7 +493,6 @@ mod tests {
             policy.exec_paths().to_vec(),
             policy.deny_paths().to_vec(),
             true,
-            policy.limits().clone(),
         );
         let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(allow network*)"));
@@ -506,14 +503,7 @@ mod tests {
 
     #[test]
     fn profile_empty_paths() {
-        let policy = SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            ResourceLimits::default(),
-        );
+        let policy = SandboxPolicy::new(vec![], vec![], vec![], vec![], false);
         let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
@@ -556,7 +546,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
         // /a, /a/b, /a/b/c — but not "/" and not the path itself
@@ -575,7 +564,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
         // /a and /a/b appear once each despite shared ancestry
@@ -603,7 +591,6 @@ mod tests {
             vec![],
             vec![],
             false,
-            ResourceLimits::default(),
         );
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
         // /usr and /usr/local are in METADATA_SYSTEM_PATHS, so excluded
@@ -615,14 +602,7 @@ mod tests {
 
     #[test]
     fn ancestor_dirs_empty_policy() {
-        let policy = SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            ResourceLimits::default(),
-        );
+        let policy = SandboxPolicy::new(vec![], vec![], vec![], vec![], false);
         // Program path /usr/bin/true still contributes /usr/bin as ancestor
         // (/usr is excluded via METADATA_SYSTEM_PATHS).
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
@@ -717,7 +697,6 @@ mod tests {
                 PathBuf::from("/tmp/test_write/private"),
             ],
             false,
-            ResourceLimits::default(),
         );
         let profile = generate_profile(&policy, &test_program()).unwrap();
         for op in &[
@@ -743,7 +722,6 @@ mod tests {
             vec![PathBuf::from("/opt/mybin")],
             vec![PathBuf::from("/tmp/test_write/private")],
             false,
-            ResourceLimits::default(),
         );
         let profile = generate_profile(&policy, &test_program()).unwrap();
 
@@ -769,7 +747,7 @@ mod tests {
         exec: Vec<PathBuf>,
         deny: Vec<PathBuf>,
     ) {
-        let policy = SandboxPolicy::new(read, write, exec, deny, false, ResourceLimits::default());
+        let policy = SandboxPolicy::new(read, write, exec, deny, false);
         let err = generate_profile(&policy, &test_program()).unwrap_err();
         assert!(
             matches!(err, SandboxError::Setup(_)),
@@ -813,14 +791,7 @@ mod tests {
 
     #[test]
     fn generate_profile_errors_on_non_utf8_program_path() {
-        let policy = SandboxPolicy::new(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            ResourceLimits::default(),
-        );
+        let policy = SandboxPolicy::new(vec![], vec![], vec![], vec![], false);
         let err = generate_profile(&policy, &bad_utf8_path()).unwrap_err();
         assert!(
             matches!(err, SandboxError::Setup(_)),
@@ -840,14 +811,7 @@ mod tests {
     #[test]
     fn generate_profile_errors_on_null_byte_path() {
         let null_path = PathBuf::from("/tmp/has\0null");
-        let policy = SandboxPolicy::new(
-            vec![null_path],
-            vec![],
-            vec![],
-            vec![],
-            false,
-            ResourceLimits::default(),
-        );
+        let policy = SandboxPolicy::new(vec![null_path], vec![], vec![], vec![], false);
         let err = generate_profile(&policy, &test_program()).unwrap_err();
         assert!(
             matches!(err, SandboxError::Setup(_)),
@@ -994,7 +958,6 @@ mod tests {
             vec![],
             vec![PathBuf::from("/tmp/test_read/secret/deep")],
             false,
-            ResourceLimits::default(),
         );
         let ancestors = collect_ancestor_dirs(&policy, &test_program());
         // /tmp/test_read/secret should NOT appear since deny paths don't
@@ -1014,7 +977,6 @@ mod tests {
             bp.exec_paths().to_vec(),
             bp.deny_paths().to_vec(),
             true,
-            bp.limits().clone(),
         );
         let profile = generate_profile(&policy, &test_program()).unwrap();
         let ancestor_pos = profile.find("(allow file-read-metadata (literal \"/opt\"))");

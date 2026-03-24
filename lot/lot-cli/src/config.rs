@@ -10,8 +10,6 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
-    pub limits: LimitsConfig,
-    #[serde(default)]
     pub environment: EnvironmentConfig,
     #[serde(default)]
     pub process: ProcessConfig,
@@ -39,14 +37,6 @@ pub struct FilesystemConfig {
 pub struct NetworkConfig {
     #[serde(default)]
     pub allow: bool,
-}
-
-#[allow(clippy::struct_field_names)]
-#[derive(serde::Deserialize, Default)]
-pub struct LimitsConfig {
-    pub max_memory_bytes: Option<u64>,
-    pub max_processes: Option<u32>,
-    pub max_cpu_seconds: Option<u64>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -88,16 +78,6 @@ pub fn build_policy(config: &SandboxConfig) -> lot::Result<lot::SandboxPolicy> {
     }
 
     builder = builder.allow_network(config.network.allow);
-
-    if let Some(bytes) = config.limits.max_memory_bytes {
-        builder = builder.max_memory_bytes(bytes);
-    }
-    if let Some(n) = config.limits.max_processes {
-        builder = builder.max_processes(n);
-    }
-    if let Some(secs) = config.limits.max_cpu_seconds {
-        builder = builder.max_cpu_seconds(secs);
-    }
 
     builder.build()
 }
@@ -172,46 +152,10 @@ mod tests {
     }
 
     #[test]
-    fn build_policy_limits_wired() {
-        let tmp = make_temp_dir();
-        let config = SandboxConfig {
-            filesystem: FilesystemConfig {
-                read: vec![tmp.path().to_path_buf()],
-                ..FilesystemConfig::default()
-            },
-            limits: LimitsConfig {
-                max_memory_bytes: Some(1_048_576),
-                max_processes: Some(10),
-                max_cpu_seconds: Some(30),
-            },
-            ..SandboxConfig::default()
-        };
-        let policy = build_policy(&config).expect("build_policy should succeed");
-        assert_eq!(policy.limits().max_memory_bytes, Some(1_048_576));
-        assert_eq!(policy.limits().max_processes, Some(10));
-        assert_eq!(policy.limits().max_cpu_seconds, Some(30));
-    }
-
-    #[test]
     fn config_deserialization_minimal() {
         let yaml = "filesystem:\n  read:\n    - .\n";
         let config: Result<SandboxConfig, _> = serde_yml::from_str(yaml);
         assert!(config.is_ok(), "minimal YAML should deserialize");
-    }
-
-    #[test]
-    fn config_deserialization_with_limits() {
-        let yaml = r"
-filesystem:
-  read:
-    - .
-limits:
-  max_memory_bytes: 1048576
-  max_processes: 10
-";
-        let config: SandboxConfig = serde_yml::from_str(yaml).expect("parse YAML");
-        assert_eq!(config.limits.max_memory_bytes, Some(1_048_576));
-        assert_eq!(config.limits.max_processes, Some(10));
     }
 
     #[test]
@@ -231,10 +175,6 @@ filesystem:
   include_temp: true
 network:
   allow: true
-limits:
-  max_memory_bytes: 1048576
-  max_processes: 10
-  max_cpu_seconds: 30
 environment:
   forward_common: true
   vars:
@@ -251,9 +191,6 @@ process:
         assert!(config.filesystem.include_platform_lib);
         assert!(config.filesystem.include_temp);
         assert!(config.network.allow);
-        assert_eq!(config.limits.max_memory_bytes, Some(1_048_576));
-        assert_eq!(config.limits.max_processes, Some(10));
-        assert_eq!(config.limits.max_cpu_seconds, Some(30));
         assert!(config.environment.forward_common);
         assert_eq!(
             config.environment.vars.get("FOO").map(String::as_str),

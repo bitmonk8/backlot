@@ -5,11 +5,11 @@
 //!
 //! # Supported platforms
 //!
-//! | Platform | Isolation | Resource Limits |
-//! |----------|-----------|-----------------|
-//! | Linux | User/mount/PID/net/IPC namespaces + seccomp-BPF | cgroups v2 |
-//! | macOS | Seatbelt (`sandbox_init` SBPL profiles) | `setrlimit` |
-//! | Windows | AppContainer + ACLs | Job Objects |
+//! | Platform | Isolation |
+//! |----------|-----------|
+//! | Linux | User/mount/PID/net/IPC namespaces + seccomp-BPF |
+//! | macOS | Seatbelt (`sandbox_init` SBPL profiles) |
+//! | Windows | AppContainer + ACLs + Job Objects |
 //!
 //! # Quick start
 //!
@@ -20,7 +20,6 @@
 //!     .include_platform_exec_paths().expect("exec paths")
 //!     .include_platform_lib_paths().expect("lib paths")
 //!     .allow_network(false)
-//!     .max_memory_bytes(64 * 1024 * 1024)
 //!     .build()
 //!     .expect("policy invalid");
 //!
@@ -76,7 +75,7 @@ mod windows;
 
 pub use command::{SandboxCommand, SandboxStdio};
 pub use error::SandboxError;
-pub use policy::{ResourceLimits, SandboxPolicy};
+pub use policy::SandboxPolicy;
 pub use policy_builder::SandboxPolicyBuilder;
 
 /// Result type for sandbox operations.
@@ -91,8 +90,6 @@ pub struct PlatformCapabilities {
     pub namespaces: bool,
     /// Linux: seccomp-BPF available.
     pub seccomp: bool,
-    /// Linux: cgroups v2 delegation available for the current user.
-    pub cgroups_v2: bool,
     /// macOS: Seatbelt (`sandbox_init`) available.
     pub seatbelt: bool,
     /// Windows: `AppContainer` available.
@@ -133,7 +130,6 @@ pub fn probe() -> PlatformCapabilities {
     return PlatformCapabilities {
         namespaces: false,
         seccomp: false,
-        cgroups_v2: false,
         seatbelt: false,
         appcontainer: false,
         job_objects: false,
@@ -288,8 +284,8 @@ pub fn appcontainer_prerequisites_met_for_policy(_policy: &SandboxPolicy) -> boo
 /// A running sandboxed process.
 ///
 /// Created by [`spawn()`]. Dropping the handle performs platform-specific
-/// cleanup (ACL restoration on Windows, cgroup removal on Linux, process
-/// group termination on macOS).
+/// cleanup (ACL restoration on Windows, helper process kill+reap on Linux,
+/// process group termination on macOS).
 pub struct SandboxedChild {
     #[cfg(target_os = "windows")]
     inner: windows::WindowsSandboxedChild,
@@ -551,7 +547,6 @@ mod tests {
             .read_path(tmp.path())
             .expect("read_path")
             .allow_network(false)
-            .max_memory_bytes(256 * 1024 * 1024)
             .build()
             .expect("build via builder should succeed on Windows");
 
@@ -561,7 +556,6 @@ mod tests {
             .expect("builder-produced policy must validate");
         assert!(!policy.read_paths().is_empty());
         assert!(!policy.allow_network());
-        assert_eq!(policy.limits().max_memory_bytes, Some(256 * 1024 * 1024));
     }
 
     /// PID 0 must be silently rejected. Reaching the end of this test
