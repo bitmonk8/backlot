@@ -121,9 +121,8 @@ Repeated identical patterns across platform backends that could be extracted.
 
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
-| 47 | Doc-Mismatch | docs/DESIGN.md | 250-262 | NON-CRITICAL | Graceful Degradation table missing `Unsupported`, `Timeout`, and `Io` error variants. |
+| 47 | Doc-Mismatch | docs/DESIGN.md | 250-262 | NIT | Graceful Degradation table missing `Unsupported` error variant (returned when platform lacks a required mechanism). `Timeout` and `Io` are runtime/generic errors, not degradation scenarios — correctly excluded. |
 | 48 | Doc-Mismatch | lot/src/policy_builder.rs | 13-19, 83-84 | NIT | `read_path()` doc says "same-or-lower privilege sets" (plural), but read is the lowest — only read set affected. Vacuously true. |
-| 49 | Doc-Mismatch | docs/DESIGN.md | 13 | NIT | Describes `policy_builder.rs` as "auto-canonicalization, platform defaults" but omits overlap deduction. |
 
 ---
 

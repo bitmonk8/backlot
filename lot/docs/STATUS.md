@@ -6,11 +6,11 @@
 
 ## Issues (2026-03-24)
 
-New audit completed. 93 active findings across 21 groups in `docs/ISSUES.md` (14 false positives removed).
+New audit completed. 92 active findings across 21 groups in `docs/ISSUES.md` (15 false positives removed).
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (31):** Groups 3–4, 7–8, 11–12, 14–15 — silent cleanup failures, missing test coverage, weak assertions, separation of concerns, placement
-- **NIT (62):** Groups 1–2, 5–6, 9–10, 13, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, test helper error handling, duplication/simplification, naming, test boilerplate, doc mismatches, architectural cleanup
+- **NON-CRITICAL (30):** Groups 3–4, 7–8, 11, 14–15 — silent cleanup failures, missing test coverage, weak assertions, separation of concerns, placement
+- **NIT (62):** Groups 1–2, 5–6, 9–10, 12–13, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, test helper error handling, duplication/simplification, naming, test boilerplate, doc mismatches, architectural cleanup
 
 Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 
@@ -35,6 +35,9 @@ Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 - **Group 8 item #39 downgraded NIT:** All three env var keys (`TEMP`, `TMP`, `TMPDIR`) share identical handling in a trivial loop.
 - **Group 9 #40 downgraded NIT:** `fork_with_seccomp` is a test helper, not production seccomp code. SIGSYS would not go unnoticed — child can't write "OK" to pipe, so test assertion fails. Group description corrected to remove misleading "seccomp enforcement" framing.
 - **Group 10 #42, #43, #44 downgraded NIT:** All three are minor code hygiene simplifications in small functions. Three explicit mount loops (~7 lines each) are clear; five `.map_err` calls are repetitive but trivial; `has_writable_delegation` duplication is minor in a ~30-line function.
+- **Group 11 #46 confirmed NON-CRITICAL:** Both `set_rlimit` and `apply_resource_limits` are `#[cfg(target_os = "macos")]` and only called from `macos/mod.rs`. Placement issue is real.
+- **Group 12 #47 downgraded NIT:** Only `Unsupported` variant is relevant to Graceful Degradation (mechanism unavailability). `Timeout` and `Io` are runtime/generic errors — correctly excluded from that table. Description corrected.
+- **Group 12 #49 removed (false positive):** DESIGN.md line 13 is a terse directory-listing comment. Overlap deduction is documented in source code (policy_builder.rs lines 7-19). Not a doc mismatch.
 
 ## CI Notes
 
