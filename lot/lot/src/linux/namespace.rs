@@ -327,20 +327,24 @@ fn mkdir_p(path: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Mount tmpfs at the given path.
-fn mount_tmpfs(target: &str) -> io::Result<()> {
+/// Mount a tmpfs at `target` with the given flags and optional mount data.
+fn mount_tmpfs_with(target: &str, flags: libc::c_ulong, data: Option<&str>) -> io::Result<()> {
     let c_target = to_cstring(target)?;
     let c_fstype = to_cstring("tmpfs")?;
     let c_source = to_cstring("tmpfs")?;
+    let c_data = data.map(to_cstring).transpose()?;
+    let data_ptr = c_data
+        .as_ref()
+        .map_or(std::ptr::null(), |c| c.as_ptr().cast());
 
-    // SAFETY: all pointers are valid CStrings, flags are standard
+    // SAFETY: all pointers are valid CStrings with lifetimes covering this call
     let rc = unsafe {
         libc::mount(
             c_source.as_ptr(),
             c_target.as_ptr(),
             c_fstype.as_ptr(),
-            libc::MS_NOSUID | libc::MS_NODEV,
-            std::ptr::null(),
+            flags,
+            data_ptr,
         )
     };
     if rc != 0 {
@@ -349,28 +353,19 @@ fn mount_tmpfs(target: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Mount tmpfs at the given path.
+fn mount_tmpfs(target: &str) -> io::Result<()> {
+    mount_tmpfs_with(target, libc::MS_NOSUID | libc::MS_NODEV, None)
+}
+
 /// Mount an empty read-only tmpfs at the given path. Used to mask deny paths
 /// so the subtree appears as an inaccessible empty directory.
 fn mount_empty_tmpfs(target: &str) -> io::Result<()> {
-    let c_target = to_cstring(target)?;
-    let c_fstype = to_cstring("tmpfs")?;
-    let c_source = to_cstring("tmpfs")?;
-    let c_opts = to_cstring("size=0")?;
-
-    // SAFETY: all pointers are valid CStrings, flags make the mount read-only
-    let rc = unsafe {
-        libc::mount(
-            c_source.as_ptr(),
-            c_target.as_ptr(),
-            c_fstype.as_ptr(),
-            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
-            c_opts.as_ptr().cast(),
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    mount_tmpfs_with(
+        target,
+        libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        Some("size=0"),
+    )
 }
 
 /// Set mount propagation to private so pivot_root works.

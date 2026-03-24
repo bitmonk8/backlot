@@ -102,35 +102,28 @@ fn hresult_to_io(hr: HRESULT) -> io::Error {
 fn create_profile() -> io::Result<(String, PSID)> {
     let name = unique_profile_name();
     let wide_name = to_wide(&name);
-    let display = to_wide(&name);
     let desc = to_wide("lot sandbox");
     let mut sid: PSID = std::ptr::null_mut();
 
-    // SAFETY: Valid wide strings and pointer for output SID.
-    let hr = unsafe {
-        CreateAppContainerProfile(
-            wide_name.as_ptr(),
-            display.as_ptr(),
-            desc.as_ptr(),
-            std::ptr::null(),
-            0,
-            &raw mut sid,
-        )
-    };
-
-    if hr == E_ALREADY_EXISTS {
-        delete_profile(&name)?;
-        // SAFETY: Retrying after deleting stale profile.
-        let hr2 = unsafe {
+    let call_create = |sid: &mut PSID| -> HRESULT {
+        // SAFETY: Valid wide strings and pointer for output SID.
+        unsafe {
             CreateAppContainerProfile(
                 wide_name.as_ptr(),
-                display.as_ptr(),
+                wide_name.as_ptr(),
                 desc.as_ptr(),
                 std::ptr::null(),
                 0,
-                &raw mut sid,
+                &raw mut *sid,
             )
-        };
+        }
+    };
+
+    let hr = call_create(&mut sid);
+
+    if hr == E_ALREADY_EXISTS {
+        delete_profile(&name)?;
+        let hr2 = call_create(&mut sid);
         if hr2 != 0 {
             return Err(hresult_to_io(hr2));
         }
@@ -306,14 +299,9 @@ impl WindowsSandboxedChild {
         Ok(())
     }
 
-    pub fn wait(&self) -> io::Result<std::process::ExitStatus> {
+    /// Retrieve the exit code of a process that has already signaled completion.
+    fn exit_status(&self) -> io::Result<std::process::ExitStatus> {
         use std::os::windows::process::ExitStatusExt;
-
-        // SAFETY: process_handle is valid. 0xFFFF_FFFF = INFINITE.
-        let wait = unsafe { WaitForSingleObject(self.process_handle, 0xFFFF_FFFF) };
-        if wait != WAIT_OBJECT_0 {
-            return Err(io::Error::last_os_error());
-        }
 
         let mut exit_code: u32 = 0;
         // SAFETY: Process has exited; exit code is available.
@@ -321,13 +309,19 @@ impl WindowsSandboxedChild {
         if ret == FALSE {
             return Err(io::Error::last_os_error());
         }
-
         Ok(std::process::ExitStatus::from_raw(exit_code))
     }
 
-    pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
-        use std::os::windows::process::ExitStatusExt;
+    pub fn wait(&self) -> io::Result<std::process::ExitStatus> {
+        // SAFETY: process_handle is valid. 0xFFFF_FFFF = INFINITE.
+        let wait = unsafe { WaitForSingleObject(self.process_handle, 0xFFFF_FFFF) };
+        if wait != WAIT_OBJECT_0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.exit_status()
+    }
 
+    pub fn try_wait(&self) -> io::Result<Option<std::process::ExitStatus>> {
         // SAFETY: process_handle is valid. Timeout=0 for non-blocking.
         let wait = unsafe { WaitForSingleObject(self.process_handle, 0) };
         if wait == WAIT_TIMEOUT {
@@ -336,15 +330,7 @@ impl WindowsSandboxedChild {
         if wait != WAIT_OBJECT_0 {
             return Err(io::Error::last_os_error());
         }
-
-        let mut exit_code: u32 = 0;
-        // SAFETY: Process has exited.
-        let ret = unsafe { GetExitCodeProcess(self.process_handle, &raw mut exit_code) };
-        if ret == FALSE {
-            return Err(io::Error::last_os_error());
-        }
-
-        Ok(Some(std::process::ExitStatus::from_raw(exit_code)))
+        self.exit_status().map(Some)
     }
 
     pub fn wait_with_output(mut self) -> io::Result<std::process::Output> {
@@ -654,15 +640,21 @@ fn spawn_with_sentinel(
     // exist yet.
     let (child_stdin, parent_stdin) = try_setup!(resolve_stdio_input(command.stdin), "stdin pipe");
 
+    // Helper: close already-resolved handles on error before StdioPipes exists.
+    let cleanup_on_err = |specs_and_handles: &[(SandboxStdio, HANDLE, Option<HANDLE>)]| {
+        for &(spec, child, parent) in specs_and_handles {
+            if spec != SandboxStdio::Inherit {
+                close_handle_if_valid(child);
+            }
+            close_optional_handle(parent);
+        }
+    };
+
     let (child_stdout, parent_stdout) =
         match resolve_stdio_output(command.stdout, STD_OUTPUT_HANDLE) {
             Ok(v) => v,
             Err(e) => {
-                // Clean up stdin handles before returning.
-                if command.stdin != SandboxStdio::Inherit {
-                    close_handle_if_valid(child_stdin);
-                }
-                close_optional_handle(parent_stdin);
+                cleanup_on_err(&[(command.stdin, child_stdin, parent_stdin)]);
                 return Err((sentinel, SandboxError::Setup(format!("stdout pipe: {e}"))));
             }
         };
@@ -671,15 +663,10 @@ fn spawn_with_sentinel(
     {
         Ok(v) => v,
         Err(e) => {
-            // Clean up stdin and stdout handles before returning.
-            if command.stdin != SandboxStdio::Inherit {
-                close_handle_if_valid(child_stdin);
-            }
-            close_optional_handle(parent_stdin);
-            if command.stdout != SandboxStdio::Inherit {
-                close_handle_if_valid(child_stdout);
-            }
-            close_optional_handle(parent_stdout);
+            cleanup_on_err(&[
+                (command.stdin, child_stdin, parent_stdin),
+                (command.stdout, child_stdout, parent_stdout),
+            ]);
             return Err((sentinel, SandboxError::Setup(format!("stderr pipe: {e}"))));
         }
     };

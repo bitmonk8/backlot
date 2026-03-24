@@ -107,9 +107,16 @@ pub fn build_policy(config: &SandboxConfig) -> lot::Result<lot::SandboxPolicy> {
 mod tests {
     use super::*;
 
+    fn make_temp_dir() -> tempfile::TempDir {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        tempfile::TempDir::new_in(workspace.join("test_tmp")).expect("failed to create temp dir")
+    }
+
     #[test]
     fn build_policy_minimal_config() {
-        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let tmp = make_temp_dir();
         let config = SandboxConfig {
             filesystem: FilesystemConfig {
                 read: vec![tmp.path().to_path_buf()],
@@ -130,7 +137,7 @@ mod tests {
 
     #[test]
     fn build_policy_write_path_wired() {
-        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let tmp = make_temp_dir();
         let config = SandboxConfig {
             filesystem: FilesystemConfig {
                 read: vec![tmp.path().to_path_buf()],
@@ -149,7 +156,7 @@ mod tests {
 
     #[test]
     fn build_policy_network_wired() {
-        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let tmp = make_temp_dir();
         let config = SandboxConfig {
             filesystem: FilesystemConfig {
                 read: vec![tmp.path().to_path_buf()],
@@ -164,7 +171,7 @@ mod tests {
 
     #[test]
     fn build_policy_limits_wired() {
-        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let tmp = make_temp_dir();
         let config = SandboxConfig {
             filesystem: FilesystemConfig {
                 read: vec![tmp.path().to_path_buf()],
@@ -251,5 +258,105 @@ process:
             Some("bar")
         );
         assert!(config.process.cwd.is_some());
+    }
+
+    #[test]
+    fn build_policy_exec_path_wired() {
+        let tmp = make_temp_dir();
+        let config = SandboxConfig {
+            filesystem: FilesystemConfig {
+                read: vec![tmp.path().to_path_buf()],
+                exec: vec![tmp.path().to_path_buf()],
+                ..FilesystemConfig::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let policy = build_policy(&config).expect("build_policy should succeed");
+        let canon = std::fs::canonicalize(tmp.path()).expect("canonicalize temp dir");
+        assert!(
+            policy.exec_paths().contains(&canon),
+            "policy exec_paths should contain the canonicalized temp dir"
+        );
+    }
+
+    #[test]
+    fn build_policy_deny_path_wired() {
+        let tmp = make_temp_dir();
+        let deny_dir = tmp.path().join("denied");
+        std::fs::create_dir_all(&deny_dir).expect("create deny subdir");
+        let config = SandboxConfig {
+            filesystem: FilesystemConfig {
+                read: vec![tmp.path().to_path_buf()],
+                deny: vec![deny_dir.clone()],
+                ..FilesystemConfig::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let policy = build_policy(&config).expect("build_policy should succeed");
+        let deny_canon = std::fs::canonicalize(&deny_dir).expect("canonicalize deny dir");
+        assert!(
+            policy.deny_paths().contains(&deny_canon),
+            "policy deny_paths should contain the canonicalized deny dir"
+        );
+    }
+
+    #[test]
+    fn build_policy_include_platform_exec_wired() {
+        let tmp = make_temp_dir();
+        let config = SandboxConfig {
+            filesystem: FilesystemConfig {
+                read: vec![tmp.path().to_path_buf()],
+                include_platform_exec: true,
+                ..FilesystemConfig::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let policy = build_policy(&config).expect("build_policy should succeed");
+        // Platform exec paths add entries on Unix; on Windows exec_paths may be
+        // empty (AppContainer inherits system binary access), but policy builds OK.
+        #[cfg(unix)]
+        assert!(
+            !policy.exec_paths().is_empty(),
+            "include_platform_exec should add exec paths on Unix"
+        );
+        let _ = &policy;
+    }
+
+    #[test]
+    fn build_policy_include_platform_lib_wired() {
+        let tmp = make_temp_dir();
+        let config = SandboxConfig {
+            filesystem: FilesystemConfig {
+                read: vec![tmp.path().to_path_buf()],
+                include_platform_lib: true,
+                ..FilesystemConfig::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let policy = build_policy(&config).expect("build_policy should succeed");
+        assert!(
+            !policy.read_paths().is_empty(),
+            "include_platform_lib should ensure read_paths is non-empty"
+        );
+    }
+
+    #[test]
+    fn build_policy_include_temp_wired() {
+        let tmp = make_temp_dir();
+        let config = SandboxConfig {
+            filesystem: FilesystemConfig {
+                read: vec![tmp.path().to_path_buf()],
+                include_temp: true,
+                ..FilesystemConfig::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let policy = build_policy(&config).expect("build_policy should succeed");
+        let temp_canon =
+            std::fs::canonicalize(std::env::temp_dir()).expect("canonicalize temp dir");
+        assert!(
+            policy.write_paths().iter().any(|p| p == &temp_canon),
+            "include_temp should add system temp dir to write_paths"
+        );
     }
 }

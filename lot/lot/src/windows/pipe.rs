@@ -99,45 +99,30 @@ fn open_nul_device(read: bool) -> io::Result<HANDLE> {
     Ok(handle)
 }
 
-pub fn resolve_stdio_input(spec: SandboxStdio) -> io::Result<(HANDLE, Option<HANDLE>)> {
-    match spec {
-        SandboxStdio::Null => {
-            let handle = open_nul_device(true)?;
-            Ok((handle, None))
-        }
-        SandboxStdio::Inherit => {
-            // SAFETY: Querying the current process's stdin handle.
-            let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-            if handle == INVALID_HANDLE_VALUE {
-                return Err(io::Error::last_os_error());
-            }
-            if handle.is_null() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "no stdin handle available",
-                ));
-            }
-            Ok((handle, None))
-        }
-        SandboxStdio::Piped => {
-            let (read, write) = create_pipe()?.into_parts();
-            // Child reads from read end, parent writes to write end.
-            Ok((read, Some(write)))
-        }
-    }
+/// Whether the child side of the pipe is the reader or writer.
+#[derive(Clone, Copy)]
+enum StdioDirection {
+    /// Child reads (stdin): NUL opened for read, pipe read-end goes to child.
+    Input,
+    /// Child writes (stdout/stderr): NUL opened for write, pipe write-end goes to child.
+    Output,
 }
 
-pub fn resolve_stdio_output(
+/// Resolve a stdio spec into (child_handle, optional_parent_handle).
+/// `std_handle_id` is the `STD_*_HANDLE` constant for the Inherit case.
+fn resolve_stdio(
     spec: SandboxStdio,
     std_handle_id: u32,
+    direction: StdioDirection,
 ) -> io::Result<(HANDLE, Option<HANDLE>)> {
     match spec {
         SandboxStdio::Null => {
-            let handle = open_nul_device(false)?;
+            let is_read = matches!(direction, StdioDirection::Input);
+            let handle = open_nul_device(is_read)?;
             Ok((handle, None))
         }
         SandboxStdio::Inherit => {
-            // SAFETY: Querying the current process's stdout/stderr handle.
+            // SAFETY: Querying the current process's std handle.
             let handle = unsafe { GetStdHandle(std_handle_id) };
             if handle == INVALID_HANDLE_VALUE {
                 return Err(io::Error::last_os_error());
@@ -145,17 +130,30 @@ pub fn resolve_stdio_output(
             if handle.is_null() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    "no stdout/stderr handle available",
+                    "no stdio handle available",
                 ));
             }
             Ok((handle, None))
         }
         SandboxStdio::Piped => {
             let (read, write) = create_pipe()?.into_parts();
-            // Child writes to write end, parent reads from read end.
-            Ok((write, Some(read)))
+            match direction {
+                StdioDirection::Input => Ok((read, Some(write))),
+                StdioDirection::Output => Ok((write, Some(read))),
+            }
         }
     }
+}
+
+pub fn resolve_stdio_input(spec: SandboxStdio) -> io::Result<(HANDLE, Option<HANDLE>)> {
+    resolve_stdio(spec, STD_INPUT_HANDLE, StdioDirection::Input)
+}
+
+pub fn resolve_stdio_output(
+    spec: SandboxStdio,
+    std_handle_id: u32,
+) -> io::Result<(HANDLE, Option<HANDLE>)> {
+    resolve_stdio(spec, std_handle_id, StdioDirection::Output)
 }
 
 pub fn close_handle_if_valid(h: HANDLE) {
@@ -237,7 +235,7 @@ impl Drop for StdioPipes {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -354,5 +352,67 @@ mod tests {
         assert!(!child.is_null());
         assert!(parent.is_none(), "Null mode should have no parent handle");
         close_handle_if_valid(child);
+    }
+
+    #[test]
+    fn input_pipe_direction_parent_writes_child_reads() {
+        use std::io::{Read, Write};
+        use std::os::windows::io::FromRawHandle;
+
+        let (child_handle, parent_handle) = resolve_stdio_input(SandboxStdio::Piped).unwrap();
+        let parent_handle = parent_handle.expect("Piped input must have parent handle");
+
+        // SAFETY: parent_handle is the write end from resolve_stdio_input,
+        // ownership transfers to File which will close it on drop.
+        let mut parent_file = unsafe {
+            std::fs::File::from_raw_handle(parent_handle as std::os::windows::io::RawHandle)
+        };
+        // SAFETY: child_handle is the read end from resolve_stdio_input,
+        // ownership transfers to File which will close it on drop.
+        let mut child_file = unsafe {
+            std::fs::File::from_raw_handle(child_handle as std::os::windows::io::RawHandle)
+        };
+
+        let msg = b"direction_test";
+        parent_file.write_all(msg).expect("write to parent handle");
+        drop(parent_file);
+
+        let mut buf = Vec::new();
+        child_file
+            .read_to_end(&mut buf)
+            .expect("read from child handle");
+        assert_eq!(buf, msg);
+    }
+
+    #[test]
+    fn output_pipe_direction_child_writes_parent_reads() {
+        use std::io::{Read, Write};
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
+
+        let (child_handle, parent_handle) =
+            resolve_stdio_output(SandboxStdio::Piped, STD_OUTPUT_HANDLE).unwrap();
+        let parent_handle = parent_handle.expect("Piped output must have parent handle");
+
+        // SAFETY: child_handle is the write end from resolve_stdio_output,
+        // ownership transfers to File which will close it on drop.
+        let mut child_file = unsafe {
+            std::fs::File::from_raw_handle(child_handle as std::os::windows::io::RawHandle)
+        };
+        // SAFETY: parent_handle is the read end from resolve_stdio_output,
+        // ownership transfers to File which will close it on drop.
+        let mut parent_file = unsafe {
+            std::fs::File::from_raw_handle(parent_handle as std::os::windows::io::RawHandle)
+        };
+
+        let msg = b"output_dir_test";
+        child_file.write_all(msg).expect("write to child handle");
+        drop(child_file);
+
+        let mut buf = Vec::new();
+        parent_file
+            .read_to_end(&mut buf)
+            .expect("read from parent handle");
+        assert_eq!(buf, msg);
     }
 }

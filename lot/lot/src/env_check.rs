@@ -89,32 +89,39 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
     for key in &["TEMP", "TMP", "TMPDIR"] {
         if let Some(val) = resolve_env_value(command, key) {
             let dir = Path::new(&val);
-            if !dir.as_os_str().is_empty()
-                && !is_dir_accessible(dir, &canon_write_paths, &[], &canon_deny)
-            {
-                // Distinguish deny-covered from uncovered for actionable diagnostics.
-                let Ok(resolved) = canonicalize_existing_prefix(dir) else {
-                    errors.push(format!(
-                        "{key}={} could not be resolved and will likely be inaccessible \
-                         at runtime. Either ensure it exists or override it with \
-                         SandboxCommand::env(\"{key}\", <an accessible path>)",
-                        dir.display()
-                    ));
-                    continue;
-                };
-                if is_denied(&resolved, &canon_deny) {
-                    errors.push(format!(
-                        "{key}={} is under a deny_path and will be inaccessible at runtime. \
-                         Override it with SandboxCommand::env(\"{key}\", <a non-denied path>)",
-                        dir.display()
-                    ));
-                } else {
-                    errors.push(format!(
-                        "{key}={} is not covered by any write_path in the policy. \
-                         Either add it as a write_path or override it with \
-                         SandboxCommand::env(\"{key}\", <a granted path>)",
-                        dir.display()
-                    ));
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            // Canonicalize once; reuse for both the accessibility check and diagnostics.
+            let resolved = canonicalize_existing_prefix(dir);
+            let accessible = resolved.as_ref().is_ok_and(|r| {
+                !is_denied(r, &canon_deny) && canon_write_paths.iter().any(|g| r.starts_with(g))
+            });
+            if !accessible {
+                match resolved {
+                    Err(_) => {
+                        errors.push(format!(
+                            "{key}={} could not be resolved and will likely be inaccessible \
+                             at runtime. Either ensure it exists or override it with \
+                             SandboxCommand::env(\"{key}\", <an accessible path>)",
+                            dir.display()
+                        ));
+                    }
+                    Ok(ref r) if is_denied(r, &canon_deny) => {
+                        errors.push(format!(
+                            "{key}={} is under a deny_path and will be inaccessible at runtime. \
+                             Override it with SandboxCommand::env(\"{key}\", <a non-denied path>)",
+                            dir.display()
+                        ));
+                    }
+                    Ok(_) => {
+                        errors.push(format!(
+                            "{key}={} is not covered by any write_path in the policy. \
+                             Either add it as a write_path or override it with \
+                             SandboxCommand::env(\"{key}\", <a granted path>)",
+                            dir.display()
+                        ));
+                    }
                 }
             }
         }
@@ -198,10 +205,17 @@ mod tests {
     use crate::command::SandboxCommand;
     use crate::policy::ResourceLimits;
 
+    fn make_temp_dir() -> tempfile::TempDir {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        tempfile::TempDir::new_in(workspace.join("test_tmp")).expect("failed to create temp dir")
+    }
+
     #[test]
     fn validate_env_ok_when_temp_in_write_path() {
-        let write_dir = tempfile::TempDir::new().expect("create temp dir");
-        let read_dir = tempfile::TempDir::new().expect("create temp dir");
+        let write_dir = make_temp_dir();
+        let read_dir = make_temp_dir();
 
         let policy = SandboxPolicy::new(
             vec![read_dir.path().to_path_buf()],
@@ -230,8 +244,8 @@ mod tests {
 
     #[test]
     fn validate_env_rejects_temp_outside_write_paths() {
-        let read_dir = tempfile::TempDir::new().expect("create temp dir");
-        let uncovered = tempfile::TempDir::new().expect("create temp dir");
+        let read_dir = make_temp_dir();
+        let uncovered = make_temp_dir();
 
         let policy = SandboxPolicy::new(
             vec![read_dir.path().to_path_buf()],
@@ -259,8 +273,8 @@ mod tests {
 
     #[test]
     fn validate_env_rejects_uncovered_path_entry() {
-        let write_dir = tempfile::TempDir::new().expect("create temp dir");
-        let uncovered = tempfile::TempDir::new().expect("create temp dir");
+        let write_dir = make_temp_dir();
+        let uncovered = make_temp_dir();
 
         let policy = SandboxPolicy::new(
             vec![],
@@ -282,9 +296,9 @@ mod tests {
 
     #[test]
     fn validate_env_accumulates_multiple_errors() {
-        let read_dir = tempfile::TempDir::new().expect("create temp dir");
-        let bad_temp = tempfile::TempDir::new().expect("create temp dir");
-        let bad_path = tempfile::TempDir::new().expect("create temp dir");
+        let read_dir = make_temp_dir();
+        let bad_temp = make_temp_dir();
+        let bad_path = make_temp_dir();
 
         let policy = SandboxPolicy::new(
             vec![read_dir.path().to_path_buf()],
@@ -307,7 +321,7 @@ mod tests {
 
     #[test]
     fn validate_env_rejects_temp_under_deny_path() {
-        let write_dir = tempfile::TempDir::new().expect("create temp dir");
+        let write_dir = make_temp_dir();
         let denied = write_dir.path().join("denied");
         std::fs::create_dir(&denied).expect("create denied dir");
 
@@ -340,8 +354,8 @@ mod tests {
 
     #[test]
     fn validate_env_rejects_path_entry_under_deny_path() {
-        let grant_dir = tempfile::TempDir::new().expect("create temp dir");
-        let write_dir = tempfile::TempDir::new().expect("create temp dir");
+        let grant_dir = make_temp_dir();
+        let write_dir = make_temp_dir();
         let denied = grant_dir.path().join("denied");
         std::fs::create_dir(&denied).expect("create denied dir");
 
@@ -393,7 +407,7 @@ mod tests {
 
     #[test]
     fn is_dir_accessible_granted() {
-        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let dir = make_temp_dir();
         let canon = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let child = dir.path().join("sub");
         std::fs::create_dir(&child).expect("create subdir");
@@ -402,7 +416,7 @@ mod tests {
 
     #[test]
     fn is_dir_accessible_implicit() {
-        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let dir = make_temp_dir();
         let canon = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let child = dir.path().join("sub");
         std::fs::create_dir(&child).expect("create subdir");
@@ -411,15 +425,15 @@ mod tests {
 
     #[test]
     fn is_dir_accessible_not_covered() {
-        let a = tempfile::TempDir::new().expect("create temp dir");
-        let b = tempfile::TempDir::new().expect("create temp dir");
+        let a = make_temp_dir();
+        let b = make_temp_dir();
         let canon_a = std::fs::canonicalize(a.path()).expect("canonicalize");
         assert!(!is_dir_accessible(b.path(), &[canon_a], &[], &[]));
     }
 
     #[test]
     fn is_dir_accessible_denied_subtree() {
-        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let dir = make_temp_dir();
         let grant = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let denied = dir.path().join("secret");
         let query = dir.path().join("secret").join("deep");
@@ -445,7 +459,7 @@ mod tests {
 
     #[test]
     fn is_dir_accessible_denied_overrides_implicit() {
-        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let dir = make_temp_dir();
         let canon = std::fs::canonicalize(dir.path()).expect("canonicalize");
         let child = dir.path().join("sub");
         std::fs::create_dir(&child).expect("create subdir");
@@ -482,7 +496,7 @@ mod tests {
 
     #[test]
     fn validate_env_reports_uncanonicalizeable_policy_path() {
-        let write_dir = tempfile::TempDir::new().expect("create temp dir");
+        let write_dir = make_temp_dir();
 
         // Relative path triggers canonicalize_existing_prefix failure
         // (normalize_lexical rejects non-absolute paths).
@@ -521,7 +535,7 @@ mod tests {
 
     #[test]
     fn validate_env_reports_unresolvable_temp() {
-        let write_dir = tempfile::TempDir::new().expect("create temp dir");
+        let write_dir = make_temp_dir();
 
         let policy = SandboxPolicy::new(
             vec![],
@@ -532,9 +546,9 @@ mod tests {
             ResourceLimits::default(),
         );
 
-        // Relative TEMP triggers canonicalize_existing_prefix failure in
-        // the re-canonicalization path (is_dir_accessible returns false,
-        // then the diagnostic re-canonicalization also fails).
+        // Relative TEMP triggers canonicalize_existing_prefix failure:
+        // the single canonicalize call returns Err, so the path is
+        // reported as unresolvable.
         let mut cmd = SandboxCommand::new("dummy");
         cmd.env("TEMP", "relative/not/absolute");
         #[cfg(target_os = "windows")]

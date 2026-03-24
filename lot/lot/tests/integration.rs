@@ -1274,6 +1274,9 @@ fn test_sandbox_policy_builder_basic() {
     eprintln!("[diag] PASSED");
 }
 
+// macOS RLIMIT_AS enforcement is unreliable — setrlimit(RLIMIT_AS) returns
+// EINVAL when the requested limit is below current virtual memory usage,
+// which is common in test environments.
 #[test]
 fn test_memory_limit_enforcement() {
     eprintln!("[diag] === test_memory_limit_enforcement ===");
@@ -1283,8 +1286,7 @@ fn test_memory_limit_enforcement() {
 
     let (program, args) = memory_hog_command();
 
-    // 512 MB limit — high enough for process startup (macOS RLIMIT_AS
-    // fails if below current virtual memory) but below the 1 GB allocation.
+    // 512 MB limit — below the 1 GB allocation the child attempts.
     let policy = lot::SandboxPolicy::new(
         vec![tmp.path().to_path_buf()],
         vec![scratch.path().to_path_buf()],
@@ -1300,14 +1302,17 @@ fn test_memory_limit_enforcement() {
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
     // macOS RLIMIT_AS can fail with EINVAL when the limit is below
-    // current virtual memory usage, so treat Setup errors as acceptable skip.
+    // current virtual memory usage. Skip rather than false-pass.
     let child = match lot::spawn(&policy, &cmd) {
         Ok(c) => {
             eprintln!("[diag] spawn succeeded, pid={}", c.id());
             c
         }
-        Err(lot::SandboxError::Setup(ref msg)) if msg.contains("setrlimit") => {
-            eprintln!("[diag] SKIPPED: setrlimit failed (platform limit too low): {msg}");
+        Err(lot::SandboxError::Setup(ref msg))
+            if cfg!(target_os = "macos") && msg.contains("setrlimit") =>
+        {
+            eprintln!("[diag] SKIPPED: test_memory_limit_enforcement — {msg}");
+            println!("[diag] SKIPPED: test_memory_limit_enforcement — {msg}");
             return;
         }
         Err(e) => panic!("spawn must succeed: {e}"),
@@ -1367,8 +1372,11 @@ fn test_allow_network_false_blocks_connections() {
 
 // ── Windows symlink deny-path test ─────────────────────────────────
 
+// Requires Developer Mode or elevation for symlink creation.
+// Ignored by default; run with `--include-ignored` when Developer Mode is enabled.
 #[cfg(target_os = "windows")]
 #[test]
+#[ignore = "requires Developer Mode or elevation for symlink creation"]
 fn test_symlink_into_deny_path_windows() {
     eprintln!("[diag] === test_symlink_into_deny_path_windows ===");
 
@@ -1384,11 +1392,10 @@ fn test_symlink_into_deny_path_windows() {
 
     let symlink_path = parent.join("sneaky_link.txt");
 
-    // Symlink creation may require Developer Mode or elevation.
-    if std::os::windows::fs::symlink_file(&secret_file, &symlink_path).is_err() {
-        eprintln!("[diag] SKIPPED: symlink creation failed (requires Developer Mode or elevation)");
-        return;
-    }
+    // Symlink creation requires Developer Mode or elevation. If unavailable,
+    // fail explicitly so CI does not silently report the test as passed.
+    std::os::windows::fs::symlink_file(&secret_file, &symlink_path)
+        .expect("symlink creation failed — enable Developer Mode or run elevated");
 
     let policy = make_deny_policy(&parent, &denied, false, scratch.path());
 

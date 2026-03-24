@@ -95,8 +95,8 @@ pub fn prepare_prefork(command: &SandboxCommand) -> io::Result<PreForkData> {
 /// Open `/dev/null` with the given flags (e.g., `O_RDONLY` or `O_WRONLY`).
 /// Returns the fd with `O_CLOEXEC` set.
 pub fn open_dev_null(flags: i32) -> io::Result<i32> {
-    let c_path =
-        CString::new("/dev/null").map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // "/dev/null" contains no NUL bytes, so CString::new cannot fail.
+    let c_path = CString::new("/dev/null").expect("static literal without NUL bytes");
     // SAFETY: valid path, caller-provided flags | O_CLOEXEC
     let fd = unsafe { libc::open(c_path.as_ptr(), flags | libc::O_CLOEXEC) };
     if fd < 0 {
@@ -565,6 +565,23 @@ pub unsafe fn setup_stdio_fds(
     Ok(())
 }
 
+/// Set a single resource limit via setrlimit.
+///
+/// # Safety
+/// Must only be called from the forked child before exec.
+#[cfg(target_os = "macos")]
+unsafe fn set_rlimit(resource: i32, value: u64) -> io::Result<()> {
+    let rlim = libc::rlimit {
+        rlim_cur: value,
+        rlim_max: value,
+    };
+    // SAFETY: rlim is a valid rlimit struct, caller is in forked child
+    if unsafe { libc::setrlimit(resource, &raw const rlim) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Apply resource limits via setrlimit. Used by macOS.
 ///
 /// # Safety
@@ -572,38 +589,17 @@ pub unsafe fn setup_stdio_fds(
 #[cfg(target_os = "macos")]
 pub unsafe fn apply_resource_limits(policy: &crate::policy::SandboxPolicy) -> io::Result<()> {
     if let Some(max_mem) = policy.limits().max_memory_bytes {
-        let rlim = libc::rlimit {
-            rlim_cur: max_mem,
-            rlim_max: max_mem,
-        };
-        // SAFETY: rlim is a valid rlimit struct
-        if unsafe { libc::setrlimit(libc::RLIMIT_AS, &raw const rlim) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        // SAFETY: caller guarantees forked child context
+        unsafe { set_rlimit(libc::RLIMIT_AS, max_mem)? };
     }
-
     if let Some(max_procs) = policy.limits().max_processes {
-        let rlim = libc::rlimit {
-            rlim_cur: u64::from(max_procs),
-            rlim_max: u64::from(max_procs),
-        };
-        // SAFETY: rlim is a valid rlimit struct
-        if unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &raw const rlim) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        // SAFETY: caller guarantees forked child context
+        unsafe { set_rlimit(libc::RLIMIT_NPROC, u64::from(max_procs))? };
     }
-
     if let Some(max_cpu) = policy.limits().max_cpu_seconds {
-        let rlim = libc::rlimit {
-            rlim_cur: max_cpu,
-            rlim_max: max_cpu,
-        };
-        // SAFETY: rlim is a valid rlimit struct
-        if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &raw const rlim) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        // SAFETY: caller guarantees forked child context
+        unsafe { set_rlimit(libc::RLIMIT_CPU, max_cpu)? };
     }
-
     Ok(())
 }
 
@@ -1570,5 +1566,22 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout, b"out");
         assert_eq!(output.stderr, b"err");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn set_rlimit_nofile_succeeds() {
+        let mut current = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: querying current RLIMIT_NOFILE into a valid rlimit struct
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut current) };
+        // SAFETY: setting limit to current soft limit (effectively a no-op)
+        let result = unsafe { set_rlimit(libc::RLIMIT_NOFILE, current.rlim_cur) };
+        assert!(
+            result.is_ok(),
+            "set_rlimit to current soft limit should succeed: {result:?}"
+        );
     }
 }

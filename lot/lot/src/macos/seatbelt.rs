@@ -190,8 +190,8 @@ pub fn generate_profile(
         append_sbpl_rule(&mut profile, "allow", "file-read*", "subpath", path)?;
     }
 
-    // Deny rules override grants above. SBPL uses last-match-wins, so these
-    // must appear after the allow rules for the denied subtrees.
+    // Deny rules override grants above. SBPL uses most-specific-match-wins
+    // semantics, so these must appear after the allow rules for the denied subtrees.
     for path in policy.deny_paths() {
         append_sbpl_rule(&mut profile, "deny", "file-read*", "subpath", path)?;
         // file-read-metadata is a separate SBPL operation not covered by file-read*

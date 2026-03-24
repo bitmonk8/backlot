@@ -111,13 +111,9 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_statx,
         ],
     );
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[libc::SYS_dup2]);
 
     // --- File open/create ---
     allow_syscalls(&mut rules, &[libc::SYS_openat]);
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[libc::SYS_open]);
 
     // --- Directory ---
     allow_syscalls(
@@ -129,8 +125,6 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_fchdir,
         ],
     );
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[libc::SYS_getdents]);
 
     // --- Process info ---
     allow_syscalls(
@@ -173,8 +167,6 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_gettimeofday,
         ],
     );
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[libc::SYS_nanosleep]);
 
     // --- Scheduling ---
     allow_syscalls(
@@ -204,18 +196,6 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_eventfd2,
             libc::SYS_memfd_create,
             libc::SYS_flock,
-        ],
-    );
-    // x86_64 has legacy variants absent on aarch64
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(
-        &mut rules,
-        &[
-            libc::SYS_arch_prctl,
-            libc::SYS_pipe,
-            libc::SYS_poll,
-            libc::SYS_select,
-            libc::SYS_epoll_wait,
         ],
     );
 
@@ -266,16 +246,9 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
 
     // --- Access checks ---
     allow_syscalls(&mut rules, &[libc::SYS_faccessat, libc::SYS_faccessat2]);
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[libc::SYS_access]);
 
     // --- Stat / readlink ---
     allow_syscalls(&mut rules, &[libc::SYS_readlinkat]);
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(
-        &mut rules,
-        &[libc::SYS_stat, libc::SYS_lstat, libc::SYS_readlink],
-    );
 
     // --- Directory ops ---
     allow_syscalls(
@@ -285,16 +258,6 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_unlinkat,
             libc::SYS_renameat,
             libc::SYS_renameat2,
-        ],
-    );
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(
-        &mut rules,
-        &[
-            libc::SYS_mkdir,
-            libc::SYS_rmdir,
-            libc::SYS_unlink,
-            libc::SYS_rename,
         ],
     );
 
@@ -309,8 +272,6 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_utimensat,
         ],
     );
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[libc::SYS_chmod, libc::SYS_chown]);
 
     // --- Write ops ---
     allow_syscalls(
@@ -322,13 +283,39 @@ pub fn build_filter(policy: &SandboxPolicy) -> io::Result<BpfProgram> {
             libc::SYS_fdatasync,
         ],
     );
-    #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[libc::SYS_truncate]);
 
     // --- Link ops ---
     allow_syscalls(&mut rules, &[libc::SYS_linkat, libc::SYS_symlinkat]);
+
+    // --- x86_64 legacy syscall variants absent on aarch64 ---
     #[cfg(target_arch = "x86_64")]
-    allow_syscalls(&mut rules, &[libc::SYS_link, libc::SYS_symlink]);
+    allow_syscalls(
+        &mut rules,
+        &[
+            libc::SYS_dup2,
+            libc::SYS_open,
+            libc::SYS_getdents,
+            libc::SYS_nanosleep,
+            libc::SYS_arch_prctl,
+            libc::SYS_pipe,
+            libc::SYS_poll,
+            libc::SYS_select,
+            libc::SYS_epoll_wait,
+            libc::SYS_access,
+            libc::SYS_stat,
+            libc::SYS_lstat,
+            libc::SYS_readlink,
+            libc::SYS_mkdir,
+            libc::SYS_rmdir,
+            libc::SYS_unlink,
+            libc::SYS_rename,
+            libc::SYS_chmod,
+            libc::SYS_chown,
+            libc::SYS_truncate,
+            libc::SYS_link,
+            libc::SYS_symlink,
+        ],
+    );
 
     // --- Network syscalls (conditional) ---
     if policy.allow_network() {

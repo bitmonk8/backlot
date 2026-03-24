@@ -145,29 +145,7 @@ pub fn modify_dacl(
     entries: &[EXPLICIT_ACCESS_W],
     security_info_flags: u32,
 ) -> crate::Result<()> {
-    let mut current_dacl: *mut ACL = std::ptr::null_mut();
-    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-
-    // SAFETY: Reading the current DACL.
-    let err = unsafe {
-        GetNamedSecurityInfoW(
-            wide_path.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &raw mut current_dacl,
-            std::ptr::null_mut(),
-            &raw mut sd,
-        )
-    };
-    if err != ERROR_SUCCESS {
-        return Err(SandboxError::Setup(format!(
-            "failed to read DACL for {display}: {}",
-            win32_error_msg(err),
-        )));
-    }
-    let _sd_guard = OwnedSecurityDescriptor::new(sd);
+    let (current_dacl, _sd_guard) = read_dacl(wide_path)?;
 
     merge_and_set_dacl(
         wide_path,
@@ -499,6 +477,57 @@ mod tests {
         assert!(
             result.unwrap(),
             "null DACL must be treated as unrestricted (Ok(true))"
+        );
+    }
+
+    #[test]
+    fn modify_dacl_grants_ace_directly() {
+        use windows_sys::Win32::Security::Authorization::{
+            GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP,
+            TRUSTEE_W,
+        };
+
+        let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("test_tmp");
+        std::fs::create_dir_all(&test_tmp).expect("create test_tmp dir");
+        let tmp = TempDir::new_in(&test_tmp).expect("create temp dir");
+
+        let file_path = tmp.path().join("modify_dacl_test.txt");
+        std::fs::write(&file_path, b"test").expect("create test file");
+
+        let wide_path = super::super::to_wide(&file_path);
+        let app_sid = allocate_app_packages_sid().unwrap();
+        let access_mask = super::super::FILE_GENERIC_READ;
+
+        let trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+            ptstrName: app_sid.as_raw().cast(),
+        };
+
+        let ea = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: access_mask,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: 0,
+            Trustee: trustee,
+        };
+
+        modify_dacl(
+            &wide_path,
+            &file_path.display().to_string(),
+            &[ea],
+            DACL_SECURITY_INFORMATION,
+        )
+        .expect("modify_dacl should succeed");
+
+        let (dacl, _sd) = read_dacl(&wide_path).unwrap();
+        assert!(
+            dacl_has_ace_for_sid(dacl, access_mask, &app_sid).unwrap(),
+            "DACL should contain the ACE granted via modify_dacl"
         );
     }
 }
