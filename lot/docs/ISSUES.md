@@ -2,7 +2,7 @@
 
 Generated from audit findings: 2026-03-24
 
-100 active findings. 0 MUST FIX. Groups ordered by impact (NON-CRITICAL first, then NIT).
+99 active findings. 0 MUST FIX. Groups ordered by impact (NON-CRITICAL first, then NIT).
 
 ---
 
@@ -13,8 +13,7 @@ Process and cgroup cleanup silently discards errors. Leaked processes or cgroups
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
 | 6 | Error-Handling | lot/src/linux/cgroup.rs | 237 | NON-CRITICAL | `libc::kill()` return silently discarded in `signal_all()` fallback. `EPERM` failure undiagnosed. |
-| 7 | Error-Handling | lot/src/linux/cgroup.rs | 308 | NON-CRITICAL | `fs::remove_dir` failure silently discarded via `let _ =`. Leaks cgroup directory with no diagnostic. |
-| 8 | Error-Handling | lot/src/macos/mod.rs | 233-237 | NON-CRITICAL | `kill_and_cleanup` always returns `Ok(())` even if `kill_and_reap` fails internally. |
+| 7 | Error-Handling | lot/src/linux/cgroup.rs | 308 | NIT | `fs::remove_dir` failure silently discarded via `let _ =` in `Drop` impl. Cannot propagate errors from Drop; diagnostic logging is the only option. |
 | 9 | Error-Handling | lot/src/linux/mod.rs | 569 | NIT | `kill_by_pid` ignores `libc::kill` return. Cannot distinguish success from permission denied. |
 | 10 | Error-Handling | lot/src/macos/mod.rs | 244-254 | NIT | `kill_by_pid` silently discards `libc::kill` return. Permission errors invisible. |
 
@@ -28,7 +27,7 @@ Sandbox enforcement code with zero test coverage. Regressions in these paths cou
 |---|----------|------|---------|----------|-------------|
 | 11 | Testing | lot/src/linux/namespace.rs | 83-289 | NON-CRITICAL | No test for `setup_user_namespace`, `mount_system_paths`, `mount_policy_paths`, `mount_deny_paths`, `setup_mount_namespace`. Security-sensitive orchestration ordering untested. |
 | 12 | Testing | lot/src/linux/seccomp.rs | 229-242 | NON-CRITICAL | No test for disallowed ioctl request number. Bug allowing all ioctls would go undetected. |
-| 13 | Testing | lot/src/linux/seccomp.rs | 321-344 | NON-CRITICAL | Only `socket` tested for network deny. `connect`, `bind`, `sendto` omission not caught. |
+| 13 | Testing | lot/src/linux/seccomp.rs | 321-344 | NIT | Only `socket` tested for network deny. `connect`, `bind`, `sendto` share the same conditional block — existing `socket` deny test covers the code path. Per-syscall tests would only catch accidental moves to the unconditional allow list. |
 | 14 | Testing | lot/src/linux/namespace.rs | 37-40 | NON-CRITICAL | No test for `is_apparmor_restricted`. Regression silently disables sandboxing on AppArmor systems. |
 | 15 | Testing | lot/src/macos/seatbelt.rs | 335-362 | NON-CRITICAL | `apply_profile` has zero test coverage. Contains FFI call, error branching, CString conversion. |
 | 16 | Testing | lot/src/linux/mod.rs | 280-282 | NON-CRITICAL | No test for `allow_network() == true` path. |

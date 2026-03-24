@@ -6,17 +6,20 @@
 
 ## Issues (2026-03-24)
 
-New audit completed. 100 active findings across 21 groups in `docs/ISSUES.md` (7 false positives removed).
+New audit completed. 99 active findings across 21 groups in `docs/ISSUES.md` (8 false positives removed).
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (47):** Groups 3–12, 14–15 — silent cleanup failures, missing test coverage, TOCTOU, canonicalization error handling, weak assertions, seccomp/fork error handling, duplication, separation of concerns, placement
-- **NIT (53):** Groups 1–2, 13, 16–21 — errno style consistency, incorrect comments, simplification, naming, test boilerplate, doc mismatches, architectural cleanup
+- **NON-CRITICAL (44):** Groups 3–12, 14–15 — silent cleanup failures, missing test coverage, TOCTOU, canonicalization error handling, weak assertions, seccomp/fork error handling, duplication, separation of concerns, placement
+- **NIT (55):** Groups 1–2, 13, 16–21 — errno style consistency, incorrect comments, simplification, naming, test boilerplate, doc mismatches, architectural cleanup
 
 Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 
 ### Review notes (2026-03-24)
 - **Group 1 downgraded NIT:** The "Rust 2024 unsafe soundness" claim is wrong. `macro_rules!` textual substitution places the errno dereference inside the macro's `unsafe` block. Code compiles cleanly. Finding is a style inconsistency, not a correctness issue.
 - **Group 2 items 3–5 downgraded NIT:** Wrong comments, not wrong behavior. No security impact.
+- **Group 3 item #8 removed (false positive):** `kill_and_reap` returns `()`, not `Result`. No error to propagate. The `Ok(())` exists for API consistency.
+- **Group 3 item #7 downgraded NIT:** Inside `Drop` impl — cannot propagate errors. Deliberate design.
+- **Group 4 item #13 downgraded NIT:** `connect`/`bind`/`sendto` share the same conditional block as `socket`. Existing deny test covers the code path.
 
 ## CI Notes
 
