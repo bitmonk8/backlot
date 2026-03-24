@@ -6,11 +6,11 @@
 
 ## Issues (2026-03-24)
 
-New audit completed. 99 active findings across 21 groups in `docs/ISSUES.md` (8 false positives removed).
+New audit completed. 97 active findings across 21 groups in `docs/ISSUES.md` (10 false positives removed).
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (44):** Groups 3–12, 14–15 — silent cleanup failures, missing test coverage, TOCTOU, canonicalization error handling, weak assertions, seccomp/fork error handling, duplication, separation of concerns, placement
-- **NIT (55):** Groups 1–2, 13, 16–21 — errno style consistency, incorrect comments, simplification, naming, test boilerplate, doc mismatches, architectural cleanup
+- **NON-CRITICAL (41):** Groups 3–4, 7–12, 14–15 — silent cleanup failures, missing test coverage, weak assertions, seccomp/fork error handling, duplication, separation of concerns, placement
+- **NIT (56):** Groups 1–2, 5–6, 13, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, simplification, naming, test boilerplate, doc mismatches, architectural cleanup
 
 Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 
@@ -20,6 +20,10 @@ Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 - **Group 3 item #8 removed (false positive):** `kill_and_reap` returns `()`, not `Result`. No error to propagate. The `Ok(())` exists for API consistency.
 - **Group 3 item #7 downgraded NIT:** Inside `Drop` impl — cannot propagate errors. Deliberate design.
 - **Group 4 item #13 downgraded NIT:** `connect`/`bind`/`sendto` share the same conditional block as `socket`. Existing deny test covers the code path.
+- **Group 5 item #18 downgraded NIT:** TOCTOU race exists but is operationally harmless — `setup_mount_namespace` runs after `unshare(CLONE_NEWNS)`, so mount operations are namespace-private.
+- **Group 6 item #19 downgraded NIT:** `is_strict_parent_of` fallback is harmless; all callers pass pre-canonicalized paths from `policy.rs` validation.
+- **Group 6 item #20 removed (false positive):** Progressive prefix fallback is the function's stated algorithm, not error swallowing. Tries `/a/b/c` → `/a/b` → `/a` → `/` by design.
+- **Group 6 item #21 removed (false positive):** Five canonicalization functions (not four) across four files, each serving a distinct purpose: permissive (builder), strict (validation), partial (ancestry), and two batch wrappers. Not redundant.
 
 ## CI Notes
 

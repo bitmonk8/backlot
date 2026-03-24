@@ -2,7 +2,7 @@
 
 Generated from audit findings: 2026-03-24
 
-99 active findings. 0 MUST FIX. Groups ordered by impact (NON-CRITICAL first, then NIT).
+97 active findings. 0 MUST FIX. Groups ordered by impact (NON-CRITICAL first, then NIT).
 
 ---
 
@@ -41,19 +41,15 @@ Race condition in mount namespace setup path.
 
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
-| 18 | Correctness | lot/src/linux/namespace.rs | 247-263 | NON-CRITICAL | TOCTOU window: `/tmp/lot-newroot-{pid}` is in host `/tmp`. Between `rmdir` and `mkdir_p`+`mount_tmpfs`, another process could plant a symlink or directory. Impact mitigated: code runs after `unshare(CLONE_NEWNS)` so mount operations are namespace-private, `mount_tmpfs` hides planted content, `mkdir` does not follow symlinks. |
+| 18 | Correctness | lot/src/linux/namespace.rs | 247-263 | NIT | TOCTOU window: `/tmp/lot-newroot-{pid}` is in host `/tmp`. Between `rmdir` and `mkdir_p`+`mount_tmpfs`, another process could plant a symlink or directory. Operationally harmless: `setup_mount_namespace` runs after `unshare(CLONE_NEWNS)` (mod.rs:306, after unshare at :285), so mount operations are namespace-private. `mount_tmpfs` hides any planted content, `mkdir` does not follow symlinks. |
 
 ---
 
-## Group 6 — Path canonicalization silent failures
-
-Canonicalization errors silently swallowed. Could cause incorrect path comparisons affecting sandbox boundary decisions.
+## Group 6 — Path canonicalization fallback in `is_strict_parent_of`
 
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
-| 19 | Error-Handling | lot/src/path_util.rs | 33-34 | NON-CRITICAL | `is_strict_parent_of` silently falls back to uncanonicalized path on `canonicalize_existing_prefix` failure. Caller cannot distinguish "canonicalization succeeded, paths unrelated" from "canonicalization failed, compared raw inputs." |
-| 20 | Error-Handling | lot/src/path_util.rs | 52 | NON-CRITICAL | `canonicalize_existing_prefix` silently discards `std::fs::canonicalize` errors per iteration. Permission-denied on existing path is swallowed. |
-| 21 | Separation-Broad | policy_builder.rs, policy.rs, path_util.rs | multiple | NON-CRITICAL | Four different canonicalization functions across three files with different error handling. |
+| 19 | Error-Handling | lot/src/path_util.rs | 33-34 | NIT | `is_strict_parent_of` falls back to uncanonicalized path on `canonicalize_existing_prefix` failure. Harmless in practice: all callers are in `policy.rs` validation, where paths have already been canonicalized by `canonicalize_collect`. The fallback handles only edge cases already caught upstream. |
 
 ---
 
