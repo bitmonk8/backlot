@@ -1370,6 +1370,55 @@ fn test_allow_network_false_blocks_connections() {
     eprintln!("[diag] PASSED");
 }
 
+// ── Network-allowed test ────────────────────────────────────────────
+
+/// Verify that allow_network(true) mounts /etc/resolv.conf and the child
+/// can read it. Exercises the network-allowed code path in namespace setup
+/// (CLONE_NEWNET skipped, DNS/SSL mounts added).
+#[cfg(target_os = "linux")]
+#[test]
+fn test_allow_network_true_has_resolv_conf() {
+    eprintln!("[diag] === test_allow_network_true_has_resolv_conf ===");
+
+    if !std::path::Path::new("/etc/resolv.conf").exists() {
+        eprintln!("[diag] SKIP: /etc/resolv.conf absent on host");
+        return;
+    }
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, args) = cat_command(std::path::Path::new("/etc/resolv.conf"));
+
+    let policy = lot::SandboxPolicy::new(
+        vec![tmp.path().to_path_buf()],
+        vec![scratch.path().to_path_buf()],
+        platform_exec_paths(),
+        Vec::new(),
+        true, // network allowed
+        lot::ResourceLimits::default(),
+    );
+
+    let cmd = make_sandbox_cmd(&program, &args, scratch.path());
+
+    let child = must_spawn(&policy, &cmd);
+    let output = child.wait_with_output().expect("wait_with_output");
+    log_output(&output);
+
+    assert!(
+        output.status.success(),
+        "reading /etc/resolv.conf should succeed with network=true, got: {:?}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // resolv.conf should contain at least a nameserver line or be non-empty
+    assert!(
+        !stdout.is_empty(),
+        "/etc/resolv.conf should have content, got empty"
+    );
+    eprintln!("[diag] PASSED");
+}
+
 // ── Windows symlink deny-path test ─────────────────────────────────
 
 // Requires Developer Mode or elevation for symlink creation.

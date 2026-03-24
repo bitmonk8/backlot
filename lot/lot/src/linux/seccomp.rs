@@ -659,6 +659,100 @@ mod tests {
         assert_eq!(result, "OK", "prlimit64 should be allowed: {result}");
     }
 
+    /// Check that a syscall returned -1/EPERM and report via the pipe fd.
+    /// Handles close + _exit so callers don't repeat that boilerplate.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn check_eperm_and_report(rc: isize, w: i32) -> ! {
+        if rc < 0 {
+            // SAFETY: reading thread-local errno
+            let errno = unsafe { *libc::__errno_location() };
+            if errno == libc::EPERM {
+                write_fd(w, b"OK");
+            } else {
+                write_fd(w, b"WRONG_ERRNO");
+            }
+        } else {
+            write_fd(w, b"SUCCEEDED");
+        }
+        // SAFETY: closing fd before exit
+        unsafe { libc::close(w) };
+        // SAFETY: async-signal-safe exit
+        unsafe { libc::_exit(0) };
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn apply_filter_denies_disallowed_ioctl() {
+        fn child_body(bpf: &BpfProgram, w: i32) -> ! {
+            if apply_filter(bpf).is_err() {
+                write_fd(w, b"FILTER_FAIL");
+                unsafe { libc::_exit(1) };
+            }
+            // TIOCSTI (0x5412) is NOT in the ioctl allowlist.
+            // SAFETY: testing ioctl denial — we expect EPERM from seccomp
+            // before the kernel inspects the fd or data pointer.
+            let rc = unsafe { libc::ioctl(0, 0x5412 as libc::c_ulong, std::ptr::null::<u8>()) };
+            check_eperm_and_report(rc.into(), w);
+        }
+
+        let bpf = build_filter(&empty_policy(false)).unwrap();
+        let result = fork_with_seccomp(&bpf, child_body);
+        assert_eq!(result, "OK", "disallowed ioctl should get EPERM: {result}");
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn apply_filter_denies_connect_without_network() {
+        fn child_body(bpf: &BpfProgram, w: i32) -> ! {
+            if apply_filter(bpf).is_err() {
+                write_fd(w, b"FILTER_FAIL");
+                unsafe { libc::_exit(1) };
+            }
+            // SAFETY: connect with invalid fd; seccomp checks the syscall
+            // number before fd validation, so we expect EPERM.
+            let addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                libc::connect(
+                    -1,
+                    &addr as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            };
+            check_eperm_and_report(rc.into(), w);
+        }
+
+        let bpf = build_filter(&empty_policy(false)).unwrap();
+        let result = fork_with_seccomp(&bpf, child_body);
+        assert_eq!(result, "OK", "connect should be denied without network: {result}");
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn apply_filter_denies_sendto_without_network() {
+        fn child_body(bpf: &BpfProgram, w: i32) -> ! {
+            if apply_filter(bpf).is_err() {
+                write_fd(w, b"FILTER_FAIL");
+                unsafe { libc::_exit(1) };
+            }
+            // SAFETY: sendto with invalid fd; seccomp rejects before fd check.
+            let rc = unsafe {
+                libc::sendto(
+                    -1,
+                    std::ptr::null(),
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0,
+                )
+            };
+            check_eperm_and_report(rc, w);
+        }
+
+        let bpf = build_filter(&empty_policy(false)).unwrap();
+        let result = fork_with_seccomp(&bpf, child_body);
+        assert_eq!(result, "OK", "sendto should be denied without network: {result}");
+    }
+
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn apply_filter_denies_socket_without_network() {
@@ -669,19 +763,7 @@ mod tests {
             }
             // SAFETY: syscall args are valid; we expect it to fail with EPERM
             let rc = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-            if rc == -1 {
-                // SAFETY: reading thread-local errno
-                let errno = unsafe { *libc::__errno_location() };
-                if errno == libc::EPERM {
-                    write_fd(w, b"OK");
-                } else {
-                    write_fd(w, b"WRONG_ERRNO");
-                }
-            } else {
-                write_fd(w, b"SOCKET_SUCCEEDED");
-            }
-            unsafe { libc::close(w) };
-            unsafe { libc::_exit(0) };
+            check_eperm_and_report(rc.into(), w);
         }
 
         let bpf = build_filter(&empty_policy(false)).unwrap();

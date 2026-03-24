@@ -656,6 +656,26 @@ mod tests {
     }
 
     #[test]
+    fn is_apparmor_restricted_matches_sysctl() {
+        // Verify the function does not panic and returns a value consistent
+        // with the sysctl file when present.
+        let restricted = super::is_apparmor_restricted();
+        let sysctl =
+            std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns");
+        match sysctl {
+            Ok(val) => assert_eq!(
+                restricted,
+                val.trim() == "1",
+                "return value should match sysctl content"
+            ),
+            Err(_) => assert!(
+                !restricted,
+                "should return false when sysctl is absent"
+            ),
+        }
+    }
+
+    #[test]
     fn test_path_to_str_rejects_non_utf8() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;

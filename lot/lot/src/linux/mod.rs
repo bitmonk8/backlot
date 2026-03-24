@@ -897,6 +897,53 @@ mod tests {
         assert_eq!(result, "OK", "child reported: {result}");
     }
 
+    // ── namespace setup coverage ────────────────────────────────────
+
+    #[test]
+    fn spawn_has_system_lib_paths() {
+        // Verify /usr/lib is accessible inside the sandbox (mount_system_paths coverage).
+        let policy = test_policy(vec![PathBuf::from("/usr")]);
+        let mut cmd = SandboxCommand::new("/bin/sh");
+        cmd.args(["-c", "test -d /usr/lib && echo SYSLIB_OK || echo SYSLIB_MISSING"]);
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
+        let output = child
+            .inner
+            .wait_with_output()
+            .expect("wait_with_output must succeed");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("SYSLIB_OK"),
+            "expected /usr/lib to exist inside sandbox, got: {stdout}"
+        );
+    }
+
+    #[test]
+    fn spawn_runs_as_root_in_namespace() {
+        // Verify uid mapping maps to 0 inside the sandbox (setup_user_namespace coverage).
+        let policy = test_policy(vec![PathBuf::from("/usr")]);
+        let mut cmd = SandboxCommand::new("/usr/bin/id");
+        cmd.arg("-u");
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+
+        let child = spawn(&policy, &cmd).expect("spawn must succeed");
+        let output = child
+            .inner
+            .wait_with_output()
+            .expect("wait_with_output must succeed");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.trim(),
+            "0",
+            "expected uid 0 inside namespace, got: {stdout}"
+        );
+    }
+
     // ── itoa_stack ──────────────────────────────────────────────────
 
     #[test]

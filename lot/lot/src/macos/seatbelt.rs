@@ -884,6 +884,79 @@ mod tests {
 
     // ── add_ancestors guard behavior ────────────────────────────────
 
+    // ── apply_profile tests ─────────────────────────────────────────
+
+    #[test]
+    fn apply_profile_rejects_null_byte() {
+        let result = apply_profile("(version 1)\0(deny default)");
+        assert!(result.is_err(), "null byte in profile should fail");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn apply_profile_rejects_invalid_sbpl_in_fork() {
+        // apply_profile is permanent, so test in a forked child.
+        // Prepare CString before fork to avoid heap allocation in the child
+        // (Rust test harness is multi-threaded; allocating after fork risks
+        // deadlock if another thread holds the heap lock).
+        let c_profile = CString::new("not valid sbpl at all").unwrap();
+
+        let mut fds = [0i32; 2];
+        // SAFETY: fds is a valid 2-element array
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "pipe() failed");
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+
+        // SAFETY: fork is safe; child uses only async-signal-safe ops
+        // plus sandbox_init (kernel FFI, does not use Rust allocator).
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+
+        if pid == 0 {
+            // SAFETY: closing unused fd
+            unsafe { libc::close(read_fd) };
+
+            let mut errorbuf: *mut c_char = std::ptr::null_mut();
+            // SAFETY: sandbox_init is async-signal-safe (kernel transition).
+            // c_profile was allocated before fork and is valid.
+            let rc = unsafe { sandbox_init(c_profile.as_ptr(), 0, &raw mut errorbuf) };
+            let msg: &[u8] = if rc == -1 {
+                if !errorbuf.is_null() {
+                    // SAFETY: errorbuf allocated by sandbox_init, must be freed
+                    unsafe { sandbox_free_error(errorbuf) };
+                }
+                b"ERR"
+            } else {
+                b"OK"
+            };
+            // SAFETY: write_fd is valid, msg is a valid buffer
+            unsafe { libc::write(write_fd, msg.as_ptr().cast(), msg.len()) };
+            unsafe { libc::close(write_fd) };
+            unsafe { libc::_exit(0) };
+        }
+
+        // Parent
+        // SAFETY: closing unused fd
+        unsafe { libc::close(write_fd) };
+
+        let mut buf = [0u8; 16];
+        // SAFETY: read_fd is valid, buf is a valid buffer
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+        unsafe { libc::close(read_fd) };
+
+        let mut status: i32 = 0;
+        // SAFETY: valid pid, valid pointer
+        unsafe { libc::waitpid(pid, &raw mut status, 0) };
+
+        let result = if n > 0 {
+            std::str::from_utf8(&buf[..n as usize]).unwrap_or("UTF8_ERR")
+        } else {
+            "READ_FAIL"
+        };
+        assert_eq!(result, "ERR", "invalid SBPL should fail: {result}");
+    }
+
     #[test]
     fn add_ancestors_skips_relative_path() {
         let mut set = HashSet::new();
