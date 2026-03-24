@@ -817,19 +817,24 @@ async fn spawn_nu_process(
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
         cmd.stdin(SandboxStdio::Piped);
-        // Override TEMP/TMP/TMPDIR before forward_common_env — explicit env
-        // takes precedence over forwarded values. This redirects nu's temp
-        // I/O to the per-session dir under the project root, keeping it
-        // within the sandbox write policy.
+        // Override env vars before forward_common_env — explicit env takes
+        // precedence over forwarded values.
+        //
+        // TEMP/TMP/TMPDIR: redirect nu's temp I/O to the per-session dir
+        // under the project root, keeping it within the sandbox write policy.
         cmd.env("TEMP", session_temp_dir.path());
         cmd.env("TMP", session_temp_dir.path());
         cmd.env("TMPDIR", session_temp_dir.path());
-        // Override PATH with a minimal system-only value. The parent's PATH
-        // contains entries (cargo, rustup, build artifacts) that are not
-        // covered by the sandbox policy or platform implicit paths, and lot
-        // now validates PATH accessibility at spawn time. Nu is invoked by
-        // absolute path and rg is resolved via REEL_RG_PATH, so nu does not
-        // need the parent's full PATH.
+        // HOME: point to session temp dir so nu can create its config/data
+        // directories (~/.config/nushell, etc.) inside the sandbox. The
+        // parent's HOME is not mounted and would cause nu to panic on Linux.
+        cmd.env("HOME", session_temp_dir.path());
+        // PATH: minimal system-only value. The parent's PATH contains
+        // entries (cargo, rustup, build artifacts) not covered by the
+        // sandbox policy or platform implicit paths, and lot now validates
+        // PATH accessibility at spawn time. Nu is invoked by absolute path
+        // and rg is resolved via REEL_RG_PATH, so nu does not need the
+        // parent's full PATH.
         cmd.env("PATH", minimal_sandbox_path());
         cmd.forward_common_env();
 
