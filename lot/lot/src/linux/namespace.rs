@@ -668,10 +668,7 @@ mod tests {
                 val.trim() == "1",
                 "return value should match sysctl content"
             ),
-            Err(_) => assert!(
-                !restricted,
-                "should return false when sysctl is absent"
-            ),
+            Err(_) => assert!(!restricted, "should return false when sysctl is absent"),
         }
     }
 

@@ -692,7 +692,7 @@ mod tests {
             // SAFETY: testing ioctl denial — we expect EPERM from seccomp
             // before the kernel inspects the fd or data pointer.
             let rc = unsafe { libc::ioctl(0, 0x5412 as libc::c_ulong, std::ptr::null::<u8>()) };
-            check_eperm_and_report(rc.into(), w);
+            check_eperm_and_report(rc as isize, w);
         }
 
         let bpf = build_filter(&empty_policy(false)).unwrap();
@@ -718,12 +718,15 @@ mod tests {
                     std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
                 )
             };
-            check_eperm_and_report(rc.into(), w);
+            check_eperm_and_report(rc as isize, w);
         }
 
         let bpf = build_filter(&empty_policy(false)).unwrap();
         let result = fork_with_seccomp(&bpf, child_body);
-        assert_eq!(result, "OK", "connect should be denied without network: {result}");
+        assert_eq!(
+            result, "OK",
+            "connect should be denied without network: {result}"
+        );
     }
 
     #[test]
@@ -735,22 +738,16 @@ mod tests {
                 unsafe { libc::_exit(1) };
             }
             // SAFETY: sendto with invalid fd; seccomp rejects before fd check.
-            let rc = unsafe {
-                libc::sendto(
-                    -1,
-                    std::ptr::null(),
-                    0,
-                    0,
-                    std::ptr::null(),
-                    0,
-                )
-            };
+            let rc = unsafe { libc::sendto(-1, std::ptr::null(), 0, 0, std::ptr::null(), 0) };
             check_eperm_and_report(rc, w);
         }
 
         let bpf = build_filter(&empty_policy(false)).unwrap();
         let result = fork_with_seccomp(&bpf, child_body);
-        assert_eq!(result, "OK", "sendto should be denied without network: {result}");
+        assert_eq!(
+            result, "OK",
+            "sendto should be denied without network: {result}"
+        );
     }
 
     #[test]
@@ -763,7 +760,7 @@ mod tests {
             }
             // SAFETY: syscall args are valid; we expect it to fail with EPERM
             let rc = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-            check_eperm_and_report(rc.into(), w);
+            check_eperm_and_report(rc as isize, w);
         }
 
         let bpf = build_filter(&empty_policy(false)).unwrap();

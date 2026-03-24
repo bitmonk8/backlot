@@ -904,7 +904,10 @@ mod tests {
         // Verify /usr/lib is accessible inside the sandbox (mount_system_paths coverage).
         let policy = test_policy(vec![PathBuf::from("/usr")]);
         let mut cmd = SandboxCommand::new("/bin/sh");
-        cmd.args(["-c", "test -d /usr/lib && echo SYSLIB_OK || echo SYSLIB_MISSING"]);
+        cmd.args([
+            "-c",
+            "test -d /usr/lib && echo SYSLIB_OK || echo SYSLIB_MISSING",
+        ]);
         cmd.stdout(SandboxStdio::Piped);
         cmd.stderr(SandboxStdio::Piped);
 
