@@ -714,7 +714,7 @@ mod tests {
             let rc = unsafe {
                 libc::connect(
                     -1,
-                    &addr as *const _ as *const libc::sockaddr,
+                    std::ptr::from_ref(&addr).cast::<libc::sockaddr>(),
                     std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
                 )
             };
