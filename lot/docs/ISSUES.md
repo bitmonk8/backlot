@@ -4,6 +4,8 @@ Generated from audit findings: 2026-03-24
 
 93 active findings. 0 MUST FIX. Groups ordered by impact (NON-CRITICAL first, then NIT).
 
+Review notes appended per group in STATUS.md.
+
 ---
 
 ## Group 3 — Silent failures in kill/signal/cleanup paths
@@ -85,13 +87,11 @@ Tests that pass trivially or don't assert the right things.
 
 ---
 
-## Group 9 — Error handling in seccomp and fork paths
-
-Errors from waitpid and seccomp enforcement silently dropped.
+## Group 9 — Error handling in fork/child paths
 
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
-| 40 | Error-Handling | lot/src/linux/seccomp.rs | 447 | NON-CRITICAL | `fork_with_seccomp` never checks `waitpid` return value or child exit status. SIGSYS from seccomp goes unnoticed. |
+| 40 | Error-Handling | lot/src/linux/seccomp.rs | 447 | NIT | Test helper `fork_with_seccomp` doesn't check `waitpid` return value or child exit status. SIGSYS would not go unnoticed — child can't write "OK" to pipe, so the test assertion fails. Real issue is unchecked `waitpid` return in test helper. |
 | 41 | Error-Handling | lot/src/unix.rs | 377 | NIT | `child_bail` discards `libc::write` return. If broken pipe, parent sees EOF and concludes success. Defensible since `_exit(1)` follows. |
 
 ---
@@ -102,9 +102,9 @@ Repeated identical patterns across platform backends that could be extracted.
 
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
-| 42 | Simplification | lot/src/linux/namespace.rs | 193-216 | NON-CRITICAL | `mount_policy_paths` has three identical loops differing only in iterator and bind function. Could be single loop over `(iterator, mount_fn)` tuples. |
-| 43 | Simplification | lot/src/unix.rs | 34-68 | NON-CRITICAL | `.map_err(...)` repeated 5 times for `CString::new` in `prepare_prefork`. A local helper would eliminate repetition. |
-| 44 | Simplification | lot/src/linux/cgroup.rs | 34-65 | NON-CRITICAL | `has_writable_delegation` duplicates subtree_control check logic for parent and current cgroup. Could extract helper. |
+| 42 | Simplification | lot/src/linux/namespace.rs | 193-216 | NIT | `mount_policy_paths` has three identical loops differing only in iterator and bind function. Could be single loop over `(iterator, mount_fn)` tuples. Three explicit loops (~7 lines each) is clear and readable. |
+| 43 | Simplification | lot/src/unix.rs | 34-68 | NIT | `.map_err(...)` repeated 5 times for `CString::new` in `prepare_prefork`. A local helper would eliminate repetition. |
+| 44 | Simplification | lot/src/linux/cgroup.rs | 34-65 | NIT | `has_writable_delegation` duplicates subtree_control check logic for parent and current cgroup. Could extract helper. ~30-line function; duplication is minor. |
 | 45 | Simplification | lot/src/macos/seatbelt.rs | 109-123 | NIT | Three separate loops for read/write/exec paths emitting identical `file-read-metadata` rules. |
 
 ---

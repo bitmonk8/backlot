@@ -9,8 +9,8 @@
 New audit completed. 93 active findings across 21 groups in `docs/ISSUES.md` (14 false positives removed).
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (35):** Groups 3–4, 7–12, 14–15 — silent cleanup failures, missing test coverage, weak assertions, seccomp/fork error handling, duplication, separation of concerns, placement
-- **NIT (58):** Groups 1–2, 5–6, 13, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, simplification, naming, test boilerplate, doc mismatches, architectural cleanup
+- **NON-CRITICAL (31):** Groups 3–4, 7–8, 11–12, 14–15 — silent cleanup failures, missing test coverage, weak assertions, separation of concerns, placement
+- **NIT (62):** Groups 1–2, 5–6, 9–10, 13, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, test helper error handling, duplication/simplification, naming, test boilerplate, doc mismatches, architectural cleanup
 
 Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 
@@ -33,6 +33,8 @@ Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 - **Group 8 item #35 description corrected:** Not silent — prints `[diag] SKIPPED:` to stdout/stderr. Real issue is reporting as passed instead of skipped.
 - **Group 8 item #36 description corrected:** Windows path does assert `!status.success()`. Finding scoped to Unix path only.
 - **Group 8 item #39 downgraded NIT:** All three env var keys (`TEMP`, `TMP`, `TMPDIR`) share identical handling in a trivial loop.
+- **Group 9 #40 downgraded NIT:** `fork_with_seccomp` is a test helper, not production seccomp code. SIGSYS would not go unnoticed — child can't write "OK" to pipe, so test assertion fails. Group description corrected to remove misleading "seccomp enforcement" framing.
+- **Group 10 #42, #43, #44 downgraded NIT:** All three are minor code hygiene simplifications in small functions. Three explicit mount loops (~7 lines each) are clear; five `.map_err` calls are repetitive but trivial; `has_writable_delegation` duplication is minor in a ~30-line function.
 
 ## CI Notes
 
