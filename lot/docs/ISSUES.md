@@ -132,13 +132,11 @@ Large monolithic functions and mixed responsibilities.
 
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
-| 58 | Separation | lot/src/linux/namespace.rs | 1-983 | NON-CRITICAL | 983-line file handles 4 distinct concerns: capability probing, user namespace mapping, mount namespace construction (~500 lines), pivot_root. |
+| 58 | Separation | lot/src/linux/namespace.rs | 1-983 | NIT | 983-line file handles 4 concerns but only mount namespace setup (~200 lines) is large; capability probing, user NS mapping (~12 lines), and pivot_root (~10 lines) are trivial. |
 | 59 | Separation | lot/src/unix.rs | 259-485 | NIT | `read_two_fds` conflates poll event loop with data accumulation. `check_child_error_pipe` merges pipe reading, protocol decoding, and child reap/cleanup. |
-| 60 | Separation | lot/src/linux/mod.rs | 165-487 | NIT | `spawn` is ~320-line monolith. |
 | 61 | Separation | lot/src/linux/mod.rs | 581-608 | NIT | `test_helpers` module has generic fd utilities that aren't Linux-specific. |
 | 62 | Separation | lot/src/linux/namespace.rs | 91-174 | NIT | `mount_system_paths` mixes path classification, mount execution, symlink creation, and network-policy-aware `/etc` mounting. |
 | 63 | Separation | lot/src/macos/mod.rs | 46-215 | NIT | `spawn` is 170-line monolith. |
-| 64 | Separation-Broad | windows/acl_helpers.rs, sddl.rs, traverse_acl.rs | multiple | NIT | Three files with overlapping DACL manipulation responsibility. |
 
 ---
 
@@ -148,12 +146,10 @@ Test helpers discard errors, producing confusing failures or false passes.
 
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
-| 65 | Error-Handling | lot/src/unix.rs | 1579 | NON-CRITICAL | `set_rlimit_nofile_succeeds` doesn't check `getrlimit` return value. If it fails, test sets RLIMIT_NOFILE to 0 — tests wrong scenario. |
 | 66 | Error-Handling | lot/src/unix.rs | 1148-1156 | NIT | Test helper `fork_pipe_writer` discards write return value. Failed write produces empty pipe indistinguishable from success. |
 | 67 | Error-Handling | lot/src/unix.rs | 1540-1549 | NIT | Test child branch discards `libc::write` return for stdout/stderr. Failures surface as confusing assertion. |
 | 68 | Error-Handling | lot/src/linux/mod.rs | 792-794 | NIT | `waitpid` return value unchecked in 4 test functions. Status remains 0 on failure. |
-| 69 | Error-Handling | lot/src/linux/namespace.rs | 183-185 | NIT | `create_mount_target` silently skips parent creation when path not valid UTF-8. Falls through to confusing error. |
-| 70 | Error-Handling | lot/src/linux/namespace.rs | 399 | NIT | `create_mount_point_file` does not check `libc::close(fd)` return value. |
+| 70 | Error-Handling | lot/src/linux/namespace.rs | 399 | NIT | `create_mount_point_file` does not check `libc::close(fd)` return value. Production code, not a test helper. |
 
 ---
 

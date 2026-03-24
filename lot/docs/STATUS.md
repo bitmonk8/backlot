@@ -6,11 +6,11 @@
 
 ## Issues (2026-03-24)
 
-New audit completed. 92 active findings across 21 groups in `docs/ISSUES.md` (15 false positives removed).
+New audit completed. 88 active findings across 21 groups in `docs/ISSUES.md` (19 false positives removed).
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (30):** Groups 3–4, 7–8, 11, 14–15 — silent cleanup failures, missing test coverage, weak assertions, separation of concerns, placement
-- **NIT (62):** Groups 1–2, 5–6, 9–10, 12–13, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, test helper error handling, duplication/simplification, naming, test boilerplate, doc mismatches, architectural cleanup
+- **NON-CRITICAL (28):** Groups 3–4, 7–8, 11 — silent cleanup failures, missing test coverage, weak assertions, placement
+- **NIT (60):** Groups 1–2, 5–6, 9–10, 12–15, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, separation of concerns, test helper error handling, duplication/simplification, naming, test boilerplate, doc mismatches, architectural cleanup
 
 Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 
@@ -38,6 +38,12 @@ Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 - **Group 11 #46 confirmed NON-CRITICAL:** Both `set_rlimit` and `apply_resource_limits` are `#[cfg(target_os = "macos")]` and only called from `macos/mod.rs`. Placement issue is real.
 - **Group 12 #47 downgraded NIT:** Only `Unsupported` variant is relevant to Graceful Degradation (mechanism unavailability). `Timeout` and `Io` are runtime/generic errors — correctly excluded from that table. Description corrected.
 - **Group 12 #49 removed (false positive):** DESIGN.md line 13 is a terse directory-listing comment. Overlap deduction is documented in source code (policy_builder.rs lines 7-19). Not a doc mismatch.
+- **Group 14 #58 downgraded NIT:** Mount namespace is ~200 lines (not ~500). User NS mapping (~12 lines) and pivot_root (~10 lines) are trivial. Real issue is mount namespace size, not 4-way concern split.
+- **Group 14 #60 removed (false positive):** Linux spawn is ~360 lines but fork semantics require unified control flow. Splitting would obscure critical fork/child boundaries.
+- **Group 14 #64 removed (false positive):** `acl_helpers.rs`, `sddl.rs`, `traverse_acl.rs` have distinct, properly layered responsibilities with no overlap. `acl_helpers` = low-level DACL primitives, `sddl` = string representation for logging/rollback, `traverse_acl` = specialized AppContainer traverse ACE logic.
+- **Group 15 #65 removed (false positive):** `getrlimit(RLIMIT_NOFILE)` effectively never fails. Test validates `set_rlimit` behavior, not `getrlimit`. If getrlimit did fail (returning 0), set_rlimit(0) would likely fail and the assertion would catch it.
+- **Group 15 #69 removed (false positive):** Dest is constructed from `format!("{new_root}{s}")` where both parts are `&str`, so `to_str()` always succeeds. Code comment documents this. Also not a test helper — misplaced in this group.
+- **Group 15 #70 description corrected:** Production code, not a test helper. Finding is valid (unchecked `close(fd)`) but was misclassified.
 
 ## CI Notes
 
