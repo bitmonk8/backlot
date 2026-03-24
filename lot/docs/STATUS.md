@@ -8,9 +8,15 @@
 
 New audit completed. 100 active findings across 21 groups in `docs/ISSUES.md` (7 false positives removed).
 
-- **MUST FIX (3):** Group 1 (unsafe errno in child_bail macro — Linux + macOS), Group 2 items 3–4 (incorrect security-semantic comments)
-- **NON-CRITICAL (47):** Groups 3–8, 9–12, 14–15 — silent cleanup failures, missing test coverage, TOCTOU, canonicalization error handling, weak assertions, seccomp/fork error handling, separation of concerns, placement
-- **NIT (58):** Groups 10, 13, 16–21 — simplification, naming, test boilerplate, doc mismatches, architectural cleanup
+- **MUST FIX (0)**
+- **NON-CRITICAL (47):** Groups 3–12, 14–15 — silent cleanup failures, missing test coverage, TOCTOU, canonicalization error handling, weak assertions, seccomp/fork error handling, duplication, separation of concerns, placement
+- **NIT (53):** Groups 1–2, 13, 16–21 — errno style consistency, incorrect comments, simplification, naming, test boilerplate, doc mismatches, architectural cleanup
+
+Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
+
+### Review notes (2026-03-24)
+- **Group 1 downgraded NIT:** The "Rust 2024 unsafe soundness" claim is wrong. `macro_rules!` textual substitution places the errno dereference inside the macro's `unsafe` block. Code compiles cleanly. Finding is a style inconsistency, not a correctness issue.
+- **Group 2 items 3–5 downgraded NIT:** Wrong comments, not wrong behavior. No security impact.
 
 ## CI Notes
 

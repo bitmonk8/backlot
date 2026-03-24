@@ -2,30 +2,7 @@
 
 Generated from audit findings: 2026-03-24
 
-100 active findings (7 false positives removed).
-
----
-
-## Group 1 — Unsafe errno dereference in child_bail! macro
-
-Rust 2024 edition soundness issue. Raw pointer dereference outside `unsafe` context.
-
-| # | Category | File | Line(s) | Severity | Description |
-|---|----------|------|---------|----------|-------------|
-| 1 | Correctness | lot/src/linux/mod.rs | 454 | MUST FIX | `*libc::__errno_location()` passed as macro argument expanding inside `unsafe` block. Under Rust 2024, macro arguments evaluate at call site, outside the macro's `unsafe` wrapper. Every other `child_bail!` call saves errno to a local first. |
-| 2 | Correctness | lot/src/macos/mod.rs | 120, 161, 178 | MUST FIX | Same issue with `*libc::__error()`. Three call sites. |
-
----
-
-## Group 2 — Incorrect security-semantic comments
-
-Wrong descriptions of sandbox rule evaluation and environment behavior. Misleads anyone reading the code to understand or modify sandbox logic.
-
-| # | Category | File | Line(s) | Severity | Description |
-|---|----------|------|---------|----------|-------------|
-| 3 | Correctness | lot/src/macos/seatbelt.rs | 193 | MUST FIX | Comment says "most-specific-match-wins" but SBPL uses last-match-wins. Test comment (line 662) and DESIGN.md (line 123) are correct. Only line 193 wrong. |
-| 4 | Doc-Mismatch | lot/src/command.rs | 23 | MUST FIX | Field comment says "Platform essentials are always included." On Unix only `PATH` is injected if missing. On Windows nothing is injected; behavior depends on whether `command.env` is empty vs non-empty. Comment is misleading. |
-| 5 | Doc-Mismatch | lot/src/linux/cgroup.rs | 82-84 | NON-CRITICAL | Struct doc says "subdirectory under current process's cgroup subtree" but implementation creates under parent (sibling model). Method doc and DESIGN.md correct; struct comment wrong. |
+100 active findings. 0 MUST FIX. Groups ordered by impact (NON-CRITICAL first, then NIT).
 
 ---
 
@@ -159,21 +136,6 @@ Repeated identical patterns across platform backends that could be extracted.
 
 ---
 
-## Group 13 — Simplification: policy and builder duplication
-
-| # | Category | File | Line(s) | Severity | Description |
-|---|----------|------|---------|----------|-------------|
-| 50 | Simplification | lot/src/policy.rs | 240-258 | NIT | `all_paths` and `grant_paths` have nearly identical bodies — only difference is whether `deny_paths` is chained. |
-| 51 | Simplification | lot/src/policy.rs | 173-211 | NIT | `validate_deny_paths` takes three separate grant-path slices, immediately chains them. Could accept single pre-chained `&[PathBuf]`. |
-| 52 | Simplification | lot/src/policy_builder.rs | 90-102, 115-129, 142-152 | NIT | `read_path`, `write_path`, `exec_path` implement same pattern differing only in which sets to check/prune. Could be single private method. |
-| 53 | Simplification | lot/src/policy_builder.rs | 288-346 | NIT | `platform_exec_paths` and `platform_lib_paths` allocate `Vec<PathBuf>` of static strings. Could return arrays or static slices. |
-| 54 | Simplification | lot/src/policy_builder.rs | 177-185 | NIT | `deny_paths` is a thin loop wrapper. No batch methods for read/write/exec. Adds API surface without meaningful value. |
-| 55 | Simplification | lot/src/policy.rs | 215-234 | NIT | `canonicalize_collect` and `collect_validation_error` catch-all `Err(e)` arm is dead code — only `InvalidPolicy` is ever produced. |
-| 56 | Simplification | lot/src/policy.rs | 426-436 | NIT | `valid_policy` helper used only once. ~20 tests construct `SandboxPolicy` with same 7 boilerplate fields. A builder helper would eliminate repetition. |
-| 57 | Simplification | lot/src/policy.rs | 447-472, 1004-1020 | NIT | `empty_policy_rejected` and `empty_policy_error_mentions_at_least_one_path` test identical setup, just different assertions. Could be merged. |
-
----
-
 ## Group 14 — Separation of concerns
 
 Large monolithic functions and mixed responsibilities.
@@ -202,6 +164,44 @@ Test helpers discard errors, producing confusing failures or false passes.
 | 68 | Error-Handling | lot/src/linux/mod.rs | 792-794 | NIT | `waitpid` return value unchecked in 4 test functions. Status remains 0 on failure. |
 | 69 | Error-Handling | lot/src/linux/namespace.rs | 183-185 | NIT | `create_mount_target` silently skips parent creation when path not valid UTF-8. Falls through to confusing error. |
 | 70 | Error-Handling | lot/src/linux/namespace.rs | 399 | NIT | `create_mount_point_file` does not check `libc::close(fd)` return value. |
+
+---
+
+## Group 1 — Inconsistent errno capture in child_bail! macro
+
+Style inconsistency: some call sites pass raw errno dereference directly as a macro argument while others save to a local first.
+
+| # | Category | File | Line(s) | Severity | Description |
+|---|----------|------|---------|----------|-------------|
+| 1 | Naming | lot/src/linux/mod.rs | 454 | NIT | `*libc::__errno_location()` passed directly to `child_bail!`. Not unsound — macro textual substitution places it inside the `unsafe` block — but inconsistent with other call sites that save errno to a local first (e.g., line 289). |
+| 2 | Naming | lot/src/macos/mod.rs | 120, 161, 178 | NIT | Same inconsistency with `*libc::__error()`. Three call sites. |
+
+---
+
+## Group 2 — Incorrect comments
+
+Wrong descriptions of sandbox rule evaluation, environment behavior, and cgroup model.
+
+| # | Category | File | Line(s) | Severity | Description |
+|---|----------|------|---------|----------|-------------|
+| 3 | Doc-Mismatch | lot/src/macos/seatbelt.rs | 193 | NIT | Comment says "most-specific-match-wins" but SBPL uses last-match-wins. Test comment (line 662) and DESIGN.md (line 123) are correct. Only line 193 wrong. |
+| 4 | Doc-Mismatch | lot/src/command.rs | 23 | NIT | Field comment says "Platform essentials are always included." On Unix only `PATH` is injected if missing. On Windows nothing is injected; empty env → null pointer → child inherits parent's full environment. Comment is misleading. |
+| 5 | Doc-Mismatch | lot/src/linux/cgroup.rs | 82-84 | NIT | Struct doc says "subdirectory under current process's cgroup subtree" but implementation creates under parent (sibling model). Method doc (line 93) and DESIGN.md correct; struct comment wrong. |
+
+---
+
+## Group 13 — Simplification: policy and builder duplication
+
+| # | Category | File | Line(s) | Severity | Description |
+|---|----------|------|---------|----------|-------------|
+| 50 | Simplification | lot/src/policy.rs | 240-258 | NIT | `all_paths` and `grant_paths` have nearly identical bodies — only difference is whether `deny_paths` is chained. |
+| 51 | Simplification | lot/src/policy.rs | 173-211 | NIT | `validate_deny_paths` takes three separate grant-path slices, immediately chains them. Could accept single pre-chained `&[PathBuf]`. |
+| 52 | Simplification | lot/src/policy_builder.rs | 90-102, 115-129, 142-152 | NIT | `read_path`, `write_path`, `exec_path` implement same pattern differing only in which sets to check/prune. Could be single private method. |
+| 53 | Simplification | lot/src/policy_builder.rs | 288-346 | NIT | `platform_exec_paths` and `platform_lib_paths` allocate `Vec<PathBuf>` of static strings. Could return arrays or static slices. |
+| 54 | Simplification | lot/src/policy_builder.rs | 177-185 | NIT | `deny_paths` is a thin loop wrapper. No batch methods for read/write/exec. Adds API surface without meaningful value. |
+| 55 | Simplification | lot/src/policy.rs | 215-234 | NIT | `canonicalize_collect` and `collect_validation_error` catch-all `Err(e)` arm is dead code — only `InvalidPolicy` is ever produced. |
+| 56 | Simplification | lot/src/policy.rs | 426-436 | NIT | `valid_policy` helper used only once. ~20 tests construct `SandboxPolicy` with same 7 boilerplate fields. A builder helper would eliminate repetition. |
+| 57 | Simplification | lot/src/policy.rs | 447-472, 1004-1020 | NIT | `empty_policy_rejected` and `empty_policy_error_mentions_at_least_one_path` test identical setup, just different assertions. Could be merged. |
 
 ---
 
