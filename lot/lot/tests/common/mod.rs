@@ -61,7 +61,7 @@ pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "windows"))]
 pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
     // Allocate 1GB via python3. Panic if python3 is absent so the test
     // never silently passes without exercising the memory limit.
