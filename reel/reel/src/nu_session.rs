@@ -1757,6 +1757,8 @@ mod tests {
         .await;
         let out3 = result3.unwrap();
         eprintln!("config-ls: is_error={} content={}", out3.is_error, out3.content);
+        // Force fail to see output in CI
+        panic!("DIAGNOSTIC DUMP COMPLETE — intentional failure to surface output");
     }
 
     #[tokio::test]
