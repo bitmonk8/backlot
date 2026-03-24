@@ -271,6 +271,120 @@ mod tests {
     }
 
     #[test]
+    fn validate_env_ok_when_tmp_in_write_path() {
+        let write_dir = make_temp_dir();
+        let read_dir = make_temp_dir();
+
+        let policy = SandboxPolicy::new(
+            vec![read_dir.path().to_path_buf()],
+            vec![write_dir.path().to_path_buf()],
+            vec![],
+            vec![],
+            false,
+        );
+
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("TMP", write_dir.path());
+        #[cfg(target_os = "windows")]
+        {
+            let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+            cmd.env("PATH", format!(r"{sys_root}\System32"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("PATH", "/usr/bin");
+
+        assert!(
+            validate_env_accessibility(&policy, &cmd).is_ok(),
+            "TMP in write_path should pass"
+        );
+    }
+
+    #[test]
+    fn validate_env_rejects_tmp_outside_write_paths() {
+        let read_dir = make_temp_dir();
+        let uncovered = make_temp_dir();
+
+        let policy = SandboxPolicy::new(
+            vec![read_dir.path().to_path_buf()],
+            vec![],
+            vec![],
+            vec![],
+            false,
+        );
+
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("TMP", uncovered.path());
+        #[cfg(target_os = "windows")]
+        {
+            let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+            cmd.env("PATH", format!(r"{sys_root}\System32"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("PATH", "/usr/bin");
+
+        let err = validate_env_accessibility(&policy, &cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("TMP"), "error should mention TMP: {msg}");
+    }
+
+    #[test]
+    fn validate_env_ok_when_tmpdir_in_write_path() {
+        let write_dir = make_temp_dir();
+        let read_dir = make_temp_dir();
+
+        let policy = SandboxPolicy::new(
+            vec![read_dir.path().to_path_buf()],
+            vec![write_dir.path().to_path_buf()],
+            vec![],
+            vec![],
+            false,
+        );
+
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("TMPDIR", write_dir.path());
+        #[cfg(target_os = "windows")]
+        {
+            let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+            cmd.env("PATH", format!(r"{sys_root}\System32"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("PATH", "/usr/bin");
+
+        assert!(
+            validate_env_accessibility(&policy, &cmd).is_ok(),
+            "TMPDIR in write_path should pass"
+        );
+    }
+
+    #[test]
+    fn validate_env_rejects_tmpdir_outside_write_paths() {
+        let read_dir = make_temp_dir();
+        let uncovered = make_temp_dir();
+
+        let policy = SandboxPolicy::new(
+            vec![read_dir.path().to_path_buf()],
+            vec![],
+            vec![],
+            vec![],
+            false,
+        );
+
+        let mut cmd = SandboxCommand::new("dummy");
+        cmd.env("TMPDIR", uncovered.path());
+        #[cfg(target_os = "windows")]
+        {
+            let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+            cmd.env("PATH", format!(r"{sys_root}\System32"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        cmd.env("PATH", "/usr/bin");
+
+        let err = validate_env_accessibility(&policy, &cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("TMPDIR"), "error should mention TMPDIR: {msg}");
+    }
+
+    #[test]
     fn validate_env_rejects_uncovered_path_entry() {
         let write_dir = make_temp_dir();
         let uncovered = make_temp_dir();

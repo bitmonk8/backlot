@@ -2,26 +2,9 @@
 
 Generated from audit findings: 2026-03-24
 
-77 active findings. 0 MUST FIX, 7 NON-CRITICAL, 70 NIT. Groups ordered by impact (NON-CRITICAL first, then NIT).
+69 active findings. 0 MUST FIX, 4 NON-CRITICAL, 65 NIT. Groups ordered by impact (NON-CRITICAL first, then NIT).
 
 Review notes appended per group in STATUS.md.
-
----
-
-## Group 2 — Weak/incomplete test assertions
-
-Tests that pass trivially or don't assert the right things.
-
-| # | Category | File | Line(s) | Severity | Description |
-|---|----------|------|---------|----------|-------------|
-| 8 | Testing | lot/src/unix.rs | 1009-1017 | NIT | `close_if_not_std_skips_standard_fds` has no explicit assertion that fds 0/1/2 remain open. Guard is 3 lines (`if fd > 2`); companion test `close_if_not_std_closes_non_standard_fd` validates fd closure robustly via `fcntl`/EPIPE checks. |
-| 9 | Testing | lot/src/lib.rs | 202-222 | NIT | No test calls `spawn()` with an invalid policy to verify error propagation. `validate()` is well-tested separately in policy.rs; risk is low. |
-| 10 | Testing | lot/src/policy_builder.rs | 908-933 | NON-CRITICAL | `include_platform_exec_paths_succeeds` and `include_platform_lib_paths_succeeds` do not assert the convenience methods actually added paths. Assertions are satisfied by manually-added paths, not the methods under test. |
-| 11 | Testing | lot/src/linux/mod.rs | 701-722 | NON-CRITICAL | `spawn_network_isolated` asserts absence of `eth0`/`wlan0` but modern distros use predictable naming (e.g., `enp0s3`). Test passes trivially on those systems. Should assert only `lo` is present. |
-| 12 | Testing | lot/tests/integration.rs | 793-863 | NON-CRITICAL | Unix path of `test_deny_path_blocks_execution` doesn't assert `!status.success()`. Only checks stdout content. Windows path does assert exit status correctly. |
-| 13 | Testing | lot/src/path_util.rs | 14-26, 28-36 | NIT | `is_descendant_or_equal` (14-26) is `#[cfg(test)]` only. Production uses `is_strict_parent_of` (28-36) which has 4 tests using non-existent paths (exercising lexical fallback). Core logic (`starts_with` + inequality) is well-covered; canonicalization tested separately. |
-| 14 | Testing | lot/src/path_util.rs | 48-68 | NIT | `canonicalize_existing_prefix` has no direct test for symlinks in the existing prefix. Indirect symlink coverage exists via `descendant_or_equal_through_symlink` test (line 226), which calls `canonicalize_existing_prefix` internally. |
-| 15 | Testing | lot/src/env_check.rs | 89 | NIT | Only `TEMP` exercised in tests. No test sets `TMP` or `TMPDIR` independently. Trivial loop — all three keys share identical handling. |
 
 ---
 
@@ -230,3 +213,4 @@ Repeated test boilerplate across test modules.
 | 75 | Testing | lot/src/policy_builder.rs | 257-260 | NIT | `sentinel_dir()` has no test coverage. |
 | 76 | Testing | lot/src/env_check.rs | 53, 77 | NIT | `validate_env_accessibility` has hidden dependency on host environment. |
 | 77 | Testing | lot/src/env_check.rs | 161-195 | NIT | No test for first-match semantics with duplicate keys. |
+

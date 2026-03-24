@@ -221,6 +221,23 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn strict_parent_with_real_paths_on_disk() {
+        // Exercise the canonicalization path (not just lexical fallback).
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let parent = dir.path().to_path_buf();
+        let child = dir.path().join("sub");
+        std::fs::create_dir(&child).expect("create subdir");
+        assert!(
+            is_strict_parent_of(&parent, &child),
+            "parent should be strict parent of child"
+        );
+        assert!(
+            !is_strict_parent_of(&child, &parent),
+            "child should not be strict parent of parent"
+        );
+    }
+
     // ── is_descendant_or_equal with symlinks ──────────────────────
 
     #[cfg(unix)]
@@ -255,6 +272,26 @@ mod tests {
         let canon_dir = std::fs::canonicalize(dir.path()).expect("canonicalize");
         // Should be canon_dir/a/b/c
         assert_eq!(result, canon_dir.join("a").join("b").join("c"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_existing_prefix_resolves_symlink() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let real = dir.path().join("real_dir");
+        let link = dir.path().join("sym_link");
+        std::fs::create_dir(&real).expect("create real dir");
+        std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+
+        // Ask for symlink/nonexistent — should resolve through the symlink.
+        let query = link.join("nonexistent_child");
+        let result = canonicalize_existing_prefix(&query).unwrap();
+        let canon_real = std::fs::canonicalize(&real).expect("canonicalize real");
+        assert_eq!(
+            result,
+            canon_real.join("nonexistent_child"),
+            "symlink in existing prefix should be resolved"
+        );
     }
 
     #[test]

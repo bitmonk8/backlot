@@ -975,7 +975,15 @@ mod tests {
             close_if_not_std(1);
             close_if_not_std(2);
         }
-        // If we got here without crashing, the test passes
+        // Verify fds 0/1/2 are still open after close_if_not_std.
+        for fd in 0..=2 {
+            // SAFETY: F_GETFD on any fd is defined behavior (returns EBADF if invalid).
+            let ret = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(
+                ret >= 0,
+                "fd {fd} should still be open after close_if_not_std"
+            );
+        }
     }
 
     #[test]

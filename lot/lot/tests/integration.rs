@@ -845,6 +845,10 @@ fn test_deny_path_blocks_execution() {
         let child = must_spawn(&policy, &cmd);
         let output = child.wait_with_output().expect("wait");
 
+        assert!(
+            !output.status.success(),
+            "process should have failed when executing from denied path"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             !stdout.contains("SHOULD_NOT_RUN"),

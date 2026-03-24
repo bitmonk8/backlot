@@ -838,29 +838,42 @@ mod tests {
 
     #[test]
     fn include_platform_exec_paths_succeeds() {
-        let tmp = make_temp_dir();
-        let policy = SandboxPolicyBuilder::new()
-            .read_path(tmp.path())
-            .unwrap()
+        let builder = SandboxPolicyBuilder::new()
             .include_platform_exec_paths()
-            .unwrap()
-            .build()
-            .expect("build should succeed");
-        // On all platforms, at least the read_path should exist.
-        assert!(!policy.read_paths().is_empty());
+            .unwrap();
+        let expected = platform_exec_paths();
+        // The convenience method must have added at least the paths that
+        // exist on disk (nonexistent paths are silently skipped by exec_path).
+        let existing_count = expected.iter().filter(|p| p.exists()).count();
+        assert!(
+            existing_count > 0,
+            "test environment has no platform exec paths on disk — cannot exercise method"
+        );
+        assert!(
+            builder.exec_paths.len() >= existing_count,
+            "include_platform_exec_paths should add existing platform exec dirs; \
+             expected >= {existing_count}, got {}",
+            builder.exec_paths.len()
+        );
     }
 
     #[test]
     fn include_platform_lib_paths_succeeds() {
-        let tmp = make_temp_dir();
-        let policy = SandboxPolicyBuilder::new()
-            .exec_path(tmp.path())
-            .unwrap()
+        let builder = SandboxPolicyBuilder::new()
             .include_platform_lib_paths()
-            .unwrap()
-            .build()
-            .expect("build should succeed");
-        assert!(!policy.exec_paths().is_empty());
+            .unwrap();
+        let expected = platform_lib_paths();
+        let existing_count = expected.iter().filter(|p| p.exists()).count();
+        assert!(
+            existing_count > 0,
+            "test environment has no platform lib paths on disk — cannot exercise method"
+        );
+        assert!(
+            builder.read_paths.len() >= existing_count,
+            "include_platform_lib_paths should add existing platform lib dirs; \
+             expected >= {existing_count}, got {}",
+            builder.read_paths.len()
+        );
     }
 
     // ── Deny path overlap with builder ──────────────────────────────

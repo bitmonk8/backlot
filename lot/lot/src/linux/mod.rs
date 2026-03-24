@@ -623,12 +623,25 @@ mod tests {
             .expect("wait_with_output must succeed");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // In a network namespace, only lo should exist (and it may not even be UP)
-        // There should be no eth0, wlan0, etc.
+        // /proc/net/dev lists interfaces after a two-line header.
+        // In a network namespace only `lo` should be present.
+        let iface_names: Vec<&str> = stdout
+            .lines()
+            .skip(2) // skip "Inter-|" and "face |" header lines
+            .filter_map(|line| line.split(':').next())
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .collect();
         assert!(
-            !stdout.contains("eth0") && !stdout.contains("wlan0"),
-            "network namespace should not have host interfaces"
+            !iface_names.is_empty(),
+            "expected at least lo in /proc/net/dev"
         );
+        for name in &iface_names {
+            assert_eq!(
+                *name, "lo",
+                "only lo should exist in network namespace, found: {name}"
+            );
+        }
     }
 
     #[test]

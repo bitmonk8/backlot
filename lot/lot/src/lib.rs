@@ -497,6 +497,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spawn_empty_policy_returns_error() {
+        let policy = SandboxPolicy::new(vec![], vec![], vec![], vec![], false);
+        let cmd = SandboxCommand::new("dummy");
+        let result = spawn(&policy, &cmd);
+        assert!(
+            result.is_err(),
+            "spawn with empty policy should fail validation"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("at least one path"),
+            "error should mention missing paths: {msg}"
+        );
+    }
+
+    #[test]
     #[cfg(target_os = "windows")]
     fn probe_windows() {
         let caps = probe();
