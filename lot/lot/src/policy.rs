@@ -364,6 +364,12 @@ impl SandboxPolicy {
 #[derive(Debug, Clone, Default)]
 pub struct ResourceLimits {
     /// Maximum memory in bytes. None = no limit.
+    ///
+    /// On macOS, this uses `setrlimit(RLIMIT_AS)` which limits virtual address
+    /// space. `setrlimit` returns `EINVAL` if the limit is below the forked
+    /// child's inherited VM size (often >4 GB on Apple Silicon due to the dyld
+    /// shared cache). `spawn()` returns `SandboxError::Setup` in this case.
+    /// Linux (cgroups v2) and Windows (job objects) are not affected.
     pub max_memory_bytes: Option<u64>,
     /// Maximum number of child processes. None = no limit.
     pub max_processes: Option<u32>,

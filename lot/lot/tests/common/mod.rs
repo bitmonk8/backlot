@@ -52,20 +52,18 @@ pub fn sleep_command(seconds: u32) -> (PathBuf, Vec<String>) {
     (PathBuf::from("/bin/sleep"), vec![seconds.to_string()])
 }
 
-/// Platform-appropriate command that attempts to allocate 8 GB of memory.
-/// Limit is set to 4 GB in the test policy. The high values avoid macOS
-/// RLIMIT_AS EINVAL when the limit falls below baseline VM usage.
+/// Platform-appropriate command that attempts to allocate 1 GB of memory.
 #[cfg(target_os = "windows")]
 pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
     (
         PathBuf::from("powershell"),
-        vec!["-Command".into(), "[byte[]]::new(8GB) | Out-Null".into()],
+        vec!["-Command".into(), "[byte[]]::new(1GB) | Out-Null".into()],
     )
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
-    // Allocate 8GB via python3. Panic if python3 is absent so the test
+    // Allocate 1GB via python3. Panic if python3 is absent so the test
     // never silently passes without exercising the memory limit.
     let python3 = ["/usr/bin/python3", "/usr/local/bin/python3"]
         .iter()
@@ -76,7 +74,7 @@ pub fn memory_hog_command() -> (PathBuf, Vec<String>) {
         python3,
         vec![
             "-c".into(),
-            "import mmap, time; m = mmap.mmap(-1, 8*1024*1024*1024); m[:] = b'\\x01' * len(m); time.sleep(1)".into(),
+            "import mmap, time; m = mmap.mmap(-1, 1024*1024*1024); m[:] = b'\\x01' * len(m); time.sleep(1)".into(),
         ],
     )
 }

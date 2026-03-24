@@ -181,6 +181,7 @@ For user-owned directories, `spawn()` grants ancestor traverse ACEs automaticall
 ## Known Limitations
 
 - `max_cpu_seconds` is not enforced on Linux (cgroups v2 `cpu.max` controls bandwidth, not total time). Enforced on Windows and macOS.
+- `max_memory_bytes` on macOS uses `setrlimit(RLIMIT_AS)`, which limits virtual address space. On Apple Silicon, the forked child inherits a large virtual memory footprint from the parent (dyld shared cache, system frameworks), often exceeding several GB. `setrlimit` returns `EINVAL` if the requested limit is below the inherited VM size. This makes low memory limits unreliable on macOS. `spawn()` returns `SandboxError::Setup` when this happens. Linux (cgroups v2 `memory.max`) and Windows (job objects) do not have this limitation.
 - macOS `mach-lookup` is unrestricted in Seatbelt profiles (restricting it breaks most programs).
 - Linux namespace tests require `kernel.apparmor_restrict_unprivileged_userns=0` on Ubuntu 24.04+.
 - Windows: AppContainer processes cannot access `\\.\NUL` without a one-time system fix (see above).

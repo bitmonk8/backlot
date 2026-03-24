@@ -134,6 +134,8 @@ void sandbox_free_error(char *errorbuf);
 
 **Resource limits:** `setrlimit(RLIMIT_AS, ...)` for memory, `setrlimit(RLIMIT_NPROC, ...)` for process count, `setrlimit(RLIMIT_CPU, ...)` for CPU time. No cgroup equivalent on macOS.
 
+**RLIMIT_AS caveat:** `RLIMIT_AS` is aliased to `RLIMIT_RSS` on macOS (both resource #5). `setrlimit` returns `EINVAL` if the new limit is below the forked child's inherited virtual memory size. On Apple Silicon, the dyld shared cache and system frameworks push baseline VM well above 4 GB, making low memory limits unreliable. `spawn()` returns `SandboxError::Setup` when `setrlimit` fails. `RLIMIT_NPROC` and `RLIMIT_CPU` are not affected.
+
 **Deprecation note:** Apple deprecated `sandbox_init` but has not removed it. It is still used by major applications (Chrome, Firefox) and the underlying kernel sandbox is actively maintained. No replacement API exists for third-party use.
 
 ### Shared Unix lifecycle (`unix.rs`)

@@ -228,6 +228,10 @@ impl SandboxPolicyBuilder {
     }
 
     /// Set the maximum memory limit in bytes.
+    ///
+    /// **macOS caveat:** uses `setrlimit(RLIMIT_AS)`. Fails with
+    /// `SandboxError::Setup` if the limit is below the child's inherited VM
+    /// size (often >4 GB on Apple Silicon). See [`ResourceLimits::max_memory_bytes`].
     #[must_use]
     pub const fn max_memory_bytes(mut self, bytes: u64) -> Self {
         self.limits.max_memory_bytes = Some(bytes);

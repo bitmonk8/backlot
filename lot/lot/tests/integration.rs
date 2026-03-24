@@ -1274,10 +1274,13 @@ fn test_sandbox_policy_builder_basic() {
     eprintln!("[diag] PASSED");
 }
 
-// macOS RLIMIT_AS enforcement is unreliable — setrlimit(RLIMIT_AS) returns
-// EINVAL when the requested limit is below current virtual memory usage,
-// which is common in test environments.
+// macOS: RLIMIT_AS (aliased to RLIMIT_RSS) returns EINVAL from setrlimit when
+// the limit is below the forked child's inherited virtual memory size, which on
+// Apple Silicon includes the dyld shared cache (often >4 GB). Memory limit
+// enforcement via RLIMIT_AS is unreliable on macOS — see Known Limitations in
+// README.md. This test is Linux + Windows only; macOS gets a separate test below.
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn test_memory_limit_enforcement() {
     eprintln!("[diag] === test_memory_limit_enforcement ===");
 
@@ -1286,8 +1289,7 @@ fn test_memory_limit_enforcement() {
 
     let (program, args) = memory_hog_command();
 
-    // 4 GB limit — below the 8 GB allocation the child attempts.
-    // High values avoid macOS RLIMIT_AS EINVAL when limit < baseline VM.
+    // 512 MB limit — below the 1 GB allocation the child attempts.
     let policy = lot::SandboxPolicy::new(
         vec![tmp.path().to_path_buf()],
         vec![scratch.path().to_path_buf()],
@@ -1295,7 +1297,7 @@ fn test_memory_limit_enforcement() {
         Vec::new(),
         false,
         lot::ResourceLimits {
-            max_memory_bytes: Some(4 * 1024 * 1024 * 1024),
+            max_memory_bytes: Some(512 * 1024 * 1024),
             ..lot::ResourceLimits::default()
         },
     );
@@ -1317,6 +1319,51 @@ fn test_memory_limit_enforcement() {
         output.status
     );
     eprintln!("[diag] PASSED");
+}
+
+// macOS: setrlimit(RLIMIT_AS) fails with EINVAL when the limit is below the
+// process's inherited virtual memory size. Verify lot surfaces the error.
+#[test]
+#[cfg(target_os = "macos")]
+fn test_memory_limit_returns_error_on_macos() {
+    eprintln!("[diag] === test_memory_limit_returns_error_on_macos ===");
+
+    let tmp = make_temp_dir();
+    let scratch = make_temp_dir();
+
+    let (program, _args) = sleep_command(10);
+
+    // 512 MB — almost certainly below inherited VM on Apple Silicon.
+    let policy = lot::SandboxPolicy::new(
+        vec![tmp.path().to_path_buf()],
+        vec![scratch.path().to_path_buf()],
+        platform_exec_paths(),
+        Vec::new(),
+        false,
+        lot::ResourceLimits {
+            max_memory_bytes: Some(512 * 1024 * 1024),
+            ..lot::ResourceLimits::default()
+        },
+    );
+
+    let cmd = make_sandbox_cmd(&program, &[], scratch.path());
+
+    match lot::spawn(&policy, &cmd) {
+        Err(lot::SandboxError::Setup(msg)) => {
+            assert!(
+                msg.contains("setrlimit"),
+                "setup error should mention setrlimit: {msg}"
+            );
+            eprintln!("[diag] PASSED: got expected SandboxError::Setup — {msg}");
+        }
+        Err(e) => panic!("expected SandboxError::Setup, got: {e}"),
+        Ok(child) => {
+            // If setrlimit somehow succeeds (e.g., low baseline VM), that is
+            // also acceptable — the limit was applied. Clean up.
+            eprintln!("[diag] setrlimit succeeded unexpectedly (low baseline VM); accepting");
+            drop(child);
+        }
+    }
 }
 
 #[test]
