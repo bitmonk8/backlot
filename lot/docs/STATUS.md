@@ -6,10 +6,10 @@
 
 ## Issues (2026-03-24)
 
-96 active findings across 21 groups in `docs/ISSUES.md` (19 false positives removed during triage).
+95 active findings across 21 groups in `docs/ISSUES.md` (19 false positives removed during triage, 1 merged duplicate).
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (19):** Groups 1–5 — missing security-critical test coverage, weak assertions, lifecycle test gaps, silent cleanup failures, placement
+- **NON-CRITICAL (18):** Groups 1–5 — missing security-critical test coverage, weak assertions, lifecycle test gaps, silent cleanup failures, placement
 - **NIT (77):** Groups 6–21 — TOCTOU (mitigated), canonicalization fallback, correctness, error handling, incorrect comments, doc mismatches, separation of concerns, architectural simplification, naming, code duplication, minor cleanup, test boilerplate, NIT test coverage gaps
 
 Groups reordered and renumbered by impact (2026-03-24). NON-CRITICAL first, then NIT by category: correctness > error handling > docs > architecture > naming > simplification > testing.
@@ -32,6 +32,11 @@ Groups reordered and renumbered by impact (2026-03-24). NON-CRITICAL first, then
 - **Old Group 12 (now 12) downgraded NIT:** Only `Unsupported` variant is relevant to Graceful Degradation. Doc mismatch item removed (false positive).
 - **Old Group 14 (now 13) items downgraded/removed:** Mount namespace is ~200 lines (not ~500). Linux spawn fork semantics require unified control flow. Windows ACL modules have distinct responsibilities.
 - **Old Group 15 (now 10) items removed/corrected:** `getrlimit(RLIMIT_NOFILE)` effectively never fails. `to_str()` always succeeds on `format!`-constructed paths. `close(fd)` finding is production code, not a test helper.
+
+### Group 1 review (2026-03-24)
+- **Item 4 downgraded NIT:** `is_apparmor_restricted` regression would not silently disable sandboxing — wrong `true` makes `probe()` report unavailable, wrong `false` causes explicit `unshare` error. Neither case is silent. Description corrected.
+- **Items 6+7 merged:** Both describe the same gap (no test for `allow_network(true)`) from source vs. integration test perspective. Merged into item 6. Finding count reduced by 1.
+- **Items 1, 2, 3, 5 confirmed:** Line numbers, descriptions, and severities are accurate.
 
 ## CI Notes
 
