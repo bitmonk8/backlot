@@ -3,7 +3,6 @@
 mod namespace;
 mod seccomp;
 
-use std::ffi::CString;
 use std::io;
 use std::sync::atomic::AtomicBool;
 
