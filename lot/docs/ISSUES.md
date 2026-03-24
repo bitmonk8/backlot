@@ -2,7 +2,7 @@
 
 Generated from audit findings: 2026-03-24
 
-69 active findings. 0 MUST FIX, 4 NON-CRITICAL, 65 NIT. Groups ordered by impact (NON-CRITICAL first, then NIT).
+69 active findings. 0 MUST FIX, 0 NON-CRITICAL, 69 NIT. Groups ordered by impact.
 
 Review notes appended per group in STATUS.md.
 
@@ -14,9 +14,9 @@ Lifecycle operations (stdio setup, timeout cleanup) lack tests.
 
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
-| 16 | Testing | lot/src/unix.rs | 512-566 | NON-CRITICAL | `setup_stdio_fds` has no test coverage. Contains non-trivial fd-aliasing logic. The aliasing case (same fd for stdout and stderr) has zero coverage. |
-| 17 | Testing | lot/tests/integration.rs | 1503-1654 | NON-CRITICAL | Tokio timeout tests don't verify child process cleanup after timeout. |
-| 18 | Testing | lot/tests/integration.rs | 440-505 | NON-CRITICAL | Drop cleanup tests: Windows only checks `cleanup_stale().is_ok()`. Linux/macOS check process termination for an `echo` child that likely already exited on its own. |
+| 16 | Testing | lot/src/unix.rs | 512-566 | NIT | `setup_stdio_fds` has no direct test coverage. The fd-aliasing logic (`effective_fd` helper, `redirected` tracking array) is only exercised indirectly via integration tests that spawn sandboxed children. The aliasing case (same fd for stdout and stderr) has zero coverage. Difficult to unit-test: runs in a forked child, requires real fd manipulation. |
+| 17 | Testing | lot/tests/integration.rs | 1488-1636 | NIT | Tokio timeout tests (`mod tokio_tests`) verify timeout fires and fast-child completes, but don't verify child process cleanup after timeout. The implementation does kill and reap, but tests don't assert it. |
+| 18 | Testing | lot/tests/integration.rs | 435-499 | NIT | `test_cleanup_after_drop` uses `echo` (short-lived), so Unix assertions (process gone) likely pass because `echo` already exited, not because drop killed it. Windows only checks `cleanup_stale().is_ok()`, not process termination. A long-running child (e.g., `sleep 60`) would actually test drop-triggered kill. |
 
 ---
 

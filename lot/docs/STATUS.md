@@ -9,8 +9,8 @@
 69 active findings across 19 groups in `docs/ISSUES.md`.
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (4):** Groups 3–4 — lifecycle test gaps, silent cleanup failures
-- **NIT (65):** Groups 5–20 — TOCTOU (mitigated), canonicalization fallback, correctness, error handling, incorrect comments, doc mismatches, separation of concerns, architectural simplification, naming, code duplication, minor cleanup, test boilerplate, NIT test coverage gaps
+- **NON-CRITICAL (0)**
+- **NIT (69):** Groups 3–20 — lifecycle test gaps (downgraded from NON-CRITICAL after review: true findings but code works correctly, tests just don't prove specific behaviors), silent cleanup failures, TOCTOU (mitigated), canonicalization fallback, correctness, error handling, incorrect comments, doc mismatches, separation of concerns, architectural simplification, naming, code duplication, minor cleanup, test boilerplate, NIT test coverage gaps
 
 Groups reordered and renumbered by impact (2026-03-24). NON-CRITICAL first, then NIT by category: correctness > error handling > docs > architecture > naming > simplification > testing.
 
