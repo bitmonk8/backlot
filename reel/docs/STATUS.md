@@ -86,4 +86,4 @@ Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testabilit
 
 ## Work Candidates
 
-No remaining work candidates.
+- **Revert config loading workaround (issue #89)** — Waiting on lot to add TCSETS/TCSETSW/TCSETSF to seccomp ioctl allowlist. Once fixed, revert `spawn_nu_process` to use `--config` flag instead of MCP evaluate sourcing. Bug report at `lot/docs/SECCOMP_IOCTL_BUG.md`.
