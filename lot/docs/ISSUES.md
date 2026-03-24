@@ -2,7 +2,7 @@
 
 Generated from audit findings: 2026-03-24
 
-97 active findings. 0 MUST FIX. Groups ordered by impact (NON-CRITICAL first, then NIT).
+93 active findings. 0 MUST FIX. Groups ordered by impact (NON-CRITICAL first, then NIT).
 
 ---
 
@@ -60,12 +60,10 @@ Lifecycle operations (stdio setup, resource limits, timeout cleanup) lack tests.
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
 | 22 | Testing | lot/src/unix.rs | 512-566 | NON-CRITICAL | `setup_stdio_fds` has no test coverage. Contains non-trivial fd-aliasing logic. The aliasing case (same fd for stdout and stderr) has zero coverage. |
-| 23 | Testing | lot/src/unix.rs | 572-604 | NON-CRITICAL | `apply_resource_limits` has no test. Only `set_rlimit` has a single no-op macOS test. |
-| 24 | Testing | lot/src/unix.rs | 623-630 | NON-CRITICAL | `validate_kill_pid` tests gated on `#[cfg(feature = "tokio")]`. If CI doesn't run with tokio feature, tests silently skipped. |
-| 25 | Testing | lot/src/lib.rs | 440-480 | NON-CRITICAL | `wait_with_output_timeout` (tokio feature) has no test. Contains nontrivial logic. |
-| 26 | Testing | lot/src/linux/cgroup.rs | 200-240 | NON-CRITICAL | `signal_all()` fallback path (per-PID SIGKILL) has no test. |
+| 23 | Testing | lot/src/unix.rs | 589-604 | NON-CRITICAL | `apply_resource_limits` has no test. Only `set_rlimit` has a single macOS test (`set_rlimit_nofile_succeeds`) that tests a different resource (NOFILE). |
+| 26 | Testing | lot/src/linux/cgroup.rs | 200-240 | NON-CRITICAL | `signal_all()` fallback path (per-PID SIGKILL) has no test. On kernels with `cgroup.kill` (5.14+), only the atomic path runs; fallback is untested. |
 | 27 | Testing | lot/tests/integration.rs | 1503-1654 | NON-CRITICAL | Tokio timeout tests don't verify child process cleanup after timeout. |
-| 28 | Testing | lot/tests/integration.rs | 440-505 | NON-CRITICAL | Drop cleanup tests: Windows only checks `cleanup_stale().is_ok()`. Linux checks `/proc/{pid}` for echo that likely already exited. |
+| 28 | Testing | lot/tests/integration.rs | 440-505 | NON-CRITICAL | Drop cleanup tests: Windows only checks `cleanup_stale().is_ok()`. Linux/macOS check process termination for an `echo` child that likely already exited on its own. |
 
 ---
 
@@ -76,16 +74,14 @@ Tests that pass trivially or don't assert the right things.
 | # | Category | File | Line(s) | Severity | Description |
 |---|----------|------|---------|----------|-------------|
 | 29 | Testing | lot/src/unix.rs | 1009-1017 | NON-CRITICAL | `close_if_not_std_skips_standard_fds` has no assertion that fds 0/1/2 remain open. Test proves nothing. |
-| 30 | Testing | lot/src/lib.rs | 503-526 | NON-CRITICAL | Platform probe tests only assert expected-true fields. None verify other-platform fields are false. |
-| 31 | Testing | lot/src/lib.rs | 202-222 | NON-CRITICAL | No test covers spawn() policy validation path. |
-| 32 | Testing | lot/src/policy_builder.rs | 908-933 | NON-CRITICAL | `include_platform_exec_paths_succeeds` and `include_platform_lib_paths_succeeds` do not assert the convenience methods actually added paths. |
-| 33 | Testing | lot/src/linux/mod.rs | 701-722 | NON-CRITICAL | `spawn_network_isolated` asserts absence of `eth0`/`wlan0` but modern distros use predictable naming. Test passes trivially. |
-| 34 | Testing | lot/src/linux/cgroup.rs | 317-319 | NON-CRITICAL | `require_cgroups()` causes tests to pass on non-cgroup environments rather than skip. |
-| 35 | Testing | lot/tests/integration.rs | 1281-1334 | NON-CRITICAL | macOS memory limit test silently returns early on `setrlimit` failure. Reports as passed, not skipped. |
-| 36 | Testing | lot/tests/integration.rs | 793-863 | NON-CRITICAL | Unix `test_deny_path_blocks_execution` doesn't assert `!status.success()`. Only checks stdout content. |
+| 31 | Testing | lot/src/lib.rs | 202-222 | NIT | No test calls `spawn()` with an invalid policy to verify error propagation. `validate()` is well-tested separately in policy.rs; risk is low. |
+| 32 | Testing | lot/src/policy_builder.rs | 908-933 | NON-CRITICAL | `include_platform_exec_paths_succeeds` and `include_platform_lib_paths_succeeds` do not assert the convenience methods actually added paths. Assertions are satisfied by manually-added paths, not the methods under test. |
+| 33 | Testing | lot/src/linux/mod.rs | 701-722 | NON-CRITICAL | `spawn_network_isolated` asserts absence of `eth0`/`wlan0` but modern distros use predictable naming (e.g., `enp0s3`). Test passes trivially on those systems. Should assert only `lo` is present. |
+| 35 | Testing | lot/tests/integration.rs | 1281-1334 | NON-CRITICAL | macOS memory limit test returns early on `setrlimit` failure with a diagnostic print, but reports as passed (not skipped) to the test framework. |
+| 36 | Testing | lot/tests/integration.rs | 793-863 | NON-CRITICAL | Unix path of `test_deny_path_blocks_execution` doesn't assert `!status.success()`. Only checks stdout content. Windows path does assert exit status correctly. |
 | 37 | Testing | lot/src/path_util.rs | 14-36 | NON-CRITICAL | `is_descendant_or_equal` is `#[cfg(test)]` only. Production uses `is_strict_parent_of` which has only 4 tests with non-existent paths. |
 | 38 | Testing | lot/src/path_util.rs | 48-68 | NON-CRITICAL | `canonicalize_existing_prefix` has no test for symlinks in the existing prefix — the function's stated purpose. |
-| 39 | Testing | lot/src/env_check.rs | 89 | NON-CRITICAL | Only `TEMP` exercised in tests. No test sets `TMP` or `TMPDIR` independently. |
+| 39 | Testing | lot/src/env_check.rs | 89 | NIT | Only `TEMP` exercised in tests. No test sets `TMP` or `TMPDIR` independently. Trivial loop — all three keys share identical handling. |
 
 ---
 

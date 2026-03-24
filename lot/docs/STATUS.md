@@ -6,11 +6,11 @@
 
 ## Issues (2026-03-24)
 
-New audit completed. 97 active findings across 21 groups in `docs/ISSUES.md` (10 false positives removed).
+New audit completed. 93 active findings across 21 groups in `docs/ISSUES.md` (14 false positives removed).
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (41):** Groups 3–4, 7–12, 14–15 — silent cleanup failures, missing test coverage, weak assertions, seccomp/fork error handling, duplication, separation of concerns, placement
-- **NIT (56):** Groups 1–2, 5–6, 13, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, simplification, naming, test boilerplate, doc mismatches, architectural cleanup
+- **NON-CRITICAL (35):** Groups 3–4, 7–12, 14–15 — silent cleanup failures, missing test coverage, weak assertions, seccomp/fork error handling, duplication, separation of concerns, placement
+- **NIT (58):** Groups 1–2, 5–6, 13, 16–21 — errno style consistency, incorrect comments, TOCTOU (mitigated), canonicalization fallback, simplification, naming, test boilerplate, doc mismatches, architectural cleanup
 
 Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 
@@ -24,6 +24,15 @@ Groups ordered by impact in ISSUES.md (NON-CRITICAL first, then NIT).
 - **Group 6 item #19 downgraded NIT:** `is_strict_parent_of` fallback is harmless; all callers pass pre-canonicalized paths from `policy.rs` validation.
 - **Group 6 item #20 removed (false positive):** Progressive prefix fallback is the function's stated algorithm, not error swallowing. Tries `/a/b/c` → `/a/b` → `/a` → `/` by design.
 - **Group 6 item #21 removed (false positive):** Five canonicalization functions (not four) across four files, each serving a distinct purpose: permissive (builder), strict (validation), partial (ancestry), and two batch wrappers. Not redundant.
+- **Group 7 item #23 line range corrected:** `apply_resource_limits` is at lines 589-604, not 572-604. Description updated to note `set_rlimit_nofile_succeeds` tests a different resource.
+- **Group 7 item #24 removed (false positive):** `validate_kill_pid` is `#[cfg(feature = "tokio")]` — tests must be feature-gated to compile. CI runs all tests with `--features tokio` (ci.yml lines 103, 121, 141). Tests are never skipped.
+- **Group 7 item #25 removed (false positive):** `wait_with_output_timeout` has integration tests in `tokio_tests` module (integration.rs lines 1552-1654).
+- **Group 8 item #30 removed (false positive):** `probe_linux` test explicitly asserts `!caps.seatbelt`, `!caps.appcontainer`, `!caps.job_objects`. Finding's blanket claim was wrong.
+- **Group 8 item #31 downgraded NIT:** `validate()` is well-tested in policy.rs (28+ tests). Risk of spawn() not propagating it is low.
+- **Group 8 item #34 removed (false positive):** `require_cgroups()` uses `assert!` which panics (fails the test), not silently passes. Finding described the opposite behavior.
+- **Group 8 item #35 description corrected:** Not silent — prints `[diag] SKIPPED:` to stdout/stderr. Real issue is reporting as passed instead of skipped.
+- **Group 8 item #36 description corrected:** Windows path does assert `!status.success()`. Finding scoped to Unix path only.
+- **Group 8 item #39 downgraded NIT:** All three env var keys (`TEMP`, `TMP`, `TMPDIR`) share identical handling in a trivial loop.
 
 ## CI Notes
 
