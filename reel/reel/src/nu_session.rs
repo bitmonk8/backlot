@@ -805,11 +805,13 @@ async fn spawn_nu_process(
         let mut cmd = SandboxCommand::new(&nu_binary);
         cmd.arg("--mcp");
 
-        // Config files are NOT passed via --config/--env-config because
-        // nu's config loading code calls Command::output() internally,
-        // which triggers a seccomp EPERM under lot's argument-filtered
-        // prctl/ioctl rules. Instead, we source the config file via MCP
-        // evaluate after the handshake completes (see below).
+        // Pass reel config files so custom commands are pre-loaded.
+        if let Some((ref config_path, ref env_path)) = config_files {
+            cmd.arg("--config");
+            cmd.arg(config_path);
+            cmd.arg("--env-config");
+            cmd.arg(env_path);
+        }
 
         cmd.cwd(&project_root);
         cmd.stdout(SandboxStdio::Piped);
@@ -904,18 +906,6 @@ async fn spawn_nu_process(
             .map_err(|e| format!("failed to serialize notification: {e}"))?;
 
         send_line(&proc.stdin, &notif_bytes)?;
-
-        // Source config files via MCP evaluate instead of --config flag.
-        // Nu's --config loading code calls Command::output() internally,
-        // which panics under lot's seccomp filter (argument-filtered
-        // prctl/ioctl). Sourcing via evaluate avoids that code path.
-        if let Some((ref config_path, _)) = config_files {
-            let source_cmd = format!("source '{}'", config_path.display());
-            let result = rpc_call(&mut proc, &source_cmd)?;
-            if result.is_error {
-                return Err(format!("failed to source config: {}", result.content));
-            }
-        }
 
         Ok(proc)
     })
