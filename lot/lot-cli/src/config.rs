@@ -108,10 +108,12 @@ mod tests {
     use super::*;
 
     fn make_temp_dir() -> tempfile::TempDir {
-        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .unwrap();
-        tempfile::TempDir::new_in(workspace.join("test_tmp")).expect("failed to create temp dir")
+            .unwrap()
+            .join("test_tmp");
+        std::fs::create_dir_all(&test_tmp).expect("create test_tmp dir");
+        tempfile::TempDir::new_in(test_tmp).expect("failed to create temp dir")
     }
 
     #[test]

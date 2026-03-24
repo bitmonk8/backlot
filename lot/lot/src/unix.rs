@@ -95,8 +95,8 @@ pub fn prepare_prefork(command: &SandboxCommand) -> io::Result<PreForkData> {
 /// Open `/dev/null` with the given flags (e.g., `O_RDONLY` or `O_WRONLY`).
 /// Returns the fd with `O_CLOEXEC` set.
 pub fn open_dev_null(flags: i32) -> io::Result<i32> {
-    // "/dev/null" contains no NUL bytes, so CString::new cannot fail.
-    let c_path = CString::new("/dev/null").expect("static literal without NUL bytes");
+    let c_path =
+        CString::new("/dev/null").map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     // SAFETY: valid path, caller-provided flags | O_CLOEXEC
     let fd = unsafe { libc::open(c_path.as_ptr(), flags | libc::O_CLOEXEC) };
     if fd < 0 {

@@ -415,10 +415,12 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_temp_dir() -> TempDir {
-        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .unwrap();
-        TempDir::new_in(workspace.join("test_tmp")).expect("failed to create temp dir")
+            .unwrap()
+            .join("test_tmp");
+        std::fs::create_dir_all(&test_tmp).expect("create test_tmp dir");
+        TempDir::new_in(test_tmp).expect("failed to create temp dir")
     }
 
     fn valid_policy(path: PathBuf) -> SandboxPolicy {
