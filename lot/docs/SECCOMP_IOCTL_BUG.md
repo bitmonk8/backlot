@@ -2,11 +2,11 @@
 
 ## Summary
 
-Sandboxed processes that spawn child subprocesses via `std::process::Command::output()` panic on Linux when the child (or its runtime) calls an ioctl not in lot's argument-filtered allowlist. The old seccomp filter (pre-331bb56) allowed `prctl` and `ioctl` unconditionally. The new filter restricts them to specific operations, which is too narrow for programs that perform terminal I/O or use ncurses.
+Sandboxed processes that spawn child subprocesses via `std::process::Command::output()` panic on Linux when the child (or its runtime) calls an ioctl not in lot's argument-filtered allowlist. The old seccomp filter (pre-da6b0fc) allowed `prctl` and `ioctl` unconditionally. Commit da6b0fc ("Fix all 13 medium audit findings") added argument filtering, which is too narrow for programs that perform terminal I/O, use ncurses, or do shell job control.
 
 ## Affected code
 
-`lot/src/linux/seccomp.rs` — ioctl argument filter (lines ~200-215 at rev 331bb56).
+`lot/src/linux/seccomp.rs` — ioctl argument filter in `build_filter()`.
 
 Current allowlist:
 
@@ -14,18 +14,36 @@ Current allowlist:
 |-------|-------|---------|
 | TCGETS | 0x5401 | Get terminal attributes |
 | TIOCGWINSZ | 0x5413 | Get window size |
-| TIOCGPGRP | 0x540F | Get process group |
+| TIOCGPGRP | 0x540F | Get foreground process group |
 | FIONREAD | 0x541B | Bytes available for reading |
 | FIOCLEX | 0x5451 | Set close-on-exec |
 | FIONCLEX | 0x5450 | Clear close-on-exec |
 
-Missing ioctls likely needed:
+Missing ioctls needed:
 
-| ioctl | Value | Purpose |
-|-------|-------|---------|
-| TCSETS | 0x5402 | Set terminal attributes (immediate) |
-| TCSETSW | 0x5403 | Set terminal attributes (drain first) |
-| TCSETSF | 0x5404 | Set terminal attributes (drain+flush) |
+| ioctl | Value | Purpose | Used by |
+|-------|-------|---------|---------|
+| TCSETS | 0x5402 | Set terminal attributes (immediate) | ncurses, crossterm, termion, any raw-mode program |
+| TCSETSW | 0x5403 | Set terminal attributes (drain first) | Same — polite variant |
+| TCSETSF | 0x5404 | Set terminal attributes (drain+flush) | Same — mode transitions |
+| TIOCSPGRP | 0x5410 | Set foreground process group | bash, zsh, any shell with job control |
+| TIOCSWINSZ | 0x5414 | Set window size | tmux, screen, pty-using programs |
+| TIOCGSID | 0x5429 | Get session ID | shells |
+| TIOCOUTQ | 0x5411 | Output queue size | ncurses flow control |
+| TCFLSH | 0x540B | Flush buffers | ncurses |
+| FIONBIO | 0x5421 | Set non-blocking I/O | Programs using this instead of fcntl |
+
+All are benign operations on the process's own fd. In lot's sandbox there is no real terminal (stdio are pipes), so most return ENOTTY. No privilege escalation path.
+
+### Ioctls that must NOT be allowed
+
+| ioctl | Value | Reason |
+|-------|-------|--------|
+| TIOCSTI | 0x5412 | Terminal input injection — classic privilege escalation vector |
+| TIOCSCTTY | 0x540E | Can steal controlling terminal with CAP_SYS_ADMIN |
+| TIOCCONS | 0x541D | Console redirect — requires CAP_SYS_ADMIN |
+| TIOCLINUX | 0x541C | Console-specific, can inject input or change kernel loglevel |
+| TIOCSETD | 0x5423 | Line discipline change — historical kernel vulnerability source |
 
 ## Reproduction
 
@@ -85,11 +103,11 @@ Any sandboxed process that transitively calls `tput`, `stty`, or similar termina
 - Any Rust program using crossterm that falls back to tput
 - Direct ncurses-based programs
 
+Additionally, shells running inside the sandbox with job control (bash, zsh) will fail on TIOCSPGRP. Programs using tmux/screen-style pty management will fail on TIOCSWINSZ. Programs using FIONBIO for non-blocking I/O (instead of fcntl) will fail.
+
 ## Suggested fix
 
-Add TCSETS (0x5402), TCSETSW (0x5403), and TCSETSF (0x5404) to the ioctl argument filter allowlist in `build_filter()`. These are the "set terminal attributes" counterparts to the already-allowed TCGETS (0x5401).
-
-Alternatively, if terminal-write ioctls are intentionally blocked as a security measure, document this limitation and provide guidance for consumers (e.g., override PATH to exclude tput, or avoid programs that perform terminal setup).
+Add all 9 missing ioctls from the table above to the argument filter allowlist in `build_filter()`. Update the ioctl table in `docs/DESIGN.md` to match.
 
 ## Workaround (reel)
 
