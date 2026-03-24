@@ -1286,7 +1286,8 @@ fn test_memory_limit_enforcement() {
 
     let (program, args) = memory_hog_command();
 
-    // 512 MB limit — below the 1 GB allocation the child attempts.
+    // 4 GB limit — below the 8 GB allocation the child attempts.
+    // High values avoid macOS RLIMIT_AS EINVAL when limit < baseline VM.
     let policy = lot::SandboxPolicy::new(
         vec![tmp.path().to_path_buf()],
         vec![scratch.path().to_path_buf()],
@@ -1294,7 +1295,7 @@ fn test_memory_limit_enforcement() {
         Vec::new(),
         false,
         lot::ResourceLimits {
-            max_memory_bytes: Some(512 * 1024 * 1024),
+            max_memory_bytes: Some(4 * 1024 * 1024 * 1024),
             ..lot::ResourceLimits::default()
         },
     );
