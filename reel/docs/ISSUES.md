@@ -5,14 +5,6 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 
 ---
 
-## Group 1: nu_session.rs — Correctness [MUST FIX]
-
-### 1.1 `append_capped` panics on multi-byte UTF-8
-- **File:** reel/src/nu_session.rs, lines 244-252
-- `buf[excess..]` (line 250) can land mid-character, panicking. `ceil_char_boundary` requires Rust 1.86 but MSRV is 1.85; use `is_char_boundary` loop or equivalent.
-
----
-
 ## Group 2: Documentation Accuracy [MUST FIX]
 
 ### 2.1 DESIGN.md stale dependency revisions
@@ -87,6 +79,10 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 - **File:** .github/workflows/ci.yml, lines 85-122
 - `cargo test` without `--locked`. Missing `timeout-minutes` on macOS/Windows. No release-profile build.
 
+### 6.7 `append_capped` multibyte test covers only 4-byte chars
+- **File:** reel/src/nu_session.rs, `append_capped_multibyte_does_not_panic` test
+- Only 4-byte emoji tested. Missing coverage for 2-byte (e.g., `\u{00E9}`) and 3-byte (e.g., `\u{4E16}`) characters, and mixed ASCII/multibyte content.
+
 ---
 
 ## Group 7: Error Handling [NON-CRITICAL]
@@ -126,11 +122,6 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 ### 10.1 DESIGN.md round count off-by-one
 - **File:** docs/DESIGN.md, line 100
 - Says "rounds < 50" but loop uses `for _round in 1..=50` (50 inclusive, agent.rs line 293). Off by one round.
-- ~~Custom tool override claim~~: DESIGN.md lines 109-110 are accurate — dispatch checks custom tools first via HashMap (agent.rs lines 358-361), override IS reachable. **FALSE POSITIVE**, removed.
-
-### 10.2 STATUS.md test count off-by-one
-- **File:** docs/STATUS.md, lines 5, 45
-- Test count "258 (243+15)" — actual is 259 (244+15). Off by 1 in reel count.
 
 ### 10.3 Root CLAUDE.md inapplicable C++ rules
 - **File:** CLAUDE.md (root), line 50

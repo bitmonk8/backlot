@@ -244,7 +244,11 @@ fn drain_stderr(buf: &StderrBuf) -> Option<String> {
 fn append_capped(buf: &mut String, line: &str) {
     buf.push_str(line);
     if buf.len() > MAX_STDERR_BUF {
-        let excess = buf.len() - MAX_STDERR_BUF;
+        let mut excess = buf.len() - MAX_STDERR_BUF;
+        // Advance to next char boundary (equivalent to ceil_char_boundary, unavailable at MSRV 1.85)
+        while !buf.is_char_boundary(excess) {
+            excess += 1;
+        }
         // Find the next newline after the excess point to avoid
         // splitting a line mid-way.
         let drop_to = buf[excess..].find('\n').map_or(excess, |i| excess + i + 1);
@@ -1427,6 +1431,22 @@ mod tests {
         let huge = "y".repeat(MAX_STDERR_BUF + 500);
         append_capped(&mut buf, &huge);
         assert!(buf.len() <= MAX_STDERR_BUF);
+    }
+
+    #[test]
+    fn append_capped_multibyte_does_not_panic() {
+        let mut buf = String::new();
+        let emoji = "\u{1F600}"; // 4 bytes each
+        // Fill buffer to exactly MAX_STDERR_BUF with emojis (no truncation yet)
+        let base = emoji.repeat(MAX_STDERR_BUF / emoji.len());
+        assert_eq!(base.len(), MAX_STDERR_BUF); // 65536 = 16384 * 4
+        append_capped(&mut buf, &base);
+        // Append 2 ASCII bytes + emojis. excess = 42, which is 4*10+2 = mid-emoji.
+        let extra = format!("ab{}", emoji.repeat(10));
+        append_capped(&mut buf, &extra);
+        // No panic means the char boundary fix worked.
+        assert!(buf.len() <= MAX_STDERR_BUF);
+        assert!(!buf.is_empty());
     }
 
     // -----------------------------------------------------------------------
