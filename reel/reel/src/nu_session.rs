@@ -805,13 +805,11 @@ async fn spawn_nu_process(
         let mut cmd = SandboxCommand::new(&nu_binary);
         cmd.arg("--mcp");
 
-        // Pass reel config files so custom commands are pre-loaded.
-        if let Some((ref config_path, ref env_path)) = config_files {
-            cmd.arg("--config");
-            cmd.arg(config_path);
-            cmd.arg("--env-config");
-            cmd.arg(env_path);
-        }
+        // Config files are NOT passed via --config/--env-config because
+        // nu's config loading code calls Command::output() internally,
+        // which triggers a seccomp EPERM under lot's argument-filtered
+        // prctl/ioctl rules. Instead, we source the config file via MCP
+        // evaluate after the handshake completes (see below).
 
         cmd.cwd(&project_root);
         cmd.stdout(SandboxStdio::Piped);
@@ -906,6 +904,18 @@ async fn spawn_nu_process(
             .map_err(|e| format!("failed to serialize notification: {e}"))?;
 
         send_line(&proc.stdin, &notif_bytes)?;
+
+        // Source config files via MCP evaluate instead of --config flag.
+        // Nu's --config loading code calls Command::output() internally,
+        // which panics under lot's seccomp filter (argument-filtered
+        // prctl/ioctl). Sourcing via evaluate avoids that code path.
+        if let Some((ref config_path, _)) = config_files {
+            let source_cmd = format!("source '{}'", config_path.display());
+            let result = rpc_call(&mut proc, &source_cmd)?;
+            if result.is_error {
+                return Err(format!("failed to source config: {}", result.content));
+            }
+        }
 
         Ok(proc)
     })
@@ -1708,57 +1718,6 @@ mod tests {
         let out = result.unwrap();
         assert!(!out.is_error);
         assert!(out.content.contains("hello world"));
-    }
-
-    #[tokio::test]
-    async fn integration_diagnose_config_loading() {
-        skip_no_nu!();
-        let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
-        // Check if nu loaded our config by querying the config path and
-        // testing whether 'reel' is a known command.
-        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
-        let result = try_eval(
-            &session,
-            "$nu.config-path",
-            30,
-            tmp.path(),
-            grant,
-        )
-        .await;
-        let out = result.unwrap();
-        eprintln!("config-path: is_error={} content={}", out.is_error, out.content);
-        if let Some(ref stderr) = out.stderr {
-            eprintln!("config-path stderr: {stderr}");
-        }
-
-        let result2 = try_eval(
-            &session,
-            "help commands | where name == 'reel' | length",
-            30,
-            tmp.path(),
-            grant,
-        )
-        .await;
-        let out2 = result2.unwrap();
-        eprintln!("reel-commands: is_error={} content={}", out2.is_error, out2.content);
-        if let Some(ref stderr) = out2.stderr {
-            eprintln!("reel-commands stderr: {stderr}");
-        }
-
-        // Check if the config file exists from nu's perspective
-        let result3 = try_eval(
-            &session,
-            "ls ($nu.config-path) | get name",
-            30,
-            tmp.path(),
-            grant,
-        )
-        .await;
-        let out3 = result3.unwrap();
-        eprintln!("config-ls: is_error={} content={}", out3.is_error, out3.content);
-        // Force fail to see output in CI
-        panic!("DIAGNOSTIC DUMP COMPLETE — intentional failure to surface output");
     }
 
     #[tokio::test]
