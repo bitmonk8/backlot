@@ -6,11 +6,11 @@
 
 ## Issues (2026-03-24)
 
-95 active findings across 21 groups in `docs/ISSUES.md` (19 false positives removed during triage, 1 merged duplicate).
+88 active findings across 21 groups in `docs/ISSUES.md` (19 false positives removed during triage, 1 merged duplicate, 6 fixed in Group 1, 1 fixed in Group 2).
 
 - **MUST FIX (0)**
-- **NON-CRITICAL (18):** Groups 1–5 — missing security-critical test coverage, weak assertions, lifecycle test gaps, silent cleanup failures, placement
-- **NIT (77):** Groups 6–21 — TOCTOU (mitigated), canonicalization fallback, correctness, error handling, incorrect comments, doc mismatches, separation of concerns, architectural simplification, naming, code duplication, minor cleanup, test boilerplate, NIT test coverage gaps
+- **NON-CRITICAL (10):** Groups 1–5 — missing security-critical test coverage, weak assertions, lifecycle test gaps, silent cleanup failures, placement
+- **NIT (78):** Groups 6–21 — TOCTOU (mitigated), canonicalization fallback, correctness, error handling, incorrect comments, doc mismatches, separation of concerns, architectural simplification, naming, code duplication, minor cleanup, test boilerplate, NIT test coverage gaps
 
 Groups reordered and renumbered by impact (2026-03-24). NON-CRITICAL first, then NIT by category: correctness > error handling > docs > architecture > naming > simplification > testing.
 
@@ -37,6 +37,14 @@ Groups reordered and renumbered by impact (2026-03-24). NON-CRITICAL first, then
 - **Item 4 downgraded NIT:** `is_apparmor_restricted` regression would not silently disable sandboxing — wrong `true` makes `probe()` report unavailable, wrong `false` causes explicit `unshare` error. Neither case is silent. Description corrected.
 - **Items 6+7 merged:** Both describe the same gap (no test for `allow_network(true)`) from source vs. integration test perspective. Merged into item 6. Finding count reduced by 1.
 - **Items 1, 2, 3, 5 confirmed:** Line numbers, descriptions, and severities are accurate.
+
+### Group 2 review (2026-03-24)
+- **Item 8 downgraded NIT:** Guard is 3 lines (`if fd > 2`). Companion test `close_if_not_std_closes_non_standard_fd` validates closure robustly via `fcntl`/EPIPE. No-crash smoke test is adequate for the trivial guard.
+- **Item 12 downgraded NIT:** Rust stable has no built-in test skip mechanism. Early return with diagnostic print is the standard pattern. Not a code defect.
+- **Item 14 downgraded NIT:** Line range corrected to 14-26 + 28-36 (two functions). 4 tests cover core `starts_with` + inequality logic. Canonicalization tested separately. Non-existent paths exercise the lexical fallback — a valid code path.
+- **Item 15 downgraded NIT:** Indirect symlink coverage exists via `descendant_or_equal_through_symlink` (line 226), which exercises `canonicalize_existing_prefix` internally.
+- **Items 9, 10, 11, 13, 16 confirmed:** Line numbers, descriptions, and severities are accurate.
+- **Severity recount:** 4 items NON-CRITICAL→NIT. New totals: 0 MUST FIX, 10 NON-CRITICAL, 79 NIT.
 
 ## CI Notes
 

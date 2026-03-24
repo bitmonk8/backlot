@@ -1301,22 +1301,7 @@ fn test_memory_limit_enforcement() {
 
     let cmd = make_sandbox_cmd(&program, &args, scratch.path());
 
-    // macOS RLIMIT_AS can fail with EINVAL when the limit is below
-    // current virtual memory usage. Skip rather than false-pass.
-    let child = match lot::spawn(&policy, &cmd) {
-        Ok(c) => {
-            eprintln!("[diag] spawn succeeded, pid={}", c.id());
-            c
-        }
-        Err(lot::SandboxError::Setup(ref msg))
-            if cfg!(target_os = "macos") && msg.contains("setrlimit") =>
-        {
-            eprintln!("[diag] SKIPPED: test_memory_limit_enforcement — {msg}");
-            println!("[diag] SKIPPED: test_memory_limit_enforcement — {msg}");
-            return;
-        }
-        Err(e) => panic!("spawn must succeed: {e}"),
-    };
+    let child = must_spawn(&policy, &cmd);
     let output = child.wait_with_output().expect("wait_with_output");
     eprintln!("[diag] exit status: {:?}", output.status);
     eprintln!(
