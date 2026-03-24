@@ -96,6 +96,26 @@ Resource limits are not central to lot's purpose (process sandboxing). Platform 
 
 - Remove cgroup delegation setup from Linux test job (if resource limits were the only reason for it).
 
+### 16. `docs/ISSUES.md`
+
+Remove 11 findings that exist solely because of resource limits or cgroup.rs:
+
+| # | Reason |
+|---|--------|
+| 18 | `apply_resource_limits` test coverage — function removed |
+| 19 | `signal_all()` fallback in cgroup.rs — file deleted |
+| 22 | `libc::kill()` return in `signal_all()` — file deleted |
+| 23 | `fs::remove_dir` in cgroup.rs Drop — file deleted |
+| 26 | macOS `set_rlimit`/`apply_resource_limits` placement — functions removed |
+| 38 | cgroup struct doc comment — file deleted |
+| 52 | `signal_all` naming in cgroup.rs — file deleted |
+| 55 | `has_writable_delegation` duplication in cgroup.rs — file deleted |
+| 69 | `procs_path` recomputed in cgroup.rs — file deleted |
+| 89 | No test for cgroup integration path in spawn — path removed |
+| 92 | `current_cgroup_path()`/`pid_in_cgroup()` parsing — file deleted |
+
+Renumber remaining findings after removal. Update header counts.
+
 ## Dependency Order
 
 1. Delete example file and test helpers/tests (no dependents).
