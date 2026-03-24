@@ -15,9 +15,11 @@ mod common;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "macos"))]
+use common::memory_hog_command;
 use common::{
-    make_sandbox_cmd, make_temp_dir, memory_hog_command, network_connect_command,
-    platform_exec_paths, set_sandbox_env, sleep_command,
+    make_sandbox_cmd, make_temp_dir, network_connect_command, platform_exec_paths, set_sandbox_env,
+    sleep_command,
 };
 
 /// Spawn a sandboxed child, panicking on any error including missing prerequisites.
