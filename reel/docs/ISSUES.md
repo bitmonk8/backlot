@@ -5,38 +5,6 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 
 ---
 
-## Group 6: Testing Gaps [NON-CRITICAL]
-
-### 6.1 File tool success path untested
-- **File:** reel/src/tools.rs, lines 519-586
-- No test covers Read/Write/Edit/Glob/Grep through `execute_tool`. The translate-evaluate-format-truncate pipeline and error-path truncation bypass are untested.
-
-### 6.2 build.rs has zero tests
-- **File:** reel/build.rs, lines 1-498
-- Multiple testable pure functions uncovered. Embedded NuShell config (~150 lines) has no automated coverage.
-
-### 6.3 cmd_run is untestable
-- **File:** reel-cli/src/main.rs, lines 164-258, 345-361
-- Combines file I/O, stdin, registry loading, and agent execution with no injectable dependencies. No CLI integration tests.
-
-### 6.4 Diagnostic and sandbox tests are vacuous
-- **File:** reel/src/nu_session.rs, lines 2384-2535, 2918-2972, 3007-3017
-- Diagnostic test has zero assertions. Network grant/deny tests pass on `Err` — vacuous on platforms without sandbox enforcement.
-
-### 6.5 finalize_result fallback path has no test
-- **File:** reel/src/agent.rs, lines 389-393
-- Non-JSON text wrapped as JSON string and re-parsed — no dedicated test.
-
-### 6.6 CI missing --locked, timeout, and release build validation
-- **File:** .github/workflows/ci.yml, lines 85-122
-- `cargo test` without `--locked`. Missing `timeout-minutes` on macOS/Windows. No release-profile build.
-
-### 6.7 `append_capped` multibyte test covers only 4-byte chars
-- **File:** reel/src/nu_session.rs, `append_capped_multibyte_does_not_panic` test
-- Only 4-byte emoji tested. Missing coverage for 2-byte (e.g., `\u{00E9}`) and 3-byte (e.g., `\u{4E16}`) characters, and mixed ASCII/multibyte content.
-
----
-
 ## Group 7: Error Handling [NON-CRITICAL]
 
 ### 7.1 unwrap_or_default masks extraction errors in tests

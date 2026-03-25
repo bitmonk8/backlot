@@ -82,11 +82,12 @@ jobs:
 
           # Move ourselves into the runner leaf.
           echo $$ | sudo tee "$cg/runner/cgroup.procs"
-          cargo test
+          cargo test --locked
 
   test-macos:
     name: Test (macOS)
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - run: rustup show
@@ -98,11 +99,12 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - run: cargo test
+      - run: cargo test --locked
 
   test-windows:
     name: Test (Windows)
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - run: rustup show
@@ -119,7 +121,7 @@ jobs:
         run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
       - name: Configure AppContainer prerequisites
         run: cargo run -p reel-cli -- setup --verbose
-      - run: cargo test
+      - run: cargo test --locked
 
   build:
     name: Build (${{ matrix.os }})

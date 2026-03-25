@@ -647,6 +647,7 @@ fn format_nu_output(raw: String) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::nu_session::test_support::{isolated_session, sandbox_test_base, skip_no_nu};
     use tempfile::TempDir;
 
     /// Helper: execute a tool in a fresh temp dir (for tests that don't need
@@ -1960,6 +1961,218 @@ mod tests {
             "Glob" | "Grep" => serde_json::json!({"pattern": "__SYNC_pattern__"}),
             other => panic!("minimal_valid_input: no entry for tool {other:?} — add one"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests: execute_tool success paths
+    //
+    // These exercise the full translate → nu evaluate → format → truncate
+    // pipeline for each file tool. They require a real nu binary.
+    // -----------------------------------------------------------------------
+
+    /// Helper: execute a tool against a real nu session in a sandbox-friendly
+    /// temp directory, returning the result.
+    async fn exec_integration(
+        name: &str,
+        input: serde_json::Value,
+        project: &std::path::Path,
+        grant: ToolGrant,
+        session: &NuSession,
+    ) -> ToolExecResult {
+        execute_tool("tu_int".into(), name, &input, project, grant, session).await
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_read() {
+        skip_no_nu!();
+        let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
+        let (session, _tool) = isolated_session();
+        let file = tmp.path().join("hello.txt");
+        std::fs::write(&file, "hello world").unwrap();
+        let input = serde_json::json!({
+            "file_path": file.to_str().unwrap().replace('\\', "/")
+        });
+        let result = exec_integration("Read", input, tmp.path(), ToolGrant::TOOLS, &session).await;
+        assert!(
+            !result.is_error,
+            "Read should succeed, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("hello world"),
+            "Read output should contain file contents, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_write() {
+        skip_no_nu!();
+        let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
+        let (session, _tool) = isolated_session();
+        let file = tmp.path().join("out.txt");
+        let input = serde_json::json!({
+            "file_path": file.to_str().unwrap().replace('\\', "/"),
+            "content": "written by test"
+        });
+        let result = exec_integration(
+            "Write",
+            input,
+            tmp.path(),
+            ToolGrant::WRITE | ToolGrant::TOOLS,
+            &session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Write should succeed, got error: {}",
+            result.content
+        );
+        let on_disk = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(on_disk, "written by test");
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_edit() {
+        skip_no_nu!();
+        let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
+        let (session, _tool) = isolated_session();
+        let file = tmp.path().join("edit_me.txt");
+        std::fs::write(&file, "aaa bbb ccc").unwrap();
+        let input = serde_json::json!({
+            "file_path": file.to_str().unwrap().replace('\\', "/"),
+            "old_string": "bbb",
+            "new_string": "XXX"
+        });
+        let result = exec_integration(
+            "Edit",
+            input,
+            tmp.path(),
+            ToolGrant::WRITE | ToolGrant::TOOLS,
+            &session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Edit should succeed, got error: {}",
+            result.content
+        );
+        let on_disk = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(on_disk, "aaa XXX ccc");
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_glob() {
+        skip_no_nu!();
+        let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
+        let (session, _tool) = isolated_session();
+        std::fs::write(tmp.path().join("foo.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("bar.txt"), "").unwrap();
+        let input = serde_json::json!({
+            "pattern": "*.txt",
+            "path": tmp.path().to_str().unwrap().replace('\\', "/")
+        });
+        let result = exec_integration("Glob", input, tmp.path(), ToolGrant::TOOLS, &session).await;
+        assert!(
+            !result.is_error,
+            "Glob should succeed, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("foo.txt") && result.content.contains("bar.txt"),
+            "Glob output should list both .txt files, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_grep() {
+        skip_no_nu!();
+        let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
+        let (session, _tool) = isolated_session();
+        std::fs::write(tmp.path().join("searchme.txt"), "needle in haystack\n").unwrap();
+        let input = serde_json::json!({
+            "pattern": "needle",
+            "path": tmp.path().to_str().unwrap().replace('\\', "/"),
+            "output_mode": "content"
+        });
+        let result = exec_integration("Grep", input, tmp.path(), ToolGrant::TOOLS, &session).await;
+        assert!(
+            !result.is_error,
+            "Grep should succeed, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("needle"),
+            "Grep output should contain the match, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_write_denied_without_grant() {
+        skip_no_nu!();
+        let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
+        let (session, _tool) = isolated_session();
+        let input = serde_json::json!({
+            "file_path": tmp.path().join("nope.txt").to_str().unwrap().replace('\\', "/"),
+            "content": "should fail"
+        });
+        let result = exec_integration("Write", input, tmp.path(), ToolGrant::TOOLS, &session).await;
+        assert!(result.is_error, "Write without WRITE grant should fail");
+        assert!(
+            result.content.contains("not permitted"),
+            "error should mention permission denial, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_read_nonexistent() {
+        skip_no_nu!();
+        let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
+        let (session, _tool) = isolated_session();
+        let input = serde_json::json!({
+            "file_path": tmp.path().join("does_not_exist.txt").to_str().unwrap().replace('\\', "/")
+        });
+        let result = exec_integration("Read", input, tmp.path(), ToolGrant::TOOLS, &session).await;
+        assert!(
+            result.is_error,
+            "Read of nonexistent file should fail, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_edit_no_match() {
+        skip_no_nu!();
+        let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
+        let (session, _tool) = isolated_session();
+        let file = tmp.path().join("edit_nomatch.txt");
+        std::fs::write(&file, "aaa bbb ccc").unwrap();
+        let input = serde_json::json!({
+            "file_path": file.to_str().unwrap().replace('\\', "/"),
+            "old_string": "zzz_not_present",
+            "new_string": "XXX"
+        });
+        let result = exec_integration(
+            "Edit",
+            input,
+            tmp.path(),
+            ToolGrant::WRITE | ToolGrant::TOOLS,
+            &session,
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "Edit with non-matching old_string should fail, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("not found"),
+            "error should mention old_string not found, got: {}",
+            result.content
+        );
     }
 
     /// Return the expected substring in the translated nu command for a

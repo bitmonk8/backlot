@@ -324,7 +324,7 @@ impl NuSession {
     /// **Do not call this directly.** Use `isolated_session()` or
     /// `sandbox_env()` which handle the copy and lifetime management.
     #[cfg(test)]
-    fn with_tool_dir(tool_dir: PathBuf) -> Self {
+    pub(crate) fn with_tool_dir(tool_dir: PathBuf) -> Self {
         Self {
             state: Mutex::new(SessionState::default()),
             tool_dir: Some(tool_dir),
@@ -952,6 +952,82 @@ async fn spawn_nu_process(
     .map_err(|e| format!("spawn task panicked: {e}"))?
 }
 
+/// Shared test helpers for modules that need nu session infrastructure.
+///
+/// Lives outside `mod tests` so other crate-internal test modules can import it.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Returns true if the nu binary is resolvable.
+    pub fn nu_available() -> bool {
+        let nu = resolve_nu_binary(option_env!("NU_CACHE_DIR").map(Path::new));
+        let path = Path::new(&nu);
+        if path.is_absolute() {
+            return path.exists();
+        }
+        std::process::Command::new(&nu)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    /// Skip the current test if nu is not available.
+    macro_rules! skip_no_nu {
+        () => {
+            if !$crate::nu_session::test_support::nu_available() {
+                eprintln!("SKIP: nu binary not available");
+                return;
+            }
+        };
+    }
+    pub(crate) use skip_no_nu;
+
+    /// Base directory for sandbox test temp dirs.
+    pub fn sandbox_test_base() -> PathBuf {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("sandbox-test");
+        std::fs::create_dir_all(&base).expect("create sandbox test base dir");
+        base
+    }
+
+    /// Create an isolated copy of the build-time tool directory.
+    ///
+    /// Each sandbox test gets its own tool dir so AppContainer ACL
+    /// operations on exec_path do not interfere between concurrent tests.
+    pub fn tmp_sandbox_tool_dir() -> tempfile::TempDir {
+        #[allow(clippy::option_env_unwrap)]
+        let src = option_env!("NU_CACHE_DIR")
+            .expect("NU_CACHE_DIR not set at compile time — cannot create isolated tool dir");
+        let dest = tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox tool dir");
+        for entry in std::fs::read_dir(src).expect("read tool dir") {
+            let entry = entry.expect("read dir entry");
+            let path = entry.path();
+            if path.is_file() {
+                std::fs::copy(&path, dest.path().join(path.file_name().unwrap()))
+                    .expect("copy tool file");
+            }
+        }
+        dest
+    }
+
+    /// Create a NuSession with an isolated copy of the build-time tool dir.
+    ///
+    /// Each test gets its own tool dir so concurrent AppContainer profiles
+    /// do not interfere via ACL grant/restore on a shared directory.
+    /// The returned `TempDir` must be held alive for the test duration.
+    pub fn isolated_session() -> (NuSession, tempfile::TempDir) {
+        let tool = tmp_sandbox_tool_dir();
+        let session = NuSession::with_tool_dir(tool.path().to_path_buf());
+        (session, tool)
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -964,6 +1040,7 @@ async fn spawn_nu_process(
     clippy::match_same_arms
 )]
 mod tests {
+    use super::test_support::{isolated_session, sandbox_test_base, skip_no_nu};
     use super::*;
 
     /// Creates a `TempDir` with a nested session temp dir and builds a sandbox policy.
@@ -1516,6 +1593,62 @@ mod tests {
         assert!(!buf.is_empty());
     }
 
+    #[test]
+    fn append_capped_multibyte_2byte() {
+        // 2-byte character: U+00E9 (é) is 2 bytes in UTF-8.
+        let mut buf = String::new();
+        let ch = "\u{00E9}";
+        assert_eq!(ch.len(), 2);
+        let base = ch.repeat(MAX_STDERR_BUF / ch.len());
+        assert_eq!(base.len(), MAX_STDERR_BUF);
+        append_capped(&mut buf, &base);
+        // Append extra that forces truncation at a non-char-boundary.
+        let extra = format!("x{}", ch.repeat(10));
+        append_capped(&mut buf, &extra);
+        assert!(buf.len() <= MAX_STDERR_BUF);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn append_capped_multibyte_3byte() {
+        // 3-byte character: U+4E16 (世) is 3 bytes in UTF-8.
+        let mut buf = String::new();
+        let ch = "\u{4E16}";
+        assert_eq!(ch.len(), 3);
+        // Fill with 3-byte chars then pad with ASCII to reach exactly MAX_STDERR_BUF.
+        let count = MAX_STDERR_BUF / ch.len();
+        let mut base = ch.repeat(count);
+        let gap = MAX_STDERR_BUF - base.len();
+        base.push_str(&"x".repeat(gap));
+        assert_eq!(base.len(), MAX_STDERR_BUF);
+        append_capped(&mut buf, &base);
+        // Append 3-byte chars to trigger truncation from exactly at the limit.
+        let extra = ch.repeat(10);
+        append_capped(&mut buf, &extra);
+        assert!(buf.len() <= MAX_STDERR_BUF);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn append_capped_multibyte_mixed() {
+        // Mixed ASCII (1-byte), 2-byte, 3-byte, and 4-byte characters.
+        let mut buf = String::new();
+        let mixed = "A\u{00E9}\u{4E16}\u{1F600}"; // 1 + 2 + 3 + 4 = 10 bytes
+        assert_eq!(mixed.len(), 10);
+        // Fill with mixed units then pad with ASCII to reach exactly MAX_STDERR_BUF.
+        let count = MAX_STDERR_BUF / mixed.len();
+        let mut base = mixed.repeat(count);
+        let gap = MAX_STDERR_BUF - base.len();
+        base.push_str(&"x".repeat(gap));
+        assert_eq!(base.len(), MAX_STDERR_BUF);
+        append_capped(&mut buf, &base);
+        // Append mixed content to trigger truncation from exactly at the limit.
+        let extra = mixed.repeat(5);
+        append_capped(&mut buf, &extra);
+        assert!(buf.len() <= MAX_STDERR_BUF);
+        assert!(!buf.is_empty());
+    }
+
     // -----------------------------------------------------------------------
     // err_with_stderr tests
     // -----------------------------------------------------------------------
@@ -1606,80 +1739,9 @@ mod tests {
     // Integration tests — spawn real nu processes
     // -----------------------------------------------------------------------
 
-    /// Returns true if the nu binary is resolvable. Tests that need a real
-    /// nu process should call this and return early if false.
-    fn nu_available() -> bool {
-        let nu = resolve_nu_binary(option_env!("NU_CACHE_DIR").map(Path::new));
-        let path = Path::new(&nu);
-        // If resolve returned an absolute path, check existence directly.
-        if path.is_absolute() {
-            return path.exists();
-        }
-        // Bare name: try running it.
-        std::process::Command::new(&nu)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok()
-    }
-
-    macro_rules! skip_no_nu {
-        () => {
-            if !nu_available() {
-                eprintln!("SKIP: nu binary not available");
-                return;
-            }
-        };
-    }
-
-    /// Base directory for sandbox test temp dirs.
-    fn sandbox_test_base() -> PathBuf {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("sandbox-test");
-        std::fs::create_dir_all(&base).expect("create sandbox test base dir");
-        base
-    }
-
     /// Create a temp project directory under `sandbox_test_base()` for sandbox tests.
     fn tmp_sandbox_project() -> tempfile::TempDir {
         tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox test dir")
-    }
-
-    /// Create an isolated copy of the build-time tool directory.
-    ///
-    /// Each sandbox test gets its own tool dir so AppContainer ACL
-    /// operations on exec_path do not interfere between concurrent tests.
-    fn tmp_sandbox_tool_dir() -> tempfile::TempDir {
-        #[allow(clippy::option_env_unwrap)] // Intentional: panic at test-time, not compile-time.
-        let src = option_env!("NU_CACHE_DIR")
-            .expect("NU_CACHE_DIR not set at compile time — cannot create isolated tool dir");
-        let dest = tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox tool dir");
-        for entry in std::fs::read_dir(src).expect("read tool dir") {
-            let entry = entry.expect("read dir entry");
-            let path = entry.path();
-            if path.is_file() {
-                std::fs::copy(&path, dest.path().join(path.file_name().unwrap()))
-                    .expect("copy tool file");
-            }
-        }
-        dest
-    }
-
-    /// Create a NuSession with an isolated copy of the build-time tool dir.
-    ///
-    /// Each test gets its own tool dir so concurrent AppContainer profiles
-    /// do not interfere via ACL grant/restore on a shared directory.
-    /// The returned `TempDir` must be held alive for the test duration.
-    ///
-    /// This is the required entry point for tests that need a `NuSession`.
-    /// Do **not** use `NuSession::new()` directly in tests — it bypasses
-    /// sandbox isolation and uses the shared (non-isolated) tool directory.
-    fn isolated_session() -> (NuSession, tempfile::TempDir) {
-        let tool = tmp_sandbox_tool_dir();
-        let session = NuSession::with_tool_dir(tool.path().to_path_buf());
-        (session, tool)
     }
 
     /// Sandbox test environment with isolated project and tool directories.
@@ -2482,7 +2544,12 @@ mod tests {
 
         // Trigger session spawn.
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
-        let _ = init.unwrap();
+        let init_out = init.unwrap();
+        assert!(
+            !init_out.is_error,
+            "init command should succeed, got error: {}",
+            init_out.content
+        );
 
         let rg_name = if cfg!(windows) { "rg.exe" } else { "rg" };
         let rg_exe = tool_path.join(rg_name);
@@ -2491,6 +2558,11 @@ mod tests {
         let read_cmd = format!("ls '{}' | length", nu_path(&tool_path));
         let read_result = try_eval(session, &read_cmd, 30, tmp.path(), grant).await;
         let read_out = read_result.unwrap();
+        assert!(
+            !read_out.is_error,
+            "tool directory listing should succeed, got error: {}",
+            read_out.content
+        );
         eprintln!(
             "File read rg.exe: is_error={}, content={}",
             read_out.is_error, read_out.content
@@ -3026,10 +3098,20 @@ mod tests {
             Err(e) => {
                 if looks_like_sandbox_denial(&e) {
                     eprintln!("network blocked (sandbox denial in error): {e}");
+                } else if e.contains("timed out") {
+                    // Timeout is an expected manifestation of network denial:
+                    // AppContainer blocks the connection, causing http get to
+                    // hang until the timeout fires.
+                    eprintln!("network blocked (timeout, consistent with sandbox denial): {e}");
                 } else {
-                    // On platforms without active sandbox enforcement, errors
-                    // like timeout or connection-refused are acceptable — the
-                    // test still passes, but we log a warning.
+                    // On Windows, sandbox enforcement is expected — a non-denial,
+                    // non-timeout error means the sandbox is not working.
+                    #[cfg(target_os = "windows")]
+                    panic!(
+                        "Windows sandbox should enforce network denial, but got \
+                         non-sandbox error: {e}"
+                    );
+                    #[cfg(not(target_os = "windows"))]
                     eprintln!(
                         "WARNING: network error is not a recognisable sandbox denial \
                          (platform may lack sandbox enforcement): {e}"
@@ -3048,6 +3130,13 @@ mod tests {
                         out.content
                     );
                 } else {
+                    // On Windows, sandbox enforcement is expected.
+                    #[cfg(target_os = "windows")]
+                    panic!(
+                        "Windows sandbox should produce a recognisable denial, but got: {}",
+                        out.content
+                    );
+                    #[cfg(not(target_os = "windows"))]
                     eprintln!(
                         "WARNING: network failed but output is not a recognisable sandbox \
                          denial (platform may lack sandbox enforcement): {}",

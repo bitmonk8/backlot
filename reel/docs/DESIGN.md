@@ -403,7 +403,7 @@ and reusability.
 
 - Custom command execution: `reel read`, `reel write`, `reel edit`, `reel glob`,
   `reel grep`.
-- Full `execute_tool()` path: Read, Write, Glob, NuShell, grant denial.
+- Full `execute_tool()` path: Read, Write, Edit, Glob, Grep, NuShell, grant denial.
 - Grant-change respawn (TOOLS→WRITE, TOOLS→NETWORK).
 - Project-root-change respawn.
 - Concurrent evaluate (both callers succeed).
@@ -442,9 +442,9 @@ and reusability.
 | Format | ubuntu-latest | `cargo fmt --all --check` |
 | Clippy | Linux, macOS, Windows | `cargo clippy --all-targets -- -D warnings` |
 | Build | Linux, macOS, Windows | `cargo build` |
-| Test (Linux) | ubuntu-latest | Parallel test execution, dynamic cgroup delegation |
-| Test (macOS) | macos-latest | |
-| Test (Windows) | windows-latest | |
+| Test (Linux) | ubuntu-latest | `--locked`, 15 min timeout, parallel test execution, dynamic cgroup delegation |
+| Test (macOS) | macos-latest | `--locked`, 15 min timeout |
+| Test (Windows) | windows-latest | `--locked`, 15 min timeout |
 
 Rust toolchain: 1.93.1. Dependencies pinned to git revs (lot `30bd25f`, flick
 `c827fda`).

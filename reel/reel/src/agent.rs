@@ -1523,4 +1523,97 @@ mod tests {
         // Round 1's 150 were executed; round 2's 51 tripped the cap before execution.
         assert_eq!(tool_calls_counter.load(Ordering::Relaxed), 150);
     }
+
+    // -----------------------------------------------------------------------
+    // finalize_result fallback path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn finalize_result_plain_text_fallback() {
+        // When model output is plain text (not valid JSON), finalize_result
+        // wraps it as a JSON string and re-parses. Verify this fallback path
+        // produces a serde_json::Value::String containing the original text.
+        let result = flick::FlickResult {
+            status: ResultStatus::Complete,
+            content: vec![flick::ContentBlock::Text {
+                text: "This is plain text, not JSON.".into(),
+            }],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        let run: RunResult<serde_json::Value> = finalize_result(&result, 0).unwrap();
+        assert!(
+            run.output.is_string(),
+            "expected Value::String for plain text fallback, got: {:?}",
+            run.output
+        );
+        assert_eq!(
+            run.output.as_str().unwrap(),
+            "This is plain text, not JSON."
+        );
+    }
+
+    #[test]
+    fn finalize_result_valid_json_no_fallback() {
+        // When model output is valid JSON, finalize_result parses it directly.
+        let result = flick::FlickResult {
+            status: ResultStatus::Complete,
+            content: vec![flick::ContentBlock::Text {
+                text: r#"{"key": "value"}"#.into(),
+            }],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        let run: RunResult<serde_json::Value> = finalize_result(&result, 5).unwrap();
+        assert!(run.output.is_object());
+        assert_eq!(run.output["key"], "value");
+        assert_eq!(run.tool_calls, 5);
+    }
+
+    #[test]
+    fn finalize_result_empty_content_errors() {
+        // extract_text returns Err when no text block is present.
+        let result = flick::FlickResult {
+            status: ResultStatus::Complete,
+            content: vec![],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        let err = finalize_result::<serde_json::Value>(&result, 0);
+        assert!(err.is_err(), "empty content should produce an error");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("no text block"),
+            "error should mention missing text block, got: {msg}"
+        );
+    }
+
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct StrictStruct {
+        required_field: String,
+    }
+
+    #[test]
+    fn finalize_result_fallback_fails_for_concrete_type() {
+        // Plain text cannot deserialize into a concrete struct even after
+        // the JSON-string fallback wrapping.
+        let result = flick::FlickResult {
+            status: ResultStatus::Complete,
+            content: vec![flick::ContentBlock::Text {
+                text: "not a StrictStruct".into(),
+            }],
+            usage: None,
+            context_hash: None,
+            error: None,
+        };
+        let err = finalize_result::<StrictStruct>(&result, 0);
+        assert!(
+            err.is_err(),
+            "plain text should fail to deserialize into StrictStruct"
+        );
+    }
 }
