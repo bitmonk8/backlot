@@ -16,7 +16,7 @@
   - JSONL changelog append and read
   - Raw document write/read with `NAME_N.md` versioning
   - Name validation (`^[A-Z][A-Z0-9_]*[A-Z0-9]$`)
-  - Derived document listing and header/filename validation
+  - Derived document listing, filename validation, and content validation (warns on unreadable files; checks title and scope independently)
   - Full document inventory (raw + derived)
   - UTC timestamp generation
   - Unit tests covering storage functionality

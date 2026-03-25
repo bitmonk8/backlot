@@ -312,7 +312,16 @@ impl Storage {
             }
 
             // Header check
-            let content = fs::read_to_string(entry.path())?;
+            let content = match fs::read_to_string(entry.path()) {
+                Ok(c) => c,
+                Err(e) => {
+                    warnings.push(DerivedValidationWarning {
+                        filename: fname,
+                        reason: format!("unable to read file: {e}"),
+                    });
+                    continue;
+                }
+            };
             let mut lines = content.lines();
             let has_title = lines.next().is_some_and(|l| l.starts_with("# "));
             let has_scope = lines.next().is_some_and(|l| l.starts_with("<!-- scope: "));
@@ -322,7 +331,8 @@ impl Storage {
                     filename: fname.clone(),
                     reason: "missing title line starting with '# '".to_owned(),
                 });
-            } else if !has_scope {
+            }
+            if !has_scope {
                 warnings.push(DerivedValidationWarning {
                     filename: fname,
                     reason: "missing scope comment on second line starting with '<!-- scope: '"
@@ -697,8 +707,9 @@ mod tests {
         fs::write(derived.join("PROJECT.md"), "No title here\n").unwrap();
 
         let warnings = storage.validate_derived().unwrap();
-        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings.len(), 2);
         assert!(warnings[0].reason.contains("title"));
+        assert!(warnings[1].reason.contains("scope"));
     }
 
     #[test]
@@ -713,6 +724,65 @@ mod tests {
         let warnings = storage.validate_derived().unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].reason.contains("scope"));
+    }
+
+    #[test]
+    fn validate_derived_scope_must_be_on_second_line() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        let derived = storage.derived_dir();
+        // Valid title on line 1, blank line on line 2, valid scope comment on line 3.
+        fs::write(derived.join("PROJECT.md"), "# Title\n\n<!-- scope: x -->\n").unwrap();
+
+        let warnings = storage.validate_derived().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].reason.contains("scope"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn validate_derived_unreadable_file_warns_and_continues() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        let derived = storage.derived_dir();
+
+        // A good file that should still be validated
+        fs::write(
+            derived.join("GOOD.md"),
+            "# Good File\n<!-- scope: test -->\n",
+        )
+        .unwrap();
+
+        // An unreadable file
+        let unreadable = derived.join("UNREADABLE.md");
+        fs::write(&unreadable, "# Title\n<!-- scope: x -->\n").unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Skip test if running as root (permissions don't block root reads)
+        if fs::read_to_string(&unreadable).is_ok() {
+            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+
+        let warnings = storage.validate_derived().unwrap();
+
+        // Restore permissions so temp dir cleanup succeeds
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+
+        // The unreadable file should produce a warning, not abort validation
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.filename == "UNREADABLE.md" && w.reason.contains("unable to read file"))
+        );
+        // The good file should still have been validated (no warnings for it)
+        assert!(!warnings.iter().any(|w| w.filename == "GOOD.md"));
     }
 
     // -- inventory --
