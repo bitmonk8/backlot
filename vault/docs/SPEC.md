@@ -34,6 +34,11 @@ pub struct VaultModels {
     pub record: String,                 // model ID for Record operation
     pub reorganize: String,             // model ID for Reorganize operation
 }
+
+pub enum VaultCreateError {
+    /// Storage root does not exist or is inaccessible.
+    StorageUnavailable(PathBuf),
+}
 ```
 
 `model_registry` and `provider_registry` are required because the librarian is a reel agent that makes LLM calls internally. `models` allows the orchestrator to choose which model handles each operation — e.g., Haiku for lightweight operations like Query and Record, a larger model for Bootstrap or Reorganize if needed.
@@ -44,13 +49,45 @@ pub struct VaultModels {
 
 Centralized knowledge at a configurable root directory (e.g., `.epic/docs/`). All consumers see all accumulated knowledge, organized by topic. File-based (markdown). Small document counts make this sufficient.
 
+### Directory Structure
+
+The storage root is partitioned into three areas:
+
+```
+storage_root/
+├── CHANGELOG.md          # Append-only mutation log (vault-managed)
+├── raw/                  # Client-provided content (vault-managed)
+│   ├── REQUIREMENTS_1.md
+│   ├── FINDINGS_1.md
+│   ├── FINDINGS_2.md
+│   └── ...
+└── derived/              # Librarian-produced documents
+    ├── PROJECT.md
+    ├── DESIGN.md
+    └── ...
+```
+
+| Area | Writer | Librarian access | Content |
+|---|---|---|---|
+| `raw/` | Vault (programmatic) | Read-only | Raw inputs: bootstrap requirements, record contents. Immutable once written. |
+| `derived/` | Librarian | Read-write | Organized, curated documents. Current-reality view of project knowledge. |
+| `CHANGELOG.md` | Vault (programmatic) | Read-only | Append-only log of all mutations. |
+
+**Recoverability:** If the librarian corrupts derived documents, the entire `derived/` directory can be reconstructed from `CHANGELOG.md` and `raw/` contents. The raw data and changelog together form the authoritative record; derived documents are a curated view.
+
+### Raw Documents
+
+Raw documents are versioned by name. Each document has a base name and a version number: `NAME_N.md` (e.g., `FINDINGS_1.md`, `FINDINGS_2.md`). Later versions supersede earlier versions. The full version history is preserved — raw documents are never modified or deleted.
+
+The version number is assigned by vault at write time. See the [Record operation](#3-record) for details.
+
 ### Core Principle
 
-Documents describe **current reality**. They are not logs, journals, or histories. When information becomes obsolete — a decision is reversed, a constraint is resolved, an approach is abandoned — the old information is **removed** from the document. The document should read as if it were written today. All historical changes are captured in CHANGELOG.md, which is managed programmatically by vault (not by the librarian).
+Documents in `derived/` describe **current reality**. They are not logs, journals, or histories. When information becomes obsolete — a decision is reversed, a constraint is resolved, an approach is abandoned — the old information is **removed** from the document. The document should read as if it were written today. All historical changes are captured in CHANGELOG.md, which is managed programmatically by vault (not by the librarian).
 
 ### Document Format
 
-**Naming:** `UPPERCASE_DESCRIPTIVE` names: `FINDINGS.md`, `API_DESIGN.md`, `MIGRATION_PLAN.md`. No numbering prefixes. No lowercase. No sequencing.
+**Naming:** `UPPERCASE_DESCRIPTIVE` names. In `derived/`: `FINDINGS.md`, `API_DESIGN.md`, `MIGRATION_PLAN.md`. In `raw/`: versioned as `NAME_N.md` (e.g., `FINDINGS_1.md`). No lowercase.
 
 **Structure:** Every document uses a standard header:
 
@@ -83,20 +120,33 @@ Not every document needs all section types. Sections may have subsections (`###`
 
 Both triggers are considered together. A 50-line document with an off-topic section warrants a new document. A 300-line document where all sections are cohesive may be fine.
 
-When creating a new document: choose an `UPPERCASE_DESCRIPTIVE` name, add the standard header, add appropriate section types, and update PROJECT.md to index the new document.
+When creating a new document in `derived/`: choose an `UPPERCASE_DESCRIPTIVE` name, add the standard header, add appropriate section types, and update PROJECT.md to index the new document.
 
 ## Core Documents
 
+**Raw (created at bootstrap):**
+
 | Document | Purpose |
 |---|---|
-| PROJECT.md | Project overview + document index |
-| REQUIREMENTS.md | Captured from interactive session |
-| CHANGELOG.md | Append-only mutation log (managed programmatically, not by librarian) |
-| FINDINGS.md | Accumulated discoveries |
-| DESIGN.md | Design decisions |
-| Topic-specific | Created as needed by librarian |
+| `raw/REQUIREMENTS_1.md` | Initial requirements as provided to bootstrap |
 
-The set of core documents is fixed at bootstrap time. Topic-specific documents are created dynamically by the librarian as the knowledge base grows.
+**Derived (created by librarian at bootstrap):**
+
+| Document | Purpose |
+|---|---|
+| `derived/PROJECT.md` | Project overview + document index |
+| `derived/REQUIREMENTS.md` | Structured requirements (derived from raw) |
+| `derived/FINDINGS.md` | Accumulated discoveries |
+| `derived/DESIGN.md` | Design decisions |
+| Topic-specific | Created as needed by librarian in `derived/` |
+
+**Root:**
+
+| Document | Purpose |
+|---|---|
+| `CHANGELOG.md` | Append-only mutation log (managed programmatically, not by librarian) |
+
+The set of core derived documents is fixed at bootstrap time. Topic-specific documents are created dynamically by the librarian in `derived/` as the knowledge base grows.
 
 ---
 
@@ -107,10 +157,22 @@ The set of core documents is fixed at bootstrap time. Topic-specific documents a
 Convert an initial set of requirements into the core document set. This runs once, before any interactive session.
 
 ```rust
-pub async fn bootstrap(&self, requirements: &str) -> Result<(), VaultError>;
+pub async fn bootstrap(&self, requirements: &str) -> Result<(), BootstrapError>;
+
+pub enum BootstrapError {
+    /// Bootstrap called on an already-initialized vault.
+    AlreadyInitialized,
+    Io(std::io::Error),
+    LibrarianFailed(String),
+}
 ```
 
 Input: raw requirements text. Output: populated core documents on disk. Returns error if the storage root already contains core documents (bootstrap is not idempotent).
+
+**Sequence:**
+1. Vault writes the raw requirements to `raw/REQUIREMENTS_1.md`.
+2. Vault invokes the librarian to produce the core derived documents in `derived/`.
+3. Vault appends a bootstrap entry to `CHANGELOG.md`.
 
 ### 2. Query
 
@@ -139,8 +201,15 @@ pub struct Extract {
     pub source: DocumentRef,
 }
 
-pub async fn query(&self, question: &str) -> Result<QueryResult, VaultError>;
+pub async fn query(&self, question: &str) -> Result<QueryResult, QueryError>;
+
+pub enum QueryError {
+    Io(std::io::Error),
+    LibrarianFailed(String),
+}
 ```
+
+Design choice: vault does not define a "not found" error for Query. A `QueryResult` with `Coverage::None` is the normal response when no documents match — not an error condition.
 
 `coverage` is the librarian's structured assessment of how well the vault's existing knowledge answers the question. The Research Service uses this to decide whether further research is needed without parsing the natural-language answer. `answer` is a consolidated response suitable for printing to end users — it may be partial if coverage is `Partial`. `extracts` provide source material for validation and deeper reading.
 
@@ -148,15 +217,53 @@ The orchestrator's Research Service layers on top of this: it calls `query`, che
 
 ### 3. Record
 
-Write findings into vault. The librarian decides file placement.
+Write content into vault. Vault stores the raw content, then the librarian integrates it into derived documents.
 
 ```rust
-pub async fn record(&self, content: &str) -> Result<Vec<DocumentRef>, VaultError>;
+pub enum RecordMode {
+    /// Create a new document series. Fails if any version already exists.
+    New,
+    /// Append a new version to an existing document series.
+    Append,
+}
+
+pub async fn record(
+    &self,
+    name: &str,
+    content: &str,
+    mode: RecordMode,
+) -> Result<Vec<DocumentRef>, RecordError>;
+
+pub enum RecordError {
+    /// Name is not UPPERCASE_DESCRIPTIVE or contains a version suffix.
+    InvalidName(String),
+    /// RecordMode::New but versions already exist.
+    VersionConflict(String),
+    /// RecordMode::Append but no prior version exists.
+    DocumentNotFound(String),
+    Io(std::io::Error),
+    LibrarianFailed(String),
+}
 ```
 
-Input: raw content (findings, decisions, discoveries). Output: references to documents that were created or modified. Callers submit raw content; vault handles organization via the librarian.
+**Parameters:**
+- `name`: Document base name (e.g., `"FINDINGS"`). Must be `UPPERCASE_DESCRIPTIVE` format (uppercase letters and underscores only) and must not contain a trailing version number (e.g., `"FINDINGS_2"` is rejected). Returns `RecordError::InvalidName` if validation fails. Vault stores the content in `raw/` as `NAME_N.md` where N is the next version number.
+- `content`: Raw content (findings, decisions, discoveries).
+- `mode`: Controls version behavior:
+  - `RecordMode::New` — Creates version 1. Returns `RecordError::VersionConflict` if any version of this document already exists in `raw/`.
+  - `RecordMode::Append` — Creates the next version (e.g., if `FINDINGS_2.md` is the latest, creates `FINDINGS_3.md`). Returns `RecordError::DocumentNotFound` if no prior version exists.
 
-**Relevance filter:** The librarian does not record everything. It filters for information that a future task would need to: avoid repeating failed work, make consistent decisions, understand constraints or blockers, or follow established patterns. Raw error logs, intermediate build output, routine progress updates, and information only relevant to the current task's execution are summarized or discarded.
+**Sequence:**
+1. Vault determines the next version number by scanning `raw/` for existing `NAME_*.md` files.
+2. Vault writes the content to `raw/NAME_N.md`.
+3. Vault invokes the librarian to integrate the new content into `derived/` documents. The librarian reads the new raw document and updates derived documents accordingly.
+4. Vault appends a record entry to `CHANGELOG.md`.
+
+**Output:** References to derived documents that were created or modified.
+
+**Later versions supersede earlier versions.** When the librarian processes a new raw document, it treats the content as the latest truth for that document series. The librarian can read all versions in `raw/` to understand evolution, but the latest version takes precedence.
+
+**Relevance filter:** The librarian does not blindly copy raw content into derived documents. It filters for information that a future task would need to: avoid repeating failed work, make consistent decisions, understand constraints or blockers, or follow established patterns. Raw error logs, intermediate build output, routine progress updates, and information only relevant to the current task's execution are summarized or discarded.
 
 **No restructuring during Record.** The Record operation only adds or updates content relevant to the new information. It does not reorder sections, split documents, or restructure for cosmetic reasons. Restructuring is reserved for the Reorganize operation.
 
@@ -165,7 +272,12 @@ Input: raw content (findings, decisions, discoveries). Output: references to doc
 Trigger a thorough restructuring pass over the entire vault. The librarian reviews all documents for merging opportunities, structural improvements, and deduplication. Unlike the lightweight librarian pass on each Record, this is a full sweep.
 
 ```rust
-pub async fn reorganize(&self) -> Result<ReorganizeReport, VaultError>;
+pub async fn reorganize(&self) -> Result<ReorganizeReport, ReorganizeError>;
+
+pub enum ReorganizeError {
+    Io(std::io::Error),
+    LibrarianFailed(String),
+}
 
 pub struct ReorganizeReport {
     pub merged: Vec<DocumentRef>,
@@ -182,16 +294,16 @@ Note: Reorganize has no counterpart in epic's current DocumentStore design. It e
 
 ## Librarian
 
-A reel agent that manages document organization. The model for each operation is configured via `VaultModels`. Invoked internally by vault on Query, Record, and Reorganize. Not exposed to external callers.
+A reel agent that manages document organization. The model for each operation is configured via `VaultModels`. Invoked internally by vault on Bootstrap, Query, Record, and Reorganize. Not exposed to external callers.
 
 **Responsibilities:**
-- **Placement**: decides which file and section receives new content.
-- **Merging**: combines related content across documents when overlap grows.
+- **Placement**: decides which file and section in `derived/` receives new content.
+- **Merging**: combines related content across derived documents when overlap grows.
 - **Restructuring**: reorganizes sections as topics evolve.
 - **Deduplication**: prevents repeated information.
 - **Growth control**: prevents unbounded document expansion.
 
-**Tool access:** The librarian has read/write access to files within the storage root only. It reads existing documents to decide placement and writes to create, modify, or merge documents. It has no access to tools outside the storage root (no codebase exploration, no web search, no shell commands). The constraint is **scope**: it operates exclusively within the vault storage directory.
+**Tool access:** The librarian has read access to `raw/` and `CHANGELOG.md`, and read-write access to `derived/`. It cannot modify or delete raw documents or the changelog. It has no access to tools outside the storage root (no codebase exploration, no web search, no shell commands). The constraint is **scope**: it operates exclusively within the vault storage directory, with write access limited to `derived/`.
 
 ### System Prompt Composition
 
@@ -204,17 +316,17 @@ The librarian's system prompt is composed per-operation from shared building blo
 | Core principle | "Documents describe current reality." Superseding rules. |
 | Document format | UPPERCASE_DESCRIPTIVE naming, standard header, typed sections. |
 | Cross-references | Path reference format, no content duplication. |
-| Scope restriction | Operate only within the storage root. No external tools. |
-| Document inventory | Current list of documents with their scope comments. |
+| Scope restriction | Read `raw/` and `CHANGELOG.md`. Read-write `derived/`. No external tools. |
+| Document inventory | Current list of documents in `raw/` and `derived/` with their scope comments. |
 
 **Operation-specific blocks:**
 
 | Operation | Additional blocks |
 |---|---|
-| Query | Extraction process: start with PROJECT.md for orientation, read relevant documents, synthesize answer with coverage assessment. No writes. |
-| Record | Relevance filter, placement rules (read PROJECT.md for index, identify target document and section). Superseding rules (replace, don't append). No restructuring. |
-| Reorganize | Full restructuring operations: split, merge, remove, consolidate, reorder, tighten prose. Document lifecycle triggers (size ~200 lines, coherence). Update PROJECT.md after structural changes. |
-| Bootstrap | Core document templates (PROJECT.md, REQUIREMENTS.md, CHANGELOG.md). Initialization rules: derive structure from requirements, don't invent structure they don't support. |
+| Query | Extraction process: start with `derived/PROJECT.md` for orientation, read relevant documents in `derived/` and `raw/`, synthesize answer with coverage assessment. No writes. |
+| Record | New raw document path provided. Relevance filter, placement rules (read `derived/PROJECT.md` for index, identify target document and section in `derived/`). Superseding rules (replace, don't append). No restructuring. |
+| Reorganize | Full restructuring operations on `derived/`: split, merge, remove, consolidate, reorder, tighten prose. May read `raw/` for source of truth. Document lifecycle triggers (size ~200 lines, coherence). Update `derived/PROJECT.md` after structural changes. |
+| Bootstrap | Raw requirements path provided. Core document templates (`derived/PROJECT.md`, `derived/REQUIREMENTS.md`). Initialization rules: derive structure from raw requirements, don't invent structure they don't support. |
 
 Vault assembles the final prompt by concatenating the relevant blocks. The shared blocks are defined once as embedded constants (e.g., `include_str!`). The document inventory block is generated at call time from the current state of the storage root.
 
@@ -222,28 +334,70 @@ This scoping prevents the librarian from restructuring documents during a Record
 
 ---
 
-## Errors
+## CLI
 
-```rust
-pub enum VaultError {
-    /// Storage root does not exist or is inaccessible.
-    StorageUnavailable(PathBuf),
-    /// Bootstrap called on an already-initialized vault.
-    AlreadyInitialized,
-    /// File I/O failure (read, write, delete).
-    Io(std::io::Error),
-    /// Librarian agent call failed (model error, timeout).
-    LibrarianFailed(String),
-}
+The `vault-cli` crate provides a command-line interface that exposes vault's public API as subcommands. Following the conventions of sibling projects (reel, lot, flick): clap 4 with derive macros, YAML configuration, JSON output to stdout, errors to stderr, tokio single-threaded runtime.
+
+### Configuration
+
+The CLI reads a YAML config file that maps to `VaultEnvironment`. The CLI constructs the model and provider registries internally — these are embedding-only plumbing not exposed as CLI arguments.
+
+```yaml
+storage_root: ".epic/docs/"
+models:
+  bootstrap: "sonnet"
+  query: "haiku"
+  record: "haiku"
+  reorganize: "sonnet"
 ```
 
-Design choice: vault does not define a "not found" error for Query. A `QueryResult` with `Coverage::None` is the normal response when no documents match — not an error condition.
+The `--config <path>` flag is required for all subcommands that interact with the vault.
+
+### Subcommands
+
+#### `vault bootstrap`
+
+```
+vault bootstrap --config <path>
+```
+
+Reads requirements from stdin. Creates the initial vault structure. Maps to `Vault::bootstrap()`.
+
+#### `vault query`
+
+```
+vault query --config <path> --query <text>
+vault query --config <path> < question.txt
+```
+
+Query text via `--query` flag or stdin. Outputs `QueryResult` as JSON to stdout. Maps to `Vault::query()`.
+
+#### `vault record`
+
+```
+vault record --config <path> --name <NAME> --mode new|append
+vault record --config <path> --name <NAME> --mode new|append --content <text>
+```
+
+Content via `--content` flag or stdin. `--name` is the document base name (e.g., `FINDINGS`). `--mode` is required. Outputs the list of modified `DocumentRef`s as JSON. Maps to `Vault::record()`.
+
+#### `vault reorganize`
+
+```
+vault reorganize --config <path>
+```
+
+Triggers a full restructuring pass. Outputs `ReorganizeReport` as JSON. Maps to `Vault::reorganize()`.
+
+### Output
+
+All subcommands emit JSON to stdout on success. Errors are emitted as JSON to stderr with a non-zero exit code. This matches the reel and flick convention of machine-readable output for composability.
 
 ---
 
 ## Integration Contract
 
-Vault is a library consumed by orchestrators (e.g., epic). It provides Bootstrap, Query, and Record as its public API. Higher-level services (e.g., epic's Research Service) layer on top by calling these operations combined with external tools.
+Vault is a library consumed by orchestrators (e.g., epic). It provides Bootstrap, Query, Record, and Reorganize as its public API. Higher-level services (e.g., epic's Research Service) layer on top by calling these operations combined with external tools.
 
 Vault participates in a dual-channel context propagation model:
 

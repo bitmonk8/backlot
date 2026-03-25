@@ -14,7 +14,7 @@ vault/                            (workspace root)
 ├── vault-cli/                   (CLI binary crate)
 │   ├── Cargo.toml
 │   └── src/
-│       └── main.rs              — thin binary wrapper
+│       └── main.rs              — CLI: subcommands mapping to library API
 ├── docs/
 └── .github/
 ```
