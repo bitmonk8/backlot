@@ -5,26 +5,6 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 
 ---
 
-## Group 2: Documentation Accuracy [MUST FIX]
-
-### 2.1 DESIGN.md stale dependency revisions
-- **File:** docs/DESIGN.md, lines 40-41, 412
-- lot listed as `c3cc94d` (actual `30bd25f`), flick listed as `287bfbd` (actual `c827fda`).
-
-### 2.2 DESIGN.md wrong parameter names and file attribution
-- **File:** docs/DESIGN.md, lines 266-268, 281-283
-- Nu Command Translation table shows Read/Write/Edit with `path` but JSON schema uses `file_path` (tools.rs lines 125, 177, 189). `extract_text()` described under "## Tool System (`tools.rs`)" section but defined in `agent.rs` line 420.
-
-### 2.3 README.md stale test count and license mismatch
-- **File:** README.md, lines 260, 278
-- Test count says 247 (232+15) vs actual 259 (244+15). License says "MIT" but Cargo.toml declares "MIT OR Apache-2.0".
-
-### 2.4 project_assistant.md references deleted file
-- **File:** prompts/project_assistant.md, lines 7, 23
-- References `docs/CLI_TOOL.md` which was deleted. Should reference `docs/DESIGN.md`.
-
----
-
 ## Group 3: nu_session.rs — Safety [NON-CRITICAL]
 
 ### 3.1 `NuProcess::Drop` blocks the async runtime
@@ -42,6 +22,18 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 ### 4.1 DESIGN.md CI table inaccuracies
 - **File:** docs/DESIGN.md, lines 405-407
 - Clippy and Build documented with `--workspace` flag but actual CI omits it (ci.yml lines 39, 142). Format job documented as "All" platforms but runs only on ubuntu-latest (ci.yml line 15).
+
+### 4.2 STATUS.md "What Is Implemented" is append-only changelog
+- **File:** docs/STATUS.md, lines 9-48
+- Section is historical narrative with per-issue provenance (e.g., "closes issue #22") rather than a description of current state. A clean-slate rewrite would eliminate ~40 lines of cruft.
+
+### 4.3 STATUS.md duplicate test count
+- **File:** docs/STATUS.md, lines 5 and 47
+- Line 5 states "All 259 tests pass locally" and line 47 repeats "259 tests total (244 reel + 15 reel-cli), all pass locally."
+
+### 4.4 STATUS.md references deletion of obsolete files
+- **File:** docs/STATUS.md, line 48
+- "Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted" describes a past action, not current state.
 
 ---
 
