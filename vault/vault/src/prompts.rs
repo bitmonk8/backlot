@@ -68,9 +68,9 @@ fn document_inventory_block(inventory: &DocumentInventory) -> String {
     block
 }
 
-fn build_shared_prompt(inventory: &DocumentInventory) -> String {
+fn build_shared_prompt(inventory: &DocumentInventory, scope_restriction: &str) -> String {
     format!(
-        "{CORE_PRINCIPLE}\n\n{DOCUMENT_FORMAT}\n\n{CROSS_REFERENCES}\n\n{SCOPE_RESTRICTION}\n\n{}",
+        "{CORE_PRINCIPLE}\n\n{DOCUMENT_FORMAT}\n\n{CROSS_REFERENCES}\n\n{scope_restriction}\n\n{}",
         document_inventory_block(inventory)
     )
 }
@@ -110,7 +110,10 @@ support them. Do not invent structure the requirements do not warrant.
 - Keep documents focused and non-overlapping.";
 
 fn bootstrap_system_prompt(inventory: &DocumentInventory) -> String {
-    format!("{}\n\n{BOOTSTRAP_BLOCK}", build_shared_prompt(inventory))
+    format!(
+        "{}\n\n{BOOTSTRAP_BLOCK}",
+        build_shared_prompt(inventory, SCOPE_RESTRICTION)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -136,8 +139,62 @@ constraints, patterns, failure records). Discard routine progress and intermedia
 fn record_system_prompt(inventory: &DocumentInventory, raw_filename: &str) -> String {
     format!(
         "{}\n\n{}",
-        build_shared_prompt(inventory),
+        build_shared_prompt(inventory, SCOPE_RESTRICTION),
         RECORD_BLOCK.replace("RAW_FILENAME_PLACEHOLDER", raw_filename)
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Query-specific prompt
+// ---------------------------------------------------------------------------
+
+const QUERY_SCOPE_RESTRICTION: &str = "\
+## Scope Restriction
+
+You may read files in `raw/`, `derived/`, and `CHANGELOG.md`. \
+You must NOT write, create, edit, or delete any files. \
+Do not use network tools or shell commands.";
+
+const QUERY_BLOCK: &str = "\
+## Query Task
+
+Answer the user's question using the vault's documents.
+
+### Extraction Process
+
+1. Read `derived/PROJECT.md` for orientation and the current document index.
+2. Read relevant documents in `derived/` and `raw/` based on the question.
+3. Synthesize an answer from the documents.
+4. Assess coverage: `full` if the documents completely answer the question, \
+`partial` if they partially answer it, `none` if they contain no relevant information.
+
+### Rules
+
+- Do NOT write, create, edit, or delete any files.
+- Base your answer only on the vault's documents. Do not invent information.
+- Include extracts (verbatim or closely paraphrased passages) that support your answer.
+
+### Required Output Format
+
+Return a single JSON object (no other text) with this structure:
+
+```json
+{
+  \"coverage\": \"full\" | \"partial\" | \"none\",
+  \"answer\": \"<your synthesized answer>\",
+  \"extracts\": [
+    {\"content\": \"<supporting passage>\", \"source\": \"<filename>\"},
+    ...
+  ]
+}
+```
+
+The `source` field is the filename only (e.g., `PROJECT.md`), not the full path.";
+
+fn query_system_prompt(inventory: &DocumentInventory) -> String {
+    format!(
+        "{}\n\n{QUERY_BLOCK}",
+        build_shared_prompt(inventory, QUERY_SCOPE_RESTRICTION)
     )
 }
 
@@ -145,8 +202,8 @@ fn record_system_prompt(inventory: &DocumentInventory, raw_filename: &str) -> St
 // Public access for operation modules
 // ---------------------------------------------------------------------------
 
-/// Bootstrap query message sent as the user turn.
-pub const fn bootstrap_query() -> &'static str {
+/// Bootstrap user message sent as the user turn to the librarian.
+pub const fn bootstrap_user_message() -> &'static str {
     "Initialize this vault. Read the raw requirements and create the core derived documents."
 }
 
@@ -156,8 +213,8 @@ pub fn build_bootstrap_prompt(storage: &Storage) -> Result<String, StorageError>
     Ok(bootstrap_system_prompt(&inventory))
 }
 
-/// Record query message sent as the user turn.
-pub const fn record_query() -> &'static str {
+/// Record user message sent as the user turn to the librarian.
+pub const fn record_user_message() -> &'static str {
     "Integrate the new raw document into the derived knowledge base."
 }
 
@@ -165,6 +222,17 @@ pub const fn record_query() -> &'static str {
 pub fn build_record_prompt(storage: &Storage, raw_filename: &str) -> Result<String, StorageError> {
     let inventory = storage.inventory()?;
     Ok(record_system_prompt(&inventory, raw_filename))
+}
+
+/// Format the user's question for the query librarian invocation.
+pub fn query_user_message(question: &str) -> String {
+    format!("Answer this question from the vault's knowledge base:\n\n{question}")
+}
+
+/// Build the system prompt for a query invocation from current storage state.
+pub fn build_query_prompt(storage: &Storage) -> Result<String, StorageError> {
+    let inventory = storage.inventory()?;
+    Ok(query_system_prompt(&inventory))
 }
 
 // ---------------------------------------------------------------------------
@@ -265,5 +333,41 @@ mod tests {
 
         let prompt = build_record_prompt(&storage, "NOTES_3.md").unwrap();
         assert!(prompt.contains("raw/NOTES_3.md"));
+    }
+
+    #[test]
+    fn query_prompt_contains_required_sections() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        std::fs::write(
+            storage.derived_dir().join("PROJECT.md"),
+            "# Project\n<!-- scope: overview -->\n",
+        )
+        .unwrap();
+
+        let prompt = build_query_prompt(&storage).unwrap();
+
+        // Shared blocks
+        assert!(prompt.contains("Core Principle"));
+        assert!(prompt.contains("Document Format"));
+        assert!(prompt.contains("Cross-References"));
+        assert!(prompt.contains("Current Document Inventory"));
+
+        // Query-specific scope restriction (read-only)
+        assert!(prompt.contains("must NOT write"));
+
+        // Query-specific block
+        assert!(prompt.contains("Query Task"));
+        assert!(prompt.contains("derived/PROJECT.md"));
+        assert!(prompt.contains("coverage"));
+        assert!(prompt.contains("extracts"));
+    }
+
+    #[test]
+    fn query_user_message_includes_question() {
+        let msg = query_user_message("What is the project about?");
+        assert!(msg.contains("What is the project about?"));
     }
 }

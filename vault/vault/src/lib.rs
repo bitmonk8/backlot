@@ -1,12 +1,13 @@
 // Vault: library crate.
 //
 // Persistent, file-based knowledge store for agent systems. Provides the Vault
-// struct as the public API entry point. Implements bootstrap and record
-// operations, with query and reorganize planned.
+// struct as the public API entry point. Implements bootstrap, record, and query
+// operations, with reorganize planned.
 
 pub(crate) mod bootstrap;
 pub(crate) mod librarian;
 pub(crate) mod prompts;
+pub(crate) mod query;
 pub(crate) mod record;
 pub(crate) mod storage;
 #[cfg(test)]
@@ -105,6 +106,41 @@ impl From<storage::StorageError> for RecordError {
     }
 }
 
+/// Coverage assessment for a query answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Coverage {
+    /// The vault's documents fully address the question.
+    Full,
+    /// The vault's documents partially address the question.
+    Partial,
+    /// The vault's documents do not address the question.
+    None,
+}
+
+/// Structured result from a query operation.
+#[derive(Debug, Clone)]
+pub struct QueryResult {
+    pub coverage: Coverage,
+    pub answer: String,
+    pub extracts: Vec<Extract>,
+}
+
+/// An extract from a vault document supporting a query answer.
+#[derive(Debug, Clone)]
+pub struct Extract {
+    pub content: String,
+    pub source: DocumentRef,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum QueryError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("librarian failed: {0}")]
+    LibrarianFailed(String),
+}
+
 // ---------------------------------------------------------------------------
 // Vault
 // ---------------------------------------------------------------------------
@@ -191,6 +227,20 @@ impl Vault {
             );
         }
         Ok(modified)
+    }
+
+    /// Query the vault's knowledge base.
+    ///
+    /// Read-only operation. Invokes the librarian to read documents and
+    /// synthesize an answer. No files are written and no changelog entry
+    /// is appended.
+    pub async fn query(&self, question: &str) -> Result<QueryResult, QueryError> {
+        let invoker = ReelLibrarian {
+            agent: &self.agent,
+            model_name: &self.models.query,
+        };
+
+        query::run(&self.storage, &invoker, question).await
     }
 }
 

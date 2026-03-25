@@ -5,7 +5,7 @@
 // operation in the changelog.
 
 use crate::BootstrapError;
-use crate::librarian::LibrarianInvoker;
+use crate::librarian::DerivedProducer;
 use crate::prompts;
 use crate::storage::{ChangelogEntry, DerivedValidationWarning, Storage, utc_now_iso8601};
 
@@ -15,7 +15,7 @@ use crate::storage::{ChangelogEntry, DerivedValidationWarning, Storage, utc_now_
 /// or `derived/`). Writes requirements to `raw/REQUIREMENTS_1.md`, invokes the
 /// librarian to create derived documents, validates results, and appends a
 /// changelog entry.
-pub async fn run<L: LibrarianInvoker>(
+pub async fn run<L: DerivedProducer>(
     storage: &Storage,
     invoker: &L,
     requirements: &str,
@@ -33,10 +33,10 @@ pub async fn run<L: LibrarianInvoker>(
 
     // Step 3: Build prompt and invoke librarian.
     let system_prompt = prompts::build_bootstrap_prompt(storage)?;
-    let query = prompts::bootstrap_query();
+    let user_message = prompts::bootstrap_user_message();
 
     invoker
-        .produce_derived(&system_prompt, query, storage)
+        .produce_derived(&system_prompt, user_message, storage)
         .await
         .map_err(BootstrapError::LibrarianFailed)?;
 
@@ -93,7 +93,7 @@ mod tests {
         run(&storage, &invoker, "Test requirements.").await.unwrap();
 
         let prompt = invoker.captured_prompt.lock().unwrap().clone().unwrap();
-        let query = invoker.captured_query.lock().unwrap().clone().unwrap();
+        let message = invoker.captured_message.lock().unwrap().clone().unwrap();
 
         // Prompt must contain all shared blocks and the bootstrap-specific block.
         assert!(prompt.contains("Core Principle"), "missing Core Principle");
@@ -103,8 +103,8 @@ mod tests {
             "inventory should list the raw document written before invocation"
         );
 
-        // Query should be the bootstrap query constant.
-        assert_eq!(query, prompts::bootstrap_query());
+        // User message should be the bootstrap constant.
+        assert_eq!(message, prompts::bootstrap_user_message());
     }
 
     #[tokio::test]

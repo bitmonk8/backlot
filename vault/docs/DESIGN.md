@@ -16,6 +16,7 @@ vault/                            (workspace root)
 |       +-- librarian.rs         -- Agent invocation trait + ReelLibrarian impl
 |       +-- bootstrap.rs         -- Bootstrap operation implementation
 |       +-- record.rs            -- Record operation implementation
+|       +-- query.rs             -- Query operation implementation
 |       +-- test_support.rs      -- Shared mock librarians for tests (cfg(test))
 +-- vault-cli/                   (CLI binary crate)
 |   +-- Cargo.toml
@@ -43,6 +44,7 @@ vault/                            (workspace root)
     |
     +-- bootstrap.rs    -- bootstrap operation logic
     +-- record.rs       -- record operation logic
+    +-- query.rs        -- query operation logic (read-only)
     |     |
     |     +-- prompts.rs    -- system prompt composition (shared + per-operation)
     |     +-- librarian.rs  -- agent invocation trait + ReelLibrarian impl
@@ -62,7 +64,7 @@ The prompts module (`prompts.rs`) composes system prompts from shared blocks (co
 
 The librarian (`librarian.rs`) is the interface between vault operations and the reel agent. It has one responsibility:
 
-**Agent invocation** -- The `LibrarianInvoker` trait abstracts agent calls so that tests can substitute mocks without requiring real LLM calls. The production implementation (`ReelLibrarian`) holds a reference to the shared `Agent` and configures each call with the appropriate model, grant, and write paths. The grant is `TOOLS`-only (read-only filesystem tools); reel automatically enables Write/Edit tools when `write_paths` is non-empty, so the agent can write only to the paths listed in `write_paths` (the `derived/` directory). The trait method `produce_derived` names the side-effect: it reads raw documents and writes derived documents.
+**Agent invocation** -- Two traits abstract agent calls so that tests can substitute mocks without requiring real LLM calls: `DerivedProducer` (used by bootstrap and record, writes derived documents) and `QueryResponder` (used by query, read-only, returns a structured `QueryResult` parsed from the agent's JSON response). The production implementation (`ReelLibrarian`) implements both traits, holds a reference to the shared `Agent`, and configures each call with the appropriate model, grant, and write paths. The grant is `TOOLS`-only (read-only filesystem tools); reel automatically enables Write/Edit tools when `write_paths` is non-empty, so the agent can write only to the paths listed in `write_paths` (the `derived/` directory). Splitting the traits ensures each operation depends only on the capability it uses, and test mocks need not stub unrelated methods.
 
 ### Bootstrap Operation
 
@@ -96,6 +98,22 @@ Sequence:
 The record prompt instructs the librarian to: read `derived/PROJECT.md` for orientation, apply a relevance filter (keep decisions/constraints/patterns, discard routine progress), follow the superseding rule (new info replaces outdated), and avoid restructuring (only add/update content relevant to the new information).
 
 Partial failure semantics: same as bootstrap. If the librarian fails, the raw document remains on disk and no changelog entry is written.
+
+### Query Operation
+
+The query operation (`query.rs`) is the only read-only operation. It answers questions from the vault's knowledge base without modifying any files or appending changelog entries.
+
+Sequence:
+
+1. Builds a query-specific system prompt with a read-only scope restriction (no writes allowed).
+2. Formats the user's question as a user message.
+3. Invokes the librarian via `answer_query` with a `TOOLS`-only grant and empty `write_paths`.
+4. The librarian reads `derived/PROJECT.md` for orientation, reads relevant documents, and returns a JSON response.
+5. The JSON response is parsed into a `QueryResult` containing coverage assessment (`Full`/`Partial`/`None`), a synthesized answer, and supporting extracts with source references.
+
+The query prompt uses a separate scope restriction block that explicitly prohibits writes. The `ReelLibrarian` implementation passes an empty `write_paths` vec, so reel does not enable Write/Edit tools.
+
+Response parsing handles JSON wrapped in markdown code fences (```` ```json ... ``` ````) or bare JSON. The parser validates coverage values and extract structure, returning descriptive errors for malformed responses.
 
 ## Storage Layer
 

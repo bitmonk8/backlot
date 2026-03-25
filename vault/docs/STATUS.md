@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Bootstrap and Record operations implemented. Two operations remaining.**
+**Bootstrap, Record, and Query operations implemented. Reorganize remaining.**
 
 ## What Is Implemented
 
@@ -19,15 +19,22 @@
   - Derived document listing, filename validation, and content validation
   - Full document inventory (raw + derived)
   - UTC timestamp generation
+  - `snapshot_derived()` and `compute_changed()` for before/after derived document comparison
 - Public API (`vault/src/lib.rs`):
-  - `Vault` struct with `new()` constructor and `bootstrap()` method
+  - `Vault` struct with `new()` constructor
+  - `Vault::bootstrap()`, `Vault::record()`, `Vault::query()` methods
   - `VaultEnvironment` and `VaultModels` configuration types
-  - `VaultCreateError` and `BootstrapError` error types
+  - `VaultCreateError`, `BootstrapError`, `RecordError`, `QueryError` error types
+  - `RecordMode` enum, `DocumentRef` re-export
 - Prompts module (`vault/src/prompts.rs`):
-  - System prompt composition: shared blocks (core principle, document format, cross-references, scope restriction, document inventory) plus bootstrap-specific block
+  - Shared prompt blocks: core principle, document format, cross-references, scope restriction, document inventory
+  - Bootstrap-specific prompt block
+  - Record-specific prompt block (relevance filter, superseding rule, no restructuring); `build_record_prompt()`, `record_query()`
+  - Query-specific prompt block (read-only scope restriction); `build_query_prompt()`, `query_user_message()`
 - Librarian module (`vault/src/librarian.rs`):
-  - `LibrarianInvoker` trait (`produce_derived`) for testable agent invocation
+  - `DerivedProducer` and `QueryResponder` traits (split by operation type)
   - `ReelLibrarian` production implementation using reel `Agent`
+  - `QueryResponder::answer_query`: read-only invocation with empty `write_paths`, JSON response parsing with markdown fence handling
 - Bootstrap operation (`vault/src/bootstrap.rs`):
   - Pre-condition check (`AlreadyInitialized` if any prior state exists)
   - Directory creation, raw requirements write, librarian invocation
@@ -40,20 +47,16 @@
   - Derived document snapshot before/after librarian invocation for change detection
   - Changelog entry with `derived_modified` list
   - Partial failure semantics (raw persists, changelog skipped on librarian failure)
-- Public API additions:
-  - `RecordMode` enum, `RecordError` error type, `DocumentRef` re-export
-  - `Vault::record()` method
-- Prompts module additions:
-  - Record-specific prompt block (relevance filter, superseding rule, no restructuring)
-  - `build_record_prompt()` and `record_query()` functions
-- Storage additions:
-  - `snapshot_derived()` and `compute_changed()` for before/after derived document comparison
+- Query operation (`vault/src/query.rs`):
+  - Read-only operation: no file writes, no changelog entry
+  - `Coverage` enum (`Full`/`Partial`/`None`), `QueryResult`, `Extract` types
 - Shared test infrastructure (`vault/src/test_support.rs`):
-  - `MockLibrarian`, `NoOpLibrarian`, `CapturingLibrarian`, `BadNameLibrarian`
+  - `MockLibrarian`, `NoOpLibrarian`, `CapturingLibrarian`, `BadNameLibrarian`, `MockQueryLibrarian`
   - `DerivedWriter` type alias for configurable mock output
-- Test coverage: 65 tests (storage, prompts, bootstrap, record, Vault::new)
+  - Each mock implements only its relevant trait (no dead stubs)
+- Test coverage: 84 tests (storage, prompts, librarian, bootstrap, record, query, Vault::new)
 
 ## What Remains
 
-- Core operations: Query, Reorganize
+- Core operations: Reorganize
 - CLI subcommands

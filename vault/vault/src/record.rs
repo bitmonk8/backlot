@@ -3,7 +3,7 @@
 // Stores raw content at the next version number, invokes the librarian to
 // update derived documents, then records the operation in the changelog.
 
-use crate::librarian::LibrarianInvoker;
+use crate::librarian::DerivedProducer;
 use crate::prompts;
 use crate::storage::{
     ChangelogEntry, DerivedValidationWarning, DocumentRef, Storage, compute_changed,
@@ -16,7 +16,7 @@ use crate::{RecordError, RecordMode};
 /// Writes content to `raw/NAME_N.md`, invokes the librarian to integrate the
 /// new content into derived documents, and appends a changelog entry. Returns
 /// references to derived documents that were created or modified.
-pub async fn run<L: LibrarianInvoker>(
+pub async fn run<L: DerivedProducer>(
     storage: &Storage,
     invoker: &L,
     name: &str,
@@ -33,10 +33,10 @@ pub async fn run<L: LibrarianInvoker>(
 
     // Step 3: Build prompt and invoke librarian.
     let system_prompt = prompts::build_record_prompt(storage, &raw_filename)?;
-    let query = prompts::record_query();
+    let user_message = prompts::record_user_message();
 
     invoker
-        .produce_derived(&system_prompt, query, storage)
+        .produce_derived(&system_prompt, user_message, storage)
         .await
         .map_err(RecordError::LibrarianFailed)?;
 
@@ -330,7 +330,7 @@ mod tests {
             .unwrap();
 
         let prompt = invoker.captured_prompt.lock().unwrap().clone().unwrap();
-        let query = invoker.captured_query.lock().unwrap().clone().unwrap();
+        let message = invoker.captured_message.lock().unwrap().clone().unwrap();
 
         // Shared blocks
         assert!(prompt.contains("Core Principle"), "missing Core Principle");
@@ -362,8 +362,8 @@ mod tests {
             "prompt should mention PROJECT.md for orientation"
         );
 
-        // Query
-        assert_eq!(query, prompts::record_query());
+        // User message
+        assert_eq!(message, prompts::record_user_message());
     }
 
     // -- Test 11: Validation warnings do not fail the operation --
