@@ -1,5 +1,6 @@
-// Items in this module are pre-defined for the operations layer that will
-// consume them.  The allow will be removed as consumers are added.
+// Storage primitives consumed by the operations layer. Some methods are only
+// used by tests or future operations; allow dead_code until all operations
+// are implemented.
 #![allow(dead_code)]
 
 use std::fs;

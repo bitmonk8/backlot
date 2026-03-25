@@ -1,5 +1,13 @@
 # Known Issues
 
+## Bootstrap / Operations Layer
+
+### NON-CRITICAL
+
+#### B1: `ReelLibrarian::produce_derived` untested
+
+- Grant construction (`TOOLS | WRITE`), `write_paths` wiring, and `RequestConfig` assembly are unverified. `reel::Agent::with_injected` is `#[cfg(test)]`-gated (reel-internal only), so vault cannot construct a mock Agent. Requires reel to expose test utilities via a `testing` feature or a public test constructor. (`librarian.rs`)
+
 ## Storage Layer
 
 ### NON-CRITICAL

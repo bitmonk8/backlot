@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Storage layer implemented. Operations not yet implemented.**
+**Bootstrap operation implemented. Three operations remaining.**
 
 ## What Is Implemented
 
@@ -16,14 +16,27 @@
   - JSONL changelog append and read
   - Raw document write/read with `NAME_N.md` versioning
   - Name validation (`^[A-Z][A-Z0-9_]*[A-Z0-9]$`)
-  - Derived document listing, filename validation, and content validation (warns on unreadable files; checks title and scope independently)
+  - Derived document listing, filename validation, and content validation
   - Full document inventory (raw + derived)
   - UTC timestamp generation
-  - Unit tests covering storage functionality
-  - Additional test coverage: `read_raw` not-found path, `read_changelog` corrupt data, `list_derived` direct tests, `inventory` with non-matching raw files, `create_directories` failure path
+- Public API (`vault/src/lib.rs`):
+  - `Vault` struct with `new()` constructor and `bootstrap()` method
+  - `VaultEnvironment` and `VaultModels` configuration types
+  - `VaultCreateError` and `BootstrapError` error types
+- Prompts module (`vault/src/prompts.rs`):
+  - System prompt composition: shared blocks (core principle, document format, cross-references, scope restriction, document inventory) plus bootstrap-specific block
+- Librarian module (`vault/src/librarian.rs`):
+  - `LibrarianInvoker` trait (`produce_derived`) for testable agent invocation
+  - `ReelLibrarian` production implementation using reel `Agent`
+- Bootstrap operation (`vault/src/bootstrap.rs`):
+  - Pre-condition check (`AlreadyInitialized` if any prior state exists)
+  - Directory creation, raw requirements write, librarian invocation
+  - Post-invocation derived document validation (warnings only)
+  - Changelog entry append on success
+  - Partial failure semantics (raw persists, changelog skipped on librarian failure)
+- Test coverage: 46 tests (storage, prompts, bootstrap operation, Vault::new)
 
 ## What Remains
 
-- Core operations: Bootstrap, Query, Record, Reorganize
-- Librarian agent (model-configurable, document organization)
+- Core operations: Query, Record, Reorganize
 - CLI subcommands
