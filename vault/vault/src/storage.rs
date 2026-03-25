@@ -364,6 +364,9 @@ impl Storage {
             let entry = entry?;
             let fname = entry.file_name();
             let fname_str = fname.to_string_lossy();
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
             if let Some(caps) = RAW_VERSIONED_RE.captures(&fname_str) {
                 if let Ok(ver) = caps[2].parse::<u32>() {
                     versions.push(RawDocumentVersion {
@@ -531,6 +534,19 @@ mod tests {
     }
 
     #[test]
+    fn create_directories_under_file_fails() {
+        // Place a regular file where create_directories expects a directory
+        // ancestor. create_dir_all cannot create subdirectories under a file.
+        let tmp = TempDir::new().unwrap();
+        let blocker = tmp.path().join("blocker");
+        fs::write(&blocker, "I am a file").unwrap();
+
+        let storage = Storage::new(blocker);
+        let result = storage.create_directories();
+        assert!(matches!(result, Err(StorageError::Io(_))));
+    }
+
+    #[test]
     fn changelog_append_and_read() {
         let tmp = TempDir::new().unwrap();
         let storage = Storage::new(tmp.path().to_path_buf());
@@ -552,6 +568,18 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0], e1);
         assert_eq!(entries[1], e2);
+    }
+
+    #[test]
+    fn read_changelog_corrupt_data() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        fs::write(storage.changelog_path(), "this is not json at all\n").unwrap();
+
+        let result = storage.read_changelog();
+        assert!(
+            matches!(result, Err(StorageError::Io(ref e)) if e.kind() == io::ErrorKind::InvalidData)
+        );
     }
 
     // -- version scanning --
@@ -657,6 +685,73 @@ mod tests {
             storage.write_raw_versioned("A", "x", true),
             Err(StorageError::InvalidName(_))
         ));
+    }
+
+    #[test]
+    fn read_raw_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        let result = storage.read_raw("NONEXISTENT_1.md");
+        assert!(
+            matches!(result, Err(StorageError::DocumentNotFound(ref f)) if f == "NONEXISTENT_1.md")
+        );
+    }
+
+    // -- derived listing --
+
+    #[test]
+    fn list_derived_with_files() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        let derived = storage.derived_dir();
+        fs::write(derived.join("ZEBRA.md"), "z").unwrap();
+        fs::write(derived.join("ALPHA.md"), "a").unwrap();
+        fs::write(derived.join("MIDDLE.md"), "m").unwrap();
+
+        let docs = storage.list_derived().unwrap();
+        assert_eq!(docs.len(), 3);
+        assert_eq!(docs[0].filename, "ALPHA.md");
+        assert_eq!(docs[1].filename, "MIDDLE.md");
+        assert_eq!(docs[2].filename, "ZEBRA.md");
+    }
+
+    #[test]
+    fn list_derived_empty_dir() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        let docs = storage.list_derived().unwrap();
+        assert!(docs.is_empty());
+    }
+
+    #[test]
+    fn list_derived_no_dir() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        // Do NOT call create_directories — derived/ does not exist.
+
+        let docs = storage.list_derived().unwrap();
+        assert!(docs.is_empty());
+    }
+
+    #[test]
+    fn list_derived_skips_directories() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        let derived = storage.derived_dir();
+        fs::write(derived.join("REAL.md"), "content").unwrap();
+        fs::create_dir(derived.join("SUBDIR")).unwrap();
+
+        let docs = storage.list_derived().unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].filename, "REAL.md");
     }
 
     // -- derived validation --
@@ -804,6 +899,29 @@ mod tests {
         let inv = storage.inventory().unwrap();
         assert_eq!(inv.raw.len(), 3);
         assert_eq!(inv.derived.len(), 2);
+    }
+
+    #[test]
+    fn inventory_ignores_non_matching_raw_files() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        let raw = storage.raw_dir();
+        // Valid versioned files
+        storage.write_raw("FINDINGS", 1, "v1").unwrap();
+        storage.write_raw("REQUIREMENTS", 1, "req").unwrap();
+        // Non-matching files that should be ignored
+        fs::write(raw.join("readme.txt"), "ignored").unwrap();
+        fs::write(raw.join("notes.md"), "ignored").unwrap();
+        fs::write(raw.join("lowercase_1.md"), "ignored").unwrap();
+        fs::create_dir(raw.join("SUBDIR")).unwrap();
+
+        let inv = storage.inventory().unwrap();
+        assert_eq!(inv.raw.len(), 2);
+        let names: Vec<&str> = inv.raw.iter().map(|r| r.filename.as_str()).collect();
+        assert!(names.contains(&"FINDINGS_1.md"));
+        assert!(names.contains(&"REQUIREMENTS_1.md"));
     }
 
     // -- timestamp --

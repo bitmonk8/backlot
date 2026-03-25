@@ -20,6 +20,7 @@
   - Full document inventory (raw + derived)
   - UTC timestamp generation
   - Unit tests covering storage functionality
+  - Additional test coverage: `read_raw` not-found path, `read_changelog` corrupt data, `list_derived` direct tests, `inventory` with non-matching raw files, `create_directories` failure path
 
 ## What Remains
 

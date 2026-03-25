@@ -4,11 +4,6 @@
 
 ### NON-CRITICAL
 
-#### G2: Missing test coverage
-Standalone — covers multiple functions but is a single unit of work.
-
-- **Missing test coverage** — `read_raw` not-found error path, `read_changelog` with corrupt data, `list_derived` direct tests, `list_all_raw` with non-matching files, `create_directories` failure cases. (`storage.rs`)
-
 ### NIT
 
 #### G3: `write_raw_versioned` API design
