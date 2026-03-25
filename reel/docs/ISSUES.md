@@ -5,18 +5,6 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 
 ---
 
-## Group 3: nu_session.rs — Safety [NON-CRITICAL]
-
-### 3.1 `NuProcess::Drop` blocks the async runtime
-- **File:** reel/src/nu_session.rs — `bounded_reap` (lines 134-150), `Drop` impl (lines 152-167), triggered from async context at lines 395, 462
-- `bounded_reap` polls `try_wait` with `thread::sleep(50ms)` up to 5s inside Drop. Blocks the tokio worker thread when Drop fires while holding the async mutex. Latent issue if concurrency increases.
-
-### 3.2 `try_parse_response` silently discards parse errors
-- **File:** reel/src/nu_session.rs, line 529
-- `.ok()?` conflates "not a response" with "broken response". Original error lost, producing misleading "too many non-response lines" errors.
-
----
-
 ## Group 4: Documentation Accuracy [NON-CRITICAL]
 
 ### 4.1 DESIGN.md CI table inaccuracies
@@ -100,6 +88,7 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 - Directory contains NuShell and ripgrep binaries plus config — not nu-specific.
 
 ---
+
 
 ## Group 9: Simplification [NON-CRITICAL]
 

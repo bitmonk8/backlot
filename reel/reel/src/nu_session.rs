@@ -42,6 +42,7 @@ struct JsonRpcRequest<'a> {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
+    #[allow(dead_code)]
     id: Option<u64>,
     result: Option<serde_json::Value>,
     error: Option<JsonRpcError>,
@@ -102,10 +103,12 @@ struct NuProcess {
     child_handle: ChildHandle,
     /// Per-session temp directory under `<project_root>/.reel/tmp/`.
     /// Dropped (and cleaned up) when the process is dropped.
-    _session_temp_dir: tempfile::TempDir,
+    /// Wrapped in Option so Drop can move it into a background reap thread.
+    _session_temp_dir: Option<tempfile::TempDir>,
     /// Cleans up the empty `.reel/tmp/` and `.reel/` parents after the
     /// session temp dir is deleted. Must be declared after `_session_temp_dir`.
-    _temp_parent_cleanup: TempParentCleanup,
+    /// Wrapped in Option so Drop can move it into a background reap thread.
+    _temp_parent_cleanup: Option<TempParentCleanup>,
 }
 
 /// Cleanup handle that removes the empty `.reel/tmp/` and `.reel/` parent
@@ -155,13 +158,25 @@ impl Drop for NuProcess {
             .child_handle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(ref mut child) = *guard {
+        if let Some(child) = guard.take() {
             let _ = child.kill();
-            // Bounded wait: poll try_wait to reap the child so it releases
-            // handles before _session_temp_dir is dropped (on Windows, open
-            // handles prevent directory deletion). If kill() failed silently,
-            // we must not block forever.
-            bounded_reap(|| child.try_wait(), std::time::Duration::from_secs(5));
+            // Fast path: child usually exits immediately after kill.
+            if child.try_wait().is_ok_and(|s| s.is_some()) {
+                drop(child);
+                return;
+            }
+            // Slow path: child still running, reap on a background thread
+            // to avoid blocking the tokio worker.
+            let temp_dir = self._session_temp_dir.take();
+            let temp_cleanup = self._temp_parent_cleanup.take();
+            std::thread::spawn(move || {
+                bounded_reap(|| child.try_wait(), std::time::Duration::from_secs(5));
+                // Order matters: release child handles before deleting temp
+                // dirs (Windows holds open handles), then clean up parents.
+                drop(child);
+                drop(temp_dir);
+                drop(temp_cleanup);
+            });
         }
     }
 }
@@ -524,17 +539,33 @@ impl NuSession {
 }
 
 /// Try to parse a line as a JSON-RPC response matching the expected id.
-/// Returns `Some(response)` on match, `None` if the line should be skipped.
-fn try_parse_response(line: &str, expected_id: u64) -> Option<JsonRpcResponse> {
+///
+/// Returns:
+/// - `Ok(None)` — not JSON, empty, or valid JSON without a matching id (skip)
+/// - `Ok(Some(response))` — valid response with matching id
+/// - `Err(...)` — JSON with matching id but malformed response structure
+fn try_parse_response(line: &str, expected_id: u64) -> Result<Option<JsonRpcResponse>, String> {
+    #[derive(Deserialize)]
+    struct IdOnly {
+        id: Option<u64>,
+    }
+
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let response: JsonRpcResponse = serde_json::from_str(trimmed).ok()?;
-    if response.id != Some(expected_id) {
-        return None;
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    // Use serde to check the id, consistent with how JsonRpcResponse deserializes it.
+    let id_check: IdOnly = serde_json::from_value(value.clone()).unwrap_or(IdOnly { id: None });
+    if id_check.id != Some(expected_id) {
+        return Ok(None);
     }
-    Some(response)
+    serde_json::from_value::<JsonRpcResponse>(value)
+        .map(Some)
+        .map_err(|e| format!("JSON-RPC response with id={expected_id} is malformed: {e}"))
 }
 
 /// Read lines from `reader` until a JSON-RPC response with the given `id` is
@@ -555,7 +586,7 @@ fn read_response(
             return Err("nu process closed stdout unexpectedly".into());
         }
 
-        if let Some(response) = try_parse_response(&line, expected_id) {
+        if let Some(response) = try_parse_response(&line, expected_id)? {
             return Ok(response);
         }
         skipped += 1;
@@ -869,8 +900,8 @@ async fn spawn_nu_process(
             grant,
             project_root,
             child_handle,
-            _session_temp_dir: session_temp_dir,
-            _temp_parent_cleanup: temp_parent_cleanup,
+            _session_temp_dir: Some(session_temp_dir),
+            _temp_parent_cleanup: Some(temp_parent_cleanup),
         };
 
         // MCP initialization handshake.
@@ -1207,7 +1238,7 @@ mod tests {
     fn try_parse_response_matching_id() {
         let line =
             r#"{"jsonrpc":"2.0","id":42,"result":{"content":[{"type":"text","text":"ok"}]}}"#;
-        let resp = try_parse_response(line, 42);
+        let resp = try_parse_response(line, 42).unwrap();
         assert!(resp.is_some());
         assert_eq!(resp.unwrap().id, Some(42));
     }
@@ -1215,30 +1246,30 @@ mod tests {
     #[test]
     fn try_parse_response_wrong_id() {
         let line = r#"{"jsonrpc":"2.0","id":99,"result":{}}"#;
-        assert!(try_parse_response(line, 42).is_none());
+        assert!(try_parse_response(line, 42).unwrap().is_none());
     }
 
     #[test]
     fn try_parse_response_no_id_notification() {
         let line = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
-        assert!(try_parse_response(line, 0).is_none());
+        assert!(try_parse_response(line, 0).unwrap().is_none());
     }
 
     #[test]
     fn try_parse_response_empty_line() {
-        assert!(try_parse_response("", 1).is_none());
-        assert!(try_parse_response("   \n", 1).is_none());
+        assert!(try_parse_response("", 1).unwrap().is_none());
+        assert!(try_parse_response("   \n", 1).unwrap().is_none());
     }
 
     #[test]
     fn try_parse_response_malformed_json() {
-        assert!(try_parse_response("{not json", 1).is_none());
+        assert!(try_parse_response("{not json", 1).unwrap().is_none());
     }
 
     #[test]
     fn try_parse_response_with_error() {
         let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad request"}}"#;
-        let resp = try_parse_response(line, 1);
+        let resp = try_parse_response(line, 1).unwrap();
         assert!(resp.is_some());
         let resp = resp.unwrap();
         assert!(resp.error.is_some());
@@ -1248,8 +1279,26 @@ mod tests {
     #[test]
     fn try_parse_response_with_surrounding_whitespace() {
         let line = r#"  {"jsonrpc":"2.0","id":5,"result":{}}  "#;
-        let resp = try_parse_response(line, 5);
+        let resp = try_parse_response(line, 5).unwrap();
         assert!(resp.is_some());
+    }
+
+    #[test]
+    fn try_parse_response_matching_id_malformed_structure() {
+        // Has our id but "error" is a plain string instead of the expected
+        // JsonRpcError object/struct, so deserialization into JsonRpcResponse fails.
+        let line = r#"{"jsonrpc":"2.0","id":7,"error":"not an object"}"#;
+        let result = try_parse_response(line, 7);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("id=7"),
+            "error should mention the id, got: {err}"
+        );
+        assert!(
+            err.contains("malformed"),
+            "error should say malformed, got: {err}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1298,6 +1347,20 @@ mod tests {
         let result = read_response(&mut reader, 1);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("too many non-response lines"));
+    }
+
+    #[test]
+    fn read_response_malformed_matching_id_returns_error() {
+        // Line has our id but "error" field is a string instead of the expected struct.
+        let data = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":\"not an object\"}\n";
+        let mut reader = buf_reader_from_str(data);
+        let result = read_response(&mut reader, 1);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("malformed"),
+            "expected malformed error, got: {err}"
+        );
     }
 
     #[test]

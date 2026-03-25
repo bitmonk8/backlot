@@ -162,10 +162,13 @@ project root, constructs a `SandboxCommand` for `nu --mcp`, and calls
 **Kill.** `kill()` increments generation, closes stdin handle, kills child via
 `SandboxedChild::kill()`.
 
-**Drop.** `NuProcess::drop` calls `child.kill()`, then `bounded_reap()` polls
-`try_wait()` for up to 5 seconds to reap the child (ensures handles are released
-before temp dir cleanup on Windows). Abandons silently if the process does not
-exit within the deadline. `bounded_reap` is a standalone testable function.
+**Drop.** `NuProcess::drop` calls `child.kill()`, then checks `try_wait()`. If the
+child already exited (common fast path), cleanup proceeds synchronously. Otherwise,
+a background OS thread is spawned that owns the child handle plus the session temp
+dir, calls `bounded_reap()` (polls `try_wait()` for up to 5 seconds), then drops
+resources in order: child handle first (releases file handles), then temp dir, then
+parent cleanup. This avoids blocking the tokio worker thread when Drop fires from
+async context.
 
 ### Stderr Capture
 
