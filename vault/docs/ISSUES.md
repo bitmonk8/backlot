@@ -1,46 +1,146 @@
 # Known Issues
 
-## Bootstrap / Operations Layer
+Issues grouped by co-fixability within severity. Groups ordered by impact (descending).
 
-### NON-CRITICAL
+---
 
-#### B1: `ReelLibrarian::produce_derived` untested
+## MUST FIX
 
-- Grant construction (`TOOLS | WRITE`), `write_paths` wiring, and `RequestConfig` assembly are unverified. `reel::Agent::with_injected` is `#[cfg(test)]`-gated (reel-internal only), so vault cannot construct a mock Agent. Requires reel to expose test utilities via a `testing` feature or a public test constructor. (`librarian.rs`)
+### MF1: Write grant overrides write_paths (librarian.rs)
 
-## Storage Layer
+- **Line(s):** 56
+- Grant is `TOOLS | WRITE`, which grants full write access to the project root. `write_paths: vec![storage.derived_dir()]` is silently ignored when `WRITE` is included. Comment says "Read-only root with elevated write access to derived/" but the code does not enforce that. The SCOPE_RESTRICTION prompt block (`prompts.rs:36-42`) asks the agent to confine writes to `derived/`, but this is a soft constraint not enforced by the grant system.
+- **Fix:** Cannot be fixed in vault alone. `ToolGrant::WRITE` is required to make Write/Edit tools available (`tools.rs:170`) — `TOOLS` alone only provides read-only tools. But `WRITE` also forces the entire project root writable in `build_nu_sandbox_policy` (`nu_session.rs:821-822`), ignoring `write_paths`. Reel commit `e9215a6` added `write_paths` plumbing throughout the session layer but did not update `tool_definitions()` to provide Write/Edit tools when `write_paths` is non-empty under a `TOOLS`-only grant. That decoupling is the missing piece: reel should offer Write/Edit tools whenever the agent has any writable path (via `WRITE` or `write_paths`), then let the sandbox enforce the scope.
 
-### NON-CRITICAL
+---
 
-### NIT
+## NON-CRITICAL
 
-#### G3: `write_raw_versioned` API design
-Both concern the same function's interface and would be addressed together during operations layer API design.
+### NC0: Vault::bootstrap() facade issues (lib.rs)
 
-- **`write_raw_versioned` bool param** — `new_series: bool` controls two distinct operations. Consider splitting into `create_raw_series`/`append_raw_version` when the operations layer solidifies the API surface. (`storage.rs`)
-- **TOCTOU in `write_raw_versioned`** — `scan_versions` then `write_raw` without `O_EXCL`. Spec says access is serialized by orchestrator, so not a bug today, but could matter if concurrency model changes. (`storage.rs`)
+Both are design issues in the thin `Vault::bootstrap()` wrapper.
 
-#### G4: Naming and type design
-All are naming/type clarity issues that should be revisited together when the API solidifies.
+- **Facade coupled to ReelLibrarian** (`lib.rs:109-113`) — `Vault::bootstrap()` hardcodes `ReelLibrarian`. The underlying `bootstrap::run()` already accepts generic `L: LibrarianInvoker` and is fully tested with mocks. Only the 5-line facade wrapper is untestable without real infrastructure.
+- **Warnings printed to stderr and discarded** (`lib.rs:116-121`) — `bootstrap::run()` returns `Vec<DerivedValidationWarning>`, but `Vault::bootstrap()` prints them via `eprintln!` and returns `Ok(())`. Caller cannot inspect or act on warnings. `eprintln!` is presentation-layer behavior that does not belong in a library API.
 
-- **`DocumentRef` design** — Single-field wrapper (`filename: String`) that could be simplified to `String`, but matches spec's newtype pattern. Also, `Ref` suffix conventionally implies borrowing in Rust; `DocumentEntry` or `DocumentName` would be clearer. Revisit when API solidifies. (`storage.rs`)
-- **`VersionConflict` naming** — `SeriesAlreadyExists` would better describe the condition. Defer to API solidification. (`storage.rs`)
+### NC1: Agent result handling and librarian testability (librarian.rs)
 
-#### G5: Module structure and separation of concerns
-All concern code placement — what belongs where as the crate grows.
+Both in `librarian.rs`; fixing result handling is prerequisite for meaningful tests.
 
-- **`StorageError` placement** — May need extraction to `error.rs` when the operations layer introduces its own errors. (`storage.rs`)
-- **Derived document content validation in Storage** — `validate_derived` mixes filesystem enumeration with content-level policy checks. Consider extracting content validation when the operations layer lands. (`storage.rs`)
-- **Timestamp/validation utility placement** — `utc_now_iso8601`/`days_to_civil` and name validation could be extracted to `time.rs`/`validation.rs`. Premature at current crate size. (`storage.rs`)
+- **Agent run success value discarded** (`librarian.rs:65-71`) — `RunResult<String>` from `agent.run()` is bound to `_result` and unused. Errors propagate via `.map_err()`; only the success payload is discarded. Caller cannot inspect agent output on success.
+- **Zero test coverage; config coupled to execution** (`librarian.rs:1-73`) — No unit tests. `produce_derived` mixes config assembly with agent execution, preventing unit testing of config logic. Grant construction, `write_paths` wiring, and `RequestConfig` assembly are unverified. Requires reel to expose test utilities via a `testing` feature or a public test constructor.
 
-#### G6: Validation code cleanup
-Both are minor cleanup in the name validation area.
+### NC2: SPEC-implementation divergence (storage.rs, prompts.rs, lib.rs)
 
-- **Redundant `len >= 2` check in `is_valid_raw_name`** — The regex already requires minimum 2 characters. (`storage.rs`)
-- **Three regexes share a core pattern** — `RAW_NAME_RE`, `DERIVED_FILENAME_RE`, `RAW_VERSIONED_RE` could be reduced to one regex + string ops. Low priority. (`storage.rs`)
+All are cases where implementation does not match SPEC; fixing requires deciding whether to update code or SPEC.
 
-#### G7: Timestamp testability
-Related concerns about the time utility, but low impact.
+- **DocumentRef struct diverges** (`storage.rs:64-66`, `SPEC.md:227`) — SPEC defines `DocumentRef` as tuple struct `(pub String)` with `"FILENAME > Section"` support. Implementation is a named-field struct `{ pub filename: String }` with no section support.
+- **BootstrapError::Io vs ::Storage** (`SPEC.md:193-199`, `lib.rs:40-56`) — SPEC defines `BootstrapError` with `Io(std::io::Error)` variant. Implementation uses `Storage(String)` instead.
+- **DOCUMENT_FORMAT omits related-line** (`prompts.rs:23-28`) — DOCUMENT_FORMAT prompt omits `<!-- related: ... -->` line documented in SPEC as part of standard header.
 
-- **`utc_now_iso8601` has no time injection seam** — Impossible to write deterministic tests for specific dates/times. Consider accepting a `Duration` parameter. (`storage.rs`)
-- **Hand-rolled calendar math** — `days_to_civil` is ~13 lines of Hinnant's civil calendar algorithm; the `time` crate could replace it. Defensible if staying dependency-light, and the design doc documents this rationale. (`storage.rs`)
+### NC3: CHANGELOG file extension (storage.rs, SPEC.md, lib.rs, bootstrap.rs)
+
+Single rename propagates across files.
+
+- **CHANGELOG.md misrepresents JSONL format** (`storage.rs:145-146`) — `changelog_path` returns path to `CHANGELOG.md` but the file stores JSONL, not Markdown. Should be `.jsonl` or content should be Markdown.
+- **SPEC acknowledges mismatch** (`SPEC.md:84-86`) — SPEC notes JSONL in `.md` file.
+
+### NC4: BootstrapError placement (lib.rs → bootstrap.rs)
+
+- **Error type misplaced in facade** (`lib.rs:40-56`) — `BootstrapError` defined in `lib.rs` but exclusively produced/consumed by `bootstrap.rs`. Error type and `From` impl for an operation live in the facade, not the operation module. Will scale poorly as operations are added.
+
+### NC5: CI pipeline consolidation (ci.yml)
+
+All in the same file; matrix refactor addresses the first three together.
+
+- **Missing timeout on macOS/Windows jobs** (`ci.yml:61, 74`) — `test-macos` and `test-windows` have no `timeout-minutes`, unlike `test-linux` (15 min). Hanging tests consume runner time until 6-hour GitHub default.
+- **Near-identical jobs should use matrix strategy** (`ci.yml:41-91`) — Three near-identical test jobs differing only by OS. Same cache block repeated five times. Matrix strategy would remove ~30 lines.
+- **Redundant build job** (`ci.yml:93-111`) — `build` job runs `cargo build` on all three OSes but clippy and test jobs already compile the code.
+- **No integration or CLI smoke tests** (`ci.yml`) — No integration or end-to-end test step. `vault-cli` has zero `#[test]` functions. No CLI smoke test.
+
+### NC6: Test coverage gaps (bootstrap.rs, storage.rs)
+
+All require adding or improving tests in the same area.
+
+- **Non-deterministic timestamps** (`bootstrap.rs:47-48`, `storage.rs:386-403`) — `utc_now_iso8601()` produces non-deterministic timestamps called directly rather than injected. No test verifies the `ts` field value.
+- **Missing error-path coverage** (`bootstrap.rs:35-36`) — No test exercises the `BootstrapError::Storage` path for failures in `build_bootstrap_prompt` or `append_changelog`. No test for `is_initialized` when only `raw/` or only `derived/` exists independently.
+- **Platform-gated test** (`storage.rs:840-882`) — `validate_derived_unreadable_file_warns_and_continues` gated on `#[cfg(unix)]`, never runs on Windows.
+- **Silent parse failure in list_all_raw** (`storage.rs:371-378`) — `parse::<u32>()` failure silently discarded, file skipped.
+
+### NC7: Storage code cleanup (storage.rs)
+
+Minor cleanups in the same file.
+
+- **Redundant guard in `is_valid_raw_name`** (`storage.rs:109-111`) — `len() >= 2` check redundant; regex already requires minimum 2 characters.
+- **Dead code in `write_raw_versioned`** (`storage.rs:264-268`) — `versions.last().map_or(1, ...)` fallback is dead; the `versions.is_empty()` check already returns an error, so `.last()` is guaranteed `Some`.
+- **Blanket `dead_code` allow** (`storage.rs:1-4`) — Blanket `#![allow(dead_code)]` justified by "future operations" comment. Some methods are now called; replace with per-item annotations or remove.
+
+### NC8: Unused CLI dependencies (vault-cli/Cargo.toml)
+
+- `vault-cli` pulls in `vault`, `tokio`, `serde`, `serde_json` but `main.rs` uses none of them.
+
+### NC9: Documentation accuracy (SPEC.md, DESIGN.md)
+
+All documentation corrections.
+
+- **SPEC stale references** (`SPEC.md:369, 482-483`) — Historical reference to "Python epic predecessor" violates CLAUDE.md. Pinned rev note will grow stale.
+- **SPEC undefined "lot" term** (`SPEC.md:351`) — "lot" referenced without introduction; not in Sibling Projects table.
+- **DESIGN inaccurate description** (`DESIGN.md:62`) — Says `produce_derived` "reads raw documents and writes derived documents" — method invokes an agent that does the reading/writing, not the method itself.
+
+---
+
+## NIT
+
+### T1: Storage API design decisions (storage.rs)
+
+All relate to storage API design and concurrency assumptions; address together when API solidifies.
+
+- **TOCTOU race in `write_raw_versioned`** (`storage.rs:246-269`) — `scan_versions` then `fs::write` without locking. Spec says access is serialized; single-user CLI.
+- **No file locking on changelog** (`storage.rs:177-185`) — Concurrent appends could corrupt JSONL. Same single-user constraint applies.
+- **`write_raw_versioned` bool param** (`storage.rs:246`) — `new_series: bool` controls two distinct operations. Consider splitting into `create_raw_series`/`append_raw_version` when operations layer solidifies.
+- **Boolean parameter and enum naming** (`storage.rs:26-27, 77-81`) — `VersionConflict` name (→ `SeriesAlreadyExists`), `DerivedValidationWarning` name. Revisit with API.
+
+### T2: Prompts module cleanup (prompts.rs)
+
+All in `prompts.rs`.
+
+- **Trivial functions could be inlined** (`prompts.rs:112-114, 121-123`) — `bootstrap_system_prompt` is a one-line function; `bootstrap_query` as `const fn` vs `pub const`.
+- **Untested branches** (`prompts.rs:44-69, 126-129`) — Error path and only-raw/only-derived inventory branches not tested.
+- **Coupled to Storage type** (`prompts.rs:126-129`) — `build_bootstrap_prompt` takes `&Storage` but only calls `.inventory()`. Could accept `&DocumentInventory` directly.
+- **writeln! result suppressed** (`prompts.rs:55, 63`) — `let _ =` on `writeln!`. Writing to String is infallible in practice.
+
+### T3: Librarian naming and ceremony (librarian.rs)
+
+Both in `librarian.rs`.
+
+- **Module and trait naming mismatch** (`librarian.rs:1, 23-30`) — `LibrarianInvoker` reads as "thing that invokes a librarian" rather than "librarian abstraction." `Librarian` would align with `ReelLibrarian`.
+- **Minor code ceremony** (`librarian.rs:11, 56, 65`) — `tool_grants` intermediate variable, `_result` with explicit type, `AGENT_TIMEOUT` potentially unused in-file.
+
+### T4: Module structure and separation (storage.rs)
+
+Code placement concerns for when the crate grows.
+
+- **Validation and utility logic embedded in Storage** (`storage.rs:293-346, 386-420`) — `validate_derived` mixes filesystem enumeration with content-level policy checks. Timestamp/validation utilities could be extracted.
+- **Hand-rolled calendar math** (`storage.rs:386-420`) — `days_to_civil` is ~13 lines of Hinnant's algorithm; `time` crate could replace it. Defensible if staying dependency-light; design doc documents this rationale.
+- **`StorageError` placement** — May need extraction to `error.rs` when the operations layer introduces its own errors.
+
+### T5: Documentation structure (SPEC.md, DESIGN.md, STATUS.md)
+
+Organizational concerns that do not affect correctness.
+
+- **SPEC.md** — Redundant sections (159-181, 345-358). Mixed concerns in storage/partial-failure/integration sections (54-157, 212-220, 340-392, 457-476). CLI/orchestrator details out of scope for library spec (396-453, 459-475). Error design gaps for unimplemented operations (41-47, 193-199, 249-291, 320-365). Sandbox not implemented (351-358, 481-491).
+- **DESIGN.md** — Redundant content in layer diagram and key types (37-48, 83-88). Implementation-level detail misplaced (66-75, 82-88). Mixed abstraction in storage section (77-104).
+- **STATUS.md** — API inventory duplicates code/SPEC; should be milestone-level (13-36).
+
+### T6: Bootstrap test code (bootstrap.rs)
+
+- **Mock implementations repeat code** (`bootstrap.rs:112-125, 150-185`) — Mocks repeat `.map_err` pattern. Test code; works correctly.
+
+### T7: Standalone small items
+
+- **CI test flags** (`ci.yml:56, 72, 91`) — `cargo test` runs without `--all-targets` and `--workspace`. Resilience concern for future config changes.
+- **CLI about string** (`vault-cli/src/main.rs:7`) — `about` string is just `"Vault"` — repeats the program name. CLI is a stub.
+- **bootstrap() doc comment incomplete** (`lib.rs:103-108`) — Omits post-invocation validation step and warning output.
+- **validate_derived skip behavior** (`storage.rs:307-313`) — Code `continue`s on filename failure, skipping header check. Reasonable behavior.
+- **Nu shell re-invocation pattern** (`vault_shell.nu:3, 5-9`) — Pattern via `^nu --env-config $self_path` followed by `exit` is a standard nushell idiom for env-config bootstrapping. The new nu process becomes the interactive session; nothing is lost.
+- **Nu script description** (`vault_project_assistant.nu:7`) — Tells user "project status summary" but actual behavior is broader.
