@@ -155,3 +155,15 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 ### 17.1 nu_session.rs mixes protocol, resolution, and session management
 - **File:** reel/src/nu_session.rs, lines 34-66/524-621, 637-764
 - JSON-RPC protocol layer (wire types, parsing, `rpc_call`) and tool/binary resolution (`resolve_tool_dir`, `resolve_tool_binary`, `resolve_config_files`, sandbox policy construction) mixed into a 3000-line session file. The concerns are genuinely distinct but the file also contains ~1800 lines of tests, so the production code is ~1200 lines — within range for a cohesive module.
+
+---
+
+## Group 18: write_paths Testing Gaps [NIT]
+
+### 18.1 No test for evaluate respawn with non-empty write_paths
+- **File:** reel/src/nu_session.rs
+- The integration test `integration_sandbox_write_paths_permits_subdir_writes` only exercises the warm path (process alive). No test kills the process and verifies that `write_paths` survive the respawn via `evaluate_inner`'s `last_spawn_config` recovery path.
+
+### 18.2 No test for write_paths outside project root
+- **File:** reel/src/nu_session.rs
+- No test documents behavior when a `write_paths` entry is outside the project root. Lot is expected to reject this at policy-build time, but there is no test confirming it.

@@ -60,6 +60,18 @@ pub struct AgentRequestConfig {
 
     /// Consumer-provided tools beyond the built-ins.
     pub custom_tools: Vec<Box<dyn ToolHandler>>,
+
+    /// Additional writable subdirectories within the project root.
+    ///
+    /// When the base grant includes `TOOLS` but not `WRITE` (read-only root),
+    /// each path listed here is added as a write-path in the sandbox policy,
+    /// allowing the agent to write to specific subdirectories while the rest
+    /// of the project root remains read-only.
+    ///
+    /// Ignored when the base grant includes `WRITE` (entire project root is
+    /// already writable). Each entry must be a child of `project_root`;
+    /// lot validates this at policy-build time.
+    pub write_paths: Vec<PathBuf>,
 }
 
 /// Usage statistics from an agent run.
@@ -270,7 +282,7 @@ impl Agent {
         let nu_session = NuSession::new();
         if !self.skip_nu_spawn {
             nu_session
-                .spawn(&self.project_root, request.grant)
+                .spawn(&self.project_root, request.grant, &request.write_paths)
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to spawn nu session: {e}"))?;
         }
@@ -700,6 +712,7 @@ mod tests {
                 .expect("test config"),
             grant: ToolGrant::empty(),
             custom_tools: Vec::new(),
+            write_paths: Vec::new(),
         }
     }
 

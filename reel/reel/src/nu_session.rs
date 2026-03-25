@@ -89,16 +89,24 @@ type StdinHandle = Arc<std::sync::Mutex<Option<File>>>;
 /// A background thread reads stderr lines and appends them here.
 type StderrBuf = Arc<std::sync::Mutex<String>>;
 
+/// Sandbox configuration that a process was spawned with. Used for
+/// compatibility checks (does the running process match the desired config?)
+/// and stored on `SessionState` as the desired config for future spawns.
+#[derive(Clone, PartialEq, Eq)]
+struct SpawnConfig {
+    grant: ToolGrant,
+    project_root: PathBuf,
+    write_paths: Vec<PathBuf>,
+}
+
 struct NuProcess {
     stdin: StdinHandle,
     stdout: BufReader<File>,
     /// Accumulated stderr from the background reader thread.
     stderr_buf: StderrBuf,
     next_id: u64,
-    /// The grant under which this process was spawned (determines sandbox policy).
-    grant: ToolGrant,
-    /// Project root the sandbox is anchored to.
-    project_root: PathBuf,
+    /// The sandbox configuration this process was spawned with.
+    spawn_config: SpawnConfig,
     /// Shared handle to the child — kept alive for cleanup, accessible for kill.
     child_handle: ChildHandle,
     /// Per-session temp directory under `<project_root>/.reel/tmp/`.
@@ -127,8 +135,8 @@ impl Drop for TempParentCleanup {
 }
 
 impl NuProcess {
-    fn is_compatible(&self, project_root: &Path, grant: ToolGrant) -> bool {
-        self.grant == grant && self.project_root == project_root
+    fn is_compatible(&self, desired: &SpawnConfig) -> bool {
+        self.spawn_config == *desired
     }
 }
 
@@ -186,6 +194,9 @@ impl Drop for NuProcess {
 struct SessionState {
     process: Option<NuProcess>,
     generation: u64,
+    /// Sandbox configuration from the last `spawn()` call. Read by
+    /// `evaluate_inner()` to recover `write_paths` for respawn.
+    last_spawn_config: Option<SpawnConfig>,
     /// Shared child handle kept here so `kill()` can reach the child even when
     /// the `NuProcess` has been taken out for blocking I/O in `evaluate_inner`.
     ///
@@ -333,10 +344,24 @@ impl NuSession {
 
     /// Eagerly spawn the nu MCP process so it is warm by the first tool call.
     ///
-    /// If a process already exists but was spawned with different grant or
-    /// project_root, kills the old one and spawns a replacement.
-    pub async fn spawn(&self, project_root: &Path, grant: ToolGrant) -> Result<(), String> {
-        let (proc, generation) = self.ensure_and_take(project_root, grant).await?;
+    /// If a process already exists but was spawned with different grant,
+    /// project_root, or write_paths, kills the old one and spawns a replacement.
+    ///
+    /// `write_paths` specifies additional writable subdirectories within the
+    /// project root. These are stored on the session and used for all
+    /// subsequent process spawns (including respawns from `evaluate()`).
+    pub async fn spawn(
+        &self,
+        project_root: &Path,
+        grant: ToolGrant,
+        write_paths: &[PathBuf],
+    ) -> Result<(), String> {
+        let desired = SpawnConfig {
+            grant,
+            project_root: project_root.to_path_buf(),
+            write_paths: write_paths.to_vec(),
+        };
+        let (proc, generation) = self.ensure_and_take(desired).await?;
         // Put the process back — spawn() warms the process, doesn't consume it.
         let mut st = self.state.lock().await;
         st.inflight_child = None;
@@ -351,14 +376,12 @@ impl NuSession {
     /// Ensure a compatible process exists, take it out of state, and register
     /// inflight handles — all under a single lock cycle when possible.
     ///
-    /// Returns the process and the generation at take-time. The fast path
-    /// takes an existing compatible process under one lock. The slow path
-    /// releases the lock to spawn, then re-acquires to install and take.
-    async fn ensure_and_take(
-        &self,
-        project_root: &Path,
-        grant: ToolGrant,
-    ) -> Result<(NuProcess, u64), String> {
+    /// Stores `desired` in session state as `last_spawn_config` (for use by
+    /// `evaluate()`'s respawn path) and returns the process plus the generation
+    /// at take-time. The fast path takes an existing compatible process under
+    /// one lock. The slow path releases the lock to spawn, then re-acquires to
+    /// install and take.
+    async fn ensure_and_take(&self, desired: SpawnConfig) -> Result<(NuProcess, u64), String> {
         // Fast path: compatible process already exists — take under one lock.
         //
         // Two-step check: borrow to test compatibility, then take. The borrow
@@ -366,11 +389,12 @@ impl NuSession {
         // cannot disappear between check and take because we hold the lock.
         {
             let mut st = self.state.lock().await;
-            let dominated = st
+            st.last_spawn_config = Some(desired.clone());
+            let compatible = st
                 .process
                 .as_ref()
-                .is_some_and(|p| p.is_compatible(project_root, grant));
-            if dominated {
+                .is_some_and(|p| p.is_compatible(&desired));
+            if compatible {
                 if let Some(proc) = st.process.take() {
                     st.register_inflight(&proc);
                     return Ok((proc, st.generation));
@@ -382,7 +406,7 @@ impl NuSession {
         // concurrent kill() calls keep bumping the generation.
         for _attempt in 0..3 {
             let gen_before = self.state.lock().await.generation;
-            let new_proc = spawn_nu_process(project_root, grant, self.tool_dir.as_deref()).await?;
+            let new_proc = spawn_nu_process(&desired, self.tool_dir.as_deref()).await?;
 
             let mut st = self.state.lock().await;
             if st.generation != gen_before {
@@ -391,7 +415,7 @@ impl NuSession {
                 let compatible = st
                     .process
                     .as_ref()
-                    .is_some_and(|p| p.is_compatible(project_root, grant));
+                    .is_some_and(|p| p.is_compatible(&desired));
                 if compatible {
                     // new_proc dropped after st (lock released first).
                     if let Some(proc) = st.process.take() {
@@ -499,8 +523,24 @@ impl NuSession {
         project_root: &Path,
         grant: ToolGrant,
     ) -> Result<NuOutput, String> {
+        // Build desired config from evaluate parameters + write_paths from
+        // session state (set by spawn()). Falls back to empty write_paths
+        // for sessions that skipped spawn().
+        let desired = {
+            let st = self.state.lock().await;
+            let write_paths = st
+                .last_spawn_config
+                .as_ref()
+                .map(|c| c.write_paths.clone())
+                .unwrap_or_default();
+            SpawnConfig {
+                grant,
+                project_root: project_root.to_path_buf(),
+                write_paths,
+            }
+        };
         // Phase 1: Atomically ensure a compatible process and take it out.
-        let (proc, generation_at_start) = self.ensure_and_take(project_root, grant).await?;
+        let (proc, generation_at_start) = self.ensure_and_take(desired).await?;
         // Lock released — blocking I/O below does not hold the async mutex,
         // allowing timeout + kill() to work. kill() can reach the child via
         // inflight_child and close stdin via inflight_stdin to unblock the
@@ -761,9 +801,16 @@ fn resolve_config_files(tool_dir: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
 }
 
 /// Build the sandbox policy for the nu process.
+///
+/// When `write_paths` is non-empty and the base grant includes `TOOLS` but
+/// not `WRITE`, each entry is added as a `write_path` while the project root
+/// remains `read_path`. This allows fine-grained read/write access within the
+/// project root. When `WRITE` is granted, `write_paths` is ignored because
+/// the entire project root is already writable.
 fn build_nu_sandbox_policy(
     project_root: &Path,
     grant: ToolGrant,
+    write_paths: &[PathBuf],
     tool_dir: Option<&Path>,
     session_temp_dir: &Path,
 ) -> lot::Result<lot::SandboxPolicy> {
@@ -775,6 +822,10 @@ fn build_nu_sandbox_policy(
         builder = builder.write_path(project_root)?;
     } else {
         builder = builder.read_path(project_root)?;
+        // Add fine-grained writable subdirectories under the read-only root.
+        for wp in write_paths {
+            builder = builder.write_path(wp)?;
+        }
     }
 
     // Grant exec access to the tool directory so nu can read config files
@@ -810,10 +861,12 @@ fn minimal_sandbox_path() -> String {
 /// `--env-config` flags so reel custom commands (`reel read`, etc.) are
 /// available immediately without an evaluate preamble.
 async fn spawn_nu_process(
-    project_root: &Path,
-    grant: ToolGrant,
+    config: &SpawnConfig,
     tool_dir: Option<&Path>,
 ) -> Result<NuProcess, String> {
+    let project_root = &config.project_root;
+    let grant = config.grant;
+
     // Validate project root exists before creating any directories under it.
     if !project_root.exists() {
         return Err(format!(
@@ -833,13 +886,20 @@ async fn spawn_nu_process(
         .map_err(|e| format!("failed to create session temp dir: {e}"))?;
     let temp_parent_cleanup = TempParentCleanup(temp_base);
 
-    let policy = build_nu_sandbox_policy(project_root, grant, tool_dir, session_temp_dir.path())
-        .map_err(|e| format!("sandbox setup failed: {e}"))?;
+    let policy = build_nu_sandbox_policy(
+        project_root,
+        grant,
+        &config.write_paths,
+        tool_dir,
+        session_temp_dir.path(),
+    )
+    .map_err(|e| format!("sandbox setup failed: {e}"))?;
 
     let nu_binary = resolve_nu_binary(tool_dir);
     let config_files = resolve_config_files(tool_dir);
     let rg_binary = resolve_rg_binary(tool_dir);
-    let project_root = project_root.to_path_buf();
+    let spawn_config = config.clone();
+    let project_root = project_root.clone();
     tokio::task::spawn_blocking(move || {
         let mut cmd = SandboxCommand::new(&nu_binary);
         cmd.arg("--mcp");
@@ -901,8 +961,7 @@ async fn spawn_nu_process(
             stdout: BufReader::new(stdout),
             stderr_buf,
             next_id: 1,
-            grant,
-            project_root,
+            spawn_config,
             child_handle,
             _session_temp_dir: Some(session_temp_dir),
             _temp_parent_cleanup: Some(temp_parent_cleanup),
@@ -1048,9 +1107,18 @@ mod tests {
     fn policy_test_fixture(
         grant: ToolGrant,
     ) -> (tempfile::TempDir, tempfile::TempDir, lot::SandboxPolicy) {
+        policy_test_fixture_with_write_paths(grant, &[])
+    }
+
+    /// Like `policy_test_fixture` but accepts additional write paths.
+    fn policy_test_fixture_with_write_paths(
+        grant: ToolGrant,
+        write_paths: &[PathBuf],
+    ) -> (tempfile::TempDir, tempfile::TempDir, lot::SandboxPolicy) {
         let tmp = tempfile::TempDir::new().unwrap();
         let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
-        let policy = build_nu_sandbox_policy(tmp.path(), grant, None, sess_tmp.path()).unwrap();
+        let policy =
+            build_nu_sandbox_policy(tmp.path(), grant, write_paths, None, sess_tmp.path()).unwrap();
         (tmp, sess_tmp, policy)
     }
 
@@ -1136,6 +1204,7 @@ mod tests {
         let policy = build_nu_sandbox_policy(
             tmp.path(),
             ToolGrant::TOOLS,
+            &[],
             Some(tool.path()),
             sess_tmp.path(),
         )
@@ -1150,6 +1219,159 @@ mod tests {
             has_tool_exec,
             "sandbox should grant exec access to provided tool dir"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fine-grained write_paths tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_nu_sandbox_policy_write_paths_applied_without_write_grant() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let derived = tmp.path().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(
+            tmp.path(),
+            ToolGrant::TOOLS,
+            std::slice::from_ref(&derived),
+            None,
+            sess_tmp.path(),
+        )
+        .unwrap();
+
+        let canon = tmp.path().canonicalize().unwrap();
+        let derived_canon = derived.canonicalize().unwrap();
+
+        // Project root should be read-only.
+        assert!(
+            policy.read_paths().contains(&canon),
+            "project root should be in read_paths"
+        );
+        // Derived should be writable.
+        let has_derived_write = policy
+            .write_paths()
+            .iter()
+            .any(|w| *w == derived_canon || derived_canon.starts_with(w));
+        assert!(
+            has_derived_write,
+            "derived dir should be in write_paths, got: {:?}",
+            policy.write_paths()
+        );
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_write_paths_ignored_with_write_grant() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let derived = tmp.path().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(
+            tmp.path(),
+            ToolGrant::WRITE | ToolGrant::TOOLS,
+            std::slice::from_ref(&derived),
+            None,
+            sess_tmp.path(),
+        )
+        .unwrap();
+
+        let canon = tmp.path().canonicalize().unwrap();
+        let derived_canon = derived.canonicalize().unwrap();
+
+        // With WRITE grant, project root should be in write_paths (not read_paths).
+        let covered_by_write = policy
+            .write_paths()
+            .iter()
+            .any(|w| canon.starts_with(w) || w.starts_with(&canon));
+        assert!(
+            covered_by_write,
+            "project root should be writable when WRITE granted"
+        );
+        // Project root should NOT be in read_paths.
+        assert!(
+            !policy.read_paths().contains(&canon),
+            "project root should NOT be in read_paths when WRITE granted"
+        );
+        // Derived should NOT be independently listed in write_paths — the
+        // write_paths parameter should be ignored when WRITE is granted.
+        let derived_independently_listed = policy.write_paths().contains(&derived_canon);
+        assert!(
+            !derived_independently_listed,
+            "derived dir should NOT be independently listed in write_paths when WRITE granted, got: {:?}",
+            policy.write_paths()
+        );
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_empty_write_paths_preserves_existing_behavior() {
+        // Empty write_paths should produce the same policy as before.
+        let (tmp, _sess_tmp, policy) = policy_test_fixture_with_write_paths(ToolGrant::TOOLS, &[]);
+        let canon = tmp.path().canonicalize().unwrap();
+
+        assert!(
+            policy.read_paths().contains(&canon),
+            "project root should be in read_paths with empty write_paths"
+        );
+        assert!(
+            !policy.write_paths().contains(&canon),
+            "project root should NOT be in write_paths with empty write_paths"
+        );
+    }
+
+    #[test]
+    fn test_nu_process_is_compatible() {
+        // Verify is_compatible checks all three SpawnConfig fields.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let derived = tmp.path().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let stdin_handle: StdinHandle = Arc::new(std::sync::Mutex::new(None));
+        let child_handle: ChildHandle = Arc::new(std::sync::Mutex::new(None));
+        let stderr_buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+
+        // Create a dummy file for stdout (will never be read in this test).
+        let dummy_path = tmp.path().join("dummy_stdout");
+        std::fs::write(&dummy_path, b"").unwrap();
+        let dummy_file = std::fs::File::open(&dummy_path).unwrap();
+
+        let config = SpawnConfig {
+            grant: ToolGrant::TOOLS,
+            project_root: tmp.path().to_path_buf(),
+            write_paths: vec![derived],
+        };
+
+        let proc = NuProcess {
+            stdin: stdin_handle,
+            stdout: BufReader::new(dummy_file),
+            stderr_buf,
+            next_id: 1,
+            spawn_config: config.clone(),
+            child_handle,
+            _session_temp_dir: Some(sess_tmp),
+            _temp_parent_cleanup: None,
+        };
+
+        // Exact match should be compatible.
+        assert!(proc.is_compatible(&config));
+
+        // Different write_paths should not be compatible.
+        assert!(!proc.is_compatible(&SpawnConfig {
+            write_paths: Vec::new(),
+            ..config.clone()
+        }));
+
+        // Different grant should not be compatible.
+        assert!(!proc.is_compatible(&SpawnConfig {
+            grant: ToolGrant::TOOLS | ToolGrant::WRITE,
+            ..config.clone()
+        }));
+
+        // Different project_root should not be compatible.
+        assert!(!proc.is_compatible(&SpawnConfig {
+            project_root: PathBuf::from("/nonexistent"),
+            ..config
+        }));
     }
 
     #[test]
@@ -1777,7 +1999,7 @@ mod tests {
     /// Spawn a session, panicking if sandbox setup fails.
     async fn try_spawn(session: &NuSession, root: &Path, grant: ToolGrant) {
         session
-            .spawn(root, grant)
+            .spawn(root, grant, &[])
             .await
             .expect("spawn should succeed (sandbox setup failure is fatal)");
     }
@@ -1815,7 +2037,10 @@ mod tests {
         let (session, _tool) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
         // Second spawn with same params is a no-op.
-        session.spawn(tmp.path(), ToolGrant::TOOLS).await.unwrap();
+        session
+            .spawn(tmp.path(), ToolGrant::TOOLS, &[])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2429,6 +2654,59 @@ mod tests {
         assert_eq!(
             content, "hello",
             "file content should match what was written"
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_write_paths_permits_subdir_writes() {
+        // write_paths must allow writes to a specific subdirectory while
+        // the rest of the project root remains read-only.
+        skip_no_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+
+        // Create the writable subdirectory.
+        let derived = tmp.path().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+
+        // Spawn with TOOLS (read-only root) + write_paths for derived/.
+        session
+            .spawn(tmp.path(), ToolGrant::TOOLS, std::slice::from_ref(&derived))
+            .await
+            .expect("spawn with write_paths should succeed");
+
+        // Write to the granted subdirectory should succeed.
+        let write_cmd = format!("'output' | save '{}'", nu_path(&derived.join("result.txt")));
+        let out = session
+            .evaluate(&write_cmd, 30, tmp.path(), ToolGrant::TOOLS)
+            .await
+            .unwrap();
+        assert!(
+            !out.is_error,
+            "write to write_paths subdir should succeed: {}",
+            out.content
+        );
+        let content = std::fs::read_to_string(derived.join("result.txt")).unwrap();
+        assert_eq!(content, "output");
+
+        // Write to the read-only root should fail.
+        let root_write_cmd = format!(
+            "'blocked' | save '{}'",
+            nu_path(&tmp.path().join("root_file.txt"))
+        );
+        let out2 = session
+            .evaluate(&root_write_cmd, 30, tmp.path(), ToolGrant::TOOLS)
+            .await
+            .unwrap();
+        assert!(
+            out2.is_error,
+            "write to read-only root should fail with write_paths: {}",
+            out2.content
+        );
+        assert!(
+            !tmp.path().join("root_file.txt").exists(),
+            "file must not be created in read-only root"
         );
     }
 

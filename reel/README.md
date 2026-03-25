@@ -101,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config,
         grant: ToolGrant::TOOLS | ToolGrant::WRITE,
         custom_tools: Vec::new(),
+        write_paths: Vec::new(),
     };
 
     let result: reel::RunResult<String> = agent.run(&request, "list all Rust files").await?;
@@ -125,6 +126,23 @@ pub trait ToolHandler: Send + Sync {
 ```
 
 Custom tools are added to `AgentRequestConfig.custom_tools`. They are dispatched alongside built-in tools in the tool loop.
+
+### Fine-grained path grants
+
+When an agent needs read-only access to the project root but write access to specific subdirectories, use `write_paths`:
+
+```rust
+let request = AgentRequestConfig {
+    config,
+    grant: ToolGrant::TOOLS,  // read-only root
+    custom_tools: Vec::new(),
+    write_paths: vec![
+        project_root.join("derived"),  // writable subdirectory
+    ],
+};
+```
+
+Each entry in `write_paths` must be a child of the project root. When `WRITE` is granted, `write_paths` is ignored (the entire root is already writable). Lot validates the paths at sandbox policy build time.
 
 ## CLI reference
 
@@ -242,10 +260,11 @@ Reel sandboxes the NuShell process via lot:
 - **Linux**: User/mount/PID/net namespaces + seccomp-BPF + cgroups v2
 - **macOS**: Seatbelt profiles + setrlimit
 
-The sandbox policy is derived from the grant flags:
+The sandbox policy is derived from the grant flags and optional `write_paths`:
 
 - Read-only tools: project root is read-only in sandbox
-- With WRITE: project root is read-write in sandbox
+- With `write_paths`: project root is read-only, listed subdirectories are read-write
+- With WRITE: project root is read-write in sandbox (`write_paths` ignored)
 - With NETWORK: outbound network allowed
 - Without NETWORK: network stack isolated (denied by default)
 
@@ -257,7 +276,7 @@ On Windows, `reel setup` must be run once (as administrator) before sandboxed ex
 cargo test
 ```
 
-262 tests (247 reel + 15 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
+286 tests (271 reel + 15 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
 
 ## Dependencies
 

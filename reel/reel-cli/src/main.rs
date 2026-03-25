@@ -175,6 +175,7 @@ async fn cmd_run(args: RunArgs) -> Result<(), String> {
         config: request_config,
         grant,
         custom_tools: Vec::new(),
+        write_paths: Vec::new(),
     };
 
     // Dry run: build the request config and print it without calling the model.
@@ -558,6 +559,7 @@ grant: []
                 .unwrap(),
             grant,
             custom_tools: Vec::new(),
+            write_paths: Vec::new(),
         };
         let effective = reel::Agent::build_request_config(&request).unwrap();
         let dry_output = build_dry_run_output(&effective, grant);
