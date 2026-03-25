@@ -5,26 +5,6 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 
 ---
 
-## Group 4: Documentation Accuracy [NON-CRITICAL]
-
-### 4.1 DESIGN.md CI table inaccuracies
-- **File:** docs/DESIGN.md, lines 405-407
-- Clippy and Build documented with `--workspace` flag but actual CI omits it (ci.yml lines 39, 142). Format job documented as "All" platforms but runs only on ubuntu-latest (ci.yml line 15).
-
-### 4.2 STATUS.md "What Is Implemented" is append-only changelog
-- **File:** docs/STATUS.md, lines 9-48
-- Section is historical narrative with per-issue provenance (e.g., "closes issue #22") rather than a description of current state. A clean-slate rewrite would eliminate ~40 lines of cruft.
-
-### 4.3 STATUS.md duplicate test count
-- **File:** docs/STATUS.md, lines 5 and 47
-- Line 5 states "All 259 tests pass locally" and line 47 repeats "259 tests total (244 reel + 15 reel-cli), all pass locally."
-
-### 4.4 STATUS.md references deletion of obsolete files
-- **File:** docs/STATUS.md, line 48
-- "Obsolete spec docs (`docs/CLI_TOOL.md`, `docs/CLI_TOOL_INTEGRATION_TESTS.md`) deleted" describes a past action, not current state.
-
----
-
 ## Group 5: Tool Definition Sync [NON-CRITICAL]
 
 ### 5.1 Tool behavior defined in 3 unsynchronized places

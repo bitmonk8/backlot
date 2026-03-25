@@ -356,6 +356,37 @@ deserialization.
 
 ---
 
+## Design Choices
+
+### NuShell as execution substrate
+
+All 6 built-in tools execute through a shared NuShell session (custom commands or
+direct evaluation). Enables state persistence (cwd, variables, env) across tool
+calls within a session.
+
+### Grant-based tool availability
+
+Bitflags (`TOOLS`, `WRITE`, `NETWORK`) determine tool list and sandbox policy.
+Binary decision — no per-tool grants. `WRITE` and `NETWORK` imply `TOOLS`.
+Network access denied by default; requires explicit `NETWORK` grant.
+
+### Tool loop over streaming
+
+Request-dispatch-response cycles up to 50 rounds. No streaming of partial model
+responses.
+
+### Eager NuShell spawn
+
+Process started at session creation (if TOOLS granted), not on first use. Avoids
+startup cost during tool calls.
+
+### Dual-crate architecture
+
+Library (`reel`) + thin CLI (`reel-cli`). Follows flick's pattern for testability
+and reusability.
+
+---
+
 ## Testing Strategy
 
 ### Unit Tests
@@ -405,9 +436,9 @@ deserialization.
 
 | Job | Platform | Notes |
 |---|---|---|
-| Format | All | `cargo fmt --all --check` |
-| Clippy | Linux, macOS, Windows | `cargo clippy --workspace --all-targets` |
-| Build | Linux, macOS, Windows | `cargo build --workspace` |
+| Format | ubuntu-latest | `cargo fmt --all --check` |
+| Clippy | Linux, macOS, Windows | `cargo clippy --all-targets -- -D warnings` |
+| Build | Linux, macOS, Windows | `cargo build` |
 | Test (Linux) | ubuntu-latest | Parallel test execution, dynamic cgroup delegation |
 | Test (macOS) | macos-latest | |
 | Test (Windows) | windows-latest | |
