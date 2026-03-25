@@ -9,4 +9,4 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-reel = { git = "https://github.com/bitmonk8/reel", rev = "cfa5a8a" }
+reel = { git = "https://github.com/bitmonk8/reel", rev = "e9215a6" }

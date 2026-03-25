@@ -355,7 +355,7 @@ A reel agent that manages document organization. The model for each operation is
 
 Lot supports this configuration natively (write-child-under-read-parent). The librarian has no access to tools outside the storage root (no codebase exploration, no web search, no shell commands).
 
-**Reel enhancement required:** Reel's current `AgentRequestConfig` applies a single `ToolGrant` to the entire `project_root`. Vault needs reel to support fine-grained path grants — specifically, the ability to specify additional read-only or read-write paths beyond the project root, so that lot's overlapping scope support can be leveraged. This enhancement must be implemented in reel before vault's librarian integration. See [reel#enhancement-fine-grained-path-grants](#reel-enhancement) below.
+**Reel path grants:** Reel's `AgentRequestConfig` supports fine-grained path grants, allowing vault to specify read-only access to the storage root and read-write access to `derived/` as an elevated child path. See [Dependencies](#reel-path-grants) for details.
 
 **Post-invocation validation:** After each librarian invocation (Bootstrap, Record, Reorganize), vault performs lightweight validation of derived documents:
 
@@ -478,16 +478,14 @@ Vault owns step 1 (persistent, queryable storage). The orchestrator owns steps 2
 
 ## Dependencies
 
-### Reel Enhancement: Fine-Grained Path Grants {#reel-enhancement}
+### Reel Path Grants {#reel-path-grants}
 
-**Status:** Required before vault librarian integration.
+**Status:** Implemented in reel. Available at rev `e9215a6`.
 
-**Problem:** Reel's `AgentRequestConfig` accepts a single `ToolGrant` (e.g., `TOOLS` or `WRITE`) applied uniformly to `project_root`. The vault librarian needs read-only access to `storage_root` (covering `raw/` and `CHANGELOG.md`) and read-write access to `storage_root/derived/`. Reel's current API cannot express this.
+Reel's `AgentRequestConfig` supports fine-grained path grants, allowing vault to configure:
 
-**Required change:** Reel must support specifying additional path grants beyond the project root, so that the underlying lot sandbox policy can use overlapping scopes (write-child-under-read-parent). The exact API design is reel's concern, but the capability vault needs is:
+- `project_root` set to `storage_root` with read-only access (covers `raw/` and `CHANGELOG.md`).
+- Write access granted to `storage_root/derived/` as an elevated child path.
 
-- Set `project_root` to `storage_root` with read-only access.
-- Grant write access to `storage_root/derived/` as an elevated child path.
-
-**Lot support:** Lot already supports this configuration natively. The `SandboxPolicyBuilder` accepts `read_path(parent)` + `write_path(child)` and enforces the scoping at the OS level (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS).
+Lot enforces this scoping at the OS level (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS).
 

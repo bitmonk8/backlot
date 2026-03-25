@@ -1209,7 +1209,7 @@ dependencies = [
 [[package]]
 name = "reel"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/reel?rev=cfa5a8a#cfa5a8aba7310fa74a1b777b7fa7782a01e695eb"
+source = "git+https://github.com/bitmonk8/reel?rev=e9215a6#e9215a61208a4f9906bf8df5fa983bf0fd6c499f"
 dependencies = [
  "anyhow",
  "bitflags",
