@@ -1,0 +1,12 @@
+[package]
+name = "vault"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+reel = { git = "https://github.com/bitmonk8/reel", rev = "cfa5a8a" }
