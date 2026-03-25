@@ -23,8 +23,8 @@ Following reel's pattern, vault uses an environment struct for construction and 
 ```rust
 pub struct VaultEnvironment {
     pub storage_root: PathBuf,          // e.g., ".epic/docs/"
-    pub model_registry: flick::ModelRegistry,
-    pub provider_registry: flick::ProviderRegistry,
+    pub model_registry: reel::ModelRegistry,
+    pub provider_registry: reel::ProviderRegistry,
     pub models: VaultModels,
 }
 
@@ -33,6 +33,12 @@ pub struct VaultModels {
     pub query: String,                  // model ID for Query operation
     pub record: String,                 // model ID for Record operation
     pub reorganize: String,             // model ID for Reorganize operation
+}
+
+pub struct Vault { /* private */ }
+
+impl Vault {
+    pub fn new(env: VaultEnvironment) -> Result<Vault, VaultCreateError>;
 }
 
 pub enum VaultCreateError {
@@ -75,6 +81,32 @@ storage_root/
 
 **Recoverability:** If the librarian corrupts derived documents, the entire `derived/` directory can be reconstructed from `CHANGELOG.md` and `raw/` contents. The raw data and changelog together form the authoritative record; derived documents are a curated view.
 
+### Changelog Format
+
+`CHANGELOG.md` is a JSONL file (one JSON object per line, despite the `.md` extension). Each line is a self-contained record of a completed operation.
+
+**Fields common to all entries:**
+
+| Field | Type | Description |
+|---|---|---|
+| `ts` | string | ISO 8601 timestamp (UTC) |
+| `op` | string | Operation: `"bootstrap"`, `"record"`, `"reorganize"` |
+
+**Operation-specific fields:**
+
+| Operation | Additional fields |
+|---|---|
+| `bootstrap` | `raw`: raw document written (e.g., `"REQUIREMENTS_1.md"`) |
+| `record` | `raw`: raw document written (e.g., `"FINDINGS_3.md"`), `derived_modified`: array of derived documents created or modified |
+| `reorganize` | `merged`, `restructured`, `deleted`: arrays of affected derived documents |
+
+**Example:**
+```jsonl
+{"ts":"2026-03-25T14:00:00Z","op":"bootstrap","raw":"REQUIREMENTS_1.md"}
+{"ts":"2026-03-25T15:30:00Z","op":"record","raw":"FINDINGS_1.md","derived_modified":["DESIGN.md","FINDINGS.md"]}
+{"ts":"2026-03-26T09:00:00Z","op":"reorganize","merged":["FINDINGS.md"],"restructured":["PROJECT.md"],"deleted":[]}
+```
+
 ### Raw Documents
 
 Raw documents are versioned by name. Each document has a base name and a version number: `NAME_N.md` (e.g., `FINDINGS_1.md`, `FINDINGS_2.md`). Later versions supersede earlier versions. The full version history is preserved — raw documents are never modified or deleted.
@@ -89,7 +121,7 @@ Documents in `derived/` describe **current reality**. They are not logs, journal
 
 **Naming:** `UPPERCASE_DESCRIPTIVE` names. In `derived/`: `FINDINGS.md`, `API_DESIGN.md`, `MIGRATION_PLAN.md`. In `raw/`: versioned as `NAME_N.md` (e.g., `FINDINGS_1.md`). No lowercase.
 
-**Structure:** Every document uses a standard header:
+**Structure:** Every document in `derived/` uses a standard header:
 
 ```markdown
 # Document Title
@@ -97,7 +129,9 @@ Documents in `derived/` describe **current reality**. They are not logs, journal
 <!-- related: OTHER_DOC.md, ANOTHER_DOC.md -->
 ```
 
-Followed by typed sections appropriate to the document's purpose:
+Raw documents in `raw/` are exempt from this header requirement — they store client-provided content verbatim.
+
+Derived documents are followed by typed sections appropriate to the document's purpose:
 
 | Section type | Content |
 |---|---|
@@ -136,8 +170,6 @@ When creating a new document in `derived/`: choose an `UPPERCASE_DESCRIPTIVE` na
 |---|---|
 | `derived/PROJECT.md` | Project overview + document index |
 | `derived/REQUIREMENTS.md` | Structured requirements (derived from raw) |
-| `derived/FINDINGS.md` | Accumulated discoveries |
-| `derived/DESIGN.md` | Design decisions |
 | Topic-specific | Created as needed by librarian in `derived/` |
 
 **Root:**
@@ -146,7 +178,7 @@ When creating a new document in `derived/`: choose an `UPPERCASE_DESCRIPTIVE` na
 |---|---|
 | `CHANGELOG.md` | Append-only mutation log (managed programmatically, not by librarian) |
 
-The set of core derived documents is fixed at bootstrap time. Topic-specific documents are created dynamically by the librarian in `derived/` as the knowledge base grows.
+The core derived documents (`PROJECT.md`, `REQUIREMENTS.md`) are created at bootstrap time. Additional topic-specific documents (e.g., `FINDINGS.md`, `DESIGN.md`) are created dynamically by the librarian in `derived/` as content warrants them.
 
 ---
 
@@ -167,19 +199,32 @@ pub enum BootstrapError {
 }
 ```
 
-Input: raw requirements text. Output: populated core documents on disk. Returns error if the storage root already contains core documents (bootstrap is not idempotent).
+Input: raw requirements text. Output: populated core documents on disk.
+
+**Pre-condition:** Bootstrap fails with `AlreadyInitialized` if any of `CHANGELOG.md`, `raw/`, or `derived/` exist in the storage root. This catches both complete and partial prior runs.
 
 **Sequence:**
-1. Vault writes the raw requirements to `raw/REQUIREMENTS_1.md`.
-2. Vault invokes the librarian to produce the core derived documents in `derived/`.
-3. Vault appends a bootstrap entry to `CHANGELOG.md`.
+1. Vault creates `raw/` and `derived/` directories.
+2. Vault writes the raw requirements to `raw/REQUIREMENTS_1.md`.
+3. Vault invokes the librarian to produce the core derived documents in `derived/`.
+4. Vault appends a bootstrap entry to `CHANGELOG.md`.
+
+### Partial Failure
+
+Operations that invoke the librarian (Bootstrap, Record, Reorganize) perform multiple steps: writing raw documents, invoking the librarian, and appending to the changelog. If the librarian fails mid-operation (`LibrarianFailed`):
+
+- **Raw documents already written remain on disk.** They are not rolled back.
+- **The changelog entry is not written.** The changelog only records completed operations.
+- **Derived documents may be partially updated.** The librarian may have modified some derived documents before failing.
+
+The changelog is the authoritative record of completed operations. A raw document without a corresponding changelog entry indicates an incomplete operation. The caller can retry the operation or call `reorganize` to reconcile the derived state.
 
 ### 2. Query
 
 Search documents for relevant knowledge.
 
 ```rust
-pub struct DocumentRef(pub String); // "FILENAME > Section" format
+pub struct DocumentRef(pub String); // "FILENAME" or "FILENAME > Section" format
 
 pub enum Coverage {
     /// Question fully answered from existing documents.
@@ -247,7 +292,7 @@ pub enum RecordError {
 ```
 
 **Parameters:**
-- `name`: Document base name (e.g., `"FINDINGS"`). Must be `UPPERCASE_DESCRIPTIVE` format (uppercase letters and underscores only) and must not contain a trailing version number (e.g., `"FINDINGS_2"` is rejected). Returns `RecordError::InvalidName` if validation fails. Vault stores the content in `raw/` as `NAME_N.md` where N is the next version number.
+- `name`: Document base name (e.g., `"FINDINGS"`). Must match `^[A-Z][A-Z0-9_]*[A-Z0-9]$` (minimum two characters, starts with uppercase letter, uppercase letters/digits/underscores, ends with letter or digit). Must not contain a trailing version number (e.g., `"FINDINGS_2"` is rejected). Returns `RecordError::InvalidName` if validation fails. Vault stores the content in `raw/` as `NAME_N.md` where N is the next version number.
 - `content`: Raw content (findings, decisions, discoveries).
 - `mode`: Controls version behavior:
   - `RecordMode::New` — Creates version 1. Returns `RecordError::VersionConflict` if any version of this document already exists in `raw/`.
@@ -303,7 +348,21 @@ A reel agent that manages document organization. The model for each operation is
 - **Deduplication**: prevents repeated information.
 - **Growth control**: prevents unbounded document expansion.
 
-**Tool access:** The librarian has read access to `raw/` and `CHANGELOG.md`, and read-write access to `derived/`. It cannot modify or delete raw documents or the changelog. It has no access to tools outside the storage root (no codebase exploration, no web search, no shell commands). The constraint is **scope**: it operates exclusively within the vault storage directory, with write access limited to `derived/`.
+**Tool access:** The librarian uses reel's built-in file tools (Read, Write, Edit, Glob, Grep) scoped to the storage root. Access control is enforced at the OS level via lot's sandbox:
+
+- `storage_root` — mounted read-only (covers `raw/`, `CHANGELOG.md`)
+- `storage_root/derived/` — mounted read-write (elevated child under read-only parent)
+
+Lot supports this configuration natively (write-child-under-read-parent). The librarian has no access to tools outside the storage root (no codebase exploration, no web search, no shell commands).
+
+**Reel enhancement required:** Reel's current `AgentRequestConfig` applies a single `ToolGrant` to the entire `project_root`. Vault needs reel to support fine-grained path grants — specifically, the ability to specify additional read-only or read-write paths beyond the project root, so that lot's overlapping scope support can be leveraged. This enhancement must be implemented in reel before vault's librarian integration. See [reel#enhancement-fine-grained-path-grants](#reel-enhancement) below.
+
+**Post-invocation validation:** After each librarian invocation (Bootstrap, Record, Reorganize), vault performs lightweight validation of derived documents:
+
+- **Filename check:** All files in `derived/` must match `UPPERCASE_DESCRIPTIVE` naming (`^[A-Z][A-Z0-9_]*[A-Z0-9]\.md$`).
+- **Header check:** All files in `derived/` must begin with `# ` (title line) followed by `<!-- scope: ` (scope comment).
+
+Validation failures are logged as warnings but do not fail the operation. The librarian is expected to self-correct on subsequent invocations.
 
 ### System Prompt Composition
 
@@ -317,7 +376,7 @@ The librarian's system prompt is composed per-operation from shared building blo
 | Document format | UPPERCASE_DESCRIPTIVE naming, standard header, typed sections. |
 | Cross-references | Path reference format, no content duplication. |
 | Scope restriction | Read `raw/` and `CHANGELOG.md`. Read-write `derived/`. No external tools. |
-| Document inventory | Current list of documents in `raw/` and `derived/` with their scope comments. |
+| Document inventory | Current list of documents: `derived/` documents with their scope comments, `raw/` documents listed by filename only. |
 
 **Operation-specific blocks:**
 
@@ -326,7 +385,7 @@ The librarian's system prompt is composed per-operation from shared building blo
 | Query | Extraction process: start with `derived/PROJECT.md` for orientation, read relevant documents in `derived/` and `raw/`, synthesize answer with coverage assessment. No writes. |
 | Record | New raw document path provided. Relevance filter, placement rules (read `derived/PROJECT.md` for index, identify target document and section in `derived/`). Superseding rules (replace, don't append). No restructuring. |
 | Reorganize | Full restructuring operations on `derived/`: split, merge, remove, consolidate, reorder, tighten prose. May read `raw/` for source of truth. Document lifecycle triggers (size ~200 lines, coherence). Update `derived/PROJECT.md` after structural changes. |
-| Bootstrap | Raw requirements path provided. Core document templates (`derived/PROJECT.md`, `derived/REQUIREMENTS.md`). Initialization rules: derive structure from raw requirements, don't invent structure they don't support. |
+| Bootstrap | Raw requirements path provided. Core document templates (`derived/PROJECT.md`, `derived/REQUIREMENTS.md`). Additional topic-specific documents only if the requirements warrant them. Initialization rules: derive structure from raw requirements, don't invent structure they don't support. |
 
 Vault assembles the final prompt by concatenating the relevant blocks. The shared blocks are defined once as embedded constants (e.g., `include_str!`). The document inventory block is generated at call time from the current state of the storage root.
 
@@ -414,4 +473,21 @@ When an agent discovers that reality differs from assumptions:
 4. If the discovery affects parent scope, it bubbles up through the task tree
 
 Vault owns step 1 (persistent, queryable storage). The orchestrator owns steps 2–4.
+
+---
+
+## Dependencies
+
+### Reel Enhancement: Fine-Grained Path Grants {#reel-enhancement}
+
+**Status:** Required before vault librarian integration.
+
+**Problem:** Reel's `AgentRequestConfig` accepts a single `ToolGrant` (e.g., `TOOLS` or `WRITE`) applied uniformly to `project_root`. The vault librarian needs read-only access to `storage_root` (covering `raw/` and `CHANGELOG.md`) and read-write access to `storage_root/derived/`. Reel's current API cannot express this.
+
+**Required change:** Reel must support specifying additional path grants beyond the project root, so that the underlying lot sandbox policy can use overlapping scopes (write-child-under-read-parent). The exact API design is reel's concern, but the capability vault needs is:
+
+- Set `project_root` to `storage_root` with read-only access.
+- Grant write access to `storage_root/derived/` as an elevated child path.
+
+**Lot support:** Lot already supports this configuration natively. The `SandboxPolicyBuilder` accepts `read_path(parent)` + `write_path(child)` and enforces the scoping at the OS level (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS).
 

@@ -13,7 +13,8 @@
 
 ## What Remains
 
-- Resolve open questions in SPEC.md
+- Reel enhancement: fine-grained path grants (blocking dependency for librarian integration)
 - Storage layer (file-based markdown read/write)
-- Core operations: Bootstrap, Query, Record
+- Core operations: Bootstrap, Query, Record, Reorganize
 - Librarian agent (model-configurable, document organization)
+- CLI subcommands
