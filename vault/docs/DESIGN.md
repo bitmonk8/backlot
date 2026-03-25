@@ -1,5 +1,7 @@
 # Design
 
+Vault is a persistent, file-based knowledge store for agent systems. See [SPEC.md](SPEC.md) for the full specification.
+
 ## Project Structure
 
 ```
