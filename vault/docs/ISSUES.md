@@ -56,6 +56,9 @@ All require adding or improving tests in the same area.
 - **Missing error-path coverage** (`bootstrap.rs:35-36`) — No test exercises the `BootstrapError::Storage` path for failures in `build_bootstrap_prompt` or `append_changelog`. No test for `is_initialized` when only `raw/` or only `derived/` exists independently.
 - **Platform-gated test** (`storage.rs:840-882`) — `validate_derived_unreadable_file_warns_and_continues` gated on `#[cfg(unix)]`, never runs on Windows.
 - **Silent parse failure in list_all_raw** (`storage.rs:371-378`) — `parse::<u32>()` failure silently discarded, file skipped.
+- **MockLibrarian discards prompt/query** (`test_support.rs:47-61`) — Most operation tests use `MockLibrarian` which does not capture the prompt. Only `CapturingLibrarian` tests verify prompt content. Prompt regressions in non-capturing tests would go undetected.
+- **No error-path coverage for record I/O failures** (`record.rs`) — No test exercises `RecordError::Io` path for `snapshot_derived` or `validate_derived` failures during record. Same gap as bootstrap error-path coverage above.
+- **Validation warning test checks only non-emptiness** (`record.rs:387-391`) — `record_validation_warnings_do_not_fail` asserts `!warnings.is_empty()` but does not verify which warnings are produced or their content.
 
 ### NC7: Storage code cleanup (storage.rs)
 
@@ -76,6 +79,8 @@ All documentation corrections.
 - **SPEC stale references** (`SPEC.md:369, 482-483`) — Historical reference to "Python epic predecessor" violates CLAUDE.md. Pinned rev note will grow stale.
 - **SPEC undefined "lot" term** (`SPEC.md:351`) — "lot" referenced without introduction; not in Sibling Projects table.
 - **DESIGN inaccurate description** (`DESIGN.md:62`) — Says `produce_derived` "reads raw documents and writes derived documents" — method invokes an agent that does the reading/writing, not the method itself.
+- **`RECORD_BLOCK` name doesn't signal template** (`prompts.rs:120`) — Constant requires `RAW_FILENAME_PLACEHOLDER` substitution before use, but name `RECORD_BLOCK` doesn't convey that it's a template. Compare `BOOTSTRAP_BLOCK` which needs no substitution.
+- **DESIGN tokio description** (`DESIGN.md:33`) — Says "async runtime for bootstrap operation tests" — should say "operation tests" since record also uses tokio.
 
 ---
 

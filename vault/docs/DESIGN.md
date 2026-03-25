@@ -15,6 +15,8 @@ vault/                            (workspace root)
 |       +-- prompts.rs           -- System prompt composition (shared + per-operation)
 |       +-- librarian.rs         -- Agent invocation trait + ReelLibrarian impl
 |       +-- bootstrap.rs         -- Bootstrap operation implementation
+|       +-- record.rs            -- Record operation implementation
+|       +-- test_support.rs      -- Shared mock librarians for tests (cfg(test))
 +-- vault-cli/                   (CLI binary crate)
 |   +-- Cargo.toml
 |   +-- src/
@@ -40,6 +42,7 @@ vault/                            (workspace root)
   Vault (lib.rs)        -- public API, owns Agent + Storage
     |
     +-- bootstrap.rs    -- bootstrap operation logic
+    +-- record.rs       -- record operation logic
     |     |
     |     +-- prompts.rs    -- system prompt composition (shared + per-operation)
     |     +-- librarian.rs  -- agent invocation trait + ReelLibrarian impl
@@ -74,6 +77,26 @@ The bootstrap operation (`bootstrap.rs`) is the first of four core operations. I
 
 Partial failure semantics: if the librarian fails, raw documents remain on disk (no rollback) and the changelog entry is not written.
 
+### Record Operation
+
+The record operation (`record.rs`) writes new content into the vault and invokes the librarian to integrate it into derived documents. It supports two modes:
+
+- **`RecordMode::New`** -- Creates version 1 of a new document series. Fails with `VersionConflict` if any versions already exist for the given name.
+- **`RecordMode::Append`** -- Creates the next version in an existing series. Fails with `DocumentNotFound` if no prior versions exist.
+
+Sequence:
+
+1. Validates the name and writes content to `raw/NAME_N.md` via `write_raw_versioned`.
+2. Snapshots derived documents (filename to content bytes) before librarian invocation.
+3. Invokes the librarian with a record-specific prompt that instructs it to read the new raw document and integrate its content into derived documents.
+4. Snapshots derived documents again and computes the set of created or modified files by comparing content.
+5. Appends a record changelog entry listing the raw filename and modified derived filenames.
+6. Returns `Vec<DocumentRef>` of modified derived documents.
+
+The record prompt instructs the librarian to: read `derived/PROJECT.md` for orientation, apply a relevance filter (keep decisions/constraints/patterns, discard routine progress), follow the superseding rule (new info replaces outdated), and avoid restructuring (only add/update content relevant to the new information).
+
+Partial failure semantics: same as bootstrap. If the librarian fails, the raw document remains on disk and no changelog entry is written.
+
 ## Storage Layer
 
 The storage layer (`vault/src/storage.rs`) is the foundational module that all vault operations depend on. It manages the on-disk directory layout and provides all file I/O primitives. It is internal to the vault crate (not part of the public API).
@@ -94,6 +117,8 @@ The storage layer (`vault/src/storage.rs`) is the foundational module that all v
 **No external time crate.** UTC timestamps are computed from `std::time::SystemTime` using Hinnant's civil calendar algorithm. This avoids adding `chrono` or `time` as a dependency for a single formatting function.
 
 **Regex-based validation.** Raw document names must match `^[A-Z][A-Z0-9_]*[A-Z0-9]$` (minimum 2 characters). Versioned filenames follow `NAME_N.md`. Derived filenames follow `NAME.md`. All patterns are compiled once via `LazyLock<Regex>`.
+
+**Derived snapshots.** The `snapshot_derived()` method reads all files in `derived/` into a `HashMap<String, Vec<u8>>` (filename to content bytes). The `compute_changed()` free function compares two snapshots and returns `Vec<DocumentRef>` of created or modified files (deletions are excluded). Operations call `snapshot_derived()` before and after librarian invocation, then `compute_changed()` to detect changes.
 
 **Version scanning.** Versions are determined by scanning the `raw/` directory for files matching `BASE_N.md`. This is simple and correct given the small expected document counts. The `write_raw_versioned` method handles both "new series" (version 1, fail if exists) and "append" (next version, fail if no prior) modes.
 

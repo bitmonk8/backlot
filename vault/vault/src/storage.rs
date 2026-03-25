@@ -3,6 +3,7 @@
 // are implemented.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -345,6 +346,27 @@ impl Storage {
         Ok(warnings)
     }
 
+    // -- derived snapshots --
+
+    /// Snapshot all derived documents as filename -> content bytes.
+    /// Used to detect which derived documents were created or modified.
+    pub fn snapshot_derived(&self) -> Result<HashMap<String, Vec<u8>>, StorageError> {
+        let dir = self.derived_dir();
+        if !dir.exists() {
+            return Ok(HashMap::new());
+        }
+        let mut map = HashMap::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                let fname = entry.file_name().to_string_lossy().into_owned();
+                let content = fs::read(entry.path())?;
+                map.insert(fname, content);
+            }
+        }
+        Ok(map)
+    }
+
     // -- inventory --
 
     /// Build a full document inventory (raw + derived).
@@ -381,6 +403,27 @@ impl Storage {
         versions.sort_by(|a, b| a.filename.cmp(&b.filename));
         Ok(versions)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Derived snapshot diffing
+// ---------------------------------------------------------------------------
+
+/// Compare before/after snapshots to find derived documents that were created or modified.
+/// Documents present in `before` but absent in `after` (deletions) are not included.
+pub fn compute_changed(
+    before: &HashMap<String, Vec<u8>>,
+    after: &HashMap<String, Vec<u8>>,
+) -> Vec<DocumentRef> {
+    let mut changed: Vec<DocumentRef> = after
+        .iter()
+        .filter(|(name, content_after)| before.get(*name) != Some(*content_after))
+        .map(|(name, _)| DocumentRef {
+            filename: name.clone(),
+        })
+        .collect();
+    changed.sort_by(|a, b| a.filename.cmp(&b.filename));
+    changed
 }
 
 /// Return the current UTC timestamp in ISO 8601 format.
@@ -959,5 +1002,72 @@ mod tests {
         assert_eq!(days_to_civil(19448), (2023, 4, 1));
         // Day 20537: 2026-03-25
         assert_eq!(days_to_civil(20537), (2026, 3, 25));
+    }
+
+    // -- compute_changed --
+
+    #[test]
+    fn compute_changed_both_empty() {
+        let before = HashMap::new();
+        let after = HashMap::new();
+        assert!(compute_changed(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn compute_changed_identical_snapshots() {
+        let mut snap = HashMap::new();
+        snap.insert("A.md".to_owned(), b"content".to_vec());
+        snap.insert("B.md".to_owned(), b"other".to_vec());
+        assert!(compute_changed(&snap, &snap).is_empty());
+    }
+
+    #[test]
+    fn compute_changed_new_file() {
+        let before = HashMap::new();
+        let mut after = HashMap::new();
+        after.insert("NEW.md".to_owned(), b"hello".to_vec());
+        let result = compute_changed(&before, &after);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].filename, "NEW.md");
+    }
+
+    #[test]
+    fn compute_changed_modified_file() {
+        let mut before = HashMap::new();
+        before.insert("A.md".to_owned(), b"old".to_vec());
+        let mut after = HashMap::new();
+        after.insert("A.md".to_owned(), b"new".to_vec());
+        let result = compute_changed(&before, &after);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].filename, "A.md");
+    }
+
+    #[test]
+    fn compute_changed_deleted_file_not_returned() {
+        let mut before = HashMap::new();
+        before.insert("GONE.md".to_owned(), b"was here".to_vec());
+        let after = HashMap::new();
+        assert!(compute_changed(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn compute_changed_mixed() {
+        let mut before = HashMap::new();
+        before.insert("UNCHANGED.md".to_owned(), b"same".to_vec());
+        before.insert("MODIFIED.md".to_owned(), b"old".to_vec());
+        before.insert("DELETED.md".to_owned(), b"gone".to_vec());
+
+        let mut after = HashMap::new();
+        after.insert("UNCHANGED.md".to_owned(), b"same".to_vec());
+        after.insert("MODIFIED.md".to_owned(), b"new".to_vec());
+        after.insert("CREATED.md".to_owned(), b"fresh".to_vec());
+
+        let result = compute_changed(&before, &after);
+        let names: Vec<&str> = result.iter().map(|d| d.filename.as_str()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"CREATED.md"));
+        assert!(names.contains(&"MODIFIED.md"));
+        assert!(!names.contains(&"UNCHANGED.md"));
+        assert!(!names.contains(&"DELETED.md"));
     }
 }

@@ -1,17 +1,23 @@
 // Vault: library crate.
 //
 // Persistent, file-based knowledge store for agent systems. Provides the Vault
-// struct as the public API entry point, with bootstrap as the first operation.
+// struct as the public API entry point. Implements bootstrap and record
+// operations, with query and reorganize planned.
 
 pub(crate) mod bootstrap;
 pub(crate) mod librarian;
 pub(crate) mod prompts;
+pub(crate) mod record;
 pub(crate) mod storage;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::path::PathBuf;
 
 use librarian::ReelLibrarian;
 use storage::Storage;
+
+pub use storage::DocumentRef;
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -58,6 +64,44 @@ pub enum BootstrapError {
 impl From<storage::StorageError> for BootstrapError {
     fn from(e: storage::StorageError) -> Self {
         Self::Storage(e.to_string())
+    }
+}
+
+/// Whether to create a new document series or append to an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordMode {
+    /// Create a new document series. Fails if any version already exists.
+    New,
+    /// Append a new version to an existing document series.
+    Append,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecordError {
+    #[error("invalid document name: {0}")]
+    InvalidName(String),
+
+    #[error("version conflict: {0}")]
+    VersionConflict(String),
+
+    #[error("document not found: {0}")]
+    DocumentNotFound(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("librarian failed: {0}")]
+    LibrarianFailed(String),
+}
+
+impl From<storage::StorageError> for RecordError {
+    fn from(e: storage::StorageError) -> Self {
+        match e {
+            storage::StorageError::InvalidName(s) => Self::InvalidName(s),
+            storage::StorageError::VersionConflict(s) => Self::VersionConflict(s),
+            storage::StorageError::DocumentNotFound(s) => Self::DocumentNotFound(s),
+            storage::StorageError::Io(io_err) => Self::Io(io_err),
+        }
     }
 }
 
@@ -120,6 +164,33 @@ impl Vault {
             );
         }
         Ok(())
+    }
+
+    /// Record new content into the vault.
+    ///
+    /// Writes content to `raw/NAME_N.md`, invokes the librarian to integrate
+    /// it into derived documents, and records the operation in `CHANGELOG.md`.
+    /// Returns references to derived documents that were created or modified.
+    pub async fn record(
+        &self,
+        name: &str,
+        content: &str,
+        mode: RecordMode,
+    ) -> Result<Vec<DocumentRef>, RecordError> {
+        let invoker = ReelLibrarian {
+            agent: &self.agent,
+            model_name: &self.models.record,
+        };
+
+        let (modified, warnings) =
+            record::run(&self.storage, &invoker, name, content, mode).await?;
+        for w in &warnings {
+            eprintln!(
+                "vault: record validation warning: {}: {}",
+                w.filename, w.reason
+            );
+        }
+        Ok(modified)
     }
 }
 

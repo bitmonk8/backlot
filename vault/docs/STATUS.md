@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Bootstrap operation implemented. Three operations remaining.**
+**Bootstrap and Record operations implemented. Two operations remaining.**
 
 ## What Is Implemented
 
@@ -34,9 +34,26 @@
   - Post-invocation derived document validation (warnings only)
   - Changelog entry append on success
   - Partial failure semantics (raw persists, changelog skipped on librarian failure)
-- Test coverage: 46 tests (storage, prompts, bootstrap operation, Vault::new)
+- Record operation (`vault/src/record.rs`):
+  - Name validation and version assignment via `write_raw_versioned`
+  - `RecordMode::New` (create series) and `RecordMode::Append` (next version)
+  - Derived document snapshot before/after librarian invocation for change detection
+  - Changelog entry with `derived_modified` list
+  - Partial failure semantics (raw persists, changelog skipped on librarian failure)
+- Public API additions:
+  - `RecordMode` enum, `RecordError` error type, `DocumentRef` re-export
+  - `Vault::record()` method
+- Prompts module additions:
+  - Record-specific prompt block (relevance filter, superseding rule, no restructuring)
+  - `build_record_prompt()` and `record_query()` functions
+- Storage additions:
+  - `snapshot_derived()` and `compute_changed()` for before/after derived document comparison
+- Shared test infrastructure (`vault/src/test_support.rs`):
+  - `MockLibrarian`, `NoOpLibrarian`, `CapturingLibrarian`, `BadNameLibrarian`
+  - `DerivedWriter` type alias for configurable mock output
+- Test coverage: 65 tests (storage, prompts, bootstrap, record, Vault::new)
 
 ## What Remains
 
-- Core operations: Query, Record, Reorganize
+- Core operations: Query, Reorganize
 - CLI subcommands

@@ -62,53 +62,13 @@ pub async fn run<L: LibrarianInvoker>(
 mod tests {
     use super::*;
     use crate::storage::Storage;
+    use crate::test_support::{BadNameLibrarian, CapturingLibrarian, DerivedWriter, MockLibrarian};
     use std::fs;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
 
-    /// Mock librarian that writes minimal derived documents to simulate success.
-    struct MockLibrarian {
-        /// When true, the mock writes valid derived documents.
-        succeed: bool,
-        /// Track whether invoke was called.
-        invoked: AtomicBool,
-    }
-
-    impl MockLibrarian {
-        const fn succeeding() -> Self {
-            Self {
-                succeed: true,
-                invoked: AtomicBool::new(false),
-            }
-        }
-
-        const fn failing() -> Self {
-            Self {
-                succeed: false,
-                invoked: AtomicBool::new(false),
-            }
-        }
-
-        fn was_invoked(&self) -> bool {
-            self.invoked.load(Ordering::Relaxed)
-        }
-    }
-
-    impl LibrarianInvoker for MockLibrarian {
-        async fn produce_derived(
-            &self,
-            _system_prompt: &str,
-            _query: &str,
-            storage: &Storage,
-        ) -> Result<(), String> {
-            self.invoked.store(true, Ordering::Relaxed);
-
-            if !self.succeed {
-                return Err("mock librarian failure".to_owned());
-            }
-
-            // Write minimal valid derived documents.
+    /// Writer that produces the core bootstrap derived documents.
+    fn bootstrap_writer() -> DerivedWriter {
+        Box::new(|storage: &Storage| {
             let derived = storage.derived_dir();
             fs::write(
                 derived.join("PROJECT.md"),
@@ -120,75 +80,15 @@ mod tests {
                 "# Requirements\n<!-- scope: structured requirements -->\n\nRequirements content.\n",
             )
             .map_err(|e| e.to_string())?;
-
             Ok(())
-        }
-    }
-
-    /// Mock librarian that writes a file with a bad filename.
-    struct BadNameLibrarian;
-
-    impl LibrarianInvoker for BadNameLibrarian {
-        async fn produce_derived(
-            &self,
-            _system_prompt: &str,
-            _query: &str,
-            storage: &Storage,
-        ) -> Result<(), String> {
-            let derived = storage.derived_dir();
-            fs::write(
-                derived.join("PROJECT.md"),
-                "# Project\n<!-- scope: overview -->\n",
-            )
-            .map_err(|e| e.to_string())?;
-            // Bad filename: lowercase.
-            fs::write(derived.join("bad_name.md"), "no header\n").map_err(|e| e.to_string())?;
-            Ok(())
-        }
-    }
-
-    /// Mock librarian that captures the system prompt and query for verification.
-    struct CapturingLibrarian {
-        captured_prompt: Mutex<Option<String>>,
-        captured_query: Mutex<Option<String>>,
-    }
-
-    impl CapturingLibrarian {
-        fn new() -> Self {
-            Self {
-                captured_prompt: Mutex::new(None),
-                captured_query: Mutex::new(None),
-            }
-        }
-    }
-
-    impl LibrarianInvoker for CapturingLibrarian {
-        async fn produce_derived(
-            &self,
-            system_prompt: &str,
-            query: &str,
-            storage: &Storage,
-        ) -> Result<(), String> {
-            *self.captured_prompt.lock().map_err(|e| e.to_string())? =
-                Some(system_prompt.to_owned());
-            *self.captured_query.lock().map_err(|e| e.to_string())? = Some(query.to_owned());
-
-            // Write minimal valid derived documents so the operation can complete.
-            let derived = storage.derived_dir();
-            fs::write(
-                derived.join("PROJECT.md"),
-                "# Project\n<!-- scope: overview -->\n",
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(())
-        }
+        })
     }
 
     #[tokio::test]
     async fn bootstrap_passes_correct_prompt_and_query() {
         let tmp = TempDir::new().unwrap();
         let storage = Storage::new(tmp.path().to_path_buf());
-        let invoker = CapturingLibrarian::new();
+        let invoker = CapturingLibrarian::new(None);
 
         run(&storage, &invoker, "Test requirements.").await.unwrap();
 
@@ -211,7 +111,7 @@ mod tests {
     async fn bootstrap_succeeds_on_fresh_storage() {
         let tmp = TempDir::new().unwrap();
         let storage = Storage::new(tmp.path().to_path_buf());
-        let invoker = MockLibrarian::succeeding();
+        let invoker = MockLibrarian::succeeding(bootstrap_writer());
 
         let result = run(&storage, &invoker, "Build a widget system.").await;
         assert!(result.is_ok());
@@ -241,7 +141,7 @@ mod tests {
         let storage = Storage::new(tmp.path().to_path_buf());
         storage.create_directories().unwrap();
 
-        let invoker = MockLibrarian::succeeding();
+        let invoker = MockLibrarian::succeeding(bootstrap_writer());
         let result = run(&storage, &invoker, "Requirements text.").await;
 
         assert!(matches!(result, Err(BootstrapError::AlreadyInitialized)));
@@ -260,7 +160,7 @@ mod tests {
         };
         storage.append_changelog(&entry).unwrap();
 
-        let invoker = MockLibrarian::succeeding();
+        let invoker = MockLibrarian::succeeding(bootstrap_writer());
         let result = run(&storage, &invoker, "Requirements.").await;
         assert!(matches!(result, Err(BootstrapError::AlreadyInitialized)));
     }
@@ -287,7 +187,7 @@ mod tests {
     async fn bootstrap_creates_expected_directory_structure() {
         let tmp = TempDir::new().unwrap();
         let storage = Storage::new(tmp.path().to_path_buf());
-        let invoker = MockLibrarian::succeeding();
+        let invoker = MockLibrarian::succeeding(bootstrap_writer());
 
         run(&storage, &invoker, "Test requirements.").await.unwrap();
 

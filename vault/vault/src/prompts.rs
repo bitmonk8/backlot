@@ -114,6 +114,34 @@ fn bootstrap_system_prompt(inventory: &DocumentInventory) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Record-specific prompt
+// ---------------------------------------------------------------------------
+
+const RECORD_BLOCK: &str = "\
+## Record Task
+
+A new raw document has been written to `raw/RAW_FILENAME_PLACEHOLDER`.
+
+### Instructions
+
+1. Read `derived/PROJECT.md` for orientation and the current document index.
+2. Read the new raw document listed above.
+3. Integrate the new content into existing derived documents or create new ones as warranted.
+4. Apply the relevance filter: keep information useful for future tasks (decisions, \
+constraints, patterns, failure records). Discard routine progress and intermediate output.
+5. Follow the superseding rule: new information replaces outdated information in derived docs.
+6. Do not restructure existing documents. Only add or update content relevant to the new information.
+7. If you create new derived documents, update the index in `derived/PROJECT.md`.";
+
+fn record_system_prompt(inventory: &DocumentInventory, raw_filename: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        build_shared_prompt(inventory),
+        RECORD_BLOCK.replace("RAW_FILENAME_PLACEHOLDER", raw_filename)
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Public access for operation modules
 // ---------------------------------------------------------------------------
 
@@ -126,6 +154,17 @@ pub const fn bootstrap_query() -> &'static str {
 pub fn build_bootstrap_prompt(storage: &Storage) -> Result<String, StorageError> {
     let inventory = storage.inventory()?;
     Ok(bootstrap_system_prompt(&inventory))
+}
+
+/// Record query message sent as the user turn.
+pub const fn record_query() -> &'static str {
+    "Integrate the new raw document into the derived knowledge base."
+}
+
+/// Build the system prompt for a record invocation from current storage state.
+pub fn build_record_prompt(storage: &Storage, raw_filename: &str) -> Result<String, StorageError> {
+    let inventory = storage.inventory()?;
+    Ok(record_system_prompt(&inventory, raw_filename))
 }
 
 // ---------------------------------------------------------------------------
@@ -184,5 +223,47 @@ mod tests {
         let inventory = DocumentInventory::default();
         let block = document_inventory_block(&inventory);
         assert!(block.contains("No documents exist yet"));
+    }
+
+    #[test]
+    fn record_prompt_contains_required_sections() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        storage
+            .write_raw_versioned("FINDINGS", "some findings", true)
+            .unwrap();
+        std::fs::write(
+            storage.derived_dir().join("PROJECT.md"),
+            "# Project\n<!-- scope: overview -->\n",
+        )
+        .unwrap();
+
+        let prompt = build_record_prompt(&storage, "FINDINGS_1.md").unwrap();
+
+        // Shared blocks
+        assert!(prompt.contains("Core Principle"));
+        assert!(prompt.contains("Document Format"));
+        assert!(prompt.contains("Cross-References"));
+        assert!(prompt.contains("Scope Restriction"));
+        assert!(prompt.contains("Current Document Inventory"));
+
+        // Record-specific block
+        assert!(prompt.contains("Record Task"));
+        assert!(prompt.contains("raw/FINDINGS_1.md"));
+        assert!(prompt.contains("derived/PROJECT.md"));
+        assert!(prompt.contains("relevance filter"));
+        assert!(prompt.contains("superseding rule"));
+    }
+
+    #[test]
+    fn record_prompt_includes_raw_filename() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        let prompt = build_record_prompt(&storage, "NOTES_3.md").unwrap();
+        assert!(prompt.contains("raw/NOTES_3.md"));
     }
 }
