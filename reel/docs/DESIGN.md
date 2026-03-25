@@ -395,6 +395,9 @@ and reusability.
 - Config parsing (CLI): valid grants, null/absent/invalid grant, unknown names,
   invalid YAML.
 - Output serialization shapes (success, error).
+- Tool definition sync validation: verifies schema properties are translated,
+  property counts match expectations, `required_grant()` covers all tools, and
+  `translate_tool_call()` handles all non-NuShell tools.
 
 ### Integration Tests (require nu binary)
 

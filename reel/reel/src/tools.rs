@@ -1771,4 +1771,236 @@ mod tests {
             );
         }
     }
+
+    // -- tool definition sync validation tests --
+
+    /// For each translated tool, verify every non-timeout schema property
+    /// produces output in `translate_tool_call`. Catches schema properties
+    /// that the translation layer silently ignores.
+    #[test]
+    fn test_all_schema_properties_have_translation() {
+        let grant = ToolGrant::WRITE | ToolGrant::TOOLS | ToolGrant::NETWORK;
+        let tools = tool_definitions(grant);
+
+        // Tools that go through translate_tool_call (not NuShell).
+        let translated_tools: Vec<&ToolDefinition> =
+            tools.iter().filter(|t| t.name != "NuShell").collect();
+
+        for tool in &translated_tools {
+            let props = tool.parameters["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{} missing properties object", tool.name));
+
+            for (prop_name, prop_schema) in props {
+                if prop_name == "timeout" {
+                    continue;
+                }
+
+                // Build a minimal valid input with a per-property sentinel.
+                // Each field gets a unique sentinel so we can distinguish which
+                // positional argument produced the match.
+                let mut input = minimal_valid_input(&tool.name);
+                let prop_type = prop_schema["type"].as_str().unwrap_or("string");
+                let sentinel = format!("__SYNC_{prop_name}__");
+                match prop_type {
+                    "integer" => {
+                        input[prop_name] = serde_json::json!(99887);
+                    }
+                    "boolean" => {
+                        // line_numbers is inverted: emits --no-line-numbers when false.
+                        let val = prop_name != "line_numbers";
+                        input[prop_name] = serde_json::json!(val);
+                    }
+                    _ => {
+                        input[prop_name] = serde_json::json!(sentinel);
+                    }
+                }
+
+                let result = translate_tool_call(&tool.name, &input);
+                let cmd = result.unwrap_or_else(|e| {
+                    panic!(
+                        "{}.{}: translate_tool_call failed: {}",
+                        tool.name, prop_name, e
+                    )
+                });
+
+                // Determine what to look for in the output.
+                let expected = expected_translate_substring(&tool.name, prop_name, prop_type);
+                assert!(
+                    cmd.contains(&expected),
+                    "{}.{}: expected output to contain {:?}, got {:?}",
+                    tool.name,
+                    prop_name,
+                    expected,
+                    cmd,
+                );
+            }
+        }
+    }
+
+    /// Snapshot check: each translated tool's non-timeout property names
+    /// match the expected set. Catches accidental additions/removals.
+    /// Unlike `test_all_schema_properties_have_translation` (which validates
+    /// translation output), this test detects schema drift at the name level.
+    #[test]
+    fn test_schema_property_names_match_expected() {
+        let grant = ToolGrant::WRITE | ToolGrant::TOOLS | ToolGrant::NETWORK;
+        let tools = tool_definitions(grant);
+
+        // Order must match tool_definitions() insertion order.
+        let expected: &[(&str, &[&str])] = &[
+            ("Read", &["file_path", "limit", "offset"]),
+            ("Glob", &["depth", "path", "pattern"]),
+            (
+                "Grep",
+                &[
+                    "case_insensitive",
+                    "context",
+                    "context_after",
+                    "context_before",
+                    "glob",
+                    "head_limit",
+                    "include_type",
+                    "line_numbers",
+                    "multiline",
+                    "output_mode",
+                    "path",
+                    "pattern",
+                ],
+            ),
+            ("Write", &["content", "file_path"]),
+            (
+                "Edit",
+                &["file_path", "new_string", "old_string", "replace_all"],
+            ),
+        ];
+
+        // Verify expected list covers all non-NuShell tools.
+        let non_nushell: Vec<&str> = tools
+            .iter()
+            .filter(|t| t.name != "NuShell")
+            .map(|t| t.name.as_str())
+            .collect();
+        let expected_names: Vec<&str> = expected.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            non_nushell, expected_names,
+            "expected list does not cover all non-NuShell tools"
+        );
+
+        for (name, expected_props) in expected {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == *name)
+                .unwrap_or_else(|| panic!("tool {name} not found"));
+            let props = tool.parameters["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name} missing properties"));
+            let mut actual: Vec<&str> = props
+                .keys()
+                .filter(|k| k.as_str() != "timeout")
+                .map(String::as_str)
+                .collect();
+            actual.sort_unstable();
+            assert_eq!(
+                actual, *expected_props,
+                "{name}: schema property names changed",
+            );
+        }
+    }
+
+    /// Every tool returned by `tool_definitions()` must have an entry in
+    /// `required_grant()`. Catches tools added to definitions but not to
+    /// the grant check.
+    #[test]
+    fn test_required_grant_covers_all_defined_tools() {
+        let grant = ToolGrant::WRITE | ToolGrant::TOOLS | ToolGrant::NETWORK;
+        let tools = tool_definitions(grant);
+        for tool in &tools {
+            assert!(
+                required_grant(&tool.name).is_some(),
+                "tool {:?} returned by tool_definitions() has no entry in required_grant()",
+                tool.name,
+            );
+        }
+    }
+
+    /// Every non-NuShell tool must be handled by `translate_tool_call()`
+    /// (i.e., not return "unknown tool").
+    #[test]
+    fn test_translate_tool_call_covers_all_non_nushell_tools() {
+        let grant = ToolGrant::WRITE | ToolGrant::TOOLS | ToolGrant::NETWORK;
+        let tools = tool_definitions(grant);
+        for tool in &tools {
+            if tool.name == "NuShell" {
+                continue;
+            }
+            let input = minimal_valid_input(&tool.name);
+            let result = translate_tool_call(&tool.name, &input);
+            result.unwrap_or_else(|e| {
+                panic!("translate_tool_call failed for {:?}: {}", tool.name, e)
+            });
+        }
+    }
+
+    /// Build the minimal valid JSON input for a tool (required fields only).
+    /// Each field uses a unique sentinel so tests can distinguish which
+    /// positional argument produced a match.
+    fn minimal_valid_input(tool_name: &str) -> JsonValue {
+        match tool_name {
+            "Read" => serde_json::json!({"file_path": "__SYNC_file_path__"}),
+            "Write" => serde_json::json!({
+                "file_path": "__SYNC_file_path__",
+                "content": "__SYNC_content__"
+            }),
+            "Edit" => serde_json::json!({
+                "file_path": "__SYNC_file_path__",
+                "old_string": "__SYNC_old_string__",
+                "new_string": "__SYNC_new_string__"
+            }),
+            "Glob" | "Grep" => serde_json::json!({"pattern": "__SYNC_pattern__"}),
+            other => panic!("minimal_valid_input: no entry for tool {other:?} — add one"),
+        }
+    }
+
+    /// Return the expected substring in the translated nu command for a
+    /// given tool/property/type combination.
+    fn expected_translate_substring(tool_name: &str, prop_name: &str, prop_type: &str) -> String {
+        // Special cases where schema name differs from nu flag name,
+        // or where the translation is non-obvious.
+        match (tool_name, prop_name) {
+            // Boolean flags that appear as flag names, not values.
+            (_, "replace_all") => return "--replace-all".into(),
+            (_, "case_insensitive") => return "--case-insensitive".into(),
+            (_, "multiline") => return "--multiline".into(),
+            (_, "line_numbers") => return "--no-line-numbers".into(),
+            // Schema name → nu flag name mismatch.
+            (_, "include_type") => return "--type".into(),
+            _ => {}
+        }
+
+        match prop_type {
+            "integer" => {
+                // Integer props appear as --flag-name 99887
+                let flag = format!("--{}", prop_name.replace('_', "-"));
+                format!("{flag} 99887")
+            }
+            "boolean" => {
+                // Handled above for known booleans; fallback.
+                let flag = format!("--{}", prop_name.replace('_', "-"));
+                flag
+            }
+            _ => {
+                // String props: positional args contain a per-field sentinel,
+                // optional args appear as --flag.
+                match prop_name {
+                    "file_path" | "pattern" | "content" | "old_string" | "new_string" => {
+                        format!("__SYNC_{prop_name}__")
+                    }
+                    _ => {
+                        format!("--{}", prop_name.replace('_', "-"))
+                    }
+                }
+            }
+        }
+    }
 }

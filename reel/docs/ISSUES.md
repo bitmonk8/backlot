@@ -5,14 +5,6 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 
 ---
 
-## Group 5: Tool Definition Sync [NON-CRITICAL]
-
-### 5.1 Tool behavior defined in 3 unsynchronized places
-- **Files:** reel/build.rs (lines 336-491), reel/src/tools.rs (lines 109-216, 269-380)
-- NuShell commands (build.rs), JSON Schema definitions (tools.rs 109-216), and the translation layer (tools.rs 269-380) must stay in sync. Some test enforcement exists (e.g., `test_all_tool_definitions_have_timeout`, individual translation round-trip tests) but no comprehensive check that schema property names match extraction keys or that all schema parameters are translated.
-
----
-
 ## Group 6: Testing Gaps [NON-CRITICAL]
 
 ### 6.1 File tool success path untested
