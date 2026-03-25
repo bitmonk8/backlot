@@ -1,0 +1,22 @@
+# Design
+
+## Project Structure
+
+```
+vault/                            (workspace root)
+├── Cargo.toml                   (workspace config, shared lints/versions/profile)
+├── vault/                       (library crate)
+│   ├── Cargo.toml
+│   └── src/
+│       └── lib.rs
+├── vault-cli/                   (CLI binary crate)
+│   ├── Cargo.toml
+│   └── src/
+│       └── main.rs              — thin binary wrapper
+├── docs/
+└── .github/
+```
+
+## Dependencies
+
+- **reel** — agent session layer (git rev dependency)
