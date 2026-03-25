@@ -167,3 +167,4 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 ### 18.2 No test for write_paths outside project root
 - **File:** reel/src/nu_session.rs
 - No test documents behavior when a `write_paths` entry is outside the project root. Lot is expected to reject this at policy-build time, but there is no test confirming it.
+

@@ -66,7 +66,8 @@ pub struct AgentRequestConfig {
     /// When the base grant includes `TOOLS` but not `WRITE` (read-only root),
     /// each path listed here is added as a write-path in the sandbox policy,
     /// allowing the agent to write to specific subdirectories while the rest
-    /// of the project root remains read-only.
+    /// of the project root remains read-only. Write and Edit tools are
+    /// automatically included in the tool set (no `WRITE` grant needed).
     ///
     /// Ignored when the base grant includes `WRITE` (entire project root is
     /// already writable). Each entry must be a child of `project_root`;
@@ -200,8 +201,8 @@ impl Agent {
         request: &AgentRequestConfig,
         query: &str,
     ) -> anyhow::Result<RunResult<T>> {
-        let has_tools =
-            !tools::tool_definitions(request.grant).is_empty() || !request.custom_tools.is_empty();
+        let has_tools = !tools::tool_definitions(Self::effective_tool_grant(request)).is_empty()
+            || !request.custom_tools.is_empty();
         if has_tools {
             self.run_with_tools(request, query).await
         } else {
@@ -213,12 +214,25 @@ impl Agent {
     // Config building
     // -----------------------------------------------------------------------
 
+    /// Compute the grant used for tool definitions. When `write_paths` is
+    /// non-empty and the base grant includes `TOOLS`, `WRITE` is added so
+    /// that Write/Edit tools are included. The sandbox policy still uses the
+    /// original grant — only tool availability is affected.
+    fn effective_tool_grant(request: &AgentRequestConfig) -> tools::ToolGrant {
+        let grant = request.grant.normalize();
+        if !request.write_paths.is_empty() && grant.contains(tools::ToolGrant::TOOLS) {
+            grant | tools::ToolGrant::WRITE
+        } else {
+            grant
+        }
+    }
+
     /// Build the effective request config with tool definitions injected.
     /// Useful for dry-run / debugging, or called internally before model invocation.
     pub fn build_request_config(
         request: &AgentRequestConfig,
     ) -> anyhow::Result<flick::RequestConfig> {
-        let built_in_tools = tools::tool_definitions(request.grant);
+        let built_in_tools = tools::tool_definitions(Self::effective_tool_grant(request));
         let custom_tool_defs = request.custom_tools.iter().map(|h| h.definition());
 
         let all_tools: Vec<flick::ToolConfig> = built_in_tools
@@ -1063,6 +1077,77 @@ mod tests {
         assert!(tool_names.contains(&"SpecialTool"));
         // Built-in tools should also be present.
         assert!(tool_names.contains(&"Read"));
+    }
+
+    // -----------------------------------------------------------------------
+    // write_paths → tool availability
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn write_paths_enables_write_edit_tools() {
+        let mut request = test_request();
+        request.grant = ToolGrant::TOOLS;
+        request.write_paths = vec![std::path::PathBuf::from("/tmp/out")];
+
+        let config = Agent::build_request_config(&request).unwrap();
+        let tool_names: Vec<&str> = config.tools().iter().map(flick::ToolConfig::name).collect();
+        assert!(tool_names.contains(&"Write"), "Write tool missing");
+        assert!(tool_names.contains(&"Edit"), "Edit tool missing");
+        assert!(tool_names.contains(&"Read"), "Read tool missing");
+    }
+
+    #[tokio::test]
+    async fn empty_write_paths_excludes_write_edit_tools() {
+        let mut request = test_request();
+        request.grant = ToolGrant::TOOLS;
+
+        let config = Agent::build_request_config(&request).unwrap();
+        let tool_names: Vec<&str> = config.tools().iter().map(flick::ToolConfig::name).collect();
+        assert!(
+            !tool_names.contains(&"Write"),
+            "Write tool should be absent"
+        );
+        assert!(!tool_names.contains(&"Edit"), "Edit tool should be absent");
+        assert!(tool_names.contains(&"Read"), "Read tool missing");
+    }
+
+    #[tokio::test]
+    async fn empty_grant_with_write_paths_produces_no_tools() {
+        let mut request = test_request();
+        request.grant = ToolGrant::empty();
+        request.write_paths = vec![std::path::PathBuf::from("/tmp/out")];
+
+        let config = Agent::build_request_config(&request).unwrap();
+        assert!(
+            config.tools().is_empty(),
+            "empty grant should produce no tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn network_grant_with_write_paths_includes_write_edit() {
+        let mut request = test_request();
+        request.grant = ToolGrant::NETWORK; // implies TOOLS after normalize
+        request.write_paths = vec![std::path::PathBuf::from("/tmp/out")];
+
+        let config = Agent::build_request_config(&request).unwrap();
+        let tool_names: Vec<&str> = config.tools().iter().map(flick::ToolConfig::name).collect();
+        assert!(tool_names.contains(&"Write"), "Write tool missing");
+        assert!(tool_names.contains(&"Edit"), "Edit tool missing");
+    }
+
+    #[tokio::test]
+    async fn write_grant_with_write_paths_no_duplicate_tools() {
+        let mut request = test_request();
+        request.grant = ToolGrant::WRITE | ToolGrant::TOOLS;
+        request.write_paths = vec![std::path::PathBuf::from("/tmp/out")];
+
+        let config = Agent::build_request_config(&request).unwrap();
+        let tool_names: Vec<&str> = config.tools().iter().map(flick::ToolConfig::name).collect();
+        let write_count = tool_names.iter().filter(|&&n| n == "Write").count();
+        let edit_count = tool_names.iter().filter(|&&n| n == "Edit").count();
+        assert_eq!(write_count, 1, "Write tool should appear exactly once");
+        assert_eq!(edit_count, 1, "Edit tool should appear exactly once");
     }
 
     #[tokio::test]

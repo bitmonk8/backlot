@@ -129,7 +129,7 @@ Custom tools are added to `AgentRequestConfig.custom_tools`. They are dispatched
 
 ### Fine-grained path grants
 
-When an agent needs read-only access to the project root but write access to specific subdirectories, use `write_paths`:
+When an agent needs read-only access to the project root but write access to specific subdirectories, use `write_paths`. This automatically enables Write and Edit tools (in addition to the read-only tools) without requiring the `WRITE` grant:
 
 ```rust
 let request = AgentRequestConfig {
@@ -248,8 +248,8 @@ All tools execute through the NuShell MCP session as custom commands (`reel read
 
 | Flag | Effect |
 |------|--------|
-| `TOOLS` | Enables tool loop and read-only tools (Read, Glob, Grep, NuShell). Without TOOLS, agent runs in structured-output mode (no tools). |
-| `WRITE` | Enables Write and Edit tools. Grants sandbox write access to project root. Implies `TOOLS`. |
+| `TOOLS` | Enables tool loop and read-only tools (Read, Glob, Grep, NuShell). When `write_paths` is non-empty, also enables Write and Edit tools with scoped write access. Without TOOLS, agent runs in structured-output mode (no tools). |
+| `WRITE` | Enables Write and Edit tools with full project-root write access. Implies `TOOLS`. |
 | `NETWORK` | Enables outbound network from sandbox. Denied by default. Implies `TOOLS`. |
 
 ## Sandboxing
@@ -276,7 +276,7 @@ On Windows, `reel setup` must be run once (as administrator) before sandboxed ex
 cargo test
 ```
 
-286 tests (271 reel + 15 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
+290 tests (275 reel + 15 reel-cli). Integration tests require NuShell binary (downloaded by build.rs).
 
 ## Dependencies
 

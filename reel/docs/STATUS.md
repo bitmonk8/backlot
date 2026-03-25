@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 286 tests pass locally.** Lot dependency at rev `30bd25f`. Flick dependency at rev `c827fda`. CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel.
+**Core agent runtime and tooling implemented. All 290 tests pass locally.** Lot dependency at rev `30bd25f`. Flick dependency at rev `c827fda`. CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel.
 
 ## What Is Implemented
 
@@ -15,7 +15,7 @@ All components described in [DESIGN.md](DESIGN.md) are implemented and tested:
 - CLI binary (`reel-cli`) — complete
 - Build infrastructure (`build.rs`) — complete
 - CI pipeline — complete, green on all platforms
-- 286 tests (271 reel + 15 reel-cli)
+- 290 tests (275 reel + 15 reel-cli)
 ## What Is NOT Implemented
 
 - **ToolHandler consumer** — Trait exists but no real consumer yet. Design assumes epic's Research Service as first consumer.

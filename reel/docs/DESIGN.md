@@ -277,6 +277,11 @@ results.
 - **TOOLS** — Read, Glob, Grep, NuShell
 - **WRITE** (implies TOOLS) — adds Write, Edit
 
+`Agent::effective_tool_grant()` computes the grant passed to `tool_definitions`:
+when `write_paths` is non-empty and the base grant includes `TOOLS`, `WRITE` is
+added so that Write/Edit tools are included. The sandbox policy still uses the
+original grant — only tool availability is affected.
+
 Each definition includes name, description, and JSON Schema parameters matching
 the model's tool-calling format.
 
@@ -388,8 +393,10 @@ Binary decision — no per-tool grants. `WRITE` and `NETWORK` imply `TOOLS`.
 Network access denied by default; requires explicit `NETWORK` grant.
 
 Fine-grained path grants (`write_paths`) allow mixed read/write access within the
-project root without granting full `WRITE` access. This enables use cases like a
-read-only root with a writable output subdirectory.
+project root without granting full `WRITE` access. `Agent` adds `WRITE` to the
+effective tool grant when `write_paths` is non-empty, so Write/Edit tools are
+available without making the entire project root writable. The sandbox policy
+uses the original grant, preserving scoped enforcement.
 
 ### Tool loop over streaming
 
