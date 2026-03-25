@@ -478,13 +478,17 @@ impl NuSession {
         st.inflight_stdin = None;
 
         // Kill the process if it's parked in state (not currently in-flight).
+        // Take the child out of the handle so Drop doesn't spawn a background
+        // reap thread — kill() callers expect the child to be fully reaped
+        // before the next spawn.
         if let Some(proc) = st.process.take() {
             let mut child_guard = proc
                 .child_handle
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(ref mut child) = *child_guard {
+            if let Some(child) = child_guard.take() {
                 let _ = child.kill();
+                bounded_reap(|| child.try_wait(), std::time::Duration::from_secs(5));
             }
         }
     }
