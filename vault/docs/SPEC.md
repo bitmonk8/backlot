@@ -480,12 +480,12 @@ Vault owns step 1 (persistent, queryable storage). The orchestrator owns steps 2
 
 ### Reel Path Grants {#reel-path-grants}
 
-**Status:** Implemented in reel. Available at rev `e9215a6`.
+**Status:** Implemented in reel. Available at rev `a6be158`.
 
 Reel's `AgentRequestConfig` supports fine-grained path grants, allowing vault to configure:
 
-- `project_root` set to `storage_root` with read-only access (covers `raw/` and `CHANGELOG.md`).
-- Write access granted to `storage_root/derived/` as an elevated child path.
+- `project_root` set to `storage_root` with `TOOLS`-only grant (read-only filesystem tools).
+- `write_paths` set to `[storage_root/derived/]`; reel automatically enables Write/Edit tools when `write_paths` is non-empty, scoping write access to listed paths only.
 
 Lot enforces this scoping at the OS level (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS).
 

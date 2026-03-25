@@ -9,7 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-reel = { git = "https://github.com/bitmonk8/reel", rev = "e9215a6" }
+reel = { git = "https://github.com/bitmonk8/reel", rev = "a6be158" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

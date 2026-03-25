@@ -52,8 +52,8 @@ impl LibrarianInvoker for ReelLibrarian<'_> {
             .build()
             .map_err(|e| format!("failed to build request config: {e}"))?;
 
-        // Read-only root with elevated write access to derived/.
-        let tool_grants = reel::ToolGrant::TOOLS | reel::ToolGrant::WRITE;
+        // Read-only root; write_paths scopes Write/Edit tools to derived/.
+        let tool_grants = reel::ToolGrant::TOOLS;
 
         let request = reel::AgentRequestConfig {
             config,

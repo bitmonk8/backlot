@@ -7,7 +7,7 @@
 ## What Is Implemented
 
 - Workspace structure: `vault` (lib) + `vault-cli` (bin)
-- Dependency on `reel` via git rev (`e9215a6`)
+- Dependency on `reel` via git rev (`a6be158`)
 - CI pipeline (fmt, clippy, test, build on Linux/macOS/Windows)
 - Project specification ([SPEC.md](SPEC.md))
 - Storage layer (`vault/src/storage.rs`):

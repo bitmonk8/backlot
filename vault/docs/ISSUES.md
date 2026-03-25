@@ -4,16 +4,6 @@ Issues grouped by co-fixability within severity. Groups ordered by impact (desce
 
 ---
 
-## MUST FIX
-
-### MF1: Write grant overrides write_paths (librarian.rs)
-
-- **Line(s):** 56
-- Grant is `TOOLS | WRITE`, which grants full write access to the project root. `write_paths: vec![storage.derived_dir()]` is silently ignored when `WRITE` is included. Comment says "Read-only root with elevated write access to derived/" but the code does not enforce that. The SCOPE_RESTRICTION prompt block (`prompts.rs:36-42`) asks the agent to confine writes to `derived/`, but this is a soft constraint not enforced by the grant system.
-- **Fix:** Cannot be fixed in vault alone. `ToolGrant::WRITE` is required to make Write/Edit tools available (`tools.rs:170`) — `TOOLS` alone only provides read-only tools. But `WRITE` also forces the entire project root writable in `build_nu_sandbox_policy` (`nu_session.rs:821-822`), ignoring `write_paths`. Reel commit `e9215a6` added `write_paths` plumbing throughout the session layer but did not update `tool_definitions()` to provide Write/Edit tools when `write_paths` is non-empty under a `TOOLS`-only grant. That decoupling is the missing piece: reel should offer Write/Edit tools whenever the agent has any writable path (via `WRITE` or `write_paths`), then let the sandbox enforce the scope.
-
----
-
 ## NON-CRITICAL
 
 ### NC0: Vault::bootstrap() facade issues (lib.rs)

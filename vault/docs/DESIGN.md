@@ -59,7 +59,7 @@ The prompts module (`prompts.rs`) composes system prompts from shared blocks (co
 
 The librarian (`librarian.rs`) is the interface between vault operations and the reel agent. It has one responsibility:
 
-**Agent invocation** -- The `LibrarianInvoker` trait abstracts agent calls so that tests can substitute mocks without requiring real LLM calls. The production implementation (`ReelLibrarian`) holds a reference to the shared `Agent` and configures each call with the appropriate model, grant, and write paths. The trait method `produce_derived` names the side-effect: it reads raw documents and writes derived documents.
+**Agent invocation** -- The `LibrarianInvoker` trait abstracts agent calls so that tests can substitute mocks without requiring real LLM calls. The production implementation (`ReelLibrarian`) holds a reference to the shared `Agent` and configures each call with the appropriate model, grant, and write paths. The grant is `TOOLS`-only (read-only filesystem tools); reel automatically enables Write/Edit tools when `write_paths` is non-empty, so the agent can write only to the paths listed in `write_paths` (the `derived/` directory). The trait method `produce_derived` names the side-effect: it reads raw documents and writes derived documents.
 
 ### Bootstrap Operation
 
