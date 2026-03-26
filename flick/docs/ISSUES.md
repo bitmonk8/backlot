@@ -118,3 +118,42 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 **Category:** Correctness
 
 Chat Completions reports non-cached input tokens (prompt_tokens minus cached_tokens). Messages API reports total input tokens as-is. Both are correct for their respective APIs and cost computation works correctly, but `UsageSummary.input_tokens` has different semantics across providers for reporting purposes.
+
+---
+
+## 14. Structured output not validated or cleaned
+
+**File:** `flick/src/runner.rs`
+**Category:** Bug / Enhancement
+**Source:** rig integration testing (F-001)
+
+Two issues when `output_schema` is set:
+
+1. The model sometimes wraps its JSON response in markdown code fences (`` ```json ... ``` ``). Flick passes this through as-is, forcing every caller to strip fences.
+2. The model sometimes omits fields marked `required` in the schema. Flick does not validate the response against the schema.
+
+Since flick owns the `output_schema` feature, it should: (a) strip code fences from the response, (b) validate the response against the schema and retry or error if non-conforming.
+
+**Workaround:** Callers strip code fences manually; use `get -i` for optional access to "required" fields.
+
+---
+
+## 15. No Anthropic prompt caching
+
+**File:** `flick/src/provider/messages.rs`
+**Category:** Enhancement (performance)
+**Source:** rig integration testing (F-004)
+
+Flick formats the system prompt as an array-of-content-blocks (which supports `cache_control`), but never attaches `cache_control: { type: "ephemeral" }` to any block. Every turn in a multi-turn reel session re-processes the full system prompt and tool definitions from scratch.
+
+Impact observed in vault tests: bootstrap (Sonnet, 4 tool calls) takes 47s; record (Haiku, ~4 tool calls) takes 93s. The per-turn overhead of 8-13s is largely input re-processing that prompt caching would eliminate.
+
+---
+
+## 16. No per-call timing in output
+
+**File:** `flick/src/runner.rs`
+**Category:** Enhancement (observability)
+**Source:** rig integration testing (F-006)
+
+Flick returns structured JSON per call but does not include API latency. Adding a `timing` field (e.g., `{ "api_latency_ms": N }`) to the response would give per-call diagnostics to every consumer (reel, vault, anything else) for free.
