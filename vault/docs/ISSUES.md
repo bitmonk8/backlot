@@ -4,33 +4,14 @@
 
 | Severity | Count |
 |---|---|
-| MUST FIX | 6 |
+| MUST FIX | 3 |
 | NON-CRITICAL | 23 |
 | NIT | 28 |
-| **Total** | **57** |
+| **Total** | **54** |
 
 ---
 
 ## MUST FIX
-
-### Group M1: DESIGN.md inaccuracies (3 issues)
-
-All three are doc-mismatch errors in docs/DESIGN.md that can be fixed in a single pass.
-
-#### M1a. Record operation sequence omits validation step and wrong return type
-- **File(s):** docs/DESIGN.md
-- **Line(s):** 219-226
-- **Description:** Record sequence omits post-invocation validation step present in code (record.rs line 44). Bootstrap and reorganize sections document this step; record does not. Also states return type as `Vec<DocumentRef>` but actual type is `(Vec<DocumentRef>, Vec<DerivedValidationWarning>)`.
-
-#### M1b. project_root and TOOLS grant description inaccurate
-- **File(s):** docs/DESIGN.md
-- **Line(s):** 192-196
-- **Description:** Two inaccuracies: (1) States `project_root` is set in `build_request`, actually set on `AgentEnvironment` at `Vault::new` time (lib.rs line 196). (2) States `TOOLS`-only grant is "read-only filesystem tools" but write scoping is controlled by `write_paths`, not the grant.
-
-#### M1c. DerivedProducer usage incomplete
-- **File(s):** docs/DESIGN.md
-- **Line(s):** 190
-- **Description:** States `DerivedProducer` is "used by bootstrap and record" — omits reorganize, which also uses it.
 
 ### Group M2: Corrupted license text (1 issue)
 
