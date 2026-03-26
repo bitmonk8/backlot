@@ -355,3 +355,27 @@ Unrelated low-impact issues not suitable for co-fixing.
 - **File(s):** vault/src/record.rs
 - **Line(s):** 28-48
 - **Description:** Six `// Step N:` comments narrate what self-documenting function calls already express.
+
+---
+
+## Integration Testing Findings
+
+Issues discovered during rig end-to-end integration testing.
+
+### Group IT1: Bug (1 issue)
+
+#### IT1a. Bootstrap requires pre-existing storage_root (F-002)
+- **File(s):** vault/src/bootstrap.rs
+- **Description:** `vault bootstrap` fails with "storage root does not exist or is not a directory" if the directory doesn't exist yet. Bootstrap is the initialization command — it should create the directory.
+- **Workaround:** `mkdir` the storage root before calling bootstrap.
+
+### Group IT2: Observability (2 issues)
+
+#### IT2a. No token usage in CLI output (F-003)
+- **File(s):** vault-cli/src/main.rs
+- **Description:** No vault command exposes token usage or cost information. Adding usage stats to each command's JSON output would enable budget tracking across operations.
+
+#### IT2b. Discards usage/cost data from reel (F-005)
+- **File(s):** vault/src/librarian.rs
+- **Description:** Vault calls `agent.run()` but discards the returned `RunResult` fields `usage` and `tool_calls` (assigned to `_result` in librarian.rs). Combined with IT2a, there is no observability into token consumption for any vault operation.
+- **Note:** Blocked downstream by reel issue 19.2 (cache token fields stripped) and flick issue 15 (no prompt caching). Full observability requires fixes across all three layers.
