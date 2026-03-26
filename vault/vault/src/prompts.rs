@@ -60,7 +60,11 @@ fn document_inventory_block(inventory: &DocumentInventory) -> String {
     if !inventory.derived.is_empty() {
         block.push_str("### Derived Documents\n\n");
         for doc in &inventory.derived {
-            let _ = writeln!(block, "- `derived/{}`", doc.filename);
+            if let Some(scope) = &doc.scope {
+                let _ = writeln!(block, "- `derived/{}` — {}", doc.filename, scope);
+            } else {
+                let _ = writeln!(block, "- `derived/{}`", doc.filename);
+            }
         }
         block.push('\n');
     }
@@ -334,6 +338,41 @@ mod tests {
 
         assert!(block.contains("raw/REQUIREMENTS_1.md"));
         assert!(block.contains("derived/PROJECT.md"));
+        assert!(
+            block.contains("derived/PROJECT.md` — overview"),
+            "scope comment should appear next to its document"
+        );
+    }
+
+    #[test]
+    fn inventory_block_omits_scope_suffix_when_none() {
+        let inventory = DocumentInventory {
+            raw: vec![],
+            derived: vec![
+                crate::storage::DerivedDocumentInfo {
+                    filename: "PROJECT.md".to_owned(),
+                    scope: Some("overview".to_owned()),
+                },
+                crate::storage::DerivedDocumentInfo {
+                    filename: "NOTES.md".to_owned(),
+                    scope: None,
+                },
+            ],
+        };
+        let block = document_inventory_block(&inventory);
+
+        assert!(
+            block.contains("derived/PROJECT.md` — overview"),
+            "should render scope when present"
+        );
+        assert!(
+            block.contains("- `derived/NOTES.md`\n"),
+            "should render without scope suffix when None"
+        );
+        assert!(
+            !block.contains("NOTES.md` —"),
+            "should not have dash suffix for None scope"
+        );
     }
 
     #[test]

@@ -186,7 +186,8 @@ The storage layer (`vault/src/storage.rs`) is the foundational module that all v
 - **`DocumentRef`** -- Lightweight reference to a document by filename.
 - **`RawDocumentVersion`** -- Parsed raw document with base name, version number, and filename.
 - **`DerivedValidationWarning`** -- Warning produced when a derived document fails filename or header validation.
-- **`DocumentInventory`** -- Combined listing of all raw and derived documents.
+- **`DerivedDocumentInfo`** -- A derived document filename paired with its optional scope comment (extracted from the `<!-- scope: ... -->` line).
+- **`DocumentInventory`** -- Combined listing of all raw documents and derived documents with scope comments. The prompt block renders scope text alongside each derived entry.
 
 ### Design Decisions
 

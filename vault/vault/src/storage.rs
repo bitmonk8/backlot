@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -78,11 +78,18 @@ pub struct DerivedValidationWarning {
     pub reason: String,
 }
 
+/// A derived document with its filename and optional scope comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedDocumentInfo {
+    pub filename: String,
+    pub scope: Option<String>,
+}
+
 /// Full inventory of the storage root.
 #[derive(Debug, Clone, Default)]
 pub struct DocumentInventory {
     pub raw: Vec<RawDocumentVersion>,
-    pub derived: Vec<DocumentRef>,
+    pub derived: Vec<DerivedDocumentInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -364,10 +371,21 @@ impl Storage {
 
     // -- inventory --
 
-    /// Build a full document inventory (raw + derived).
+    /// Build a full document inventory (raw + derived with scope comments).
     pub fn inventory(&self) -> Result<DocumentInventory, StorageError> {
         let raw = self.list_all_raw()?;
-        let derived = self.list_derived()?;
+        let doc_refs = self.list_derived()?;
+        let derived_dir = self.derived_dir();
+        let derived = doc_refs
+            .into_iter()
+            .map(|doc| {
+                let scope = extract_scope_comment(&derived_dir.join(&doc.filename));
+                DerivedDocumentInfo {
+                    filename: doc.filename,
+                    scope,
+                }
+            })
+            .collect();
         Ok(DocumentInventory { raw, derived })
     }
 
@@ -397,6 +415,33 @@ impl Storage {
         }
         versions.sort_by(|a, b| a.filename.cmp(&b.filename));
         Ok(versions)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scope comment extraction
+// ---------------------------------------------------------------------------
+
+/// Read the second line of a file and extract the scope text from
+/// `<!-- scope: ... -->`. Returns `None` if the file can't be read or the
+/// second line doesn't match the expected pattern.
+fn extract_scope_comment(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    parse_scope_from_content(&content)
+}
+
+/// Parse the scope text from file content. Expects the second line to match
+/// `<!-- scope: ... -->`. Returns `None` if missing or empty.
+fn parse_scope_from_content(content: &str) -> Option<String> {
+    let second_line = content.lines().nth(1)?;
+    let trimmed = second_line.trim();
+    let rest = trimmed.strip_prefix("<!-- scope:")?;
+    let scope = rest.strip_suffix("-->")?;
+    let scope = scope.trim();
+    if scope.is_empty() {
+        None
+    } else {
+        Some(scope.to_owned())
     }
 }
 
@@ -955,6 +1000,38 @@ mod tests {
         let inv = storage.inventory().unwrap();
         assert_eq!(inv.raw.len(), 3);
         assert_eq!(inv.derived.len(), 2);
+
+        let design = inv
+            .derived
+            .iter()
+            .find(|d| d.filename == "DESIGN.md")
+            .unwrap();
+        assert_eq!(design.scope.as_deref(), Some("y"));
+        let project = inv
+            .derived
+            .iter()
+            .find(|d| d.filename == "PROJECT.md")
+            .unwrap();
+        assert_eq!(project.scope.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn inventory_scope_none_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        let derived = storage.derived_dir();
+        // No scope comment on second line
+        fs::write(derived.join("NOTES.md"), "# Notes\nJust some text\n").unwrap();
+        // Only one line, no second line at all
+        fs::write(derived.join("EMPTY.md"), "# Empty").unwrap();
+
+        let inv = storage.inventory().unwrap();
+        assert_eq!(inv.derived.len(), 2);
+        for doc in &inv.derived {
+            assert_eq!(doc.scope, None, "scope should be None for {}", doc.filename);
+        }
     }
 
     #[test]
@@ -978,6 +1055,61 @@ mod tests {
         let names: Vec<&str> = inv.raw.iter().map(|r| r.filename.as_str()).collect();
         assert!(names.contains(&"FINDINGS_1.md"));
         assert!(names.contains(&"REQUIREMENTS_1.md"));
+    }
+
+    // -- parse_scope_from_content --
+
+    #[test]
+    fn parse_scope_standard() {
+        let content = "# Title\n<!-- scope: project overview -->\n";
+        assert_eq!(
+            parse_scope_from_content(content).as_deref(),
+            Some("project overview")
+        );
+    }
+
+    #[test]
+    fn parse_scope_no_space_after_colon() {
+        let content = "# Title\n<!-- scope:compact -->\n";
+        assert_eq!(
+            parse_scope_from_content(content).as_deref(),
+            Some("compact")
+        );
+    }
+
+    #[test]
+    fn parse_scope_extra_whitespace() {
+        let content = "# Title\n<!-- scope:   padded   -->\n";
+        assert_eq!(parse_scope_from_content(content).as_deref(), Some("padded"));
+    }
+
+    #[test]
+    fn parse_scope_empty_value() {
+        let content = "# Title\n<!-- scope: -->\n";
+        assert_eq!(parse_scope_from_content(content), None);
+    }
+
+    #[test]
+    fn parse_scope_missing_second_line() {
+        assert_eq!(parse_scope_from_content("# Title"), None);
+    }
+
+    #[test]
+    fn parse_scope_wrong_prefix() {
+        let content = "# Title\n<!-- other: something -->\n";
+        assert_eq!(parse_scope_from_content(content), None);
+    }
+
+    #[test]
+    fn parse_scope_no_closing_tag() {
+        let content = "# Title\n<!-- scope: unclosed\n";
+        assert_eq!(parse_scope_from_content(content), None);
+    }
+
+    #[test]
+    fn parse_scope_on_third_line_not_second() {
+        let content = "# Title\n\n<!-- scope: too late -->\n";
+        assert_eq!(parse_scope_from_content(content), None);
     }
 
     // -- timestamp --

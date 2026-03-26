@@ -2,19 +2,6 @@
 
 **Severity scale:** MUST-FIX (functional impact, fix before ship) · NON-CRITICAL (spec/impl mismatch, no functional harm) · NIT (cosmetic or stylistic)
 
-## MUST-FIX
-
-#### 1: Document inventory block omits scope comments for derived documents
-
-**Status:** Real divergence. **Resolution: Fix implementation.**
-
-The spec requires the inventory to list "derived/ documents with their scope comments" (SPEC.md:379). The implementation lists filenames only. This matters: the scope comment tells the librarian what each document covers, which directly affects placement decisions during record and reorganize. Without it, the librarian must read each document to understand its purpose, wasting tokens and risking mis-placement.
-
-The fix is straightforward: when building the inventory block, read the second line of each derived document (the `<!-- scope: ... -->` comment) and include it in the listing.
-
-- **Spec:** "derived/ documents with their scope comments, raw/ documents listed by filename only" (`SPEC.md:379`)
-- **Impl:** Lists `- derived/FILENAME.md` with no scope text (`prompts.rs:60-65`)
-
 ## NON-CRITICAL
 
 #### 2: `BootstrapError` uses `Storage(String)` instead of `Io(std::io::Error)`

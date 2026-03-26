@@ -17,7 +17,7 @@
   - Raw document write/read with `NAME_N.md` versioning
   - Name validation (`^[A-Z][A-Z0-9_]*[A-Z0-9]$`)
   - Derived document listing, filename validation, and content validation
-  - Full document inventory (raw + derived)
+  - Full document inventory (raw + derived with scope comments)
   - UTC timestamp generation
   - `snapshot_derived()`, `compute_changed()`, and `compute_deleted()` for before/after derived document comparison
 - Public API (`vault/src/lib.rs`):
