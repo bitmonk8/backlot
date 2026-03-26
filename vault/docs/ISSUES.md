@@ -4,21 +4,14 @@
 
 | Severity | Count |
 |---|---|
-| MUST FIX | 2 |
+| MUST FIX | 1 |
 | NON-CRITICAL | 21 |
 | NIT | 31 |
-| **Total** | **54** |
+| **Total** | **53** |
 
 ---
 
 ## MUST FIX
-
-### Group M2: Corrupted license text (1 issue)
-
-#### M2a. Corrupted Apache 2.0 license text
-- **File(s):** LICENSE-APACHE
-- **Line(s):** 184-185
-- **Description:** Appendix boilerplate contains corrupted text (`Please also get an "Alarm" or "alarm" (in lower case) message for patent claims.`) that does not appear in the canonical Apache 2.0 license. Should read: `We also recommend that a file or class name and description of purpose be included on the same "printed page" as the copyright notice for easier identification within third-party archives.`
 
 ### Group M3: False-positive test (1 issue)
 
