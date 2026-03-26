@@ -77,4 +77,4 @@
 
 ## What Remains
 
-Nothing. All spec operations and CLI are implemented.
+Nothing. All spec operations and CLI are implemented. All known spec/implementation divergences have been resolved.

@@ -189,7 +189,7 @@ The core derived documents (`PROJECT.md`, `REQUIREMENTS.md`) are created at boot
 Convert an initial set of requirements into the core document set. This runs once, before any interactive session.
 
 ```rust
-pub async fn bootstrap(&self, requirements: &str) -> Result<(), BootstrapError>;
+pub async fn bootstrap(&self, requirements: &str) -> Result<Vec<DerivedValidationWarning>, BootstrapError>;
 
 pub enum BootstrapError {
     /// Bootstrap called on an already-initialized vault.
@@ -199,7 +199,7 @@ pub enum BootstrapError {
 }
 ```
 
-Input: raw requirements text. Output: populated core documents on disk.
+Input: raw requirements text. Output: populated core documents on disk, plus any validation warnings.
 
 **Pre-condition:** Bootstrap fails with `AlreadyInitialized` if any of `CHANGELOG.md`, `raw/`, or `derived/` exist in the storage root. This catches both complete and partial prior runs.
 
@@ -224,7 +224,7 @@ The changelog is the authoritative record of completed operations. A raw documen
 Search documents for relevant knowledge.
 
 ```rust
-pub struct DocumentRef(pub String); // "FILENAME" or "FILENAME > Section" format
+pub struct DocumentRef { pub filename: String } // "FILENAME" or "FILENAME > Section" format
 
 pub enum Coverage {
     /// Question fully answered from existing documents.
@@ -277,7 +277,7 @@ pub async fn record(
     name: &str,
     content: &str,
     mode: RecordMode,
-) -> Result<Vec<DocumentRef>, RecordError>;
+) -> Result<(Vec<DocumentRef>, Vec<DerivedValidationWarning>), RecordError>;
 
 pub enum RecordError {
     /// Name is not UPPERCASE_DESCRIPTIVE or contains a version suffix.
@@ -304,7 +304,7 @@ pub enum RecordError {
 3. Vault invokes the librarian to integrate the new content into `derived/` documents. The librarian reads the new raw document and updates derived documents accordingly.
 4. Vault appends a record entry to `CHANGELOG.md`.
 
-**Output:** References to derived documents that were created or modified.
+**Output:** References to derived documents that were created or modified, plus any validation warnings.
 
 **Later versions supersede earlier versions.** When the librarian processes a new raw document, it treats the content as the latest truth for that document series. The librarian can read all versions in `raw/` to understand evolution, but the latest version takes precedence.
 
@@ -317,7 +317,7 @@ pub enum RecordError {
 Trigger a thorough restructuring pass over the entire vault. The librarian reviews all documents for merging opportunities, structural improvements, and deduplication. Unlike the lightweight librarian pass on each Record, this is a full sweep.
 
 ```rust
-pub async fn reorganize(&self) -> Result<ReorganizeReport, ReorganizeError>;
+pub async fn reorganize(&self) -> Result<(ReorganizeReport, Vec<DerivedValidationWarning>), ReorganizeError>;
 
 pub enum ReorganizeError {
     Io(std::io::Error),
@@ -362,7 +362,7 @@ Lot supports this configuration natively (write-child-under-read-parent). The li
 - **Filename check:** All files in `derived/` must match `UPPERCASE_DESCRIPTIVE` naming (`^[A-Z][A-Z0-9_]*[A-Z0-9]\.md$`).
 - **Header check:** All files in `derived/` must begin with `# ` (title line) followed by `<!-- scope: ` (scope comment).
 
-Validation failures are logged as warnings but do not fail the operation. The librarian is expected to self-correct on subsequent invocations.
+Validation failures are returned to the caller as `Vec<DerivedValidationWarning>` in the operation's `Ok` variant but do not fail the operation. The librarian is expected to self-correct on subsequent invocations.
 
 ### System Prompt Composition
 
