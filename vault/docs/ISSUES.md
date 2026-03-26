@@ -4,20 +4,6 @@
 
 ## NON-CRITICAL
 
-#### 2: `BootstrapError` uses `Storage(String)` instead of `Io(std::io::Error)`
-
-**Status:** Real divergence, but scoped to `BootstrapError` only. **Resolution: Fix implementation.**
-
-The spec defines `Io(std::io::Error)` for `BootstrapError`. The implementation uses `Storage(String)` instead. However, `RecordError`, `QueryError`, and `ReorganizeError` all use `Io(std::io::Error)` matching the spec — only `BootstrapError` diverges.
-
-The original analysis claimed "all four error enums use `Storage(String)` consistently" — this is incorrect. `RecordError` maps `StorageError` variants individually (preserving `InvalidName`, `VersionConflict`, `DocumentNotFound`, and `Io`). `QueryError` and `ReorganizeError` use `Io(#[from] std::io::Error)` directly, with `From<StorageError>` wrapping via `std::io::Error::other()`.
-
-`BootstrapError` should be updated to use `Io(std::io::Error)` for consistency with the other three error enums and the spec. The `From<StorageError>` impl can wrap via `std::io::Error::other()`, matching the `ReorganizeError` pattern.
-
-- **Spec:** `Io(std::io::Error)` variant (`SPEC.md:197`)
-- **Impl:** `Storage(String)` variant (`lib.rs:59-60`), `From<StorageError>` converts via `.to_string()` (`lib.rs:66-70`)
-- **RecordError, QueryError, ReorganizeError:** All use `Io(std::io::Error)`, matching spec (`lib.rs:92-93, 138-139, 147-148`)
-
 #### 3: `bootstrap()` return type diverges from spec
 
 **Status:** Real divergence. **Resolution: Update spec.**

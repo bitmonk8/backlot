@@ -56,8 +56,8 @@ pub enum BootstrapError {
     #[error("bootstrap called on an already-initialized vault")]
     AlreadyInitialized,
 
-    #[error("storage error: {0}")]
-    Storage(String),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 
     #[error("librarian failed: {0}")]
     LibrarianFailed(String),
@@ -65,7 +65,7 @@ pub enum BootstrapError {
 
 impl From<storage::StorageError> for BootstrapError {
     fn from(e: storage::StorageError) -> Self {
-        Self::Storage(e.to_string())
+        Self::Io(std::io::Error::other(e.to_string()))
     }
 }
 
