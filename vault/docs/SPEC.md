@@ -224,7 +224,7 @@ The changelog is the authoritative record of completed operations. A raw documen
 Search documents for relevant knowledge.
 
 ```rust
-pub struct DocumentRef { pub filename: String } // "FILENAME" or "FILENAME > Section" format
+pub struct DocumentRef { pub filename: String }
 
 pub enum Coverage {
     /// Question fully answered from existing documents.
