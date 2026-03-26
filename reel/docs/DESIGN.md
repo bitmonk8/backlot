@@ -37,7 +37,7 @@ thin wrapper for config parsing and output formatting.
 
 | Crate | Purpose |
 |---|---|
-| `flick` (git, rev `c827fda`) | LLM client: RequestConfig, FlickClient, Context, ModelRegistry, ProviderRegistry |
+| `flick` (git, rev `5164736`) | LLM client: RequestConfig, FlickClient, Context, ModelRegistry, ProviderRegistry |
 | `lot` (git, rev `30bd25f`) | Process sandboxing: SandboxPolicy, SandboxCommand, spawn, AppContainer/namespaces/Seatbelt |
 | `tokio` | Async runtime (rt-multi-thread, macros, time, sync, process, fs, signal, io-util) |
 | `anyhow` | Error handling |
@@ -69,11 +69,20 @@ pub struct AgentRequestConfig {
     pub write_paths: Vec<PathBuf>,    // fine-grained writable subdirectories
 }
 
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cost_usd: f64,
+}
+
 pub struct RunResult<T> {
     pub output: T,
     pub usage: Option<Usage>,
     pub tool_calls: u32,
     pub response_hash: Option<String>,
+    pub transcript: Vec<TurnRecord>,
 }
 ```
 
@@ -109,6 +118,15 @@ grant flags directly.
 Custom tool dispatch uses a `HashMap<String, usize>` index built at dispatch time
 for O(1) lookup. Custom tools are checked first via the HashMap (allows consumers
 to override built-in tools), then built-in tools via the tool executor.
+
+### Transcript Recording
+
+The tool loop records a `Vec<TurnRecord>` with one entry per model call.
+Each `TurnRecord` has tool call records (name, id, input JSON), per-turn
+`Usage` (including cache token fields), and API latency from `flick::Timing`.
+Turns with non-empty `tool_calls` were followed by tool execution before the
+next turn. The transcript is attached to `RunResult` for post-session analysis
+without external polling.
 
 `extract_text()` extracts the last text content block from the model response
 (reverse iterator for efficiency).
@@ -475,4 +493,4 @@ and reusability.
 | Test (Windows) | windows-latest | `--locked`, 15 min timeout |
 
 Rust toolchain: 1.93.1. Dependencies pinned to git revs (lot `30bd25f`, flick
-`c827fda`).
+`5164736`).

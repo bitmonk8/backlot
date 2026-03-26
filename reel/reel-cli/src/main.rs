@@ -80,7 +80,16 @@ struct SuccessOutput {
 struct UsageOutput {
     input_tokens: u64,
     output_tokens: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    cache_creation_input_tokens: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    cache_read_input_tokens: u64,
     cost_usd: f64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Serialize)]
@@ -247,6 +256,8 @@ async fn cmd_run(args: RunArgs) -> Result<(), String> {
         usage: result.usage.map(|u| UsageOutput {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens,
+            cache_read_input_tokens: u.cache_read_input_tokens,
             cost_usd: u.cost_usd,
         }),
         tool_calls: result.tool_calls,
@@ -508,6 +519,8 @@ grant: []
             usage: Some(UsageOutput {
                 input_tokens: 100,
                 output_tokens: 50,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
                 cost_usd: 0.001,
             }),
             tool_calls: 3,
@@ -520,6 +533,62 @@ grant: []
         assert_eq!(parsed["usage"]["input_tokens"], 100);
         assert_eq!(parsed["tool_calls"], 3);
         assert_eq!(parsed["response_hash"], "abc123");
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache token field tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn usage_output_omits_zero_cache_fields() {
+        let output = UsageOutput {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost_usd: 0.001,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("cache_creation_input_tokens").is_none());
+        assert!(parsed.get("cache_read_input_tokens").is_none());
+        assert_eq!(parsed["input_tokens"], 100);
+    }
+
+    #[test]
+    fn usage_output_includes_nonzero_cache_fields() {
+        let output = UsageOutput {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 200,
+            cache_read_input_tokens: 300,
+            cost_usd: 0.005,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["cache_creation_input_tokens"], 200);
+        assert_eq!(parsed["cache_read_input_tokens"], 300);
+    }
+
+    #[test]
+    fn success_output_includes_cache_fields() {
+        let output = SuccessOutput {
+            status: "Ok",
+            content: serde_json::json!({"key": "value"}),
+            usage: Some(UsageOutput {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_input_tokens: 400,
+                cache_read_input_tokens: 500,
+                cost_usd: 0.01,
+            }),
+            tool_calls: 1,
+            response_hash: None,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["usage"]["cache_creation_input_tokens"], 400);
+        assert_eq!(parsed["usage"]["cache_read_input_tokens"], 500);
     }
 
     // -----------------------------------------------------------------------

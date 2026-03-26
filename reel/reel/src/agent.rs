@@ -80,7 +80,43 @@ pub struct AgentRequestConfig {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
     pub cost_usd: f64,
+}
+
+impl From<&flick::result::UsageSummary> for Usage {
+    fn from(u: &flick::result::UsageSummary) -> Self {
+        Self {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens,
+            cache_read_input_tokens: u.cache_read_input_tokens,
+            cost_usd: u.cost_usd,
+        }
+    }
+}
+
+/// A single model call in the agent session transcript.
+///
+/// Each entry corresponds to one model response. Turns with non-empty
+/// `tool_calls` were followed by tool execution before the next turn.
+#[derive(Debug, Clone)]
+pub struct TurnRecord {
+    /// Tool calls the model requested in this turn (empty for final turns).
+    pub tool_calls: Vec<ToolCallRecord>,
+    /// Token usage for this model call.
+    pub usage: Option<Usage>,
+    /// API latency in milliseconds for this model call.
+    pub api_latency_ms: Option<u64>,
+}
+
+/// Record of a single tool call within a turn.
+#[derive(Debug, Clone)]
+pub struct ToolCallRecord {
+    pub tool_use_id: String,
+    pub name: String,
+    pub input: serde_json::Value,
 }
 
 /// Result of an agent run.
@@ -90,6 +126,8 @@ pub struct RunResult<T> {
     pub usage: Option<Usage>,
     pub tool_calls: u32,
     pub response_hash: Option<String>,
+    /// Session transcript: one entry per model call, in order.
+    pub transcript: Vec<TurnRecord>,
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +315,8 @@ impl Agent {
             bail!("model requested tool calls in structured-only (no-tool) context");
         }
 
-        finalize_result(&result, 0)
+        let transcript = vec![build_assistant_turn(&result)];
+        finalize_result(&result, 0, transcript)
     }
 
     // -----------------------------------------------------------------------
@@ -309,6 +348,8 @@ impl Agent {
             .map(|(i, h)| (h.definition().name, i))
             .collect();
 
+        let mut transcript = Vec::new();
+
         let mut result = tokio::time::timeout(self.timeout, client.run(query, &mut context))
             .await
             .map_err(|_| anyhow::anyhow!("agent call timed out after {:?}", self.timeout))?
@@ -320,6 +361,9 @@ impl Agent {
             if !matches!(result.status, ResultStatus::ToolCallsPending) {
                 break;
             }
+
+            // Record the assistant turn (with tool calls).
+            transcript.push(build_assistant_turn(&result));
 
             let tool_calls = extract_tool_calls(&result)?;
             total_tool_calls += tool_calls.len() as u32;
@@ -354,6 +398,9 @@ impl Agent {
                 .map_err(|e| anyhow::anyhow!("agent resume failed: {e}"))?;
         }
 
+        // Record the final assistant turn.
+        transcript.push(build_assistant_turn(&result));
+
         if matches!(result.status, ResultStatus::ToolCallsPending) {
             nu_session.kill().await;
             bail!("agent tool loop exceeded {MAX_TOOL_ROUNDS} rounds");
@@ -363,7 +410,7 @@ impl Agent {
 
         check_error(&result)?;
 
-        finalize_result(&result, total_tool_calls)
+        finalize_result(&result, total_tool_calls, transcript)
     }
 
     // -----------------------------------------------------------------------
@@ -404,9 +451,35 @@ impl Agent {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn build_assistant_turn(result: &flick::FlickResult) -> TurnRecord {
+    let tool_calls: Vec<ToolCallRecord> = result
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            flick::ContentBlock::ToolUse { id, name, input } => Some(ToolCallRecord {
+                tool_use_id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+
+    let usage = result.usage.as_ref().map(Usage::from);
+
+    let api_latency_ms = result.timing.as_ref().map(|t| t.api_latency_ms);
+
+    TurnRecord {
+        tool_calls,
+        usage,
+        api_latency_ms,
+    }
+}
+
 fn finalize_result<T: DeserializeOwned>(
     result: &flick::FlickResult,
     tool_calls: u32,
+    transcript: Vec<TurnRecord>,
 ) -> anyhow::Result<RunResult<T>> {
     let text = extract_text(result)?;
     // Try JSON parse first. If the text isn't valid JSON (e.g. free-form
@@ -418,17 +491,14 @@ fn finalize_result<T: DeserializeOwned>(
             .with_context(|| format!("failed to parse model output ({orig_err}): {text}"))
     })?;
 
-    let usage = result.usage.as_ref().map(|u| Usage {
-        input_tokens: u.input_tokens,
-        output_tokens: u.output_tokens,
-        cost_usd: u.cost_usd,
-    });
+    let usage = result.usage.as_ref().map(Usage::from);
 
     Ok(RunResult {
         output,
         usage,
         tool_calls,
         response_hash: result.context_hash.clone(),
+        transcript,
     })
 }
 
@@ -498,6 +568,7 @@ mod tests {
                 },
             ],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
@@ -515,6 +586,7 @@ mod tests {
                 signature: String::new(),
             }],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
@@ -536,6 +608,7 @@ mod tests {
                 },
             ],
             usage: None,
+            timing: None,
             context_hash: Some("abc123".into()),
             error: None,
         };
@@ -551,6 +624,7 @@ mod tests {
             status: ResultStatus::Error,
             content: vec![],
             usage: None,
+            timing: None,
             context_hash: None,
             error: Some(flick::result::ResultError {
                 message: "rate limited".into(),
@@ -570,6 +644,7 @@ mod tests {
             status: ResultStatus::Complete,
             content: vec![],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
@@ -582,6 +657,7 @@ mod tests {
             status: ResultStatus::Error,
             content: vec![],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
@@ -598,6 +674,7 @@ mod tests {
             status: ResultStatus::ToolCallsPending,
             content: vec![],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
@@ -612,6 +689,7 @@ mod tests {
                 text: "thinking...".into(),
             }],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
@@ -777,6 +855,52 @@ mod tests {
         assert_eq!(r.output["done"], true);
         assert_eq!(tool_calls.load(Ordering::Relaxed), 1);
         assert_eq!(r.tool_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_produces_multi_turn_transcript() {
+        let agent = test_agent(
+            mock_client_factory(|| {
+                MultiShotProvider::new(vec![
+                    // Turn 1: model requests two tool calls.
+                    tool_call_response(vec![
+                        flick::provider::ToolCallResponse {
+                            call_id: "tc_a".into(),
+                            tool_name: "Read".into(),
+                            arguments: r#"{"file_path":"/tmp/a"}"#.into(),
+                        },
+                        flick::provider::ToolCallResponse {
+                            call_id: "tc_b".into(),
+                            tool_name: "Glob".into(),
+                            arguments: r#"{"pattern":"*.rs"}"#.into(),
+                        },
+                    ]),
+                    // Turn 2: model completes.
+                    text_response(r#"{"done":true}"#),
+                ])
+            }),
+            Box::new(CountingToolExecutor {
+                call_count: Arc::new(AtomicU32::new(0)),
+            }),
+        );
+        let mut request = test_request();
+        request.grant = ToolGrant::TOOLS;
+        let r: RunResult<serde_json::Value> = agent.run(&request, "test").await.unwrap();
+
+        // Two transcript entries: tool-call turn + final turn.
+        assert_eq!(r.transcript.len(), 2);
+
+        // First turn: model requested 2 tool calls.
+        assert_eq!(r.transcript[0].tool_calls.len(), 2);
+        assert_eq!(r.transcript[0].tool_calls[0].name, "Read");
+        assert_eq!(r.transcript[0].tool_calls[1].name, "Glob");
+        assert_eq!(
+            r.transcript[0].tool_calls[0].input,
+            serde_json::json!({"file_path": "/tmp/a"})
+        );
+
+        // Second turn: final response, no tool calls.
+        assert!(r.transcript[1].tool_calls.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -1637,10 +1761,11 @@ mod tests {
                 text: "This is plain text, not JSON.".into(),
             }],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
-        let run: RunResult<serde_json::Value> = finalize_result(&result, 0).unwrap();
+        let run: RunResult<serde_json::Value> = finalize_result(&result, 0, Vec::new()).unwrap();
         assert!(
             run.output.is_string(),
             "expected Value::String for plain text fallback, got: {:?}",
@@ -1661,10 +1786,11 @@ mod tests {
                 text: r#"{"key": "value"}"#.into(),
             }],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
-        let run: RunResult<serde_json::Value> = finalize_result(&result, 5).unwrap();
+        let run: RunResult<serde_json::Value> = finalize_result(&result, 5, Vec::new()).unwrap();
         assert!(run.output.is_object());
         assert_eq!(run.output["key"], "value");
         assert_eq!(run.tool_calls, 5);
@@ -1677,10 +1803,11 @@ mod tests {
             status: ResultStatus::Complete,
             content: vec![],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
-        let err = finalize_result::<serde_json::Value>(&result, 0);
+        let err = finalize_result::<serde_json::Value>(&result, 0, Vec::new());
         assert!(err.is_err(), "empty content should produce an error");
         let msg = err.unwrap_err().to_string();
         assert!(
@@ -1705,13 +1832,109 @@ mod tests {
                 text: "not a StrictStruct".into(),
             }],
             usage: None,
+            timing: None,
             context_hash: None,
             error: None,
         };
-        let err = finalize_result::<StrictStruct>(&result, 0);
+        let err = finalize_result::<StrictStruct>(&result, 0, Vec::new());
         assert!(
             err.is_err(),
             "plain text should fail to deserialize into StrictStruct"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache token fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn usage_preserves_cache_fields() {
+        let result = flick::FlickResult {
+            status: ResultStatus::Complete,
+            content: vec![flick::ContentBlock::Text {
+                text: r#"{"ok":true}"#.into(),
+            }],
+            usage: Some(flick::result::UsageSummary {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_input_tokens: 200,
+                cache_read_input_tokens: 300,
+                cost_usd: 0.005,
+            }),
+            timing: Some(flick::Timing {
+                api_latency_ms: 150,
+            }),
+            context_hash: None,
+            error: None,
+        };
+        let run_result: RunResult<serde_json::Value> =
+            finalize_result(&result, 0, Vec::new()).unwrap();
+        let usage = run_result.usage.unwrap();
+        assert_eq!(usage.cache_creation_input_tokens, 200);
+        assert_eq!(usage.cache_read_input_tokens, 300);
+        assert_eq!(usage.input_tokens, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // Transcript recording
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transcript_single_turn_structured() {
+        let result = flick::FlickResult {
+            status: ResultStatus::Complete,
+            content: vec![flick::ContentBlock::Text {
+                text: r#"{"ok":true}"#.into(),
+            }],
+            usage: Some(flick::result::UsageSummary {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                cost_usd: 0.001,
+            }),
+            timing: Some(flick::Timing { api_latency_ms: 42 }),
+            context_hash: None,
+            error: None,
+        };
+        let transcript = vec![build_assistant_turn(&result)];
+        let run_result: RunResult<serde_json::Value> =
+            finalize_result(&result, 0, transcript).unwrap();
+        assert_eq!(run_result.transcript.len(), 1);
+        assert!(run_result.transcript[0].tool_calls.is_empty());
+        assert_eq!(run_result.transcript[0].api_latency_ms, Some(42));
+        assert!(run_result.transcript[0].usage.is_some());
+    }
+
+    #[test]
+    fn build_assistant_turn_captures_tool_calls() {
+        let result = flick::FlickResult {
+            status: ResultStatus::ToolCallsPending,
+            content: vec![
+                flick::ContentBlock::Text {
+                    text: "let me check".into(),
+                },
+                flick::ContentBlock::ToolUse {
+                    id: "tc_1".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({"file_path": "/tmp/x"}),
+                },
+                flick::ContentBlock::ToolUse {
+                    id: "tc_2".into(),
+                    name: "Glob".into(),
+                    input: serde_json::json!({"pattern": "*.rs"}),
+                },
+            ],
+            usage: None,
+            timing: None,
+            context_hash: None,
+            error: None,
+        };
+        let turn = build_assistant_turn(&result);
+        assert_eq!(turn.tool_calls.len(), 2);
+        assert_eq!(turn.tool_calls[0].name, "Read");
+        assert_eq!(turn.tool_calls[1].name, "Glob");
+        assert!(turn.usage.is_none());
+        assert!(turn.api_latency_ms.is_none());
     }
 }

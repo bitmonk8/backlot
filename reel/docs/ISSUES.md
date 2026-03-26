@@ -167,19 +167,3 @@ Groups ordered by severity descending (MUST FIX → NON-CRITICAL → NIT), then 
 ### 18.2 No test for write_paths outside project root
 - **File:** reel/src/nu_session.rs
 - No test documents behavior when a `write_paths` entry is outside the project root. Lot is expected to reject this at policy-build time, but there is no test confirming it.
-
----
-
-## Group 19: Observability [NON-CRITICAL]
-**Source:** rig integration testing
-
-### 19.1 No session transcript (F-007)
-- **File:** reel/src/agent.rs
-- Reel runs the multi-turn tool loop but does not capture or expose a session transcript. The agent loop already has all the data — tool calls, tool results, per-turn usage, model responses — but none of it is surfaced. Diagnosing session performance currently requires external filesystem polling with ±2s accuracy and no visibility into Read calls, retries, or per-turn token counts.
-- **Proposed:** `RunResult` gains an optional `transcript: Vec<TurnRecord>` field. Each `TurnRecord` captures role (assistant/tool_results), tool calls with args, usage per turn (including cache fields from flick), and latency.
-
-### 19.2 Usage struct strips cache token fields (F-008)
-- **File:** reel/src/agent.rs (Usage struct and conversion at ~line 421)
-- Reel's `Usage` struct has only `input_tokens`, `output_tokens`, and `cost_usd`. When converting from flick's `UsageSummary`, it discards `cache_creation_input_tokens` and `cache_read_input_tokens`. Even if flick enables prompt caching, the cache hit/miss telemetry would be lost at the reel layer.
-- **Note:** Also blocks observability for F-004 (flick prompt caching). Both fields should be added to `Usage` and preserved through the conversion.
-

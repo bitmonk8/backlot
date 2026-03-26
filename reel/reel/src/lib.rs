@@ -11,7 +11,10 @@ pub mod sandbox;
 pub mod tools;
 
 // Re-export public API types.
-pub use agent::{Agent, AgentEnvironment, AgentRequestConfig, RunResult, ToolHandler, Usage};
+pub use agent::{
+    Agent, AgentEnvironment, AgentRequestConfig, RunResult, ToolCallRecord, ToolHandler,
+    TurnRecord, Usage,
+};
 /// Describes a tool's name, description, and JSON Schema parameters as seen
 /// by the model.
 pub use tools::ToolDefinition;
