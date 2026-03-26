@@ -4,16 +4,7 @@ Issues identified during review but deferred for later resolution.
 
 ---
 
-## 1. `input_tokens` semantics differ between providers
-
-**File:** `flick/src/provider/chat_completions.rs`, `flick/src/provider/messages.rs`
-**Category:** Correctness
-
-Chat Completions reports non-cached input tokens (prompt_tokens minus cached_tokens). Messages API reports total input tokens as-is. Both are correct for their respective APIs and cost computation works correctly, but `UsageSummary.input_tokens` has different semantics across providers for reporting purposes.
-
----
-
-## 2. Structured output not validated or cleaned
+## 1. Structured output not validated or cleaned
 
 **File:** `flick/src/runner.rs`
 **Category:** Bug / Enhancement
@@ -30,7 +21,7 @@ Since flick owns the `output_schema` feature, it should: (a) strip code fences f
 
 ---
 
-## 3. No Anthropic prompt caching
+## 2. No Anthropic prompt caching
 
 **File:** `flick/src/provider/messages.rs`
 **Category:** Enhancement (performance)
@@ -42,17 +33,7 @@ Impact observed in vault tests: bootstrap (Sonnet, 4 tool calls) takes 47s; reco
 
 ---
 
-## 4. No per-call timing in output
-
-**File:** `flick/src/runner.rs`
-**Category:** Enhancement (observability)
-**Source:** rig integration testing (F-006)
-
-Flick returns structured JSON per call but does not include API latency. Adding a `timing` field (e.g., `{ "api_latency_ms": N }`) to the response would give per-call diagnostics to every consumer (reel, vault, anything else) for free.
-
----
-
-## 5. `validate_resolved_from_provider_info` adapter could be inlined
+## 3. `validate_resolved_from_provider_info` adapter could be inlined
 
 **File:** `flick/src/validation.rs`
 **Category:** Simplification
@@ -61,7 +42,7 @@ Thin wrapper that unpacks `ProviderInfo` fields and forwards to `validate_resolv
 
 ---
 
-## 6. `validate_assistant_content` could fold into `validate_message_structure`
+## 4. `validate_assistant_content` could fold into `validate_message_structure`
 
 **File:** `flick/src/context.rs`
 **Category:** Simplification
@@ -70,7 +51,7 @@ Thin wrapper that unpacks `ProviderInfo` fields and forwards to `validate_resolv
 
 ---
 
-## 7. FlickResult construction duplicated in runner
+## 5. FlickResult construction duplicated in runner
 
 **File:** `flick/src/runner.rs`
 **Category:** Simplification
@@ -79,7 +60,7 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 
 ---
 
-## 8. `_ = compat` dead parameter in validate_resolved
+## 6. `_ = compat` dead parameter in validate_resolved
 
 **File:** `flick/src/validation.rs`
 **Category:** Simplification
@@ -88,7 +69,7 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 
 ---
 
-## 9. `CompatFlags` placement in provider_registry
+## 7. `CompatFlags` placement in provider_registry
 
 **File:** `flick/src/provider_registry.rs`
 **Category:** Separation of concerns
@@ -97,7 +78,7 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 
 ---
 
-## 10. `flick_dir()` and `home_dir()` in provider_registry
+## 8. `flick_dir()` and `home_dir()` in provider_registry
 
 **File:** `flick/src/provider_registry.rs`
 **Category:** Separation of concerns
@@ -106,7 +87,7 @@ General path utilities unrelated to provider credential management. Other module
 
 ---
 
-## 11. `validate_resolved` naming
+## 9. `validate_resolved` naming
 
 **File:** `flick/src/validation.rs`
 **Category:** Naming
@@ -115,7 +96,7 @@ General path utilities unrelated to provider credential management. Other module
 
 ---
 
-## 12. `platform.rs` module name is broad
+## 10. `platform.rs` module name is broad
 
 **File:** `flick/src/platform.rs`
 **Category:** Naming
@@ -124,7 +105,7 @@ Currently contains only one Windows ACL function. `permissions.rs` or `fs_permis
 
 ---
 
-## 13. `crypto.rs` `provider` parameter name
+## 11. `crypto.rs` `provider` parameter name
 
 **File:** `flick/src/crypto.rs`
 **Category:** Naming
@@ -133,7 +114,7 @@ The `provider` parameter in `encrypt`/`decrypt` serves as AAD (additional authen
 
 ---
 
-## 14. `validation.rs` missing branch coverage
+## 12. `validation.rs` missing branch coverage
 
 **File:** `flick/src/validation.rs`
 **Category:** Testing
@@ -142,7 +123,7 @@ Missing tests for: ChatCompletions temperature > 2.0, reasoning+output_schema al
 
 ---
 
-## 15. `crypto.rs` missing invalid hex test
+## 13. `crypto.rs` missing invalid hex test
 
 **File:** `flick/src/crypto.rs`
 **Category:** Testing
@@ -151,9 +132,11 @@ Missing tests for: ChatCompletions temperature > 2.0, reasoning+output_schema al
 
 ---
 
-## 16. `platform.rs` has zero test coverage
+## 14. `platform.rs` has zero test coverage
 
 **File:** `flick/src/platform.rs`
 **Category:** Testing
 
 `restrict_windows_permissions` has no tests. A smoke test on Windows would catch regressions.
+
+

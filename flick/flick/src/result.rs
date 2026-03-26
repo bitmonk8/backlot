@@ -10,9 +10,16 @@ pub struct FlickResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub timing: Option<Timing>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub context_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ResultError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Timing {
+    pub api_latency_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -23,6 +30,8 @@ pub enum ResultStatus {
     Error,
 }
 
+/// Token usage aggregated across calls.
+/// `input_tokens` is non-cached input tokens (total minus `cache_creation` and `cache_read`).
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageSummary {
     pub input_tokens: u64,
@@ -64,6 +73,9 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cost_usd: 0.0032,
             }),
+            timing: Some(Timing {
+                api_latency_ms: 150,
+            }),
             context_hash: Some("abc123".into()),
             error: None,
         };
@@ -71,6 +83,7 @@ mod tests {
         assert_eq!(json["status"], "complete");
         assert_eq!(json["content"][0]["text"], "Done.");
         assert_eq!(json["usage"]["input_tokens"], 2400);
+        assert_eq!(json["timing"]["api_latency_ms"], 150);
         assert_eq!(json["context_hash"], "abc123");
         // error omitted when None
         assert!(json.get("error").is_none());
@@ -97,6 +110,9 @@ mod tests {
                 cache_read_input_tokens: 400,
                 cost_usd: 0.0087,
             }),
+            timing: Some(Timing {
+                api_latency_ms: 200,
+            }),
             context_hash: Some("00a1b2c3".into()),
             error: None,
         };
@@ -113,6 +129,7 @@ mod tests {
             status: ResultStatus::Error,
             content: vec![],
             usage: None,
+            timing: None,
             context_hash: None,
             error: Some(ResultError {
                 message: "Rate limit exceeded".into(),
@@ -127,6 +144,7 @@ mod tests {
         assert!(json.get("content").is_none());
         assert!(json.get("usage").is_none());
         assert!(json.get("context_hash").is_none());
+        assert!(json.get("timing").is_none());
     }
 
     #[test]

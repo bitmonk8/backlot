@@ -105,6 +105,7 @@ async fn main() {
                     status: ResultStatus::Error,
                     content: vec![],
                     usage: None,
+                    timing: None,
                     context_hash: None,
                     error: Some(ResultError {
                         message: e.to_string(),

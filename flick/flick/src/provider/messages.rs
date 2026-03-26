@@ -193,9 +193,8 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
         }
     }
 
-    // Usage
     let usage_obj = &json["usage"];
-    let input_tokens = usage_obj["input_tokens"].as_u64().unwrap_or(0);
+    let raw_input_tokens = usage_obj["input_tokens"].as_u64().unwrap_or(0);
     let output_tokens = usage_obj["output_tokens"].as_u64().unwrap_or(0);
     let cache_creation = usage_obj["cache_creation_input_tokens"]
         .as_u64()
@@ -206,12 +205,12 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
         text: if text.is_empty() { None } else { Some(text) },
         thinking,
         tool_calls,
-        usage: UsageResponse {
-            input_tokens,
+        usage: UsageResponse::normalized(
+            raw_input_tokens,
             output_tokens,
-            cache_creation_input_tokens: cache_creation,
-            cache_read_input_tokens: cache_read,
-        },
+            cache_creation,
+            cache_read,
+        ),
     })
 }
 
@@ -537,8 +536,28 @@ mod tests {
             "stop_reason": "end_turn"
         });
         let resp = parse_response(&json).expect("should parse");
-        assert_eq!(resp.usage.input_tokens, 100);
+        // input_tokens is normalized: 100 - 30 - 20 = 50
+        assert_eq!(resp.usage.input_tokens, 50);
         assert_eq!(resp.usage.cache_creation_input_tokens, 30);
+        assert_eq!(resp.usage.cache_read_input_tokens, 20);
+    }
+
+    #[test]
+    fn parse_response_cache_tokens_saturates_to_zero() {
+        let json = serde_json::json!({
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 30,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 20
+            },
+            "stop_reason": "end_turn"
+        });
+        let resp = parse_response(&json).expect("should parse");
+        // 30 - (20 + 20) = -10, saturates to 0
+        assert_eq!(resp.usage.input_tokens, 0);
+        assert_eq!(resp.usage.cache_creation_input_tokens, 20);
         assert_eq!(resp.usage.cache_read_input_tokens, 20);
     }
 

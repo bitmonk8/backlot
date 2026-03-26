@@ -50,6 +50,8 @@ async fn end_to_end_text_only() {
     assert_eq!(usage.output_tokens, 20);
     assert!(usage.cost_usd > 0.0);
 
+    assert!(result.timing.is_some(), "timing should be present");
+
     assert_eq!(context.messages.len(), 2);
     assert_eq!(context.messages[0].role, flick::context::Role::User);
     assert_eq!(context.messages[1].role, flick::context::Role::Assistant);
@@ -100,6 +102,7 @@ tools:
         .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
         .count();
     assert_eq!(tool_use_count, 1);
+    assert!(result.timing.is_some(), "timing should be present");
     assert_eq!(context.messages.len(), 2);
 }
 
@@ -446,6 +449,7 @@ fn error_result_json_output_format() {
         status: ResultStatus::Error,
         content: vec![],
         usage: None,
+        timing: None,
         context_hash: None,
         error: Some(ResultError {
             message: error.to_string(),
@@ -475,6 +479,7 @@ fn complete_result_json_output_format() {
             cache_read_input_tokens: 0,
             cost_usd: 0.001,
         }),
+        timing: Some(flick::Timing { api_latency_ms: 42 }),
         context_hash: Some("abcdef01234567890abcdef012345678".into()),
         error: None,
     };
@@ -486,6 +491,7 @@ fn complete_result_json_output_format() {
     assert_eq!(parsed["content"][0]["type"], "text");
     assert_eq!(parsed["content"][0]["text"], "answer");
     assert_eq!(parsed["usage"]["input_tokens"], 100);
+    assert_eq!(parsed["timing"]["api_latency_ms"], 42);
 }
 
 #[tokio::test]

@@ -66,12 +66,32 @@ pub struct ToolCallResponse {
 }
 
 /// Token usage from a single response.
+/// `input_tokens` is non-cached input tokens (total minus `cache_creation` and `cache_read`).
 #[derive(Default)]
 pub struct UsageResponse {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,
     pub cache_read_input_tokens: u64,
+}
+
+impl UsageResponse {
+    /// Construct with normalized `input_tokens` (total minus cache tokens).
+    pub const fn normalized(
+        raw_input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: u64,
+    ) -> Self {
+        Self {
+            input_tokens: raw_input_tokens
+                .saturating_sub(cache_creation_input_tokens)
+                .saturating_sub(cache_read_input_tokens),
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        }
+    }
 }
 
 /// Concrete provider enum — enables test verification of constructed variant.
@@ -152,6 +172,45 @@ mod tests {
     use super::*;
     use crate::ApiKind;
     use crate::provider_registry::CompatFlags;
+
+    #[test]
+    fn normalized_no_cache() {
+        let u = UsageResponse::normalized(100, 50, 0, 0);
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.cache_creation_input_tokens, 0);
+        assert_eq!(u.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn normalized_with_cache() {
+        let u = UsageResponse::normalized(100, 50, 30, 20);
+        assert_eq!(u.input_tokens, 50);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.cache_creation_input_tokens, 30);
+        assert_eq!(u.cache_read_input_tokens, 20);
+    }
+
+    #[test]
+    fn normalized_saturates_to_zero() {
+        let u = UsageResponse::normalized(30, 10, 20, 20);
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 10);
+    }
+
+    #[test]
+    fn normalized_all_zeros() {
+        let u = UsageResponse::normalized(0, 0, 0, 0);
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 0);
+    }
+
+    #[test]
+    fn normalized_large_cache_no_overflow() {
+        let u = UsageResponse::normalized(100, 50, u64::MAX, u64::MAX);
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 50);
+    }
 
     #[test]
     fn create_provider_messages_variant() {

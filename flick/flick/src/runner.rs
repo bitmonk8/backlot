@@ -1,10 +1,12 @@
+use std::time::Instant;
+
 use crate::ApiKind;
 use crate::config::RequestConfig;
 use crate::context::{ContentBlock, Context};
 use crate::error::FlickError;
 use crate::model_registry::ModelInfo;
 use crate::provider::{DynProvider, ModelResponse, RequestParams, ToolDefinition};
-use crate::result::{FlickResult, ResultStatus, UsageSummary};
+use crate::result::{FlickResult, ResultStatus, Timing, UsageSummary};
 
 /// Make a single model call and return the result.
 ///
@@ -40,7 +42,9 @@ pub async fn run(
     if needs_two_step {
         params.output_schema = None;
     }
+    let start = Instant::now();
     let response = provider.call_boxed(params).await?;
+    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let blocks = build_content(&response)?;
 
@@ -60,7 +64,10 @@ pub async fn run(
     // Two-step: if the first call completed (no tool calls), make a second
     // call with schema and no tools to get structured output.
     if needs_two_step && status == ResultStatus::Complete {
-        return run_second_step(config, model_info, provider, context, &response, &blocks).await;
+        return run_second_step(
+            config, model_info, provider, context, &response, &blocks, elapsed_ms,
+        )
+        .await;
     }
 
     let cost_usd = model_info.compute_cost(
@@ -80,6 +87,9 @@ pub async fn run(
             cache_read_input_tokens: response.usage.cache_read_input_tokens,
             cost_usd,
         }),
+        timing: Some(Timing {
+            api_latency_ms: elapsed_ms,
+        }),
         context_hash: None,
         error: None,
     })
@@ -95,6 +105,7 @@ async fn run_second_step(
     context: &mut Context,
     first_response: &ModelResponse,
     first_blocks: &[ContentBlock],
+    first_elapsed_ms: u64,
 ) -> Result<FlickResult, FlickError> {
     let saved = if first_blocks.is_empty() {
         None
@@ -103,19 +114,21 @@ async fn run_second_step(
     };
 
     let empty_tools: Vec<ToolDefinition> = Vec::new();
-    let result: Result<(ModelResponse, Vec<ContentBlock>), FlickError> = async {
+    let result: Result<(ModelResponse, Vec<ContentBlock>, u64), FlickError> = async {
         let params2 = build_params(config, model_info, &context.messages, &empty_tools);
+        let start2 = Instant::now();
         let response2 = provider.call_boxed(params2).await?;
+        let elapsed2_ms = u64::try_from(start2.elapsed().as_millis()).unwrap_or(u64::MAX);
         let blocks2 = build_content(&response2)?;
         if !blocks2.is_empty() {
             context.push_assistant(blocks2.clone())?;
         }
-        Ok((response2, blocks2))
+        Ok((response2, blocks2, elapsed2_ms))
     }
     .await;
 
-    let (response2, blocks2) = match result {
-        Ok(pair) => pair,
+    let (response2, blocks2, second_elapsed_ms) = match result {
+        Ok(triple) => triple,
         Err(e) => {
             if let Some(msg) = saved {
                 context.messages.push(msg);
@@ -137,6 +150,8 @@ async fn run_second_step(
         total_cache_read,
     );
 
+    let total_latency_ms = first_elapsed_ms.saturating_add(second_elapsed_ms);
+
     Ok(FlickResult {
         status: ResultStatus::Complete,
         content: blocks2,
@@ -146,6 +161,9 @@ async fn run_second_step(
             cache_creation_input_tokens: total_cache_creation,
             cache_read_input_tokens: total_cache_read,
             cost_usd,
+        }),
+        timing: Some(Timing {
+            api_latency_ms: total_latency_ms,
         }),
         context_hash: None,
         error: None,

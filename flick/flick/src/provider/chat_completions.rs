@@ -372,21 +372,11 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
-    // OpenAI includes cached tokens within prompt_tokens. Subtract them so
-    // compute_cost does not charge cached tokens at both the input rate and
-    // the cache-read rate.
-    let input_tokens = raw_input_tokens.saturating_sub(cached);
-
     Ok(ModelResponse {
         text,
         thinking: Vec::new(), // OpenAI does not expose thinking blocks
         tool_calls,
-        usage: UsageResponse {
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: cached,
-        },
+        usage: UsageResponse::normalized(raw_input_tokens, output_tokens, 0, cached),
     })
 }
 
@@ -774,6 +764,23 @@ mod tests {
         assert_eq!(resp.usage.cache_read_input_tokens, 40);
         // input_tokens should be prompt_tokens minus cached_tokens
         assert_eq!(resp.usage.input_tokens, 60);
+    }
+
+    #[test]
+    fn parse_response_cached_tokens_saturates_to_zero() {
+        let json = serde_json::json!({
+            "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 30,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 50}
+            }
+        });
+        let resp = parse_response(&json).expect("should parse");
+        // 30 - 50 saturates to 0
+        assert_eq!(resp.usage.input_tokens, 0);
+        assert_eq!(resp.usage.output_tokens, 10);
+        assert_eq!(resp.usage.cache_read_input_tokens, 50);
     }
 
     #[test]

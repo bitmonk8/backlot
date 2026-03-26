@@ -28,7 +28,7 @@ pub use model_registry::{ModelInfo, ModelRegistry};
 pub use provider::DynProvider;
 use provider::create_provider;
 pub use provider_registry::ProviderRegistry;
-pub use result::FlickResult;
+pub use result::{FlickResult, Timing};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

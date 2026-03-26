@@ -22,7 +22,7 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - Config validation: `deny_unknown_fields` on all structs, reasoning+output_schema mutual exclusion, temperature+thinking mutual exclusion (enforced at both config and provider level), empty tool description/non-object input_schema rejected, whitespace-only query early rejection, `validate_resolved` in `validation.rs` module
 - CLI input hardening — stdin capped at 10 MiB, provider name length validated (max 255), API key content validated (no control chars, max 4096), whitespace-only stdin produces distinct error
 - CLI commands: `provider add/list`, `model add/list/remove`, `init`, `run`
-- Cache-aware cost computation — `compute_cost` on `ModelInfo`, plain arithmetic for readability, both providers subtract cached tokens from input_tokens to prevent double-counting (consistent semantics)
+- Cache-aware cost computation — `compute_cost` on `ModelInfo`, plain arithmetic for readability, both providers normalize `input_tokens` to non-cached tokens (total minus cache_creation and cache_read) for consistent cross-provider semantics
 - Context serialization robustness — custom `ContentBlock` deserializer (direct field extraction, no inner enum), message ordering validation on load (including `ToolUse`-in-user check), empty-content assistant validation on load, `push_*` methods enforce message alternation and reject pushes on empty context, `check_capacity` helper for overflow detection, serde defaults for optional fields
 - Error type hygiene — `CredentialError` split into specific variants (`InvalidProviderName`, `InvalidBaseUrl`, `InvalidSecretKey`, `TomlParse`), `ProviderError::InvalidRequest` for client-side validation, `ProviderError::code()` delegation, explicit `serde_json::Error` mapping (no blanket `From`)
 - Messages API: system prompt serialized as content-block array (enables prompt caching), `tool_choice` support (`auto`/`any`/`none`/`tool`)
@@ -31,7 +31,8 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - Module organization: `crypto.rs` (encrypt/decrypt), `platform.rs` (Windows permissions), `validation.rs` (resolved config validation)
 - `CompatFlags` in `provider_registry.rs` (describes provider behavior), `ToolConfig::input_schema` aligned with `ToolDefinition::input_schema` (backward compat via `#[serde(alias = "parameters")]`)
 - Secret key file write logic extracted to `write_new_secret_key_file` helper (shared across Unix/Windows)
-- 329 tests passing (272 lib, 26 bin, 20 runner, 11 integration), zero clippy errors
+- Per-call timing — `FlickResult.timing` contains `api_latency_ms` measured around provider calls (summed for two-step structured output)
+- 336 tests passing (279 lib, 26 bin, 20 runner, 11 integration), zero clippy errors
 
 ## Next Work
 

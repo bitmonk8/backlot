@@ -226,6 +226,7 @@ Each invocation writes one JSON object to stdout. The `status` field tells the c
     {"type": "tool_use", "id": "tc_1", "name": "read_file", "input": {"path": "src/main.rs"}}
   ],
   "usage": {"input_tokens": 1200, "output_tokens": 340, "cache_creation_input_tokens": 800, "cache_read_input_tokens": 400, "cost_usd": 0.0087},
+  "timing": {"api_latency_ms": 1523},
   "context_hash": "00a1b2c3d4e5f67890abcdef12345678"
 }
 ```
@@ -236,6 +237,7 @@ Each invocation writes one JSON object to stdout. The `status` field tells the c
   "status": "complete",
   "content": [{"type": "text", "text": "Done."}],
   "usage": {"input_tokens": 2400, "output_tokens": 50, "cost_usd": 0.0032},
+  "timing": {"api_latency_ms": 892},
   "context_hash": "11b2c3d4e5f67890abcdef1234567899"
 }
 ```
@@ -245,7 +247,7 @@ Each invocation writes one JSON object to stdout. The `status` field tells the c
 {"status": "error", "error": {"message": "Rate limit exceeded", "code": "rate_limit"}}
 ```
 
-The `usage` fields `cache_creation_input_tokens` and `cache_read_input_tokens` are omitted when zero. The `cost_usd` field includes cache token costs when `cache_creation_per_million` and `cache_read_per_million` are configured in the model registry.
+The `usage` field `input_tokens` reports non-cached input tokens (total minus cache_creation and cache_read), consistent across all providers. Fields `cache_creation_input_tokens` and `cache_read_input_tokens` are omitted when zero. The `cost_usd` field includes cache token costs when `cache_creation_per_million` and `cache_read_per_million` are configured in the model registry. The `timing` field reports `api_latency_ms` (wall-clock milliseconds for the provider call; summed across both calls for two-step structured output). The `timing` field is omitted on error results.
 
 ## Invocation Model
 
@@ -414,8 +416,8 @@ Retry applies only to the HTTP request/response exchange.
 cargo test
 ```
 
-329 tests (272 lib, 26 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
+336 tests (279 lib, 26 bin, 20 runner, 11 integration). One additional Unix-only test for file permissions.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
