@@ -4,9 +4,9 @@
 
 | Severity | Count |
 |---|---|
-| MUST FIX | 3 |
-| NON-CRITICAL | 23 |
-| NIT | 28 |
+| MUST FIX | 2 |
+| NON-CRITICAL | 21 |
+| NIT | 31 |
 | **Total** | **54** |
 
 ---
@@ -18,7 +18,7 @@
 #### M2a. Corrupted Apache 2.0 license text
 - **File(s):** LICENSE-APACHE
 - **Line(s):** 184-185
-- **Description:** Appendix boilerplate contains corrupted text ("Please also get an 'Alarm' or 'alarm' (in lower case) message for patent claims") that does not appear in the canonical Apache 2.0 license. Should read: "We also recommend that a file or class name and description of purpose be included on the same 'printed page' as the copyright notice..."
+- **Description:** Appendix boilerplate contains corrupted text (`Please also get an "Alarm" or "alarm" (in lower case) message for patent claims.`) that does not appear in the canonical Apache 2.0 license. Should read: `We also recommend that a file or class name and description of purpose be included on the same "printed page" as the copyright notice for easier identification within third-party archives.`
 
 ### Group M3: False-positive test (1 issue)
 
@@ -26,13 +26,6 @@
 - **File(s):** vault-cli/src/main.rs
 - **Line(s):** 296-300
 - **Description:** Does not call `emit_error` at all. Constructs an independent `serde_json::json!` value and asserts against that — always passes regardless of `emit_error`'s behavior.
-
-### Group M4: Stale code reference (1 issue)
-
-#### M4a. Stale SPEC.md reference
-- **File(s):** vault/src/reorganize.rs
-- **Line(s):** 45
-- **Description:** Comment references "per spec's ReorganizeReport fields" — SPEC.md was deleted in commit e216765.
 
 ---
 
@@ -45,17 +38,17 @@ User-facing docs contain inaccurate descriptions. All fixable in one documentati
 #### N1a. DESIGN.md public API listing incomplete
 - **File(s):** docs/DESIGN.md
 - **Line(s):** 13
-- **Description:** States lib.rs exposes "Public API: Vault, VaultEnvironment, error types" but actual exports also include VaultModels, RecordMode, Coverage, QueryResult, Extract, ReorganizeReport, DerivedValidationWarning, DocumentRef.
+- **Description:** File-tree annotation says lib.rs contains "Public API: Vault, VaultEnvironment, error types" — a brief summary, not an exhaustive inventory. Actual public exports also include VaultModels, RecordMode, Coverage, QueryResult, Extract, ReorganizeReport, DerivedValidationWarning, DocumentRef. The annotation omits domain types that external consumers need.
 
 #### N1b. README record output description misleading
 - **File(s):** README.md
 - **Line(s):** 57
 - **Description:** Says record "Outputs modified documents as JSON" but actually outputs `Vec<DocumentRef>` (document references/metadata, not document content).
 
-#### N1c. stderr is not JSON-only
+#### N1c. README omits plain-text warnings on stderr
 - **File(s):** vault-cli/src/main.rs, README.md
 - **Line(s):** main.rs:138-142; README.md:69
-- **Description:** README implies stderr is JSON-only ("Errors are emitted as JSON to stderr") but `emit_warnings` writes plain-text validation warnings to stderr on successful operations.
+- **Description:** README says "Errors are emitted as JSON to stderr" which is accurate for errors. However, `emit_warnings` also writes plain-text validation warnings to stderr on successful operations. The README is silent about this second stderr channel, which could mislead consumers who parse stderr expecting only JSON.
 
 #### N1d. STATUS.md test count stale
 - **File(s):** docs/STATUS.md
@@ -83,7 +76,7 @@ Both address unnecessary type duplication between vault and vault-cli that can b
 #### N3a. Four near-identical error enums
 - **File(s):** vault/src/lib.rs
 - **Line(s):** 48-158
-- **Description:** Four error enums share nearly identical structure (Io + LibrarianFailed). A single `VaultError` would eliminate duplication of five variant definitions and two identical `From` impls.
+- **Description:** BootstrapError, RecordError, QueryError, and ReorganizeError all carry Io + LibrarianFailed variants. QueryError and ReorganizeError are structurally identical. Consolidation would eliminate six duplicate variant definitions and two identical `From<StorageError>` impls (BootstrapError and ReorganizeError both stringify all StorageError variants into Io).
 
 #### N3b. Duplicate type wrappers in CLI
 - **File(s):** vault-cli/src/main.rs
@@ -166,23 +159,9 @@ Cross-cutting naming mismatches affecting API clarity.
 - **Line(s):** 146-148
 - **Description:** The file on disk is named `CHANGELOG.md` but contains JSONL content. The extension is misleading.
 
-### Group N8: parse_query_response manual JSON walking (1 issue)
+### Group N8: Workspace dependency duplication (1 issue)
 
-#### N8a. Manual JSON Value walking in parse_query_response
-- **File(s):** vault/src/librarian.rs
-- **Line(s):** 122-176
-- **Description:** Manually walks `serde_json::Value` fields (~50 lines). `Deserialize` derives on `QueryResult`/`Extract`/`Coverage` would reduce to a one-liner.
-
-### Group N9: Dead fallback in write_raw_versioned (1 issue)
-
-#### N9a. Dead fallback in versions.last().map_or
-- **File(s):** vault/src/storage.rs
-- **Line(s):** 267-271
-- **Description:** `versions.last().map_or(1, ...)` has a dead fallback — `versions` is guaranteed non-empty. `.unwrap()` expresses intent directly.
-
-### Group N10: Workspace dependency duplication (1 issue)
-
-#### N10a. reel dependency duplicated across workspace
+#### N8a. reel dependency duplicated across workspace
 - **File(s):** vault/Cargo.toml, vault-cli/Cargo.toml
 - **Line(s):** (both files)
 - **Description:** `reel` git dependency with `rev = "a6be158"` specified independently in both crates. Should use `[workspace.dependencies]`.
@@ -282,7 +261,7 @@ Redundant or duplicated code within storage.rs, fixable in one pass.
 - **Line(s):** 278-293, 355-370
 - **Description:** `list_derived` and `snapshot_derived` share identical directory-walking boilerplate. Could extract a shared helper.
 
-### Group T5: librarian.rs testing and error handling (3 issues)
+### Group T5: librarian.rs testing, error handling, and simplification (4 issues)
 
 Testing gaps and error handling in librarian.rs, addressable together.
 
@@ -296,7 +275,12 @@ Testing gaps and error handling in librarian.rs, addressable together.
 - **Line(s):** 217-224
 - **Description:** `parse_bare_json` test does not assert the `content` field of the extract. Broken content parsing would not be caught.
 
-#### T5c. extract_json_block silently falls through to passthrough
+#### T5c. parse_query_response manually walks JSON Value
+- **File(s):** vault/src/librarian.rs
+- **Line(s):** 122-176
+- **Description:** Manually walks `serde_json::Value` fields (~50 lines). `Deserialize` derives on `QueryResult`/`Extract`/`Coverage` would reduce to a one-liner.
+
+#### T5d. extract_json_block silently falls through to passthrough
 - **File(s):** vault/src/librarian.rs
 - **Line(s):** 179-205
 - **Description:** `extract_json_block` returns the entire input trimmed when no fenced block is found, rather than returning an error. The caller (`parse_query_response`) will then fail at JSON parse, producing a less informative error message.
@@ -315,16 +299,21 @@ Both in prompts.rs, addressing template naming and builder duplication.
 - **Line(s):** 122-296
 - **Description:** Four builders follow identical two-layer pattern. A single parameterized builder would cut eight functions to one.
 
-### Group T7: storage.rs version-writing correctness and naming (2 issues)
+### Group T7: storage.rs version-writing correctness and naming (3 issues)
 
-Both concern write_raw_versioned in storage.rs.
+All concern write_raw_versioned in storage.rs.
 
 #### T7a. TOCTOU race in version assignment
 - **File(s):** vault/src/storage.rs
 - **Line(s):** 249-273
 - **Description:** Concurrent callers of `write_raw_versioned` can assign the same version number, causing silent overwrites. No file locking or `O_EXCL` is used to prevent the race.
 
-#### T7b. write_raw_versioned boolean parameter
+#### T7b. Dead fallback in versions.last().map_or
+- **File(s):** vault/src/storage.rs
+- **Line(s):** 267-271
+- **Description:** `versions.last().map_or(1, ...)` has a dead fallback — `versions` is guaranteed non-empty by the preceding `is_empty()` check. `.unwrap()` expresses intent directly.
+
+#### T7c. write_raw_versioned boolean parameter
 - **File(s):** vault/src/storage.rs
 - **Line(s):** 249-273
 - **Description:** Takes a `new_series` boolean. An enum (`VersionMode::NewSeries | VersionMode::Append`) or two methods would be more self-documenting.
@@ -342,6 +331,13 @@ Both concern write_raw_versioned in storage.rs.
 - **File(s):** .github/workflows/ci.yml
 - **Line(s):** 41-91
 - **Description:** Three near-identical test jobs could be a single matrix job, eliminating ~30 lines of duplication.
+
+### Group M4: Stale code comment (1 issue)
+
+#### M4a. Stale "spec" reference in comment
+- **File(s):** vault/src/reorganize.rs
+- **Line(s):** 45
+- **Description:** Comment says "per spec's ReorganizeReport fields" — the word "spec's" references the deleted SPEC.md. The field descriptions in the comment (merged/restructured/deleted) are still accurate; only the attribution is stale. DESIGN.md now documents ReorganizeReport but not the individual field semantics.
 
 ### Group T10: Standalone nits (4 issues)
 
