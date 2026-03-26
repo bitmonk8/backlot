@@ -72,7 +72,7 @@ pub struct RawDocumentVersion {
 }
 
 /// Result of validating a single derived document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DerivedValidationWarning {
     pub filename: String,
     pub reason: String,

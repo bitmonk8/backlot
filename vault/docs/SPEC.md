@@ -126,7 +126,6 @@ Documents in `derived/` describe **current reality**. They are not logs, journal
 ```markdown
 # Document Title
 <!-- scope: one-line description of what this document covers -->
-<!-- related: OTHER_DOC.md, ANOTHER_DOC.md -->
 ```
 
 Raw documents in `raw/` are exempt from this header requirement — they store client-provided content verbatim.

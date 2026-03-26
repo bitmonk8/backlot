@@ -24,7 +24,13 @@ const DOCUMENT_FORMAT: &str = "\
 
 - Filenames: `UPPERCASE_DESCRIPTIVE.md` (e.g., `PROJECT.md`, `REQUIREMENTS.md`).
 - Header: First line is `# Title`. Second line is `<!-- scope: brief description -->`.
-- Sections: Use `##` headings. Each section has a clear purpose.
+- Sections: Use `##` headings. Standard section types (use when appropriate, not all required):
+  - `## Decisions` — Resolved choices with rationale
+  - `## Constraints` — Hard limits, invariants, non-negotiables
+  - `## Open Questions` — Unresolved issues requiring future work
+  - `## Approach` — Current implementation strategy
+  - `## Findings` — Discovered facts, error patterns, observations
+  - `## Interfaces` — API surfaces, contracts, protocols
 - Content: Concise, factual, no filler. Use bullet lists for enumerations.";
 
 const CROSS_REFERENCES: &str = "\
@@ -311,6 +317,7 @@ mod tests {
         assert!(prompt.contains("Core Principle"));
         assert!(prompt.contains("Document Format"));
         assert!(prompt.contains("Cross-References"));
+        assert!(prompt.contains("Decisions"));
         assert!(prompt.contains("Scope Restriction"));
         assert!(prompt.contains("Current Document Inventory"));
         assert!(prompt.contains("Bootstrap Task"));

@@ -179,6 +179,8 @@ async fn run_bootstrap(config_path: &Path) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     emit_warnings(&warnings);
+    let json = serde_json::to_string_pretty(&warnings).map_err(|e| e.to_string())?;
+    println!("{json}");
     Ok(())
 }
 
