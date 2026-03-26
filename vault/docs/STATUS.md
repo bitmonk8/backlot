@@ -9,7 +9,6 @@
 - Workspace structure: `vault` (lib) + `vault-cli` (bin)
 - Dependency on `reel` via git rev (`a6be158`)
 - CI pipeline (fmt, clippy, test, build on Linux/macOS/Windows)
-- Project specification ([SPEC.md](SPEC.md))
 - Storage layer (`vault/src/storage.rs`):
   - Directory structure management (`raw/`, `derived/`, `CHANGELOG.md`)
   - Existence checks for vault initialization
@@ -77,4 +76,4 @@
 
 ## What Remains
 
-Nothing. All spec operations and CLI are implemented. All known spec/implementation divergences have been resolved.
+Nothing. All operations and CLI are implemented.

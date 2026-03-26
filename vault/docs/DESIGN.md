@@ -1,6 +1,6 @@
 # Design
 
-Vault is a persistent, file-based knowledge store for agent systems. See [SPEC.md](SPEC.md) for the full specification.
+Vault is a persistent, file-based knowledge store for agent systems.
 
 ## Project Structure
 
@@ -47,6 +47,114 @@ vault/                            (workspace root)
 - **serde_yaml** -- YAML configuration parsing
 - **tokio** -- async runtime (single-threaded)
 
+## Document Model
+
+### Directory Structure
+
+The storage root is partitioned into three areas:
+
+```
+storage_root/
++-- CHANGELOG.md          # Append-only mutation log (vault-managed)
++-- raw/                  # Client-provided content (vault-managed)
+|   +-- REQUIREMENTS_1.md
+|   +-- FINDINGS_1.md
+|   +-- FINDINGS_2.md
+|   +-- ...
++-- derived/              # Librarian-produced documents
+    +-- PROJECT.md
+    +-- DESIGN.md
+    +-- ...
+```
+
+| Area | Writer | Librarian access | Content |
+|---|---|---|---|
+| `raw/` | Vault (programmatic) | Read-only | Raw inputs: bootstrap requirements, record contents. Immutable once written. |
+| `derived/` | Librarian | Read-write | Organized, curated documents. Current-reality view of project knowledge. |
+| `CHANGELOG.md` | Vault (programmatic) | Read-only | Append-only log of all mutations. |
+
+**Recoverability:** If the librarian corrupts derived documents, `derived/` can be reconstructed from `CHANGELOG.md` and `raw/` contents. Raw data and changelog are the authoritative record; derived documents are a curated view.
+
+### Core Principle
+
+Documents in `derived/` describe **current reality**. They are not logs, journals, or histories. When information becomes obsolete — a decision is reversed, a constraint is resolved, an approach is abandoned — the old information is **removed**. The document should read as if it were written today. Historical changes are captured in `CHANGELOG.md`.
+
+### Changelog Format
+
+`CHANGELOG.md` is a JSONL file (one JSON object per line, despite the `.md` extension).
+
+**Common fields:** `ts` (ISO 8601 UTC), `op` (`"bootstrap"` | `"record"` | `"reorganize"`).
+
+**Operation-specific fields:**
+
+| Operation | Additional fields |
+|---|---|
+| `bootstrap` | `raw`: raw document written |
+| `record` | `raw`: raw document written, `derived_modified`: array of derived documents created or modified |
+| `reorganize` | `merged`, `restructured`, `deleted`: arrays of affected derived documents |
+
+```jsonl
+{"ts":"2026-03-25T14:00:00Z","op":"bootstrap","raw":"REQUIREMENTS_1.md"}
+{"ts":"2026-03-25T15:30:00Z","op":"record","raw":"FINDINGS_1.md","derived_modified":["DESIGN.md","FINDINGS.md"]}
+{"ts":"2026-03-26T09:00:00Z","op":"reorganize","merged":["FINDINGS.md"],"restructured":["PROJECT.md"],"deleted":[]}
+```
+
+### Raw Documents
+
+Raw documents are versioned by name: `NAME_N.md` (e.g., `FINDINGS_1.md`, `FINDINGS_2.md`). Later versions supersede earlier versions. The full version history is preserved — raw documents are never modified or deleted. Version numbers are assigned by vault at write time.
+
+### Document Format
+
+**Naming:** `UPPERCASE_DESCRIPTIVE` names. In `derived/`: `FINDINGS.md`, `API_DESIGN.md`. In `raw/`: versioned as `NAME_N.md`.
+
+**Structure:** Every document in `derived/` uses a standard header:
+
+```markdown
+# Document Title
+<!-- scope: one-line description of what this document covers -->
+```
+
+Raw documents in `raw/` are exempt from this header requirement — they store client-provided content verbatim.
+
+**Typed sections** appropriate to the document's purpose:
+
+| Section type | Content |
+|---|---|
+| `## Decisions` | Resolved choices with rationale |
+| `## Constraints` | Hard limits, invariants, non-negotiables |
+| `## Open Questions` | Unresolved issues requiring future work |
+| `## Approach` | Current implementation strategy |
+| `## Findings` | Discovered facts, error patterns, observations |
+| `## Interfaces` | API surfaces, contracts, protocols |
+
+Not every document needs all section types.
+
+**Cross-references:** Use explicit path references: `See DESIGN.md > Authentication` or `See [Authentication](DESIGN.md#authentication)`. Do not duplicate substantial content across documents.
+
+### Document Lifecycle
+
+**Size trigger:** If a document exceeds ~200 lines, review whether its largest topic should be split.
+
+**Coherence trigger:** If information has no natural home in any existing document, create a new document rather than adding an unrelated section.
+
+Both triggers are considered together. A 50-line document with an off-topic section warrants a new document. A 300-line document where all sections are cohesive may be fine.
+
+### Core Documents
+
+**Raw (created at bootstrap):**
+
+| Document | Purpose |
+|---|---|
+| `raw/REQUIREMENTS_1.md` | Initial requirements as provided to bootstrap |
+
+**Derived (created by librarian at bootstrap):**
+
+| Document | Purpose |
+|---|---|
+| `derived/PROJECT.md` | Project overview + document index |
+| `derived/REQUIREMENTS.md` | Structured requirements (derived from raw) |
+| Topic-specific | Created as needed by librarian |
+
 ## Architecture
 
 ### Layer Diagram
@@ -79,7 +187,14 @@ The prompts module (`prompts.rs`) composes system prompts from shared blocks (co
 
 The librarian (`librarian.rs`) is the interface between vault operations and the reel agent. It has one responsibility:
 
-**Agent invocation** -- Two traits abstract agent calls so that tests can substitute mocks without requiring real LLM calls: `DerivedProducer` (used by bootstrap and record, writes derived documents) and `QueryResponder` (used by query, read-only, returns a structured `QueryResult` parsed from the agent's JSON response). The production implementation (`ReelLibrarian`) implements both traits, holds a reference to the shared `Agent`, and configures each call with the appropriate model, grant, and write paths. The grant is `TOOLS`-only (read-only filesystem tools); reel automatically enables Write/Edit tools when `write_paths` is non-empty, so the agent can write only to the paths listed in `write_paths` (the `derived/` directory). Splitting the traits ensures each operation depends only on the capability it uses, and test mocks need not stub unrelated methods.
+**Agent invocation** -- Two traits abstract agent calls so that tests can substitute mocks without requiring real LLM calls: `DerivedProducer` (used by bootstrap and record, writes derived documents) and `QueryResponder` (used by query, read-only, returns a structured `QueryResult` parsed from the agent's JSON response). The production implementation (`ReelLibrarian`) implements both traits, holds a reference to the shared `Agent`, and configures each call with the appropriate model, grant, and write paths. Splitting the traits ensures each operation depends only on the capability it uses, and test mocks need not stub unrelated methods.
+
+**Tool access and sandboxing** -- The librarian uses reel's built-in file tools (Read, Write, Edit, Glob, Grep) scoped to the storage root. Reel's `AgentRequestConfig` supports fine-grained path grants:
+
+- `project_root` set to `storage_root` with `TOOLS`-only grant (read-only filesystem tools).
+- `write_paths` set to `[storage_root/derived/]`; reel automatically enables Write/Edit tools when `write_paths` is non-empty, scoping write access to listed paths only.
+
+Lot (the sandbox sibling project) enforces this scoping at the OS level (AppContainer on Windows, namespaces+seccomp on Linux, Seatbelt on macOS). Lot supports write-child-under-read-parent natively. The librarian has no access to tools outside the storage root.
 
 ### Bootstrap Operation
 
@@ -153,27 +268,9 @@ Partial failure semantics: if the librarian fails, no changelog entry is written
 
 ## CLI
 
-The `vault-cli` crate (`vault-cli/src/main.rs`) provides a command-line interface that maps directly to vault's public API. Uses clap 4 with derive macros, YAML configuration, JSON output to stdout, errors as JSON to stderr.
+The `vault-cli` crate (`vault-cli/src/main.rs`) provides a command-line interface that maps directly to vault's public API. See [README.md](../README.md) for configuration format and subcommand usage.
 
-### Configuration
-
-A YAML config file maps to `VaultEnvironment`. The CLI constructs `ModelRegistry` and `ProviderRegistry` internally via `load_default()`.
-
-```yaml
-storage_root: ".epic/docs/"
-models:
-  bootstrap: "sonnet"
-  query: "haiku"
-  record: "haiku"
-  reorganize: "sonnet"
-```
-
-### Subcommands
-
-- `vault bootstrap --config <path>` -- reads requirements from stdin, calls `Vault::bootstrap()`.
-- `vault query --config <path> [--query <text>]` -- query text via `--query` flag or stdin, outputs `QueryResult` as JSON.
-- `vault record --config <path> --name <NAME> --mode new|append [--content <text>]` -- content via `--content` flag or stdin, outputs `Vec<DocumentRef>` as JSON.
-- `vault reorganize --config <path>` -- outputs `ReorganizeReport` as JSON.
+Uses clap 4 with derive macros, YAML configuration, JSON output to stdout, errors as JSON to stderr, tokio single-threaded runtime. The CLI constructs `ModelRegistry` and `ProviderRegistry` internally via `load_default()`. Validation warning display is owned by the CLI, not the library.
 
 ## Storage Layer
 
@@ -191,7 +288,7 @@ The storage layer (`vault/src/storage.rs`) is the foundational module that all v
 
 ### Design Decisions
 
-**Synchronous I/O.** The storage layer uses `std::fs` rather than `tokio::fs`. The spec states that access is serialized by the orchestrator, so there is no need for async file operations at this level. Async boundaries are introduced higher up (at the operation level) where the librarian agent is invoked.
+**Synchronous I/O.** The storage layer uses `std::fs` rather than `tokio::fs`. Access is serialized by the orchestrator, so there is no need for async file operations at this level. Async boundaries are introduced higher up (at the operation level) where the librarian agent is invoked.
 
 **No external time crate.** UTC timestamps are computed from `std::time::SystemTime` using Hinnant's civil calendar algorithm. This avoids adding `chrono` or `time` as a dependency for a single formatting function.
 
@@ -206,3 +303,9 @@ The storage layer (`vault/src/storage.rs`) is the foundational module that all v
 **Testable librarian.** The `DerivedProducer` trait allows bootstrap tests to run without real LLM calls. Mock invokers write predetermined files to `derived/`, verifying the operation's pre/post-condition logic, changelog behavior, and partial failure semantics independently of the model.
 
 **Single shared Agent.** Rather than creating a new reel `Agent` per operation call, `Vault` creates one at construction time. Since `ModelRegistry` and `ProviderRegistry` are not `Clone`, they are consumed once. Per-call differences (model name, system prompt, tool grants) are passed via `AgentRequestConfig`.
+
+## Integration Contract
+
+Vault is a library consumed by orchestrators (e.g., epic). It provides Bootstrap, Query, Record, and Reorganize as its public API. Higher-level services (e.g., epic's Research Service) layer on top by calling these operations combined with external tools.
+
+Vault participates in a dual-channel context propagation model: small task metadata is injected by the orchestrator, while vault provides the large, queryable knowledge base (full research, analysis, failure records). In the orchestrator's discovery flow, vault owns persistent storage of findings (via Record); the orchestrator owns classification, summarization, and propagation through the task tree.
