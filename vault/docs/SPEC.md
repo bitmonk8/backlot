@@ -239,6 +239,7 @@ pub struct QueryResult {
     pub answer: String,             // Natural-language answer, suitable for end users
     pub extracts: Vec<Extract>,     // Source material backing the answer
 }
+// `extracts` is optional; defaults to empty.
 
 pub struct Extract {
     pub content: String,
@@ -374,7 +375,7 @@ The librarian's system prompt is composed per-operation from shared building blo
 | Core principle | "Documents describe current reality." Superseding rules. |
 | Document format | UPPERCASE_DESCRIPTIVE naming, standard header, typed sections. |
 | Cross-references | Path reference format, no content duplication. |
-| Scope restriction | Read `raw/` and `CHANGELOG.md`. Read-write `derived/`. No external tools. |
+| Scope restriction | Parameterized per operation (passed as argument to shared prompt builder). Read-write `derived/` for write operations; read-only for Query. No external tools. |
 | Document inventory | Current list of documents: `derived/` documents with their scope comments, `raw/` documents listed by filename only. |
 
 **Operation-specific blocks:**
@@ -384,9 +385,9 @@ The librarian's system prompt is composed per-operation from shared building blo
 | Query | Extraction process: start with `derived/PROJECT.md` for orientation, read relevant documents in `derived/` and `raw/`, synthesize answer with coverage assessment. No writes. |
 | Record | New raw document path provided. Relevance filter, placement rules (read `derived/PROJECT.md` for index, identify target document and section in `derived/`). Superseding rules (replace, don't append). No restructuring. |
 | Reorganize | Full restructuring operations on `derived/`: split, merge, remove, consolidate, reorder, tighten prose. May read `raw/` for source of truth. Document lifecycle triggers (size ~200 lines, coherence). Update `derived/PROJECT.md` after structural changes. |
-| Bootstrap | Raw requirements path provided. Core document templates (`derived/PROJECT.md`, `derived/REQUIREMENTS.md`). Additional topic-specific documents only if the requirements warrant them. Initialization rules: derive structure from raw requirements, don't invent structure they don't support. |
+| Bootstrap | Raw requirements path (`raw/REQUIREMENTS_1.md`) known at compile time. Core document templates (`derived/PROJECT.md`, `derived/REQUIREMENTS.md`). Additional topic-specific documents only if the requirements warrant them. Initialization rules: derive structure from raw requirements, don't invent structure they don't support. |
 
-Vault assembles the final prompt by concatenating the relevant blocks. The shared blocks are defined once as embedded constants (e.g., `include_str!`). The document inventory block is generated at call time from the current state of the storage root.
+Vault assembles the final prompt by concatenating the relevant blocks. The shared blocks are defined once as embedded constants (e.g., `include_str!`), except scope restriction which is parameterized — the shared prompt builder accepts a scope restriction string so each operation can supply an unambiguous scope (read-write for write operations, read-only for query). The document inventory block is generated at call time from the current state of the storage root.
 
 This scoping prevents the librarian from restructuring documents during a Record call, or from modifying documents during a Query call — not by convention, but because the instructions for those capabilities are absent from the prompt.
 
