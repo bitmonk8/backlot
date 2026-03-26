@@ -156,6 +156,24 @@ impl DerivedProducer for BadNameLibrarian {
     }
 }
 
+/// Mock librarian that deletes a file from `derived/` (for reorganize delete detection tests).
+pub struct DeletingLibrarian {
+    /// Filename to delete from `derived/`.
+    pub filename_to_delete: String,
+}
+
+impl DerivedProducer for DeletingLibrarian {
+    async fn produce_derived(
+        &self,
+        _system_prompt: &str,
+        _user_message: &str,
+        storage: &Storage,
+    ) -> Result<(), String> {
+        let path = storage.derived_dir().join(&self.filename_to_delete);
+        fs::remove_file(path).map_err(|e| e.to_string())
+    }
+}
+
 /// Mock librarian for query operations. Returns a predetermined QueryResult
 /// or fails.
 pub struct MockQueryLibrarian {

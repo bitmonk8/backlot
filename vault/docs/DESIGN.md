@@ -17,6 +17,7 @@ vault/                            (workspace root)
 |       +-- bootstrap.rs         -- Bootstrap operation implementation
 |       +-- record.rs            -- Record operation implementation
 |       +-- query.rs             -- Query operation implementation
+|       +-- reorganize.rs       -- Reorganize operation implementation
 |       +-- test_support.rs      -- Shared mock librarians for tests (cfg(test))
 +-- vault-cli/                   (CLI binary crate)
 |   +-- Cargo.toml
@@ -28,12 +29,23 @@ vault/                            (workspace root)
 
 ## Dependencies
 
+### vault (library)
+
 - **reel** -- agent session layer (git rev dependency)
-- **serde** + **serde_json** -- changelog entry serialization (JSONL format)
+- **serde** + **serde_json** -- changelog entry serialization (JSONL format), JSON output for CLI
 - **thiserror** -- ergonomic error type derivation
 - **regex** -- raw document name validation and version parsing
 - **tempfile** (dev) -- temporary directories for unit tests
-- **tokio** (dev) -- async runtime for bootstrap operation tests
+- **tokio** (dev) -- async runtime for operation tests
+
+### vault-cli (binary)
+
+- **vault** -- library crate (path dependency)
+- **reel** -- constructs `ModelRegistry` and `ProviderRegistry`
+- **clap** -- argument parsing with derive macros
+- **serde** + **serde_json** -- JSON output serialization
+- **serde_yaml** -- YAML configuration parsing
+- **tokio** -- async runtime (single-threaded)
 
 ## Architecture
 
@@ -45,6 +57,7 @@ vault/                            (workspace root)
     +-- bootstrap.rs    -- bootstrap operation logic
     +-- record.rs       -- record operation logic
     +-- query.rs        -- query operation logic (read-only)
+    +-- reorganize.rs   -- reorganize operation logic (full sweep)
     |     |
     |     +-- prompts.rs    -- system prompt composition (shared + per-operation)
     |     +-- librarian.rs  -- agent invocation trait + ReelLibrarian impl
@@ -55,6 +68,8 @@ vault/                            (workspace root)
 ### Vault Struct
 
 `Vault` is the public entry point. It is constructed from a `VaultEnvironment` containing the storage root path, reel registries, and per-operation model names (`VaultModels`). At construction time it creates a reel `Agent` (consuming the registries) and a `Storage` handle. The agent is reused across operations; per-call configuration (model, prompt, grants) is passed via `AgentRequestConfig`.
+
+**Warning handling:** Operations that invoke the librarian (bootstrap, record, reorganize) perform post-invocation validation of derived documents. Validation warnings are returned to the caller as `Vec<DerivedValidationWarning>` — the library does not print them. The CLI is responsible for formatting and displaying warnings.
 
 ### Prompts
 
@@ -115,6 +130,51 @@ The query prompt uses a separate scope restriction block that explicitly prohibi
 
 Response parsing handles JSON wrapped in markdown code fences (```` ```json ... ``` ````) or bare JSON. The parser validates coverage values and extract structure, returning descriptive errors for malformed responses.
 
+### Reorganize Operation
+
+The reorganize operation (`reorganize.rs`) performs a full restructuring pass over derived documents. Unlike the lightweight librarian pass on each record, this is a thorough sweep that can merge, split, deduplicate, and tighten documents.
+
+Sequence:
+
+1. Snapshots derived documents before librarian invocation.
+2. Builds a reorganize-specific system prompt instructing the librarian to review all derived documents for restructuring opportunities.
+3. Invokes the librarian via `DerivedProducer::produce_derived`.
+4. Validates derived documents (warnings only).
+5. Snapshots derived documents after invocation and categorizes changes:
+   - **merged**: files present in both snapshots where content changed (content was consolidated/updated).
+   - **restructured**: files in the after snapshot but not in before (new documents from splits).
+   - **deleted**: files in the before snapshot but not in after (removed during merge).
+6. Appends a reorganize changelog entry with merged/restructured/deleted lists.
+7. Returns a `ReorganizeReport`.
+
+The reorganize prompt instructs the librarian to: read `derived/PROJECT.md` for orientation, apply document lifecycle triggers (size ~200 lines, coherence), merge overlapping documents, split multi-topic documents, remove duplicated content, tighten prose, and update the PROJECT.md index. The librarian may read `raw/` for content accuracy verification.
+
+Partial failure semantics: if the librarian fails, no changelog entry is written. Derived documents may be in a partially modified state (same as other write operations).
+
+## CLI
+
+The `vault-cli` crate (`vault-cli/src/main.rs`) provides a command-line interface that maps directly to vault's public API. Uses clap 4 with derive macros, YAML configuration, JSON output to stdout, errors as JSON to stderr.
+
+### Configuration
+
+A YAML config file maps to `VaultEnvironment`. The CLI constructs `ModelRegistry` and `ProviderRegistry` internally via `load_default()`.
+
+```yaml
+storage_root: ".epic/docs/"
+models:
+  bootstrap: "sonnet"
+  query: "haiku"
+  record: "haiku"
+  reorganize: "sonnet"
+```
+
+### Subcommands
+
+- `vault bootstrap --config <path>` -- reads requirements from stdin, calls `Vault::bootstrap()`.
+- `vault query --config <path> [--query <text>]` -- query text via `--query` flag or stdin, outputs `QueryResult` as JSON.
+- `vault record --config <path> --name <NAME> --mode new|append [--content <text>]` -- content via `--content` flag or stdin, outputs `Vec<DocumentRef>` as JSON.
+- `vault reorganize --config <path>` -- outputs `ReorganizeReport` as JSON.
+
 ## Storage Layer
 
 The storage layer (`vault/src/storage.rs`) is the foundational module that all vault operations depend on. It manages the on-disk directory layout and provides all file I/O primitives. It is internal to the vault crate (not part of the public API).
@@ -136,7 +196,7 @@ The storage layer (`vault/src/storage.rs`) is the foundational module that all v
 
 **Regex-based validation.** Raw document names must match `^[A-Z][A-Z0-9_]*[A-Z0-9]$` (minimum 2 characters). Versioned filenames follow `NAME_N.md`. Derived filenames follow `NAME.md`. All patterns are compiled once via `LazyLock<Regex>`.
 
-**Derived snapshots.** The `snapshot_derived()` method reads all files in `derived/` into a `HashMap<String, Vec<u8>>` (filename to content bytes). The `compute_changed()` free function compares two snapshots and returns `Vec<DocumentRef>` of created or modified files (deletions are excluded). Operations call `snapshot_derived()` before and after librarian invocation, then `compute_changed()` to detect changes.
+**Derived snapshots.** The `snapshot_derived()` method reads all files in `derived/` into a `HashMap<String, Vec<u8>>` (filename to content bytes). The `compute_changed()` free function compares two snapshots and returns `Vec<DocumentRef>` of created or modified files. The `compute_deleted()` free function returns files present in the before snapshot but absent in the after snapshot. Operations call `snapshot_derived()` before and after librarian invocation; record uses `compute_changed()`, reorganize uses both `compute_changed()` and `compute_deleted()` to categorize changes into merged/restructured/deleted.
 
 **Version scanning.** Versions are determined by scanning the `raw/` directory for files matching `BASE_N.md`. This is simple and correct given the small expected document counts. The `write_raw_versioned` method handles both "new series" (version 1, fail if exists) and "append" (next version, fail if no prior) modes.
 

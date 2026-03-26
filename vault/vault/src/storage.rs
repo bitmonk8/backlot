@@ -1,12 +1,9 @@
-// Storage primitives consumed by the operations layer. Some methods are only
-// used by tests or future operations; allow dead_code until all operations
-// are implemented.
-#![allow(dead_code)]
+// Storage primitives consumed by the operations layer.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -61,7 +58,7 @@ pub enum ChangelogEntry {
 // ---------------------------------------------------------------------------
 
 /// A reference to a document (filename only, no directory prefix).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DocumentRef {
     pub filename: String,
 }
@@ -139,10 +136,6 @@ impl Storage {
 
     // -- paths --
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     pub fn changelog_path(&self) -> PathBuf {
         self.root.join("CHANGELOG.md")
     }
@@ -186,6 +179,7 @@ impl Storage {
     }
 
     /// Read all changelog entries.
+    #[cfg(test)]
     pub fn read_changelog(&self) -> Result<Vec<ChangelogEntry>, StorageError> {
         let path = self.changelog_path();
         if !path.exists() {
@@ -233,6 +227,7 @@ impl Storage {
     }
 
     /// Read a raw document by filename.
+    #[cfg(test)]
     pub(crate) fn read_raw(&self, filename: &str) -> Result<String, StorageError> {
         let path = self.raw_dir().join(filename);
         if !path.exists() {
@@ -424,6 +419,23 @@ pub fn compute_changed(
         .collect();
     changed.sort_by(|a, b| a.filename.cmp(&b.filename));
     changed
+}
+
+/// Compare before/after snapshots to find derived documents that were deleted.
+/// Documents present in `before` but absent in `after`.
+pub fn compute_deleted(
+    before: &HashMap<String, Vec<u8>>,
+    after: &HashMap<String, Vec<u8>>,
+) -> Vec<DocumentRef> {
+    let mut deleted: Vec<DocumentRef> = before
+        .keys()
+        .filter(|name| !after.contains_key(*name))
+        .map(|name| DocumentRef {
+            filename: name.clone(),
+        })
+        .collect();
+    deleted.sort_by(|a, b| a.filename.cmp(&b.filename));
+    deleted
 }
 
 /// Return the current UTC timestamp in ISO 8601 format.
@@ -1069,5 +1081,61 @@ mod tests {
         assert!(names.contains(&"MODIFIED.md"));
         assert!(!names.contains(&"UNCHANGED.md"));
         assert!(!names.contains(&"DELETED.md"));
+    }
+
+    // -- compute_deleted --
+
+    #[test]
+    fn compute_deleted_both_empty() {
+        let before = HashMap::new();
+        let after = HashMap::new();
+        assert!(compute_deleted(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn compute_deleted_identical_snapshots() {
+        let mut snap = HashMap::new();
+        snap.insert("A.md".to_owned(), b"content".to_vec());
+        snap.insert("B.md".to_owned(), b"other".to_vec());
+        assert!(compute_deleted(&snap, &snap).is_empty());
+    }
+
+    #[test]
+    fn compute_deleted_file_removed() {
+        let mut before = HashMap::new();
+        before.insert("GONE.md".to_owned(), b"was here".to_vec());
+        let after = HashMap::new();
+        let result = compute_deleted(&before, &after);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].filename, "GONE.md");
+    }
+
+    #[test]
+    fn compute_deleted_file_added_not_deleted() {
+        let before = HashMap::new();
+        let mut after = HashMap::new();
+        after.insert("NEW.md".to_owned(), b"hello".to_vec());
+        assert!(compute_deleted(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn compute_deleted_mixed() {
+        let mut before = HashMap::new();
+        before.insert("UNCHANGED.md".to_owned(), b"same".to_vec());
+        before.insert("MODIFIED.md".to_owned(), b"old".to_vec());
+        before.insert("DELETED.md".to_owned(), b"gone".to_vec());
+
+        let mut after = HashMap::new();
+        after.insert("UNCHANGED.md".to_owned(), b"same".to_vec());
+        after.insert("MODIFIED.md".to_owned(), b"new".to_vec());
+        after.insert("CREATED.md".to_owned(), b"fresh".to_vec());
+
+        let result = compute_deleted(&before, &after);
+        let names: Vec<&str> = result.iter().map(|d| d.filename.as_str()).collect();
+        assert_eq!(names.len(), 1);
+        assert!(names.contains(&"DELETED.md"));
+        assert!(!names.contains(&"UNCHANGED.md"));
+        assert!(!names.contains(&"MODIFIED.md"));
+        assert!(!names.contains(&"CREATED.md"));
     }
 }

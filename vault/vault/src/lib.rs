@@ -1,14 +1,15 @@
 // Vault: library crate.
 //
 // Persistent, file-based knowledge store for agent systems. Provides the Vault
-// struct as the public API entry point. Implements bootstrap, record, and query
-// operations, with reorganize planned.
+// struct as the public API entry point. Implements bootstrap, record, query,
+// and reorganize operations.
 
 pub(crate) mod bootstrap;
 pub(crate) mod librarian;
 pub(crate) mod prompts;
 pub(crate) mod query;
 pub(crate) mod record;
+pub(crate) mod reorganize;
 pub(crate) mod storage;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -18,7 +19,7 @@ use std::path::PathBuf;
 use librarian::ReelLibrarian;
 use storage::Storage;
 
-pub use storage::DocumentRef;
+pub use storage::{DerivedValidationWarning, DocumentRef};
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -107,7 +108,7 @@ impl From<storage::StorageError> for RecordError {
 }
 
 /// Coverage assessment for a query answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum Coverage {
     /// The vault's documents fully address the question.
     Full,
@@ -118,7 +119,7 @@ pub enum Coverage {
 }
 
 /// Structured result from a query operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct QueryResult {
     pub coverage: Coverage,
     pub answer: String,
@@ -126,7 +127,7 @@ pub struct QueryResult {
 }
 
 /// An extract from a vault document supporting a query answer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Extract {
     pub content: String,
     pub source: DocumentRef,
@@ -139,6 +140,29 @@ pub enum QueryError {
 
     #[error("librarian failed: {0}")]
     LibrarianFailed(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReorganizeError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("librarian failed: {0}")]
+    LibrarianFailed(String),
+}
+
+impl From<storage::StorageError> for ReorganizeError {
+    fn from(e: storage::StorageError) -> Self {
+        Self::Io(std::io::Error::other(e.to_string()))
+    }
+}
+
+/// Report produced by a reorganize operation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReorganizeReport {
+    pub merged: Vec<DocumentRef>,
+    pub restructured: Vec<DocumentRef>,
+    pub deleted: Vec<DocumentRef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -186,20 +210,16 @@ impl Vault {
     /// produce derived documents in `derived/`, and records the operation in
     /// `CHANGELOG.md`. Fails with `AlreadyInitialized` if the vault has any
     /// prior state.
-    pub async fn bootstrap(&self, requirements: &str) -> Result<(), BootstrapError> {
+    pub async fn bootstrap(
+        &self,
+        requirements: &str,
+    ) -> Result<Vec<DerivedValidationWarning>, BootstrapError> {
         let invoker = ReelLibrarian {
             agent: &self.agent,
             model_name: &self.models.bootstrap,
         };
 
-        let warnings = bootstrap::run(&self.storage, &invoker, requirements).await?;
-        for w in &warnings {
-            eprintln!(
-                "vault: bootstrap validation warning: {}: {}",
-                w.filename, w.reason
-            );
-        }
-        Ok(())
+        bootstrap::run(&self.storage, &invoker, requirements).await
     }
 
     /// Record new content into the vault.
@@ -212,21 +232,13 @@ impl Vault {
         name: &str,
         content: &str,
         mode: RecordMode,
-    ) -> Result<Vec<DocumentRef>, RecordError> {
+    ) -> Result<(Vec<DocumentRef>, Vec<DerivedValidationWarning>), RecordError> {
         let invoker = ReelLibrarian {
             agent: &self.agent,
             model_name: &self.models.record,
         };
 
-        let (modified, warnings) =
-            record::run(&self.storage, &invoker, name, content, mode).await?;
-        for w in &warnings {
-            eprintln!(
-                "vault: record validation warning: {}: {}",
-                w.filename, w.reason
-            );
-        }
-        Ok(modified)
+        record::run(&self.storage, &invoker, name, content, mode).await
     }
 
     /// Query the vault's knowledge base.
@@ -241,6 +253,22 @@ impl Vault {
         };
 
         query::run(&self.storage, &invoker, question).await
+    }
+
+    /// Reorganize the vault's derived documents.
+    ///
+    /// Full restructuring pass: merges, splits, deduplicates, and tightens
+    /// derived documents. Appends a changelog entry. Returns a report of
+    /// merged, restructured, and deleted documents.
+    pub async fn reorganize(
+        &self,
+    ) -> Result<(ReorganizeReport, Vec<DerivedValidationWarning>), ReorganizeError> {
+        let invoker = ReelLibrarian {
+            agent: &self.agent,
+            model_name: &self.models.reorganize,
+        };
+
+        reorganize::run(&self.storage, &invoker).await
     }
 }
 

@@ -199,6 +199,45 @@ fn query_system_prompt(inventory: &DocumentInventory) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Reorganize-specific prompt
+// ---------------------------------------------------------------------------
+
+const REORGANIZE_BLOCK: &str = "\
+## Reorganize Task
+
+Full restructuring operations on `derived/`: split, merge, remove, consolidate, \
+reorder, tighten prose. May read `raw/` for source of truth.
+
+### Instructions
+
+1. Read `derived/PROJECT.md` for orientation and the current document index.
+2. Review all derived documents for restructuring opportunities.
+3. Apply document lifecycle triggers:
+   - **Size**: documents approaching ~200 lines should be split into focused subtopics.
+   - **Coherence**: documents covering multiple unrelated topics should be split.
+   - **Overlap**: documents with duplicated content should be merged or deduplicated.
+4. Merge related or overlapping documents.
+5. Split documents that cover too many topics.
+6. Remove duplicated content across documents.
+7. Tighten prose: eliminate filler, reduce verbosity, sharpen facts.
+8. Update `derived/PROJECT.md` index after structural changes.
+
+### Rules
+
+- Derive all content from existing documents. Do not invent information.
+- Every derived document must follow the document format (title + scope header).
+- Use cross-references between documents where appropriate.
+- Keep documents focused and non-overlapping.
+- May read `raw/` to verify content accuracy.";
+
+fn reorganize_system_prompt(inventory: &DocumentInventory) -> String {
+    format!(
+        "{}\n\n{REORGANIZE_BLOCK}",
+        build_shared_prompt(inventory, SCOPE_RESTRICTION)
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Public access for operation modules
 // ---------------------------------------------------------------------------
 
@@ -233,6 +272,17 @@ pub fn query_user_message(question: &str) -> String {
 pub fn build_query_prompt(storage: &Storage) -> Result<String, StorageError> {
     let inventory = storage.inventory()?;
     Ok(query_system_prompt(&inventory))
+}
+
+/// Reorganize user message sent as the user turn to the librarian.
+pub const fn reorganize_user_message() -> &'static str {
+    "Perform a full restructuring pass over the derived knowledge base."
+}
+
+/// Build the system prompt for a reorganize invocation from current storage state.
+pub fn build_reorganize_prompt(storage: &Storage) -> Result<String, StorageError> {
+    let inventory = storage.inventory()?;
+    Ok(reorganize_system_prompt(&inventory))
 }
 
 // ---------------------------------------------------------------------------
@@ -369,5 +419,33 @@ mod tests {
     fn query_user_message_includes_question() {
         let msg = query_user_message("What is the project about?");
         assert!(msg.contains("What is the project about?"));
+    }
+
+    #[test]
+    fn reorganize_prompt_contains_required_sections() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.create_directories().unwrap();
+
+        std::fs::write(
+            storage.derived_dir().join("PROJECT.md"),
+            "# Project\n<!-- scope: overview -->\n",
+        )
+        .unwrap();
+
+        let prompt = build_reorganize_prompt(&storage).unwrap();
+
+        // Shared blocks
+        assert!(prompt.contains("Core Principle"));
+        assert!(prompt.contains("Document Format"));
+        assert!(prompt.contains("Cross-References"));
+        assert!(prompt.contains("Scope Restriction"));
+        assert!(prompt.contains("Current Document Inventory"));
+
+        // Reorganize-specific block
+        assert!(prompt.contains("Reorganize Task"));
+        assert!(prompt.contains("lifecycle triggers"));
+        assert!(prompt.contains("200 lines"));
+        assert!(prompt.contains("PROJECT.md"));
     }
 }
