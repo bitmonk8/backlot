@@ -43,6 +43,13 @@ pub enum FlickError {
 
     #[error("tool result parse error: {0}")]
     ToolResultParse(String),
+
+    #[error("structured output is not valid JSON: {0}")]
+    ResponseNotJson(String),
+
+    /// Schema conformance failure: missing text block, non-object where object expected, or missing required field.
+    #[error("schema validation failed: {0}")]
+    SchemaValidation(String),
 }
 
 impl FlickError {
@@ -62,6 +69,8 @@ impl FlickError {
             Self::ContextParse(_) => "context_parse_error",
             Self::Io(_) => "io_error",
             Self::ToolResultParse(_) => "tool_result_parse_error",
+            Self::ResponseNotJson(_) => "response_not_json",
+            Self::SchemaValidation(_) => "schema_validation",
         }
     }
 }
@@ -437,6 +446,20 @@ mod tests {
     fn code_invalid_message_order() {
         let e = FlickError::InvalidMessageOrder("bad order".into());
         assert_eq!(e.code(), "invalid_message_order");
+    }
+
+    #[test]
+    fn code_response_not_json() {
+        let e = FlickError::ResponseNotJson("bad".into());
+        assert_eq!(e.code(), "response_not_json");
+        assert!(e.to_string().contains("bad"));
+    }
+
+    #[test]
+    fn code_schema_validation() {
+        let e = FlickError::SchemaValidation("missing field".into());
+        assert_eq!(e.code(), "schema_validation");
+        assert!(e.to_string().contains("missing field"));
     }
 
     #[test]

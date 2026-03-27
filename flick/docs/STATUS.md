@@ -32,7 +32,8 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - `CompatFlags` in `provider_registry.rs` (describes provider behavior), `ToolConfig::input_schema` aligned with `ToolDefinition::input_schema` (backward compat via `#[serde(alias = "parameters")]`)
 - Secret key file write logic extracted to `write_new_secret_key_file` helper (shared across Unix/Windows)
 - Per-call timing — `FlickResult.timing` contains `api_latency_ms` measured around provider calls (summed for two-step structured output)
-- 336 tests passing (279 lib, 26 bin, 20 runner, 11 integration), zero clippy errors
+- Structured output cleaning — `structured_output.rs` provides `strip_fences_from_blocks` (fence stripping) and `check_required_fields` (required-field validation, recursive including array items); `FlickError::ResponseNotJson` for unparseable JSON, `FlickError::SchemaValidation` for schema conformance failures; inline context rollback (pop stale assistant, restore prior message) in both `run` and `run_second_step`
+- 365 tests passing (308 lib, 26 bin, 20 runner, 11 integration), zero clippy errors
 
 ## Next Work
 

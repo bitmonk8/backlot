@@ -4,24 +4,7 @@ Issues identified during review but deferred for later resolution.
 
 ---
 
-## 1. Structured output not validated or cleaned
-
-**File:** `flick/src/runner.rs`
-**Category:** Bug / Enhancement
-**Source:** rig integration testing (F-001)
-
-Two issues when `output_schema` is set:
-
-1. The model sometimes wraps its JSON response in markdown code fences (`` ```json ... ``` ``). Flick passes this through as-is, forcing every caller to strip fences.
-2. The model sometimes omits fields marked `required` in the schema. Flick does not validate the response against the schema.
-
-Since flick owns the `output_schema` feature, it should: (a) strip code fences from the response, (b) validate the response against the schema and retry or error if non-conforming.
-
-**Workaround:** Callers strip code fences manually; use `get -i` for optional access to "required" fields.
-
----
-
-## 2. No Anthropic prompt caching
+## 1. No Anthropic prompt caching
 
 **File:** `flick/src/provider/messages.rs`
 **Category:** Enhancement (performance)
@@ -33,7 +16,7 @@ Impact observed in vault tests: bootstrap (Sonnet, 4 tool calls) takes 47s; reco
 
 ---
 
-## 3. `validate_resolved_from_provider_info` adapter could be inlined
+## 2. `validate_resolved_from_provider_info` adapter could be inlined
 
 **File:** `flick/src/validation.rs`
 **Category:** Simplification
@@ -42,7 +25,7 @@ Thin wrapper that unpacks `ProviderInfo` fields and forwards to `validate_resolv
 
 ---
 
-## 4. `validate_assistant_content` could fold into `validate_message_structure`
+## 3. `validate_assistant_content` could fold into `validate_message_structure`
 
 **File:** `flick/src/context.rs`
 **Category:** Simplification
@@ -51,7 +34,7 @@ Thin wrapper that unpacks `ProviderInfo` fields and forwards to `validate_resolv
 
 ---
 
-## 5. FlickResult construction duplicated in runner
+## 4. FlickResult construction duplicated in runner
 
 **File:** `flick/src/runner.rs`
 **Category:** Simplification
@@ -60,7 +43,7 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 
 ---
 
-## 6. `_ = compat` dead parameter in validate_resolved
+## 5. `_ = compat` dead parameter in validate_resolved
 
 **File:** `flick/src/validation.rs`
 **Category:** Simplification
@@ -69,7 +52,7 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 
 ---
 
-## 7. `CompatFlags` placement in provider_registry
+## 6. `CompatFlags` placement in provider_registry
 
 **File:** `flick/src/provider_registry.rs`
 **Category:** Separation of concerns
@@ -78,7 +61,7 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 
 ---
 
-## 8. `flick_dir()` and `home_dir()` in provider_registry
+## 7. `flick_dir()` and `home_dir()` in provider_registry
 
 **File:** `flick/src/provider_registry.rs`
 **Category:** Separation of concerns
@@ -87,7 +70,7 @@ General path utilities unrelated to provider credential management. Other module
 
 ---
 
-## 9. `validate_resolved` naming
+## 8. `validate_resolved` naming
 
 **File:** `flick/src/validation.rs`
 **Category:** Naming
@@ -96,7 +79,7 @@ General path utilities unrelated to provider credential management. Other module
 
 ---
 
-## 10. `platform.rs` module name is broad
+## 9. `platform.rs` module name is broad
 
 **File:** `flick/src/platform.rs`
 **Category:** Naming
@@ -105,7 +88,7 @@ Currently contains only one Windows ACL function. `permissions.rs` or `fs_permis
 
 ---
 
-## 11. `crypto.rs` `provider` parameter name
+## 10. `crypto.rs` `provider` parameter name
 
 **File:** `flick/src/crypto.rs`
 **Category:** Naming
@@ -114,7 +97,7 @@ The `provider` parameter in `encrypt`/`decrypt` serves as AAD (additional authen
 
 ---
 
-## 12. `validation.rs` missing branch coverage
+## 11. `validation.rs` missing branch coverage
 
 **File:** `flick/src/validation.rs`
 **Category:** Testing
@@ -123,7 +106,7 @@ Missing tests for: ChatCompletions temperature > 2.0, reasoning+output_schema al
 
 ---
 
-## 13. `crypto.rs` missing invalid hex test
+## 12. `crypto.rs` missing invalid hex test
 
 **File:** `flick/src/crypto.rs`
 **Category:** Testing
@@ -132,11 +115,9 @@ Missing tests for: ChatCompletions temperature > 2.0, reasoning+output_schema al
 
 ---
 
-## 14. `platform.rs` has zero test coverage
+## 13. `platform.rs` has zero test coverage
 
 **File:** `flick/src/platform.rs`
 **Category:** Testing
 
 `restrict_windows_permissions` has no tests. A smoke test on Windows would catch regressions.
-
-

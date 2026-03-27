@@ -11,6 +11,7 @@ pub mod provider;
 pub mod provider_registry;
 pub mod result;
 pub mod runner;
+mod structured_output;
 pub mod validation;
 
 #[cfg(any(test, feature = "testing"))]
