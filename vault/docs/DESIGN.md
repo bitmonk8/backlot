@@ -10,7 +10,7 @@ vault/                            (workspace root)
 +-- vault/                       (library crate)
 |   +-- Cargo.toml
 |   +-- src/
-|       +-- lib.rs               -- Public API: Vault, VaultEnvironment, error types
+|       +-- lib.rs               -- Public API: Vault, VaultEnvironment, SessionMetadata, error types
 |       +-- storage.rs           -- Storage layer: file I/O, changelog, versioning
 |       +-- prompts.rs           -- System prompt composition (shared + per-operation)
 |       +-- librarian.rs         -- Agent invocation trait + ReelLibrarian impl
@@ -187,7 +187,7 @@ The prompts module (`prompts.rs`) composes system prompts from shared blocks (co
 
 The librarian (`librarian.rs`) is the interface between vault operations and the reel agent. It has one responsibility:
 
-**Agent invocation** -- Two traits abstract agent calls so that tests can substitute mocks without requiring real LLM calls: `DerivedProducer` (used by bootstrap, record, and reorganize — writes derived documents) and `QueryResponder` (used by query, read-only, returns a structured `QueryResult` parsed from the agent's JSON response). The production implementation (`ReelLibrarian`) implements both traits, holds a reference to the shared `Agent`, and configures each call with the appropriate model, grant, and write paths. Splitting the traits ensures each operation depends only on the capability it uses, and test mocks need not stub unrelated methods.
+**Agent invocation** -- Two traits abstract agent calls so that tests can substitute mocks without requiring real LLM calls: `DerivedProducer` (used by bootstrap, record, and reorganize — writes derived documents, returns `SessionMetadata`) and `QueryResponder` (used by query, read-only, returns a structured `QueryResult` and `SessionMetadata` parsed from the agent's response). Both traits return `SessionMetadata` alongside their domain results so callers can surface usage and transcript data. The production implementation (`ReelLibrarian`) implements both traits, holds a reference to the shared `Agent`, and configures each call with the appropriate model, grant, and write paths. `ReelLibrarian` captures the full `RunResult` from reel and converts it to `SessionMetadata`. Splitting the traits ensures each operation depends only on the capability it uses, and test mocks need not stub unrelated methods.
 
 **Tool access and sandboxing** -- The librarian uses reel's built-in file tools (Read, Write, Edit, Glob, Grep) scoped to the storage root. Reel's `AgentRequestConfig` supports fine-grained path grants:
 
@@ -224,7 +224,7 @@ Sequence:
 4. Validates derived documents (warnings only, does not fail the operation).
 5. Snapshots derived documents again and computes the set of created or modified files by comparing content.
 6. Appends a record changelog entry listing the raw filename and modified derived filenames.
-7. Returns `(Vec<DocumentRef>, Vec<DerivedValidationWarning>)` — modified documents and any validation warnings.
+7. Returns `(Vec<DocumentRef>, Vec<DerivedValidationWarning>, SessionMetadata)` — modified documents, any validation warnings, and session metadata.
 
 The record prompt instructs the librarian to: read `derived/PROJECT.md` for orientation, apply a relevance filter (keep decisions/constraints/patterns, discard routine progress), follow the superseding rule (new info replaces outdated), and avoid restructuring (only add/update content relevant to the new information).
 
@@ -261,7 +261,7 @@ Sequence:
    - **restructured**: files in the after snapshot but not in before (new documents from splits).
    - **deleted**: files in the before snapshot but not in after (removed during merge).
 6. Appends a reorganize changelog entry with merged/restructured/deleted lists.
-7. Returns a `ReorganizeReport`.
+7. Returns `(ReorganizeReport, Vec<DerivedValidationWarning>, SessionMetadata)` — the reorganize report, any validation warnings, and session metadata.
 
 The reorganize prompt instructs the librarian to: read `derived/PROJECT.md` for orientation, apply document lifecycle triggers (size ~200 lines, coherence), merge overlapping documents, split multi-topic documents, remove duplicated content, tighten prose, and update the PROJECT.md index. The librarian may read `raw/` for content accuracy verification.
 

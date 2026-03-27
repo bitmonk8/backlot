@@ -5,9 +5,13 @@
 // operation in the changelog.
 
 use crate::BootstrapError;
+use crate::SessionMetadata;
 use crate::librarian::DerivedProducer;
 use crate::prompts;
 use crate::storage::{ChangelogEntry, DerivedValidationWarning, Storage, utc_now_iso8601};
+
+/// Bootstrap result: validation warnings and session metadata.
+pub type BootstrapResult = (Vec<DerivedValidationWarning>, SessionMetadata);
 
 /// Execute the bootstrap operation.
 ///
@@ -19,7 +23,7 @@ pub async fn run<L: DerivedProducer>(
     storage: &Storage,
     invoker: &L,
     requirements: &str,
-) -> Result<Vec<DerivedValidationWarning>, BootstrapError> {
+) -> Result<BootstrapResult, BootstrapError> {
     // Pre-condition: reject if already initialized.
     if storage.is_initialized() {
         return Err(BootstrapError::AlreadyInitialized);
@@ -35,7 +39,7 @@ pub async fn run<L: DerivedProducer>(
     let system_prompt = prompts::build_bootstrap_prompt(storage)?;
     let user_message = prompts::bootstrap_user_message();
 
-    invoker
+    let metadata = invoker
         .produce_derived(&system_prompt, user_message, storage)
         .await
         .map_err(BootstrapError::LibrarianFailed)?;
@@ -50,7 +54,7 @@ pub async fn run<L: DerivedProducer>(
     };
     storage.append_changelog(&entry)?;
 
-    Ok(warnings)
+    Ok((warnings, metadata))
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +94,7 @@ mod tests {
         let storage = Storage::new(tmp.path().to_path_buf());
         let invoker = CapturingLibrarian::new(None);
 
-        run(&storage, &invoker, "Test requirements.").await.unwrap();
+        let (_warnings, _metadata) = run(&storage, &invoker, "Test requirements.").await.unwrap();
 
         let prompt = invoker.captured_prompt.lock().unwrap().clone().unwrap();
         let message = invoker.captured_message.lock().unwrap().clone().unwrap();
@@ -116,6 +120,7 @@ mod tests {
         let result = run(&storage, &invoker, "Build a widget system.").await;
         assert!(result.is_ok());
         assert!(invoker.was_invoked());
+        let (_warnings, _metadata) = result.unwrap();
 
         // Raw requirements written.
         let raw_content = storage.read_raw("REQUIREMENTS_1.md").unwrap();
@@ -189,7 +194,7 @@ mod tests {
         let storage = Storage::new(tmp.path().to_path_buf());
         let invoker = MockLibrarian::succeeding(bootstrap_writer());
 
-        run(&storage, &invoker, "Test requirements.").await.unwrap();
+        let (_warnings, _metadata) = run(&storage, &invoker, "Test requirements.").await.unwrap();
 
         assert!(storage.raw_dir().is_dir());
         assert!(storage.derived_dir().is_dir());
@@ -201,7 +206,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let storage = Storage::new(tmp.path().to_path_buf());
 
-        let warnings = run(&storage, &BadNameLibrarian, "Reqs.").await.unwrap();
+        let (warnings, _metadata) = run(&storage, &BadNameLibrarian, "Reqs.").await.unwrap();
         // Operation succeeds despite validation warnings, but warnings are produced.
         assert!(
             !warnings.is_empty(),

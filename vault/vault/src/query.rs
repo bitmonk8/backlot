@@ -3,21 +3,26 @@
 // Read-only operation. The librarian reads raw and derived documents to
 // synthesize an answer. No files are written, no changelog entry is appended.
 
+use crate::SessionMetadata;
 use crate::librarian::QueryResponder;
 use crate::prompts;
 use crate::storage::Storage;
 use crate::{QueryError, QueryResult};
 
+/// Query result: the structured answer and session metadata.
+pub type QueryOpResult = (QueryResult, SessionMetadata);
+
 /// Execute the query operation.
 ///
 /// Builds a query-specific system prompt, invokes the librarian to read
-/// documents and synthesize an answer, and returns the structured result.
-/// No files are written and no changelog entry is appended.
+/// documents and synthesize an answer, and returns the structured result
+/// with session metadata. No files are written and no changelog entry is
+/// appended.
 pub async fn run<L: QueryResponder>(
     storage: &Storage,
     invoker: &L,
     question: &str,
-) -> Result<QueryResult, QueryError> {
+) -> Result<QueryOpResult, QueryError> {
     let system_prompt = prompts::build_query_prompt(storage)
         .map_err(|e| QueryError::Io(std::io::Error::other(e.to_string())))?;
     let user_message = prompts::query_user_message(question);
@@ -71,7 +76,7 @@ mod tests {
         };
         let invoker = MockQueryLibrarian::succeeding(result);
 
-        let qr = run(&storage, &invoker, "What is the project?")
+        let (qr, _metadata) = run(&storage, &invoker, "What is the project?")
             .await
             .unwrap();
         assert!(matches!(qr.coverage, Coverage::Full));
@@ -92,7 +97,7 @@ mod tests {
         };
         let invoker = MockQueryLibrarian::succeeding(result);
 
-        let qr = run(&storage, &invoker, "Tell me about deployment.")
+        let (qr, _metadata) = run(&storage, &invoker, "Tell me about deployment.")
             .await
             .unwrap();
         assert!(matches!(qr.coverage, Coverage::Partial));
@@ -110,7 +115,7 @@ mod tests {
         };
         let invoker = MockQueryLibrarian::succeeding(result);
 
-        let qr = run(&storage, &invoker, "What is the weather?")
+        let (qr, _metadata) = run(&storage, &invoker, "What is the weather?")
             .await
             .unwrap();
         assert!(matches!(qr.coverage, Coverage::None));
@@ -149,7 +154,7 @@ mod tests {
         };
         let invoker = MockQueryLibrarian::succeeding(result);
 
-        let qr = run(&storage, &invoker, "How is the architecture organized?")
+        let (qr, _metadata) = run(&storage, &invoker, "How is the architecture organized?")
             .await
             .unwrap();
         assert_eq!(qr.extracts.len(), 2);

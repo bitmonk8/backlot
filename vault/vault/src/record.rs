@@ -3,6 +3,7 @@
 // Stores raw content at the next version number, invokes the librarian to
 // update derived documents, then records the operation in the changelog.
 
+use crate::SessionMetadata;
 use crate::librarian::DerivedProducer;
 use crate::prompts;
 use crate::storage::{
@@ -11,18 +12,26 @@ use crate::storage::{
 };
 use crate::{RecordError, RecordMode};
 
+/// Record result: modified documents, validation warnings, and session metadata.
+pub type RecordResult = (
+    Vec<DocumentRef>,
+    Vec<DerivedValidationWarning>,
+    SessionMetadata,
+);
+
 /// Execute the record operation.
 ///
 /// Writes content to `raw/NAME_N.md`, invokes the librarian to integrate the
 /// new content into derived documents, and appends a changelog entry. Returns
-/// references to derived documents that were created or modified.
+/// references to derived documents that were created or modified, validation
+/// warnings, and session metadata.
 pub async fn run<L: DerivedProducer>(
     storage: &Storage,
     invoker: &L,
     name: &str,
     content: &str,
     mode: RecordMode,
-) -> Result<(Vec<DocumentRef>, Vec<DerivedValidationWarning>), RecordError> {
+) -> Result<RecordResult, RecordError> {
     let new_series = mode == RecordMode::New;
 
     // Step 1: Write raw document (validates name and version constraints).
@@ -35,7 +44,7 @@ pub async fn run<L: DerivedProducer>(
     let system_prompt = prompts::build_record_prompt(storage, &raw_filename)?;
     let user_message = prompts::record_user_message();
 
-    invoker
+    let metadata = invoker
         .produce_derived(&system_prompt, user_message, storage)
         .await
         .map_err(RecordError::LibrarianFailed)?;
@@ -58,7 +67,7 @@ pub async fn run<L: DerivedProducer>(
     };
     storage.append_changelog(&entry)?;
 
-    Ok((derived_modified, warnings))
+    Ok((derived_modified, warnings, metadata))
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +135,7 @@ mod tests {
         assert!(result.is_ok());
         assert!(invoker.was_invoked());
 
-        let (modified, _warnings) = result.unwrap();
+        let (modified, _warnings, _metadata) = result.unwrap();
         // MockLibrarian creates FINDINGS.md and modifies PROJECT.md
         assert!(modified.iter().any(|d| d.filename == "FINDINGS.md"));
         assert!(modified.iter().any(|d| d.filename == "PROJECT.md"));
@@ -276,9 +285,10 @@ mod tests {
         .unwrap();
 
         let invoker = MockLibrarian::succeeding(record_writer());
-        let (modified, _warnings) = run(&storage, &invoker, "FINDINGS", "content", RecordMode::New)
-            .await
-            .unwrap();
+        let (modified, _warnings, _metadata) =
+            run(&storage, &invoker, "FINDINGS", "content", RecordMode::New)
+                .await
+                .unwrap();
 
         // FINDINGS.md created, PROJECT.md modified, REQUIREMENTS.md unchanged
         let names: Vec<&str> = modified.iter().map(|d| d.filename.as_str()).collect();
@@ -294,7 +304,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let storage = setup_bootstrapped(&tmp);
 
-        let (modified, _warnings) = run(
+        let (modified, _warnings, _metadata) = run(
             &storage,
             &NoOpLibrarian,
             "FINDINGS",
@@ -384,7 +394,7 @@ mod tests {
         )
         .await;
         // Operation succeeds despite validation warnings, but warnings are produced.
-        let (modified, warnings) = result.unwrap();
+        let (modified, warnings, _metadata) = result.unwrap();
         assert!(
             !warnings.is_empty(),
             "expected validation warnings for bad filename"

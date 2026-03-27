@@ -5,6 +5,7 @@
 // on each record, this is a full sweep.
 
 use crate::ReorganizeError;
+use crate::SessionMetadata;
 use crate::librarian::DerivedProducer;
 use crate::prompts;
 use crate::storage::{
@@ -12,8 +13,12 @@ use crate::storage::{
     compute_deleted, utc_now_iso8601,
 };
 
-/// Result of a reorganize operation: the report and any validation warnings.
-pub type ReorganizeResult = (crate::ReorganizeReport, Vec<DerivedValidationWarning>);
+/// Result of a reorganize operation: the report, validation warnings, and session metadata.
+pub type ReorganizeResult = (
+    crate::ReorganizeReport,
+    Vec<DerivedValidationWarning>,
+    SessionMetadata,
+);
 
 /// Execute the reorganize operation.
 ///
@@ -31,7 +36,7 @@ pub async fn run<L: DerivedProducer>(
     let system_prompt = prompts::build_reorganize_prompt(storage)?;
     let user_message = prompts::reorganize_user_message();
 
-    invoker
+    let metadata = invoker
         .produce_derived(&system_prompt, user_message, storage)
         .await
         .map_err(ReorganizeError::LibrarianFailed)?;
@@ -67,7 +72,7 @@ pub async fn run<L: DerivedProducer>(
         restructured,
         deleted,
     };
-    Ok((report, warnings))
+    Ok((report, warnings, metadata))
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +140,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let storage = setup_bootstrapped(&tmp);
 
-        let (report, _warnings) = run(&storage, &NoOpLibrarian).await.unwrap();
+        let (report, _warnings, _metadata) = run(&storage, &NoOpLibrarian).await.unwrap();
         assert!(report.merged.is_empty());
         assert!(report.restructured.is_empty());
         assert!(report.deleted.is_empty());
@@ -154,7 +159,7 @@ mod tests {
         let storage = setup_bootstrapped(&tmp);
         let invoker = MockLibrarian::succeeding(merge_writer());
 
-        let (report, _warnings) = run(&storage, &invoker).await.unwrap();
+        let (report, _warnings, _metadata) = run(&storage, &invoker).await.unwrap();
         assert!(report.merged.iter().any(|d| d.filename == "PROJECT.md"));
         assert!(report.restructured.is_empty());
         assert!(report.deleted.is_empty());
@@ -168,7 +173,7 @@ mod tests {
         let storage = setup_bootstrapped(&tmp);
         let invoker = MockLibrarian::succeeding(restructure_writer());
 
-        let (report, _warnings) = run(&storage, &invoker).await.unwrap();
+        let (report, _warnings, _metadata) = run(&storage, &invoker).await.unwrap();
         assert!(
             report
                 .restructured
@@ -189,7 +194,7 @@ mod tests {
             filename_to_delete: "REQUIREMENTS.md".to_owned(),
         };
 
-        let (report, _warnings) = run(&storage, &invoker).await.unwrap();
+        let (report, _warnings, _metadata) = run(&storage, &invoker).await.unwrap();
         assert!(
             report
                 .deleted
@@ -224,7 +229,7 @@ mod tests {
             Ok(())
         }));
 
-        let (report, _warnings) = run(&storage, &invoker).await.unwrap();
+        let (report, _warnings, _metadata) = run(&storage, &invoker).await.unwrap();
         assert!(report.merged.iter().any(|d| d.filename == "PROJECT.md"));
         assert!(
             report
@@ -298,7 +303,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let storage = setup_bootstrapped(&tmp);
 
-        let (_, warnings) = run(&storage, &BadNameLibrarian).await.unwrap();
+        let (_, warnings, _metadata) = run(&storage, &BadNameLibrarian).await.unwrap();
         assert!(
             !warnings.is_empty(),
             "expected validation warnings for bad filename"

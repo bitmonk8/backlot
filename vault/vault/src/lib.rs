@@ -22,6 +22,146 @@ use storage::Storage;
 pub use storage::{DerivedValidationWarning, DocumentRef};
 
 // ---------------------------------------------------------------------------
+// Session metadata (observability)
+// ---------------------------------------------------------------------------
+
+/// Per-turn record from an agent session transcript.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TranscriptTurn {
+    /// Tool calls the model requested in this turn.
+    pub tool_calls: Vec<TranscriptToolCall>,
+    /// Token usage for this model call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TurnUsage>,
+    /// API latency in milliseconds for this model call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_latency_ms: Option<u64>,
+}
+
+/// A single tool call within a transcript turn.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TranscriptToolCall {
+    pub tool_use_id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+/// Token usage for a single turn.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TurnUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub cache_creation_input_tokens: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub cache_read_input_tokens: u64,
+    pub cost_usd: f64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, clippy::missing_const_for_fn)]
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+/// Aggregated session metadata from a librarian invocation.
+///
+/// Extracted from reel's `RunResult` to decouple vault's public API from reel
+/// internals. Includes token usage, tool call count, and the full session
+/// transcript.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionMetadata {
+    /// Total input tokens across the session.
+    pub input_tokens: u64,
+    /// Total output tokens across the session.
+    pub output_tokens: u64,
+    /// Tokens used to create prompt cache entries (zero when caching inactive).
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub cache_creation_input_tokens: u64,
+    /// Tokens read from prompt cache (zero when caching inactive).
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub cache_read_input_tokens: u64,
+    /// Estimated cost in USD (if the model has pricing info).
+    pub cost_usd: f64,
+    /// Total number of tool calls executed during the session.
+    pub tool_calls: u32,
+    /// Session transcript: one entry per model call, in order.
+    pub transcript: Vec<TranscriptTurn>,
+}
+
+impl SessionMetadata {
+    /// Build from a reel `RunResult`.
+    pub(crate) fn from_run_result<T>(result: &reel::RunResult<T>) -> Self {
+        let (input_tokens, output_tokens, cache_creation, cache_read, cost_usd) =
+            match &result.usage {
+                Some(u) => (
+                    u.input_tokens,
+                    u.output_tokens,
+                    u.cache_creation_input_tokens,
+                    u.cache_read_input_tokens,
+                    u.cost_usd,
+                ),
+                None => (0, 0, 0, 0, 0.0),
+            };
+
+        let transcript = result
+            .transcript
+            .iter()
+            .map(|turn| TranscriptTurn {
+                tool_calls: turn
+                    .tool_calls
+                    .iter()
+                    .map(|tc| TranscriptToolCall {
+                        tool_use_id: tc.tool_use_id.clone(),
+                        name: tc.name.clone(),
+                        input: tc.input.clone(),
+                    })
+                    .collect(),
+                usage: turn.usage.as_ref().map(|u| TurnUsage {
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    cache_creation_input_tokens: u.cache_creation_input_tokens,
+                    cache_read_input_tokens: u.cache_read_input_tokens,
+                    cost_usd: u.cost_usd,
+                }),
+                api_latency_ms: turn.api_latency_ms,
+            })
+            .collect();
+
+        Self {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: cache_creation,
+            cache_read_input_tokens: cache_read,
+            cost_usd,
+            tool_calls: result.tool_calls,
+            transcript,
+        }
+    }
+
+    /// Compute total API latency by summing per-turn latencies.
+    pub fn api_latency_ms(&self) -> u64 {
+        self.transcript
+            .iter()
+            .filter_map(|t| t.api_latency_ms)
+            .sum()
+    }
+
+    /// Create a synthetic empty metadata (for tests).
+    #[cfg(test)]
+    pub(crate) const fn empty() -> Self {
+        Self {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost_usd: 0.0,
+            tool_calls: 0,
+            transcript: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Configuration types
 // ---------------------------------------------------------------------------
 
@@ -209,11 +349,11 @@ impl Vault {
     /// Writes requirements to `raw/REQUIREMENTS_1.md`, invokes the librarian to
     /// produce derived documents in `derived/`, and records the operation in
     /// `CHANGELOG.md`. Fails with `AlreadyInitialized` if the vault has any
-    /// prior state.
+    /// prior state. Returns validation warnings and session metadata.
     pub async fn bootstrap(
         &self,
         requirements: &str,
-    ) -> Result<Vec<DerivedValidationWarning>, BootstrapError> {
+    ) -> Result<(Vec<DerivedValidationWarning>, SessionMetadata), BootstrapError> {
         let invoker = ReelLibrarian {
             agent: &self.agent,
             model_name: &self.models.bootstrap,
@@ -226,13 +366,21 @@ impl Vault {
     ///
     /// Writes content to `raw/NAME_N.md`, invokes the librarian to integrate
     /// it into derived documents, and records the operation in `CHANGELOG.md`.
-    /// Returns references to derived documents that were created or modified.
+    /// Returns references to derived documents that were created or modified,
+    /// validation warnings, and session metadata.
     pub async fn record(
         &self,
         name: &str,
         content: &str,
         mode: RecordMode,
-    ) -> Result<(Vec<DocumentRef>, Vec<DerivedValidationWarning>), RecordError> {
+    ) -> Result<
+        (
+            Vec<DocumentRef>,
+            Vec<DerivedValidationWarning>,
+            SessionMetadata,
+        ),
+        RecordError,
+    > {
         let invoker = ReelLibrarian {
             agent: &self.agent,
             model_name: &self.models.record,
@@ -245,8 +393,11 @@ impl Vault {
     ///
     /// Read-only operation. Invokes the librarian to read documents and
     /// synthesize an answer. No files are written and no changelog entry
-    /// is appended.
-    pub async fn query(&self, question: &str) -> Result<QueryResult, QueryError> {
+    /// is appended. Returns the structured query result and session metadata.
+    pub async fn query(
+        &self,
+        question: &str,
+    ) -> Result<(QueryResult, SessionMetadata), QueryError> {
         let invoker = ReelLibrarian {
             agent: &self.agent,
             model_name: &self.models.query,
@@ -259,10 +410,18 @@ impl Vault {
     ///
     /// Full restructuring pass: merges, splits, deduplicates, and tightens
     /// derived documents. Appends a changelog entry. Returns a report of
-    /// merged, restructured, and deleted documents.
+    /// merged, restructured, and deleted documents, validation warnings, and
+    /// session metadata.
     pub async fn reorganize(
         &self,
-    ) -> Result<(ReorganizeReport, Vec<DerivedValidationWarning>), ReorganizeError> {
+    ) -> Result<
+        (
+            ReorganizeReport,
+            Vec<DerivedValidationWarning>,
+            SessionMetadata,
+        ),
+        ReorganizeError,
+    > {
         let invoker = ReelLibrarian {
             agent: &self.agent,
             model_name: &self.models.reorganize,
@@ -295,6 +454,42 @@ mod tests {
             reel::ModelRegistry::from_map(std::collections::BTreeMap::new()).unwrap();
         let provider_registry = reel::ProviderRegistry::load_default().unwrap();
         (model_registry, provider_registry)
+    }
+
+    #[test]
+    fn api_latency_ms_sums_present_values() {
+        let metadata = SessionMetadata {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost_usd: 0.0,
+            tool_calls: 0,
+            transcript: vec![
+                TranscriptTurn {
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    api_latency_ms: Some(100),
+                },
+                TranscriptTurn {
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    api_latency_ms: None,
+                },
+                TranscriptTurn {
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    api_latency_ms: Some(250),
+                },
+            ],
+        };
+        assert_eq!(metadata.api_latency_ms(), 350);
+    }
+
+    #[test]
+    fn api_latency_ms_empty_transcript_returns_zero() {
+        let metadata = SessionMetadata::empty();
+        assert_eq!(metadata.api_latency_ms(), 0);
     }
 
     #[test]

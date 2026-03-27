@@ -5,7 +5,7 @@
 
 use crate::librarian::{DerivedProducer, QueryResponder};
 use crate::storage::Storage;
-use crate::{Coverage, QueryResult};
+use crate::{Coverage, QueryResult, SessionMetadata};
 
 use std::fs;
 use std::sync::Mutex;
@@ -52,14 +52,15 @@ impl DerivedProducer for MockLibrarian {
         _system_prompt: &str,
         _user_message: &str,
         storage: &Storage,
-    ) -> Result<(), String> {
+    ) -> Result<SessionMetadata, String> {
         self.invoked.store(true, Ordering::Relaxed);
 
         if !self.succeed {
             return Err("mock librarian failure".to_owned());
         }
 
-        (self.writer)(storage)
+        (self.writer)(storage)?;
+        Ok(SessionMetadata::empty())
     }
 }
 
@@ -72,8 +73,8 @@ impl DerivedProducer for NoOpLibrarian {
         _system_prompt: &str,
         _user_message: &str,
         _storage: &Storage,
-    ) -> Result<(), String> {
-        Ok(())
+    ) -> Result<SessionMetadata, String> {
+        Ok(SessionMetadata::empty())
     }
 }
 
@@ -111,10 +112,11 @@ impl DerivedProducer for CapturingLibrarian {
         system_prompt: &str,
         user_message: &str,
         storage: &Storage,
-    ) -> Result<(), String> {
+    ) -> Result<SessionMetadata, String> {
         *self.captured_prompt.lock().map_err(|e| e.to_string())? = Some(system_prompt.to_owned());
         *self.captured_message.lock().map_err(|e| e.to_string())? = Some(user_message.to_owned());
-        (self.writer)(storage)
+        (self.writer)(storage)?;
+        Ok(SessionMetadata::empty())
     }
 }
 
@@ -124,14 +126,17 @@ impl QueryResponder for CapturingLibrarian {
         system_prompt: &str,
         user_message: &str,
         _storage: &Storage,
-    ) -> Result<QueryResult, String> {
+    ) -> Result<(QueryResult, SessionMetadata), String> {
         *self.captured_prompt.lock().map_err(|e| e.to_string())? = Some(system_prompt.to_owned());
         *self.captured_message.lock().map_err(|e| e.to_string())? = Some(user_message.to_owned());
-        Ok(QueryResult {
-            coverage: Coverage::None,
-            answer: String::new(),
-            extracts: Vec::new(),
-        })
+        Ok((
+            QueryResult {
+                coverage: Coverage::None,
+                answer: String::new(),
+                extracts: Vec::new(),
+            },
+            SessionMetadata::empty(),
+        ))
     }
 }
 
@@ -144,7 +149,7 @@ impl DerivedProducer for BadNameLibrarian {
         _system_prompt: &str,
         _user_message: &str,
         storage: &Storage,
-    ) -> Result<(), String> {
+    ) -> Result<SessionMetadata, String> {
         let derived = storage.derived_dir();
         fs::write(
             derived.join("PROJECT.md"),
@@ -152,7 +157,7 @@ impl DerivedProducer for BadNameLibrarian {
         )
         .map_err(|e| e.to_string())?;
         fs::write(derived.join("bad_name.md"), "no header\n").map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(SessionMetadata::empty())
     }
 }
 
@@ -168,9 +173,10 @@ impl DerivedProducer for DeletingLibrarian {
         _system_prompt: &str,
         _user_message: &str,
         storage: &Storage,
-    ) -> Result<(), String> {
+    ) -> Result<SessionMetadata, String> {
         let path = storage.derived_dir().join(&self.filename_to_delete);
-        fs::remove_file(path).map_err(|e| e.to_string())
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+        Ok(SessionMetadata::empty())
     }
 }
 
@@ -205,15 +211,18 @@ impl QueryResponder for MockQueryLibrarian {
         _system_prompt: &str,
         _user_message: &str,
         _storage: &Storage,
-    ) -> Result<QueryResult, String> {
+    ) -> Result<(QueryResult, SessionMetadata), String> {
         if !self.succeed {
             return Err("mock query librarian failure".to_owned());
         }
 
-        self.result
+        let result = self
+            .result
             .lock()
             .map_err(|e| e.to_string())?
             .take()
-            .ok_or_else(|| "MockQueryLibrarian result already consumed".to_owned())
+            .ok_or_else(|| "MockQueryLibrarian result already consumed".to_owned())?;
+
+        Ok((result, SessionMetadata::empty()))
     }
 }

@@ -5,7 +5,7 @@
 // Prompt composition lives in the sibling `prompts` module.
 
 use crate::storage::Storage;
-use crate::{Coverage, Extract, QueryResult};
+use crate::{Coverage, Extract, QueryResult, SessionMetadata};
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,26 +17,27 @@ pub const AGENT_TIMEOUT: Duration = Duration::from_secs(300);
 // ---------------------------------------------------------------------------
 
 /// Trait for librarian invocations that produce or update derived documents.
-/// Used by bootstrap and record operations.
+/// Used by bootstrap and record operations. Returns session metadata alongside
+/// the unit result so callers can surface usage and transcript data.
 pub trait DerivedProducer: Send + Sync {
     fn produce_derived(
         &self,
         system_prompt: &str,
         user_message: &str,
         storage: &Storage,
-    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    ) -> impl std::future::Future<Output = Result<SessionMetadata, String>> + Send;
 }
 
 /// Trait for librarian invocations that answer queries. Read-only: no files
-/// are written. Returns a structured QueryResult parsed from the agent's
-/// response.
+/// are written. Returns a structured QueryResult and session metadata parsed
+/// from the agent's response.
 pub trait QueryResponder: Send + Sync {
     fn answer_query(
         &self,
         system_prompt: &str,
         user_message: &str,
         storage: &Storage,
-    ) -> impl std::future::Future<Output = Result<QueryResult, String>> + Send;
+    ) -> impl std::future::Future<Output = Result<(QueryResult, SessionMetadata), String>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,16 +77,16 @@ impl DerivedProducer for ReelLibrarian<'_> {
         system_prompt: &str,
         user_message: &str,
         storage: &Storage,
-    ) -> Result<(), String> {
+    ) -> Result<SessionMetadata, String> {
         let request = self.build_request(system_prompt, vec![storage.derived_dir()])?;
 
-        let _result: reel::RunResult<String> = self
+        let result: reel::RunResult<String> = self
             .agent
             .run(&request, user_message)
             .await
             .map_err(|e| format!("librarian agent failed: {e}"))?;
 
-        Ok(())
+        Ok(SessionMetadata::from_run_result(&result))
     }
 }
 
@@ -95,7 +96,7 @@ impl QueryResponder for ReelLibrarian<'_> {
         system_prompt: &str,
         user_message: &str,
         _storage: &Storage,
-    ) -> Result<QueryResult, String> {
+    ) -> Result<(QueryResult, SessionMetadata), String> {
         // Empty write_paths: reel only adds WRITE grant when write_paths is
         // non-empty (see reel agent.rs effective_tool_grant), so this is
         // genuinely read-only.
@@ -107,7 +108,9 @@ impl QueryResponder for ReelLibrarian<'_> {
             .await
             .map_err(|e| format!("librarian agent failed: {e}"))?;
 
-        parse_query_response(&result.output)
+        let metadata = SessionMetadata::from_run_result(&result);
+        let query_result = parse_query_response(&result.output)?;
+        Ok((query_result, metadata))
     }
 }
 

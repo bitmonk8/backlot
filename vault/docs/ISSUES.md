@@ -5,9 +5,9 @@
 | Severity | Count |
 |---|---|
 | MUST FIX | 1 |
-| NON-CRITICAL | 21 |
+| NON-CRITICAL | 23 |
 | NIT | 31 |
-| **Total** | **53** |
+| **Total** | **55** |
 
 ---
 
@@ -17,21 +17,21 @@
 
 #### M3a. emit_error_produces_json is a false-positive test
 - **File(s):** vault-cli/src/main.rs
-- **Line(s):** 296-300
+- **Line(s):** 348-352
 - **Description:** Does not call `emit_error` at all. Constructs an independent `serde_json::json!` value and asserts against that — always passes regardless of `emit_error`'s behavior.
 
 ---
 
 ## NON-CRITICAL
 
-### Group N1: Documentation accuracy (4 issues)
+### Group N1: Documentation accuracy (3 issues)
 
 User-facing docs contain inaccurate descriptions. All fixable in one documentation pass.
 
 #### N1a. DESIGN.md public API listing incomplete
 - **File(s):** docs/DESIGN.md
 - **Line(s):** 13
-- **Description:** File-tree annotation says lib.rs contains "Public API: Vault, VaultEnvironment, error types" — a brief summary, not an exhaustive inventory. Actual public exports also include VaultModels, RecordMode, Coverage, QueryResult, Extract, ReorganizeReport, DerivedValidationWarning, DocumentRef. The annotation omits domain types that external consumers need.
+- **Description:** File-tree annotation says lib.rs contains "Public API: Vault, VaultEnvironment, SessionMetadata, error types" — a brief summary, not an exhaustive inventory. Actual public exports also include VaultModels, RecordMode, Coverage, QueryResult, Extract, ReorganizeReport, DerivedValidationWarning, DocumentRef, TranscriptTurn, TranscriptToolCall, TurnUsage. The annotation omits domain and observability types that external consumers need.
 
 #### N1b. README record output description misleading
 - **File(s):** README.md
@@ -42,11 +42,6 @@ User-facing docs contain inaccurate descriptions. All fixable in one documentati
 - **File(s):** vault-cli/src/main.rs, README.md
 - **Line(s):** main.rs:138-142; README.md:69
 - **Description:** README says "Errors are emitted as JSON to stderr" which is accurate for errors. However, `emit_warnings` also writes plain-text validation warnings to stderr on successful operations. The README is silent about this second stderr channel, which could mislead consumers who parse stderr expecting only JSON.
-
-#### N1d. STATUS.md test count stale
-- **File(s):** docs/STATUS.md
-- **Line(s):** 75
-- **Description:** Claims "105 tests" but actual count is 116.
 
 ### Group N2: storage.rs silent error suppression (2 issues)
 
@@ -68,7 +63,7 @@ Both address unnecessary type duplication between vault and vault-cli that can b
 
 #### N3a. Four near-identical error enums
 - **File(s):** vault/src/lib.rs
-- **Line(s):** 48-158
+- **Line(s):** 188-298
 - **Description:** BootstrapError, RecordError, QueryError, and ReorganizeError all carry Io + LibrarianFailed variants. QueryError and ReorganizeError are structurally identical. Consolidation would eliminate six duplicate variant definitions and two identical `From<StorageError>` impls (BootstrapError and ReorganizeError both stringify all StorageError variants into Io).
 
 #### N3b. Duplicate type wrappers in CLI
@@ -82,12 +77,12 @@ Core operation functions and their wiring have zero test coverage.
 
 #### N4a. Vault facade methods have zero test coverage
 - **File(s):** vault/src/lib.rs
-- **Line(s):** 213-273
+- **Line(s):** 353-419
 - **Description:** The four public async `Vault` methods have zero test coverage. `Vault` holds concrete types with no trait abstraction, making unit testing impossible without a live `reel::Agent`. A regression in ReelLibrarian wiring would not be caught.
 
 #### N4b. CLI run_* functions have zero test coverage
 - **File(s):** vault-cli/src/main.rs
-- **Line(s):** 97-103, 173-230
+- **Line(s):** 203-282
 - **Description:** Zero test coverage for `run_bootstrap`, `run_query`, `run_record`, `run_reorganize`. Hard-coded dependencies on stdin/stderr/reel globals make them untestable. No integration test harness exists.
 
 #### N4c. reorganize.rs error paths and edge cases undertested
@@ -121,7 +116,7 @@ Existing tests that pass but don't meaningfully validate behavior.
 
 #### N5e. From<StorageError> impls untested
 - **File(s):** vault/src/lib.rs
-- **Line(s):** 66-70, 99-108, 154-158
+- **Line(s):** 206-210, 239-248, 294-298
 - **Description:** `From<StorageError>` impls for error types are untested. BootstrapError and ReorganizeError stringify all StorageError variants into Io, losing structure — no test confirms this is intentional.
 
 ### Group N6: CI robustness (2 issues)
@@ -157,7 +152,34 @@ Cross-cutting naming mismatches affecting API clarity.
 #### N8a. reel dependency duplicated across workspace
 - **File(s):** vault/Cargo.toml, vault-cli/Cargo.toml
 - **Line(s):** (both files)
-- **Description:** `reel` git dependency with `rev = "a6be158"` specified independently in both crates. Should use `[workspace.dependencies]`.
+- **Description:** `reel` git dependency with `rev = "93f35ef"` specified independently in both crates. Should use `[workspace.dependencies]`.
+
+### Group N9: Observability test gaps (6 issues)
+
+Discovered during review of the reel observability upgrade.
+
+#### N9a. SessionMetadata::from_run_result untested
+- **File(s):** vault/src/lib.rs
+- **Line(s):** 93-139
+- **Description:** Core conversion from reel `RunResult` to `SessionMetadata` has no unit tests. Neither the `None` usage branch nor the transcript mapping is exercised. All mock librarians bypass this by returning `SessionMetadata::empty()`.
+
+#### ~~N9b. SessionMetadata::api_latency_ms untested~~ (RESOLVED)
+Covered by `api_latency_ms_sums_present_values` and `api_latency_ms_empty_transcript_returns_zero` tests.
+
+#### N9c. Metadata propagation through operations untested
+- **File(s):** vault/src/test_support.rs, vault/src/bootstrap.rs, record.rs, query.rs, reorganize.rs
+- **Description:** Every mock librarian returns `SessionMetadata::empty()`. Every operation test destructures metadata with `_metadata` and discards it. If an operation accidentally dropped or replaced metadata, no test would catch it.
+
+#### ~~N9d. build_usage_json verbose test doesn't verify api_latency_ms~~ (RESOLVED)
+Assertion added to `build_usage_json_includes_transcript_when_verbose`.
+
+#### ~~N9e. build_usage_json tests don't assert api_latency_ms in non-verbose path~~ (RESOLVED)
+Assertion added to `build_usage_json_omits_zero_cache_and_cost`.
+
+#### N9f. Session metadata types should be in a dedicated module
+- **File(s):** vault/src/lib.rs
+- **Line(s):** 24-162
+- **Description:** ~140 lines of observability types (`SessionMetadata`, `TranscriptTurn`, `TranscriptToolCall`, `TurnUsage`, `is_zero_u64`, `from_run_result`) are inlined in `lib.rs` alongside configuration, error, and domain types. These form a self-contained group with their own serde annotations and reel-coupling conversion. A dedicated `session.rs` module would keep `lib.rs` focused on crate wiring and public re-exports.
 
 ---
 
@@ -184,7 +206,7 @@ Entities located in the wrong module. Addressing these together produces a coher
 
 #### T1d. Operation types defined in facade
 - **File(s):** vault/src/lib.rs
-- **Line(s):** 48-170
+- **Line(s):** 188-306
 - **Description:** Operation-specific error types, result types, and domain types are all defined in `lib.rs` rather than alongside their respective operations.
 
 ### Group T2: Test mock quality (3 issues)
@@ -315,7 +337,7 @@ All concern write_raw_versioned in storage.rs.
 
 #### T8a. Repeated ReelLibrarian construction
 - **File(s):** vault/src/lib.rs
-- **Line(s):** 217-272
+- **Line(s):** 353-419
 - **Description:** Every `Vault` method constructs `ReelLibrarian` identically. A private helper would reduce four repetitions.
 
 ### Group T9: CI simplification (1 issue)
@@ -369,13 +391,6 @@ Issues discovered during rig end-to-end integration testing.
 - **Description:** `vault bootstrap` fails with "storage root does not exist or is not a directory" if the directory doesn't exist yet. Bootstrap is the initialization command — it should create the directory.
 - **Workaround:** `mkdir` the storage root before calling bootstrap.
 
-### Group IT2: Observability (2 issues)
+### ~~Group IT2: Observability~~ (RESOLVED)
 
-#### IT2a. No token usage in CLI output (F-003)
-- **File(s):** vault-cli/src/main.rs
-- **Description:** No vault command exposes token usage or cost information. Adding usage stats to each command's JSON output would enable budget tracking across operations.
-
-#### IT2b. Discards usage/cost data from reel (F-005)
-- **File(s):** vault/src/librarian.rs
-- **Description:** Vault calls `agent.run()` but discards the returned `RunResult` fields `usage` and `tool_calls` (assigned to `_result` in librarian.rs). Combined with IT2a, there is no observability into token consumption for any vault operation.
-- **Note:** Blocked downstream by reel issue 19.2 (cache token fields stripped) and flick issue 15 (no prompt caching). Full observability requires fixes across all three layers.
+Resolved by the reel observability upgrade: `SessionMetadata` now captures `RunResult` fields, all operations return it, and the CLI includes a `usage` block in JSON output with `--verbose` transcript support.
