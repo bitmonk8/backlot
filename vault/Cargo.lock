@@ -428,7 +428,7 @@ dependencies = [
 [[package]]
 name = "flick"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/flick?rev=c827fda#c827fdae945a375ae0bfff9b323ef4764825fb4b"
+source = "git+https://github.com/bitmonk8/flick?rev=8b11845#8b118459acb350e84ea992d9ccdd722d0a3d2141"
 dependencies = [
  "chacha20poly1305",
  "hex",
@@ -1218,7 +1218,7 @@ dependencies = [
 [[package]]
 name = "reel"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/reel?rev=a6be158#a6be158cbc9102ebcade9ba49ce2bb86e473c926"
+source = "git+https://github.com/bitmonk8/reel?rev=93f35ef#93f35ef056c13a3aa14988fb6f6ff94e3ff652cb"
 dependencies = [
  "anyhow",
  "bitflags",

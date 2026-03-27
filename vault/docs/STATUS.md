@@ -7,7 +7,7 @@
 ## What Is Implemented
 
 - Workspace structure: `vault` (lib) + `vault-cli` (bin)
-- Dependency on `reel` via git rev (`a6be158`)
+- Dependency on `reel` via git rev (`93f35ef`)
 - CI pipeline (fmt, clippy, test, build on Linux/macOS/Windows)
 - Storage layer (`vault/src/storage.rs`):
   - Directory structure management (`raw/`, `derived/`, `CHANGELOG.md`)
