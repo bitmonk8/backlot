@@ -16,7 +16,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-flick = { git = "https://github.com/bitmonk8/flick", rev = "5164736" }
+flick = { git = "https://github.com/bitmonk8/flick", rev = "8b11845" }
 bitflags = "2"
 lot = { git = "https://github.com/bitmonk8/lot", rev = "30bd25f", features = ["tokio"] }
 tempfile = "3"
@@ -29,4 +29,4 @@ tar = "0.4"
 zip = "2"
 
 [dev-dependencies]
-flick = { git = "https://github.com/bitmonk8/flick", rev = "5164736", features = ["testing"] }
+flick = { git = "https://github.com/bitmonk8/flick", rev = "8b11845", features = ["testing"] }

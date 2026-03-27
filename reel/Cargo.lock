@@ -419,7 +419,7 @@ dependencies = [
 [[package]]
 name = "flick"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/flick?rev=5164736#516473666306799b61dbb74d1b116cd0857f7446"
+source = "git+https://github.com/bitmonk8/flick?rev=8b11845#8b118459acb350e84ea992d9ccdd722d0a3d2141"
 dependencies = [
  "chacha20poly1305",
  "hex",

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core agent runtime and tooling implemented. All 297 tests pass locally.** Lot dependency at rev `30bd25f`. Flick dependency at rev `5164736`. CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel.
+**Core agent runtime and tooling implemented. All 297 tests pass locally.** Lot dependency at rev `30bd25f`. Flick dependency at rev `8b11845`. CI fully green: Windows, Linux, macOS. Linux CI runs tests in parallel.
 
 ## What Is Implemented
 

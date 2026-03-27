@@ -37,7 +37,7 @@ thin wrapper for config parsing and output formatting.
 
 | Crate | Purpose |
 |---|---|
-| `flick` (git, rev `5164736`) | LLM client: RequestConfig, FlickClient, Context, ModelRegistry, ProviderRegistry |
+| `flick` (git, rev `8b11845`) | LLM client: RequestConfig, FlickClient, Context, ModelRegistry, ProviderRegistry |
 | `lot` (git, rev `30bd25f`) | Process sandboxing: SandboxPolicy, SandboxCommand, spawn, AppContainer/namespaces/Seatbelt |
 | `tokio` | Async runtime (rt-multi-thread, macros, time, sync, process, fs, signal, io-util) |
 | `anyhow` | Error handling |
@@ -493,4 +493,4 @@ and reusability.
 | Test (Windows) | windows-latest | `--locked`, 15 min timeout |
 
 Rust toolchain: 1.93.1. Dependencies pinned to git revs (lot `30bd25f`, flick
-`5164736`).
+`8b11845`).
