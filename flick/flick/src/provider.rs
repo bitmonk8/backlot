@@ -4,6 +4,7 @@ pub mod messages;
 
 use std::pin::Pin;
 
+use crate::config::CacheRetention;
 use crate::context::Message;
 use crate::error::ProviderError;
 use crate::model::ReasoningLevel;
@@ -34,6 +35,7 @@ pub struct RequestParams<'a> {
     pub tool_choice: Option<ToolChoice>,
     pub reasoning: Option<ReasoningLevel>,
     pub output_schema: Option<&'a serde_json::Value>,
+    pub cache_retention: CacheRetention,
 }
 
 /// Tool definition sent to the model.

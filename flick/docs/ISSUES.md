@@ -4,19 +4,7 @@ Issues identified during review but deferred for later resolution.
 
 ---
 
-## 1. No Anthropic prompt caching
-
-**File:** `flick/src/provider/messages.rs`
-**Category:** Enhancement (performance)
-**Source:** rig integration testing (F-004)
-
-Flick formats the system prompt as an array-of-content-blocks (which supports `cache_control`), but never attaches `cache_control: { type: "ephemeral" }` to any block. Every turn in a multi-turn reel session re-processes the full system prompt and tool definitions from scratch.
-
-Impact observed in vault tests: bootstrap (Sonnet, 4 tool calls) takes 47s; record (Haiku, ~4 tool calls) takes 93s. The per-turn overhead of 8-13s is largely input re-processing that prompt caching would eliminate.
-
----
-
-## 2. `validate_resolved_from_provider_info` adapter could be inlined
+## 1. `validate_resolved_from_provider_info` adapter could be inlined
 
 **File:** `flick/src/validation.rs`
 **Category:** Simplification
@@ -25,7 +13,7 @@ Thin wrapper that unpacks `ProviderInfo` fields and forwards to `validate_resolv
 
 ---
 
-## 3. `validate_assistant_content` could fold into `validate_message_structure`
+## 2. `validate_assistant_content` could fold into `validate_message_structure`
 
 **File:** `flick/src/context.rs`
 **Category:** Simplification
@@ -34,7 +22,7 @@ Thin wrapper that unpacks `ProviderInfo` fields and forwards to `validate_resolv
 
 ---
 
-## 4. FlickResult construction duplicated in runner
+## 3. FlickResult construction duplicated in runner
 
 **File:** `flick/src/runner.rs`
 **Category:** Simplification
@@ -43,7 +31,7 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 
 ---
 
-## 5. `_ = compat` dead parameter in validate_resolved
+## 4. `_ = compat` dead parameter in validate_resolved
 
 **File:** `flick/src/validation.rs`
 **Category:** Simplification
@@ -52,7 +40,7 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 
 ---
 
-## 6. `CompatFlags` placement in provider_registry
+## 5. `CompatFlags` placement in provider_registry
 
 **File:** `flick/src/provider_registry.rs`
 **Category:** Separation of concerns
@@ -61,7 +49,7 @@ Two-step and single-step paths both construct `FlickResult` with `UsageSummary` 
 
 ---
 
-## 7. `flick_dir()` and `home_dir()` in provider_registry
+## 6. `flick_dir()` and `home_dir()` in provider_registry
 
 **File:** `flick/src/provider_registry.rs`
 **Category:** Separation of concerns
@@ -70,7 +58,7 @@ General path utilities unrelated to provider credential management. Other module
 
 ---
 
-## 8. `validate_resolved` naming
+## 7. `validate_resolved` naming
 
 **File:** `flick/src/validation.rs`
 **Category:** Naming
@@ -79,7 +67,7 @@ General path utilities unrelated to provider credential management. Other module
 
 ---
 
-## 9. `platform.rs` module name is broad
+## 8. `platform.rs` module name is broad
 
 **File:** `flick/src/platform.rs`
 **Category:** Naming
@@ -88,7 +76,7 @@ Currently contains only one Windows ACL function. `permissions.rs` or `fs_permis
 
 ---
 
-## 10. `crypto.rs` `provider` parameter name
+## 9. `crypto.rs` `provider` parameter name
 
 **File:** `flick/src/crypto.rs`
 **Category:** Naming
@@ -97,7 +85,7 @@ The `provider` parameter in `encrypt`/`decrypt` serves as AAD (additional authen
 
 ---
 
-## 11. `validation.rs` missing branch coverage
+## 10. `validation.rs` missing branch coverage
 
 **File:** `flick/src/validation.rs`
 **Category:** Testing
@@ -106,7 +94,7 @@ Missing tests for: ChatCompletions temperature > 2.0, reasoning+output_schema al
 
 ---
 
-## 12. `crypto.rs` missing invalid hex test
+## 11. `crypto.rs` missing invalid hex test
 
 **File:** `flick/src/crypto.rs`
 **Category:** Testing
@@ -115,9 +103,36 @@ Missing tests for: ChatCompletions temperature > 2.0, reasoning+output_schema al
 
 ---
 
-## 13. `platform.rs` has zero test coverage
+## 12. `platform.rs` has zero test coverage
 
 **File:** `flick/src/platform.rs`
 **Category:** Testing
 
 `restrict_windows_permissions` has no tests. A smoke test on Windows would catch regressions.
+
+---
+
+## 13. `CacheRetention::Long` TTL format may not match API
+
+**File:** `flick/src/provider/messages.rs`
+**Category:** Correctness
+
+`CacheRetention::Long` emits `"ttl": "1h"` (string). Anthropic API documentation has shown both string and integer formats at different times. Verify against the current API whether `"1h"` or `3600` (integer seconds) is expected.
+
+---
+
+## 14. `CacheRetention` naming
+
+**File:** `flick/src/config.rs`
+**Category:** Naming
+
+`CacheRetention` conflates "whether to cache" (the `None` variant disables injection entirely) with "how long to cache" (Short vs Long). A name like `CachePolicy` or `CacheMode` would cover both aspects more accurately.
+
+---
+
+## 15. Cache control test coverage gaps
+
+**Files:** `flick/src/provider/chat_completions.rs`, `flick/src/config.rs`, `flick/src/runner.rs`
+**Category:** Testing
+
+Missing tests: (a) Chat Completions negative test asserting no `cache_control` in output, (b) `set_cache_retention` setter, (c) builder `cache_retention()` method, (d) `#[serde(skip)]` interaction with `deny_unknown_fields`, (e) `build_params` threading of cache_retention.

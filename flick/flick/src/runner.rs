@@ -267,6 +267,7 @@ pub fn build_params<'a>(
             .map(super::config::ToolChoiceConfig::to_tool_choice),
         reasoning: config.reasoning().map(|r| r.level),
         output_schema: config.output_schema().map(|o| &o.schema),
+        cache_retention: config.cache_retention(),
     }
 }
 
@@ -515,8 +516,6 @@ mod tests {
         }
     }
 
-    // --- #18: ResponseNotJson error propagates through runner ---
-
     #[tokio::test]
     async fn single_step_non_json_with_schema_errors() {
         let provider = SingleShotProvider::with_text("plain text, not json");
@@ -538,8 +537,6 @@ mod tests {
         // Stale assistant message popped
         assert_eq!(context.messages.len(), 1);
     }
-
-    // --- #19: second provider call failure restores context ---
 
     #[tokio::test]
     async fn two_step_second_call_failure_restores_context() {
@@ -572,8 +569,6 @@ mod tests {
             _ => panic!("expected first-step Text restored"),
         }
     }
-
-    // --- #20: schema present + tool calls → validation skipped ---
 
     #[tokio::test]
     async fn schema_with_tool_calls_skips_validation() {

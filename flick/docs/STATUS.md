@@ -25,7 +25,8 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - Cache-aware cost computation — `compute_cost` on `ModelInfo`, plain arithmetic for readability, both providers normalize `input_tokens` to non-cached tokens (total minus cache_creation and cache_read) for consistent cross-provider semantics
 - Context serialization robustness — custom `ContentBlock` deserializer (direct field extraction, no inner enum), message ordering validation on load (including `ToolUse`-in-user check), empty-content assistant validation on load, `push_*` methods enforce message alternation and reject pushes on empty context, `check_capacity` helper for overflow detection, serde defaults for optional fields
 - Error type hygiene — `CredentialError` split into specific variants (`InvalidProviderName`, `InvalidBaseUrl`, `InvalidSecretKey`, `TomlParse`), `ProviderError::InvalidRequest` for client-side validation, `ProviderError::code()` delegation, explicit `serde_json::Error` mapping (no blanket `From`)
-- Messages API: system prompt serialized as content-block array (enables prompt caching), `tool_choice` support (`auto`/`any`/`none`/`tool`)
+- Messages API: system prompt serialized as content-block array, `tool_choice` support (`auto`/`any`/`none`/`tool`)
+- Prompt caching — 2-breakpoint strategy: `cache_control` injected on system text block (BP1, caches tools+system prefix) and last user message block (BP2, caches growing conversation history). `CacheRetention` enum (`None`/`Short`/`Long`) configurable per-request via builder or setter; `Short` (ephemeral, 5-min TTL) is the default. `Long` adds `"ttl": "1h"` for extended caching. Safe to inject unconditionally across all providers (ignored by OpenAI/DeepSeek, passed through by OpenRouter/LiteLLM)
 - Chat Completions: `tool_choice` support mapped to equivalent values (`auto`/`required`/`none`/function spec)
 - `ToolChoice` enum in provider layer, `ToolChoiceConfig` in config layer with serde support and validation
 - Module organization: `crypto.rs` (encrypt/decrypt), `platform.rs` (Windows permissions), `validation.rs` (resolved config validation)
@@ -33,7 +34,7 @@ Cargo workspace: `flick` library crate + `flick-cli` binary crate.
 - Secret key file write logic extracted to `write_new_secret_key_file` helper (shared across Unix/Windows)
 - Per-call timing — `FlickResult.timing` contains `api_latency_ms` measured around provider calls (summed for two-step structured output)
 - Structured output cleaning — `structured_output.rs` provides `strip_fences_from_blocks` (fence stripping) and `check_required_fields` (required-field validation, recursive including array items); `FlickError::ResponseNotJson` for unparseable JSON, `FlickError::SchemaValidation` for schema conformance failures; inline context rollback (pop stale assistant, restore prior message) in both `run` and `run_second_step`
-- 365 tests passing (308 lib, 26 bin, 20 runner, 11 integration), zero clippy errors
+- 373 tests passing (316 lib, 26 bin, 20 runner, 11 integration), zero clippy errors
 
 ## Next Work
 

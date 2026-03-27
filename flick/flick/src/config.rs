@@ -5,6 +5,21 @@ use crate::error::ConfigError;
 use crate::model::ReasoningLevel;
 use crate::provider::{ToolChoice, ToolDefinition};
 
+/// Controls whether and how long cache breakpoints persist.
+///
+/// Injected at two positions in Messages API requests: system prompt block
+/// and last user message block. Other providers ignore these annotations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CacheRetention {
+    /// No `cache_control` injected.
+    None,
+    /// Standard 5-minute ephemeral TTL.
+    #[default]
+    Short,
+    /// Extended 1-hour TTL (2x base input write cost). Only effective on Messages API.
+    Long,
+}
+
 /// Config string format for `RequestConfig::from_str`.
 #[derive(Debug, Clone, Copy)]
 pub enum ConfigFormat {
@@ -38,6 +53,10 @@ pub struct RequestConfig {
 
     #[serde(default)]
     tools: Vec<ToolConfig>,
+
+    /// Not deserialized from config files — set programmatically via builder or setter.
+    #[serde(skip)]
+    cache_retention: CacheRetention,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,6 +224,14 @@ impl RequestConfig {
         &self.tools
     }
 
+    pub const fn cache_retention(&self) -> CacheRetention {
+        self.cache_retention
+    }
+
+    pub const fn set_cache_retention(&mut self, retention: CacheRetention) {
+        self.cache_retention = retention;
+    }
+
     /// Append tool definitions post-parse. Validates the combined set.
     pub fn add_tools(&mut self, tools: Vec<ToolConfig>) -> Result<(), ConfigError> {
         self.tools.extend(tools);
@@ -297,6 +324,7 @@ pub struct RequestConfigBuilder {
     output_schema: Option<OutputSchema>,
     tool_choice: Option<ToolChoiceConfig>,
     tools: Vec<ToolConfig>,
+    cache_retention: CacheRetention,
 }
 
 impl RequestConfigBuilder {
@@ -342,6 +370,12 @@ impl RequestConfigBuilder {
         self
     }
 
+    #[must_use]
+    pub const fn cache_retention(mut self, retention: CacheRetention) -> Self {
+        self.cache_retention = retention;
+        self
+    }
+
     pub fn build(self) -> Result<RequestConfig, ConfigError> {
         let config = RequestConfig {
             model: self
@@ -353,6 +387,7 @@ impl RequestConfigBuilder {
             output_schema: self.output_schema,
             tool_choice: self.tool_choice,
             tools: self.tools,
+            cache_retention: self.cache_retention,
         };
         config.validate_local()?;
         Ok(config)

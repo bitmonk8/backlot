@@ -503,6 +503,7 @@ mod tests {
             tool_choice: None,
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         assert_eq!(body["model"], "gpt-4o");
@@ -526,6 +527,7 @@ mod tests {
             tool_choice: None,
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         assert!(body.get("max_tokens").is_none());
@@ -546,6 +548,7 @@ mod tests {
             tool_choice: None,
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         let empty = vec![];
@@ -580,6 +583,7 @@ mod tests {
             tool_choice: None,
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         assert!(body["tools"].is_array());
@@ -600,6 +604,7 @@ mod tests {
             tool_choice: None,
             reasoning: Some(crate::model::ReasoningLevel::High),
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         assert_eq!(body["reasoning_effort"], "high");
@@ -623,6 +628,7 @@ mod tests {
             tool_choice: None,
             reasoning: None,
             output_schema: Some(&schema),
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         assert_eq!(body["response_format"]["type"], "json_schema");
@@ -1018,6 +1024,7 @@ mod tests {
             tool_choice: None,
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let result = provider.call_boxed(params).await;
         match result {
@@ -1044,6 +1051,7 @@ mod tests {
             tool_choice: None,
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let result = provider.build_request(params);
         match result {
@@ -1125,6 +1133,7 @@ mod tests {
             tool_choice: Some(crate::provider::ToolChoice::Auto),
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         assert_eq!(body["tool_choice"], "auto");
@@ -1149,6 +1158,7 @@ mod tests {
             tool_choice: Some(crate::provider::ToolChoice::Any),
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         assert_eq!(body["tool_choice"], "required");
@@ -1173,6 +1183,7 @@ mod tests {
             tool_choice: Some(crate::provider::ToolChoice::None),
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         assert_eq!(body["tool_choice"], "none");
@@ -1197,6 +1208,7 @@ mod tests {
             tool_choice: Some(crate::provider::ToolChoice::Tool("read_file".into())),
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         assert_eq!(body["tool_choice"]["type"], "function");
@@ -1229,6 +1241,7 @@ mod tests {
             tool_choice: Some(crate::provider::ToolChoice::Any),
             reasoning: None,
             output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
         };
         let body = provider.build_body(&params);
         // Explicit tool_choice should win over compat flag
