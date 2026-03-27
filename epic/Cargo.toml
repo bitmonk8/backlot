@@ -17,7 +17,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 lot = { git = "https://github.com/bitmonk8/lot", rev = "f131ad9", features = ["tokio"] }
 tempfile = "3"
-reel = { git = "https://github.com/bitmonk8/reel", rev = "51eb559" }
+reel = { git = "https://github.com/bitmonk8/reel", rev = "93f35ef" }
 
 [lints.rust]
 unsafe_code = "deny"
@@ -34,4 +34,4 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 
 [dev-dependencies]
-reel = { git = "https://github.com/bitmonk8/reel", rev = "51eb559", features = ["testing"] }
+reel = { git = "https://github.com/bitmonk8/reel", rev = "93f35ef", features = ["testing"] }

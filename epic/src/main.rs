@@ -153,7 +153,12 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         let outcome = orchestrator.run(root_id).await?;
         let state = orchestrator.into_state();
         state.save(&state_path)?;
+        let usage = state.total_usage();
         println!("Epic completed: {outcome:?}");
+        println!(
+            "Usage: {} API calls, {} input tokens, {} output tokens, ${:.4}",
+            usage.api_calls, usage.input_tokens, usage.output_tokens, usage.cost_usd
+        );
     } else {
         let mut tui_app = TuiApp::new(goal_text);
 
@@ -281,6 +286,20 @@ fn print_status(state_path: &std::path::Path) -> anyhow::Result<()> {
     println!(
         "Tasks: {total} total, {completed} completed, {in_progress} in-progress, {pending} pending, {failed} failed"
     );
+
+    let usage = state.total_usage();
+    if usage.api_calls > 0 {
+        println!(
+            "Usage: {} API calls, {} input tokens, {} output tokens, ${:.4}",
+            usage.api_calls, usage.input_tokens, usage.output_tokens, usage.cost_usd
+        );
+        if usage.input_tokens > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let cache_ratio =
+                usage.cache_read_input_tokens as f64 / usage.input_tokens as f64 * 100.0;
+            println!("Cache hit ratio: {cache_ratio:.1}%");
+        }
+    }
 
     Ok(())
 }

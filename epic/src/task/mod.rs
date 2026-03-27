@@ -94,6 +94,54 @@ pub struct Magnitude {
     pub max_lines_deleted: u64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TaskUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cost_usd: f64,
+    pub api_calls: u32,
+    pub total_tool_calls: u32,
+    pub total_latency_ms: u64,
+}
+
+impl TaskUsage {
+    pub const fn zero() -> Self {
+        Self {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost_usd: 0.0,
+            api_calls: 0,
+            total_tool_calls: 0,
+            total_latency_ms: 0,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn accumulate(
+        &mut self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: u64,
+        cost_usd: f64,
+        tool_calls: u32,
+        latency_ms: u64,
+    ) {
+        self.input_tokens += input_tokens;
+        self.output_tokens += output_tokens;
+        self.cache_creation_input_tokens += cache_creation_input_tokens;
+        self.cache_read_input_tokens += cache_read_input_tokens;
+        self.cost_usd += cost_usd;
+        self.api_calls += 1;
+        self.total_tool_calls += tool_calls;
+        self.total_latency_ms += latency_ms;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskOutcome {
     Success,
@@ -139,6 +187,8 @@ pub struct Task {
     pub verification_fix_rounds: u32,
     pub is_fix_task: bool,
     pub recovery_rounds: u32,
+    #[serde(default)]
+    pub usage: TaskUsage,
 }
 
 impl Task {
@@ -169,6 +219,7 @@ impl Task {
             verification_fix_rounds: 0,
             is_fix_task: false,
             recovery_rounds: 0,
+            usage: TaskUsage::zero(),
         }
     }
 }

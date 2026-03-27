@@ -10,6 +10,7 @@ use crate::task::TaskId;
 
 pub struct MetricsWidget<'a> {
     pub tasks: &'a HashMap<TaskId, TuiTask>,
+    pub total_cost_usd: f64,
 }
 
 impl Widget for MetricsWidget<'_> {
@@ -78,6 +79,14 @@ impl Widget for MetricsWidget<'_> {
             Line::from(vec![
                 Span::styled("Failed:      ", Style::default()),
                 Span::styled(failed.to_string(), Style::default().fg(Color::Red).bold()),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Cost:        ", Style::default()),
+                Span::styled(
+                    format!("${:.4}", self.total_cost_usd),
+                    Style::default().fg(Color::Cyan).bold(),
+                ),
             ]),
         ];
 

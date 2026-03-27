@@ -20,7 +20,7 @@ pub async fn run_init(agent: &ReelAgent, project_root: &Path) -> anyhow::Result<
 
     eprintln!("Scanning project for build/test/lint configuration...\n");
 
-    let findings = agent.explore_for_init().await?;
+    let findings = agent.explore_for_init().await?.value;
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     let (steps, declined) = present_and_confirm(findings, &mut lines)?;

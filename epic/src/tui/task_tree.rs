@@ -15,6 +15,7 @@ pub struct TuiTask {
     pub path: Option<TaskPath>,
     pub subtask_ids: Vec<TaskId>,
     pub current: bool,
+    pub cost_usd: f64,
 }
 
 const fn phase_indicator(phase: TaskPhase) -> &'static str {

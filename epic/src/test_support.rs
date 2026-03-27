@@ -1,4 +1,4 @@
-use crate::agent::{AgentService, TaskContext};
+use crate::agent::{AgentResult, AgentService, SessionMeta, TaskContext};
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
 use crate::task::verify::VerificationResult;
@@ -63,20 +63,34 @@ impl MockAgentService {
     }
 }
 
+/// Wrap a value in `AgentResult` with zero-cost `SessionMeta`.
+fn mock_result<T>(value: T) -> AgentResult<T> {
+    AgentResult {
+        value,
+        meta: SessionMeta::default(),
+    }
+}
+
 impl AgentService for MockAgentService {
-    async fn assess(&self, _ctx: &TaskContext) -> anyhow::Result<AssessmentResult> {
+    async fn assess(&self, _ctx: &TaskContext) -> anyhow::Result<AgentResult<AssessmentResult>> {
         self.assess_responses
             .lock()
             .unwrap()
             .pop_front()
+            .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no assess response queued"))
     }
 
-    async fn execute_leaf(&self, _ctx: &TaskContext, _model: Model) -> anyhow::Result<LeafResult> {
+    async fn execute_leaf(
+        &self,
+        _ctx: &TaskContext,
+        _model: Model,
+    ) -> anyhow::Result<AgentResult<LeafResult>> {
         self.leaf_responses
             .lock()
             .unwrap()
             .pop_front()
+            .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no leaf response queued"))
     }
 
@@ -86,11 +100,12 @@ impl AgentService for MockAgentService {
         _model: Model,
         _failure_reason: &str,
         _attempt: u32,
-    ) -> anyhow::Result<LeafResult> {
+    ) -> anyhow::Result<AgentResult<LeafResult>> {
         self.fix_leaf_responses
             .lock()
             .unwrap()
             .pop_front()
+            .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no fix_leaf response queued"))
     }
 
@@ -98,12 +113,13 @@ impl AgentService for MockAgentService {
         &self,
         _ctx: &TaskContext,
         model: Model,
-    ) -> anyhow::Result<DecompositionResult> {
+    ) -> anyhow::Result<AgentResult<DecompositionResult>> {
         self.decompose_models.lock().unwrap().push(model);
         self.decompose_responses
             .lock()
             .unwrap()
             .pop_front()
+            .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no decompose response queued"))
     }
 
@@ -113,7 +129,7 @@ impl AgentService for MockAgentService {
         _model: Model,
         _verification_issues: &str,
         _round: u32,
-    ) -> anyhow::Result<DecompositionResult> {
+    ) -> anyhow::Result<AgentResult<DecompositionResult>> {
         let injected = self
             .fix_subtask_errors
             .lock()
@@ -127,10 +143,15 @@ impl AgentService for MockAgentService {
             .lock()
             .unwrap()
             .pop_front()
+            .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no fix_subtask response queued"))
     }
 
-    async fn verify(&self, ctx: &TaskContext, model: Model) -> anyhow::Result<VerificationResult> {
+    async fn verify(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
         let injected = self
             .verify_errors
             .lock()
@@ -145,6 +166,7 @@ impl AgentService for MockAgentService {
             .lock()
             .unwrap()
             .pop_front()
+            .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no verify response queued"))
     }
 
@@ -152,7 +174,7 @@ impl AgentService for MockAgentService {
         &self,
         _ctx: &TaskContext,
         _discoveries: &[String],
-    ) -> anyhow::Result<CheckpointDecision> {
+    ) -> anyhow::Result<AgentResult<CheckpointDecision>> {
         let front = self.checkpoint_errors.lock().unwrap().pop_front();
         if let Some(msg) = front {
             return Err(anyhow::anyhow!(msg));
@@ -161,6 +183,7 @@ impl AgentService for MockAgentService {
             .lock()
             .unwrap()
             .pop_front()
+            .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no checkpoint response queued"))
     }
 
@@ -168,11 +191,12 @@ impl AgentService for MockAgentService {
         &self,
         _ctx: &TaskContext,
         _failure_reason: &str,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> anyhow::Result<AgentResult<Option<String>>> {
         self.recovery_responses
             .lock()
             .unwrap()
             .pop_front()
+            .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no recovery response queued"))
     }
 
@@ -182,11 +206,12 @@ impl AgentService for MockAgentService {
         _failure_reason: &str,
         _strategy: &str,
         _recovery_round: u32,
-    ) -> anyhow::Result<RecoveryPlan> {
+    ) -> anyhow::Result<AgentResult<RecoveryPlan>> {
         self.recovery_plan_responses
             .lock()
             .unwrap()
             .pop_front()
+            .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no recovery_plan response queued"))
     }
 }

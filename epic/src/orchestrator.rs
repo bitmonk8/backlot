@@ -1,6 +1,8 @@
 // Recursive task execution, DFS traversal, state persistence, resume.
 
-use crate::agent::{AgentService, ChildStatus, ChildSummary, SiblingSummary, TaskContext};
+use crate::agent::{
+    AgentService, ChildStatus, ChildSummary, SessionMeta, SiblingSummary, TaskContext,
+};
 use crate::config::project::LimitsConfig;
 use crate::events::{Event, EventSender};
 use crate::state::EpicState;
@@ -159,6 +161,30 @@ impl<A: AgentService> Orchestrator<A> {
         self
     }
 
+    fn accumulate_usage(&mut self, task_id: TaskId, meta: &SessionMeta) {
+        let total_cost = if let Some(task) = self.state.get_mut(task_id) {
+            task.usage.accumulate(
+                meta.input_tokens,
+                meta.output_tokens,
+                meta.cache_creation_input_tokens,
+                meta.cache_read_input_tokens,
+                meta.cost_usd,
+                meta.tool_calls,
+                meta.total_latency_ms,
+            );
+            Some(task.usage.cost_usd)
+        } else {
+            None
+        };
+        if let Some(total_cost_usd) = total_cost {
+            self.emit(Event::UsageUpdated {
+                task_id,
+                phase_cost_usd: meta.cost_usd,
+                total_cost_usd,
+            });
+        }
+    }
+
     pub async fn run(&mut self, root_id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
         // Clamp minimum values to 1 to prevent zero-iteration loops.
         self.limits.retry_budget = self.limits.retry_budget.max(1);
@@ -240,16 +266,19 @@ impl<A: AgentService> Orchestrator<A> {
         let verify_model = self.verification_model(id)?;
         let ctx = self.build_context(id)?;
         match self.agent.verify(&ctx, verify_model).await {
-            Ok(verify_result) => match verify_result.outcome {
-                VerificationOutcome::Pass => {
-                    self.complete_task_verified(id)?;
-                    Ok(VerifyOutcome::Passed)
+            Ok(agent_result) => {
+                self.accumulate_usage(id, &agent_result.meta);
+                match agent_result.value.outcome {
+                    VerificationOutcome::Pass => {
+                        self.complete_task_verified(id)?;
+                        Ok(VerifyOutcome::Passed)
+                    }
+                    VerificationOutcome::Fail { reason } => {
+                        self.checkpoint_save();
+                        Ok(VerifyOutcome::Failed(reason))
+                    }
                 }
-                VerificationOutcome::Fail { reason } => {
-                    self.checkpoint_save();
-                    Ok(VerifyOutcome::Failed(reason))
-                }
-            },
+            }
             Err(e) => {
                 eprintln!("warning: verify failed: {e}");
                 self.checkpoint_save();
@@ -552,7 +581,9 @@ impl<A: AgentService> Orchestrator<A> {
                 }
             } else {
                 let ctx = self.build_context(id)?;
-                self.agent.assess(&ctx).await?
+                let agent_result = self.agent.assess(&ctx).await?;
+                self.accumulate_usage(id, &agent_result.meta);
+                agent_result.value
             };
 
             // Apply assessment to task.
@@ -611,9 +642,10 @@ impl<A: AgentService> Orchestrator<A> {
 
             let verify_model = self.verification_model(id)?;
             let ctx = self.build_context(id)?;
-            let verify_result = self.agent.verify(&ctx, verify_model).await?;
+            let agent_result = self.agent.verify(&ctx, verify_model).await?;
+            self.accumulate_usage(id, &agent_result.meta);
 
-            match verify_result.outcome {
+            match agent_result.value.outcome {
                 VerificationOutcome::Pass => self.complete_task_verified(id),
                 VerificationOutcome::Fail { reason } => {
                     let task = self
@@ -735,10 +767,7 @@ impl<A: AgentService> Orchestrator<A> {
 
             // Agent call — execute_leaf or fix_leaf.
             let ctx = self.build_context(id)?;
-            let LeafResult {
-                outcome,
-                discoveries,
-            } = if is_fix {
+            let agent_result = if is_fix {
                 let reason = failure_reason.as_deref().unwrap_or("unknown failure");
                 #[allow(clippy::cast_possible_truncation)]
                 let attempt_number = self
@@ -759,6 +788,11 @@ impl<A: AgentService> Orchestrator<A> {
             } else {
                 self.agent.execute_leaf(&ctx, current_model).await?
             };
+            self.accumulate_usage(id, &agent_result.meta);
+            let LeafResult {
+                outcome,
+                discoveries,
+            } = agent_result.value;
 
             // Record attempt and discoveries.
             {
@@ -934,7 +968,10 @@ impl<A: AgentService> Orchestrator<A> {
                 .design_fix_subtasks(&ctx, model, &failure_reason, round)
                 .await
             {
-                Ok(d) => d,
+                Ok(agent_result) => {
+                    self.accumulate_usage(id, &agent_result.meta);
+                    agent_result.value
+                }
                 Err(e) => {
                     eprintln!("warning: fix subtask design failed: {e}");
                     failure_reason = format!("fix design failed: {e}");
@@ -996,10 +1033,12 @@ impl<A: AgentService> Orchestrator<A> {
                 .ok_or(OrchestratorError::TaskNotFound(id))?;
             let decompose_model = task.current_model.unwrap_or(Model::Sonnet);
             let ctx = self.build_context(id)?;
-            let decomposition = self
+            let agent_result = self
                 .agent
                 .design_and_decompose(&ctx, decompose_model)
                 .await?;
+            self.accumulate_usage(id, &agent_result.meta);
+            let decomposition = agent_result.value;
 
             {
                 let task = self
@@ -1059,7 +1098,10 @@ impl<A: AgentService> Orchestrator<A> {
                     let ctx = self.build_context(id)?;
                     // Agent errors treated as Proceed (best-effort, like recovery).
                     let decision = match self.agent.checkpoint(&ctx, &child_discoveries).await {
-                        Ok(d) => d,
+                        Ok(agent_result) => {
+                            self.accumulate_usage(id, &agent_result.meta);
+                            agent_result.value
+                        }
                         Err(e) => {
                             eprintln!("warning: checkpoint classification failed: {e}");
                             CheckpointDecision::Proceed
@@ -1177,11 +1219,16 @@ impl<A: AgentService> Orchestrator<A> {
         // due to transient errors like rate limits or malformed responses).
         let ctx = self.build_context(parent_id)?;
         let strategy = match self.agent.assess_recovery(&ctx, failure_reason).await {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                return Ok(Some(TaskOutcome::Failed {
-                    reason: failure_reason.to_string(),
-                }));
+            Ok(agent_result) => {
+                self.accumulate_usage(parent_id, &agent_result.meta);
+                match agent_result.value {
+                    Some(s) => s,
+                    None => {
+                        return Ok(Some(TaskOutcome::Failed {
+                            reason: failure_reason.to_string(),
+                        }));
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("warning: recovery assessment failed: {e}");
@@ -1216,7 +1263,10 @@ impl<A: AgentService> Orchestrator<A> {
             .design_recovery_subtasks(&ctx, failure_reason, &strategy, round)
             .await
         {
-            Ok(p) => p,
+            Ok(agent_result) => {
+                self.accumulate_usage(parent_id, &agent_result.meta);
+                agent_result.value
+            }
             Err(e) => {
                 eprintln!("warning: recovery plan design failed: {e}");
                 return Ok(Some(TaskOutcome::Failed {

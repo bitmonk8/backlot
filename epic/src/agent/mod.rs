@@ -55,6 +55,51 @@ pub struct TaskContext {
     pub parent_decomposition_rationale: Option<String>,
 }
 
+/// Metadata from a single agent session (one `run_request` call).
+#[derive(Debug, Clone, Default)]
+pub struct SessionMeta {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cost_usd: f64,
+    pub tool_calls: u32,
+    pub total_latency_ms: u64,
+}
+
+impl SessionMeta {
+    /// Extract metadata from a reel `RunResult`.
+    pub fn from_run_result<T>(r: &reel::RunResult<T>) -> Self {
+        let (input_tokens, output_tokens, cache_creation, cache_read, cost) =
+            r.usage.as_ref().map_or((0, 0, 0, 0, 0.0), |u| {
+                (
+                    u.input_tokens,
+                    u.output_tokens,
+                    u.cache_creation_input_tokens,
+                    u.cache_read_input_tokens,
+                    u.cost_usd,
+                )
+            });
+        let total_latency_ms: u64 = r.transcript.iter().filter_map(|t| t.api_latency_ms).sum();
+        Self {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: cache_creation,
+            cache_read_input_tokens: cache_read,
+            cost_usd: cost,
+            tool_calls: r.tool_calls,
+            total_latency_ms,
+        }
+    }
+}
+
+/// Agent call result with observability metadata.
+#[derive(Debug)]
+pub struct AgentResult<T> {
+    pub value: T,
+    pub meta: SessionMeta,
+}
+
 /// Trait abstracting all agent interactions.
 ///
 /// Generic (not `dyn`) — one concrete implementation per run.
@@ -64,35 +109,35 @@ pub trait AgentService: Send + Sync {
     fn assess(
         &self,
         ctx: &TaskContext,
-    ) -> impl std::future::Future<Output = anyhow::Result<AssessmentResult>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<AssessmentResult>>> + Send;
 
     /// Execute a leaf task directly with the given model.
     fn execute_leaf(
         &self,
         ctx: &TaskContext,
         model: Model,
-    ) -> impl std::future::Future<Output = anyhow::Result<LeafResult>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<LeafResult>>> + Send;
 
     /// Design decomposition and produce subtask specs.
     fn design_and_decompose(
         &self,
         ctx: &TaskContext,
         model: Model,
-    ) -> impl std::future::Future<Output = anyhow::Result<DecompositionResult>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<DecompositionResult>>> + Send;
 
     /// Independent verification of a completed task.
     fn verify(
         &self,
         ctx: &TaskContext,
         model: Model,
-    ) -> impl std::future::Future<Output = anyhow::Result<VerificationResult>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<VerificationResult>>> + Send;
 
     /// Inter-subtask checkpoint after a child reports discoveries.
     fn checkpoint(
         &self,
         ctx: &TaskContext,
         discoveries: &[String],
-    ) -> impl std::future::Future<Output = anyhow::Result<CheckpointDecision>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<CheckpointDecision>>> + Send;
 
     /// Re-execute a leaf task with verification failure context.
     fn fix_leaf(
@@ -101,7 +146,7 @@ pub trait AgentService: Send + Sync {
         model: Model,
         failure_reason: &str,
         attempt: u32,
-    ) -> impl std::future::Future<Output = anyhow::Result<LeafResult>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<LeafResult>>> + Send;
 
     /// Design fix subtasks to address branch verification issues.
     fn design_fix_subtasks(
@@ -110,14 +155,14 @@ pub trait AgentService: Send + Sync {
         model: Model,
         verification_issues: &str,
         round: u32,
-    ) -> impl std::future::Future<Output = anyhow::Result<DecompositionResult>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<DecompositionResult>>> + Send;
 
     /// Assess whether recovery is possible after a child failure.
     fn assess_recovery(
         &self,
         ctx: &TaskContext,
         failure_reason: &str,
-    ) -> impl std::future::Future<Output = anyhow::Result<Option<String>>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<Option<String>>>> + Send;
 
     /// Design recovery subtasks after a child failure (Opus).
     /// `strategy` comes from `assess_recovery`. Returns a recovery plan with
@@ -128,5 +173,5 @@ pub trait AgentService: Send + Sync {
         failure_reason: &str,
         strategy: &str,
         recovery_round: u32,
-    ) -> impl std::future::Future<Output = anyhow::Result<RecoveryPlan>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<RecoveryPlan>>> + Send;
 }

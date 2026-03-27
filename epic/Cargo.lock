@@ -475,7 +475,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
- "lot",
+ "lot 0.1.0 (git+https://github.com/bitmonk8/lot?rev=f131ad9)",
  "ratatui",
  "reel",
  "serde",
@@ -538,7 +538,7 @@ dependencies = [
 [[package]]
 name = "flick"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/flick?rev=84424ce#84424cef0b562636baa26d344d04ee76d9dee89f"
+source = "git+https://github.com/bitmonk8/flick?rev=8b11845#8b118459acb350e84ea992d9ccdd722d0a3d2141"
 dependencies = [
  "chacha20poly1305",
  "hex",
@@ -549,6 +549,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "url",
  "windows",
  "xxhash-rust",
  "zeroize",
@@ -1080,6 +1081,18 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 [[package]]
 name = "lot"
 version = "0.1.0"
+source = "git+https://github.com/bitmonk8/lot?rev=30bd25f#30bd25fc7104b79558e028d8e345464bf2b6b2a2"
+dependencies = [
+ "libc",
+ "seccompiler",
+ "thiserror",
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "lot"
+version = "0.1.0"
 source = "git+https://github.com/bitmonk8/lot?rev=f131ad9#f131ad965cba60c6425a711542a691e2b90c3a68"
 dependencies = [
  "libc",
@@ -1456,13 +1469,13 @@ dependencies = [
 [[package]]
 name = "reel"
 version = "0.1.0"
-source = "git+https://github.com/bitmonk8/reel?rev=51eb559#51eb5593bdff83fe1b69a304413dc0f3a52ea444"
+source = "git+https://github.com/bitmonk8/reel?rev=93f35ef#93f35ef056c13a3aa14988fb6f6ff94e3ff652cb"
 dependencies = [
  "anyhow",
  "bitflags",
  "flate2",
  "flick",
- "lot",
+ "lot 0.1.0 (git+https://github.com/bitmonk8/lot?rev=30bd25f)",
  "serde",
  "serde_json",
  "sha2",

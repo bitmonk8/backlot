@@ -87,6 +87,11 @@ pub enum Event {
     TaskLimitReached {
         task_id: TaskId,
     },
+    UsageUpdated {
+        task_id: TaskId,
+        phase_cost_usd: f64,
+        total_cost_usd: f64,
+    },
 }
 
 pub type EventSender = mpsc::UnboundedSender<Event>;

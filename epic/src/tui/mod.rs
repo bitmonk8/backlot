@@ -33,6 +33,7 @@ pub struct TuiApp {
     root_goal: String,
     session_start: Instant,
     orchestrator_done: bool,
+    total_cost_usd: f64,
 }
 
 impl TuiApp {
@@ -48,6 +49,7 @@ impl TuiApp {
             root_goal,
             session_start: Instant::now(),
             orchestrator_done: false,
+            total_cost_usd: 0.0,
         }
     }
 
@@ -154,6 +156,7 @@ impl TuiApp {
                     path: None,
                     subtask_ids: Vec::new(),
                     current: false,
+                    cost_usd: 0.0,
                 });
             }
             Event::PhaseTransition { task_id, phase } => {
@@ -326,6 +329,16 @@ impl TuiApp {
                     self.session_start,
                 ));
             }
+            Event::UsageUpdated {
+                task_id,
+                phase_cost_usd,
+                total_cost_usd,
+            } => {
+                if let Some(task) = self.tasks.get_mut(&task_id) {
+                    task.cost_usd = total_cost_usd;
+                }
+                self.total_cost_usd += phase_cost_usd;
+            }
         }
 
         // Evict oldest entries if worklog exceeds cap.
@@ -368,8 +381,9 @@ impl TuiApp {
             "RUNNING"
         };
 
+        let cost = self.total_cost_usd;
         let header_text = format!(
-            " [{status}] {goal}  ({completed}/{total} tasks, {elapsed:.0?})",
+            " [{status}] {goal}  ({completed}/{total} tasks, ${cost:.4}, {elapsed:.0?})",
             goal = self.root_goal,
         );
 
@@ -396,7 +410,13 @@ impl TuiApp {
 
             self.render_task_tree(frame, columns[0]);
             self.render_worklog(frame, columns[1]);
-            frame.render_widget(MetricsWidget { tasks: &self.tasks }, columns[2]);
+            frame.render_widget(
+                MetricsWidget {
+                    tasks: &self.tasks,
+                    total_cost_usd: self.total_cost_usd,
+                },
+                columns[2],
+            );
         } else {
             // Two columns: tree | worklog.
             let columns = Layout::default()

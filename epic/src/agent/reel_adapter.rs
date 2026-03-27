@@ -8,7 +8,7 @@ use crate::agent::wire::{
     self, AssessmentWire, CheckpointWire, DecompositionWire, RecoveryPlanWire, RecoveryWire,
     TaskOutcomeWire, VerificationWire,
 };
-use crate::agent::{AgentService, TaskContext};
+use crate::agent::{AgentResult, AgentService, SessionMeta, TaskContext};
 use crate::config::project::{ModelConfig, VerificationStep};
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
@@ -25,12 +25,12 @@ use std::time::Duration;
 
 /// Returns the tool grant appropriate for execute (leaf/fix-leaf) phases.
 const fn execute_grant() -> reel::ToolGrant {
-    reel::ToolGrant::WRITE.union(reel::ToolGrant::NU)
+    reel::ToolGrant::WRITE.union(reel::ToolGrant::TOOLS)
 }
 
 /// Returns the tool grant appropriate for read-only phases (verify, decompose, design).
 const fn readonly_grant() -> reel::ToolGrant {
-    reel::ToolGrant::NU
+    reel::ToolGrant::TOOLS
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +73,8 @@ fn build_model_registry(
                 max_tokens: Some(default_max_tokens(tier)),
                 input_per_million: None,
                 output_per_million: None,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
             },
         );
     }
@@ -123,7 +125,7 @@ impl ReelAgent {
         model: Model,
         grant: reel::ToolGrant,
         output_schema: serde_json::Value,
-    ) -> anyhow::Result<T> {
+    ) -> anyhow::Result<AgentResult<T>> {
         let config = reel::RequestConfig::builder()
             .model(model_key(model))
             .system_prompt(system_prompt)
@@ -135,31 +137,39 @@ impl ReelAgent {
             config,
             grant,
             custom_tools: Vec::new(),
+            write_paths: Vec::new(),
         };
         let result: reel::RunResult<T> = self.agent.run(&request, query).await?;
-        Ok(result.output)
+        let meta = SessionMeta::from_run_result(&result);
+        Ok(AgentResult {
+            value: result.output,
+            meta,
+        })
     }
 
     async fn run_leaf_task(
         &self,
         pair: prompts::PromptPair,
         model: Model,
-    ) -> anyhow::Result<LeafResult> {
+    ) -> anyhow::Result<AgentResult<LeafResult>> {
         let grant = execute_grant();
         let schema = wire::task_outcome_schema();
-        let wire: TaskOutcomeWire = self
+        let AgentResult { value: wire, meta }: AgentResult<TaskOutcomeWire> = self
             .run_request(&pair.system_prompt, &pair.query, model, grant, schema)
             .await?;
-        LeafResult::try_from(wire)
+        Ok(AgentResult {
+            value: LeafResult::try_from(wire)?,
+            meta,
+        })
     }
 
     async fn decompose_with_prompt(
         &self,
         pair: &prompts::PromptPair,
         model: Model,
-    ) -> anyhow::Result<DecompositionResult> {
+    ) -> anyhow::Result<AgentResult<DecompositionResult>> {
         let schema = wire::decomposition_schema();
-        let wire: DecompositionWire = self
+        let AgentResult { value: wire, meta }: AgentResult<DecompositionWire> = self
             .run_request(
                 &pair.system_prompt,
                 &pair.query,
@@ -168,7 +178,10 @@ impl ReelAgent {
                 schema,
             )
             .await?;
-        DecompositionResult::try_from(wire)
+        Ok(AgentResult {
+            value: DecompositionResult::try_from(wire)?,
+            meta,
+        })
     }
 }
 
@@ -178,7 +191,7 @@ impl ReelAgent {
 
 impl ReelAgent {
     /// Run the init exploration agent to detect project build/test/lint setup.
-    pub async fn explore_for_init(&self) -> anyhow::Result<wire::InitFindingsWire> {
+    pub async fn explore_for_init(&self) -> anyhow::Result<AgentResult<wire::InitFindingsWire>> {
         let pair = prompts::build_explore_for_init();
         let schema = wire::init_findings_schema();
         self.run_request(
@@ -197,10 +210,10 @@ impl ReelAgent {
 // ---------------------------------------------------------------------------
 
 impl AgentService for ReelAgent {
-    async fn assess(&self, ctx: &TaskContext) -> anyhow::Result<AssessmentResult> {
+    async fn assess(&self, ctx: &TaskContext) -> anyhow::Result<AgentResult<AssessmentResult>> {
         let pair = prompts::build_assess(ctx);
         let schema = wire::assessment_schema();
-        let wire: AssessmentWire = self
+        let AgentResult { value: wire, meta }: AgentResult<AssessmentWire> = self
             .run_request(
                 &pair.system_prompt,
                 &pair.query,
@@ -209,10 +222,17 @@ impl AgentService for ReelAgent {
                 schema,
             )
             .await?;
-        AssessmentResult::try_from(wire)
+        Ok(AgentResult {
+            value: AssessmentResult::try_from(wire)?,
+            meta,
+        })
     }
 
-    async fn execute_leaf(&self, ctx: &TaskContext, model: Model) -> anyhow::Result<LeafResult> {
+    async fn execute_leaf(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> anyhow::Result<AgentResult<LeafResult>> {
         let pair = prompts::build_execute_leaf(ctx);
         self.run_leaf_task(pair, model).await
     }
@@ -223,7 +243,7 @@ impl AgentService for ReelAgent {
         model: Model,
         failure_reason: &str,
         attempt: u32,
-    ) -> anyhow::Result<LeafResult> {
+    ) -> anyhow::Result<AgentResult<LeafResult>> {
         let pair = prompts::build_fix_leaf(ctx, failure_reason, attempt);
         self.run_leaf_task(pair, model).await
     }
@@ -232,7 +252,7 @@ impl AgentService for ReelAgent {
         &self,
         ctx: &TaskContext,
         model: Model,
-    ) -> anyhow::Result<DecompositionResult> {
+    ) -> anyhow::Result<AgentResult<DecompositionResult>> {
         let pair = prompts::build_design_and_decompose(ctx);
         self.decompose_with_prompt(&pair, model).await
     }
@@ -243,15 +263,19 @@ impl AgentService for ReelAgent {
         model: Model,
         verification_issues: &str,
         round: u32,
-    ) -> anyhow::Result<DecompositionResult> {
+    ) -> anyhow::Result<AgentResult<DecompositionResult>> {
         let pair = prompts::build_design_fix_subtasks(ctx, verification_issues, round);
         self.decompose_with_prompt(&pair, model).await
     }
 
-    async fn verify(&self, ctx: &TaskContext, model: Model) -> anyhow::Result<VerificationResult> {
+    async fn verify(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
         let pair = prompts::build_verify(ctx, &self.verification_steps);
         let schema = wire::verification_schema();
-        let wire: VerificationWire = self
+        let AgentResult { value: wire, meta }: AgentResult<VerificationWire> = self
             .run_request(
                 &pair.system_prompt,
                 &pair.query,
@@ -260,17 +284,20 @@ impl AgentService for ReelAgent {
                 schema,
             )
             .await?;
-        VerificationResult::try_from(wire)
+        Ok(AgentResult {
+            value: VerificationResult::try_from(wire)?,
+            meta,
+        })
     }
 
     async fn checkpoint(
         &self,
         ctx: &TaskContext,
         discoveries: &[String],
-    ) -> anyhow::Result<CheckpointDecision> {
+    ) -> anyhow::Result<AgentResult<CheckpointDecision>> {
         let pair = prompts::build_checkpoint(ctx, discoveries);
         let schema = wire::checkpoint_schema();
-        let wire: CheckpointWire = self
+        let AgentResult { value: wire, meta }: AgentResult<CheckpointWire> = self
             .run_request(
                 &pair.system_prompt,
                 &pair.query,
@@ -279,17 +306,20 @@ impl AgentService for ReelAgent {
                 schema,
             )
             .await?;
-        CheckpointDecision::try_from(wire)
+        Ok(AgentResult {
+            value: CheckpointDecision::try_from(wire)?,
+            meta,
+        })
     }
 
     async fn assess_recovery(
         &self,
         ctx: &TaskContext,
         failure_reason: &str,
-    ) -> anyhow::Result<Option<String>> {
+    ) -> anyhow::Result<AgentResult<Option<String>>> {
         let pair = prompts::build_assess_recovery(ctx, failure_reason);
         let schema = wire::recovery_schema();
-        let wire: RecoveryWire = self
+        let AgentResult { value: wire, meta }: AgentResult<RecoveryWire> = self
             .run_request(
                 &pair.system_prompt,
                 &pair.query,
@@ -298,7 +328,10 @@ impl AgentService for ReelAgent {
                 schema,
             )
             .await?;
-        Ok(wire.into_strategy())
+        Ok(AgentResult {
+            value: wire.into_strategy(),
+            meta,
+        })
     }
 
     async fn design_recovery_subtasks(
@@ -307,11 +340,11 @@ impl AgentService for ReelAgent {
         failure_reason: &str,
         strategy: &str,
         recovery_round: u32,
-    ) -> anyhow::Result<RecoveryPlan> {
+    ) -> anyhow::Result<AgentResult<RecoveryPlan>> {
         let pair =
             prompts::build_design_recovery_subtasks(ctx, failure_reason, strategy, recovery_round);
         let schema = wire::recovery_plan_schema();
-        let wire: RecoveryPlanWire = self
+        let AgentResult { value: wire, meta }: AgentResult<RecoveryPlanWire> = self
             .run_request(
                 &pair.system_prompt,
                 &pair.query,
@@ -320,7 +353,10 @@ impl AgentService for ReelAgent {
                 schema,
             )
             .await?;
-        RecoveryPlan::try_from(wire)
+        Ok(AgentResult {
+            value: RecoveryPlan::try_from(wire)?,
+            meta,
+        })
     }
 }
 
@@ -379,13 +415,13 @@ mod tests {
     fn execute_grant_includes_write_and_nu() {
         let grant = execute_grant();
         assert!(grant.contains(reel::ToolGrant::WRITE));
-        assert!(grant.contains(reel::ToolGrant::NU));
+        assert!(grant.contains(reel::ToolGrant::TOOLS));
     }
 
     #[test]
     fn readonly_grant_includes_nu_not_write() {
         let grant = readonly_grant();
-        assert!(grant.contains(reel::ToolGrant::NU));
+        assert!(grant.contains(reel::ToolGrant::TOOLS));
         assert!(!grant.contains(reel::ToolGrant::WRITE));
     }
 }

@@ -1,6 +1,6 @@
 // EpicState: task tree persistence and session resume.
 
-use crate::task::{Task, TaskId};
+use crate::task::{Task, TaskId, TaskUsage};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -67,6 +67,21 @@ impl EpicState {
 
     pub const fn root_id(&self) -> Option<TaskId> {
         self.root_id
+    }
+
+    pub fn total_usage(&self) -> TaskUsage {
+        let mut total = TaskUsage::zero();
+        for task in self.tasks.values() {
+            total.input_tokens += task.usage.input_tokens;
+            total.output_tokens += task.usage.output_tokens;
+            total.cache_creation_input_tokens += task.usage.cache_creation_input_tokens;
+            total.cache_read_input_tokens += task.usage.cache_read_input_tokens;
+            total.cost_usd += task.usage.cost_usd;
+            total.api_calls += task.usage.api_calls;
+            total.total_tool_calls += task.usage.total_tool_calls;
+            total.total_latency_ms += task.usage.total_latency_ms;
+        }
+        total
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
