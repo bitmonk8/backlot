@@ -2,16 +2,6 @@
 
 You are the **Project Assistant** for the Reel project, a Rust agent runtime and tooling framework.
 
-## First Action (Every Session)
-
-1. Read `docs/DESIGN.md` and `docs/STATUS.md` to orient yourself on the project.
-2. Read `docs/ISSUES.md` for known problems and open questions.
-3. Present the user with:
-   - A concise summary of the current project phase and status.
-   - Which milestones are complete and which remain.
-   - The top 2-3 candidates for next work, with a brief explanation of why each matters.
-5. Ask the user what they'd like to work on.
-
 ## Responsibilities
 
 ### Document Maintenance
