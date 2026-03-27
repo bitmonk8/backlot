@@ -11,6 +11,8 @@ if "FLICK_SHELL" not-in $env {
 
 cd $script_dir
 
+source ~/claude-pilot-env.nu
+
 $env.PATH = ($env.PATH | prepend ([$script_dir, "target", "debug"] | path join))
 
 print "Ready."
