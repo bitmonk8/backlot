@@ -172,7 +172,7 @@ Prints the goal, root task phase, and task counts (completed/in-progress/pending
 The terminal interface (ratatui + crossterm) displays:
 - **Task tree**: Hierarchical DFS view with status indicators (`✓` completed, `✗` failed, `▸` in progress, `·` pending)
 - **Worklog**: Timestamped event stream with color-coded entries
-- **Metrics panel**: Task counts by phase (toggle with `m`)
+- **Metrics panel**: Token usage per model tier, total cost, cache hit ratio, task counts (toggle with `m`)
 
 **Keybindings:**
 - `q` / `Ctrl-C`: Quit
@@ -230,7 +230,6 @@ All fields have defaults. No `epic.toml` is required — epic runs with sensible
 src/
 ├── main.rs                  # Entry point, CLI dispatch, TUI/headless mode
 ├── cli.rs                   # Clap CLI definition
-├── orchestrator.rs          # DFS task execution, retry/escalation, fix/recovery loops
 ├── state.rs                 # EpicState: task tree, JSON persistence, DFS ordering
 ├── events.rs                # Event enum (24 variants), channel types
 ├── init.rs                  # epic init: agent-driven project exploration
@@ -242,11 +241,16 @@ src/
 │   ├── reel_adapter.rs      # ReelAgent: thin adapter over reel::Agent
 │   ├── wire.rs              # Wire format types, structured output schemas
 │   └── prompts.rs           # Prompt assembly for all agent calls
+├── orchestrator/
+│   ├── mod.rs               # Coordinator: run(), execute_task(), child loops, subtask creation
+│   ├── context.rs           # TreeContext: read-only tree snapshot for task methods
+│   └── services.rs          # Services<A>: shared infrastructure (agent, events, vault, limits)
 ├── task/
-│   ├── mod.rs               # Task, TaskPhase, Model, TaskOutcome, LeafResult
+│   ├── mod.rs               # Task, TaskPhase, Model, TaskOutcome, self-contained mutations
 │   ├── assess.rs            # AssessmentResult
-│   ├── branch.rs            # SubtaskSpec, DecompositionResult, CheckpointDecision
-│   ├── leaf.rs              # Leaf execution types
+│   ├── branch.rs            # Branch decision logic and types (verify, fix, recovery, checkpoint)
+│   ├── leaf.rs              # Leaf lifecycle: retry/escalation, verify, fix loop
+│   ├── scope.rs             # Scope circuit breaker: git diff measurement, ScopeCheck
 │   └── verify.rs            # VerificationOutcome, VerificationResult
 ├── config/
 │   ├── mod.rs               # Config module

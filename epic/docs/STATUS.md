@@ -56,7 +56,7 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
 ### Reel Extraction
 
-Agent session layer extracted into standalone `reel` crate. Epic is now a thin consumer. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the original spec.
+Agent session layer extracted into standalone `reel` crate. Epic is now a thin consumer.
 
 ### CI Pipeline Fix
 

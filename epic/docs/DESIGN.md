@@ -154,6 +154,18 @@ task/
 
 ## Agent Layer
 
+### Layered Architecture
+
+Three layers of AI agent abstraction, each with a distinct scope:
+
+| Layer | Project | Scope |
+|---|---|---|
+| Conversation turn | Flick | One model call, one reply. No tools, no side effects. |
+| Agent session | Reel | One request with tools configured. Tool loop runs until the model returns a final response. Side effects via tools. |
+| Orchestration | Epic | Multi-task tree. Retry, escalation, recovery, state persistence, TUI. |
+
+Epic never calls flick directly. All agent work routes through reel, which owns the tool loop and NuShell runtime.
+
 ### Per-Phase Tool Grants
 
 | Task Path | Phase | Grants | Purpose |
@@ -174,6 +186,14 @@ Each agent call assembles:
 5. **Verification criteria** — success conditions
 
 Research Service is exposed as a tool during implementation and design+decompose phases.
+
+### Custom Tool Dispatch
+
+Reel's `ToolHandler` trait enables domain-specific tools (e.g., `ResearchQuery`). Custom tools dispatch before built-ins, allowing override. Custom tools are not governed by `ToolGrant` flags — access control is the consumer's responsibility.
+
+### Prompt Caching
+
+Prompt caching is automatic. Flick handles `cache_control` breakpoint injection. Multi-turn agent sessions (leaf execution, fix loops) benefit from cached system prompts and tool definitions with no epic-side code changes.
 
 ### Structured Output
 
