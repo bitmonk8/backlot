@@ -17,3 +17,9 @@ pub struct VerificationResult {
     pub outcome: VerificationOutcome,
     pub details: String,
 }
+
+/// Simplified pass/fail used by retry and fix loops.
+pub enum VerifyOutcome {
+    Passed,
+    Failed(String),
+}

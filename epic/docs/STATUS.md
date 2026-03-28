@@ -27,7 +27,7 @@
 - Testability infrastructure — `ClientFactory`/`ToolExecutor` traits (reel, internal), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
 - **Vault integration** — Document store via `vault` crate (git rev `f7ecea1`). `VaultConfig` in `epic.toml` (`[vault]` section, `enabled = false` by default). Vault constructed at startup, bootstrapped on new runs. `ResearchQuery` custom tool (reel `ToolHandler`) injected into execute, decompose, fix, and recovery design phases — agents query accumulated project knowledge on demand. Discovery recording at 4 orchestrator integration points (leaf discoveries, verification failures, checkpoint adjust, recovery). Vault reorganize runs after root branch children complete. Usage tracking folds vault costs into per-task `TaskUsage`. Vault events drive TUI worklog. All vault operations are best-effort (failures logged, not propagated).
 - **Research Service gap-filling** — `ResearchQuery` tool implements a multi-step pipeline: (1) query vault for existing knowledge, (2) identify information gaps via Haiku structured-output call, (3) fill gaps by spawning Haiku agents with read-only tools to explore the project codebase, (4) synthesize final answer combining vault knowledge and exploration findings. Optional `scope` parameter: `vault` (stored knowledge only) or `project` (default, vault + codebase exploration). Exploration findings are recorded back into vault. All internal agent calls use Haiku ("fast" model key). Returns structured `ResearchResult { answer, document_refs, gaps_filled }`. Web search scope deferred.
-- **Test counts** — 258 tests (all pass).
+- **Test counts** — 259 tests (all pass).
 
 ## What Is NOT Implemented
 
@@ -75,55 +75,72 @@ Extended `ResearchQuery` from vault-query-only to a multi-step gap-filling pipel
 
 ### File-Level Review
 
-Added file-level review as a leaf verification sub-phase. After verification gates pass for a leaf task, a separate agent call reviews the actual source file changes for intent/requirement alignment. Reuses `VerificationResult`/`VerificationWire`/`verification_schema()` types and `verification_model()` model selection. On failure, feeds into the existing leaf fix loop (or fails immediately for fix tasks). Branch tasks skip file-level review. `try_file_level_review()` helper called from both `finalize_task` (initial execution) and `try_verify` (fix loop re-verification). New `FileLevelReviewCompleted` event variant. `build_file_level_review` prompt builder. 4 new orchestrator tests.
+Added file-level review as a leaf verification sub-phase. After verification gates pass for a leaf task, a separate agent call reviews the actual source file changes for intent/requirement alignment. Reuses `VerificationResult`/`VerificationWire`/`verification_schema()` types and `verification_model()` model selection. On failure, feeds into the existing leaf fix loop (or fails immediately for fix tasks). Branch tasks skip file-level review. New `FileLevelReviewCompleted` event variant. `build_file_level_review` prompt builder.
+
+### Orchestrator Refactor (Phase 1)
+
+Restructured the orchestrator from a monolithic 7,345-line file into a modular architecture:
+
+- `orchestrator.rs` -> `orchestrator/mod.rs` (coordinator) + `orchestrator/context.rs` (tree context builder) + `orchestrator/services.rs` (shared infrastructure)
+- `Services<A>` struct bundles agent, events, vault, limits, paths -- passed to tasks during execution
+- `TreeContext` struct: read-only tree snapshot (parent goal, siblings, children, checkpoint guidance) built by orchestrator, passed to tasks. Resolves `&state` / `&mut task` borrow conflicts via owned data.
+- `Task` gained self-contained mutation methods (`set_assessment`, `record_attempt`, `record_discoveries`, `set_model`, `set_decomposition_rationale`, `set_checkpoint_guidance`, `append_checkpoint_guidance`, `increment_fix_rounds`, `increment_recovery_rounds`, `accumulate_usage`, `trailing_attempts_at_tier`)
+- Scope circuit breaker extracted to `task/scope.rs` (`git_diff_numstat`, `evaluate_scope`, `ScopeCheck`)
+- Full leaf lifecycle extracted to `task/leaf.rs` (`Task::execute_leaf`): retry/escalation state machine, scope checking, file-level review, verification gates, fix loop. Orchestrator's `run_leaf` delegates to `Task::execute_leaf`.
+- `ChildResponse` and `BranchResult` enums added to `task/branch.rs` for future branch migration.
+- Verify/scope helper methods duplicated into task module (`record_to_vault`, `emit_usage_event`, `check_scope`, `try_verify`, `try_file_level_review`, `verification_model`). Orchestrator retains its own copies used by branch paths. `VerifyOutcome` extracted to `task/verify.rs` (shared by both).
+
+Task module grew from 285 to ~1,145 lines. Orchestrator core shrank by ~500 lines (leaf entry point now delegates to `Task::execute_leaf` instead of inlining the full leaf lifecycle).
 
 ## Source Summary
 
-24 files, 14,657 lines. Test code (58%) outweighs core (42%).
+27 files, 15,004 lines.
 
 ```
-src/                              Total   Core   Test
-├── main.rs                         359    357      2
-├── orchestrator.rs               7,345  1,494  5,851
-├── knowledge.rs                    969    612    357
-├── state.rs                        428    115    313
-├── events.rs                       118    118      0
-├── cli.rs                           69     46     23
-├── init.rs                         582    347    235
-├── sandbox.rs                      262    132    130
-├── test_support.rs                 232      0    232
+src/                              Total
+├── main.rs                         359
+├── knowledge.rs                    969
+├── state.rs                        428
+├── events.rs                       118
+├── cli.rs                           69
+├── init.rs                         582
+├── sandbox.rs                      262
+├── test_support.rs                 232
 ├── agent/
-│   ├── mod.rs                      184    184      0
-│   ├── prompts.rs                  879    510    369
-│   ├── reel_adapter.rs             497    432     65
-│   └── wire.rs                     731    414    317
+│   ├── mod.rs                      184
+│   ├── prompts.rs                  879
+│   ├── reel_adapter.rs             497
+│   └── wire.rs                     731
 ├── config/
-│   ├── mod.rs                        3      3      0
-│   └── project.rs                  637    294    343
+│   ├── mod.rs                        3
+│   └── project.rs                  637
+├── orchestrator/
+│   ├── mod.rs                    6,834
+│   ├── context.rs                  154
+│   └── services.rs                  16
 ├── task/
-│   ├── mod.rs                      373    226    147
-│   ├── assess.rs                    12     12      0
-│   ├── branch.rs                    24     24      0
-│   ├── leaf.rs                       2      2      0
-│   └── verify.rs                    19     19      0
+│   ├── mod.rs                      453
+│   ├── assess.rs                    12
+│   ├── branch.rs                    50
+│   ├── leaf.rs                     417
+│   ├── scope.rs                    161
+│   └── verify.rs                    25
 └── tui/
-    ├── mod.rs                      620    503    117
-    ├── task_tree.rs                134    134      0
-    ├── metrics.rs                   96     96      0
-    └── worklog.rs                   82     82      0
-                                 ──────  ─────  ─────
-                                 14,657  6,156  8,501
+    ├── mod.rs                      620
+    ├── task_tree.rs                134
+    ├── metrics.rs                   96
+    └── worklog.rs                   82
+                                 ──────
+                                 15,034
 ```
 
-**Classification**: "Test" = lines inside `#[cfg(test)]` modules + `test_support.rs` (entirely test infrastructure). "Core" = everything else. All source is in `src/` — no `build.rs`, `tests/`, `benches/`, or `examples/` directories.
-
-**Notable**: `orchestrator.rs` is 50% of all source and 69% of all test code. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`.
+All source is in `src/`. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`.
 
 ## Next Up
 
-### Orchestrator Refactor
+### Branch Logic Migration
 
-Refactor the god-object `orchestrator.rs` (1,493 core lines, 5,851 test lines) into a clean coordinator + task-behavior architecture. Tasks gain their execution logic; orchestrator becomes a thin coordinator that never does task work. Full design in [ORCHESTRATOR_REFACTOR.md](ORCHESTRATOR_REFACTOR.md).
+Remaining branch execution logic (decomposition, checkpoint, recovery, branch fix loop) still lives in the orchestrator. Moving it to `task/branch.rs` would complete the task-owns-behavior architecture. Branch migration is more complex than leaf because it involves cross-task coordination (child execution, subtask creation) that must remain in the orchestrator.
 
 ## Other Work Candidates
 

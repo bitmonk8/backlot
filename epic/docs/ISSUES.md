@@ -157,13 +157,13 @@
 
 `src/agent/reel_adapter.rs` — `file_level_review` is identical to `verify` except for the prompt builder call. Both construct `verification_schema()`, call `run_request` with `readonly_grant()`, and `TryFrom` the wire type. Extract a shared helper parameterized by `PromptPair`. **Category: Simplification.**
 
-### 38. Duplicate failure-routing in `finalize_task` for file-level review
+### 38. Duplicate failure-routing in `finalize_branch` for file-level review
 
-`src/orchestrator.rs` — When file-level review fails in `finalize_task`, the failure-handling logic (is_fix_task check, routing to `fail_task` vs `leaf_retry_loop`) duplicates the `VerificationOutcome::Fail` arm directly below it. Could fall through to the existing failure-handling code. **Category: Simplification.**
+`src/orchestrator.rs` — When file-level review fails in `finalize_branch`, the failure-handling logic (is_fix_task check, routing to `fail_task` vs `leaf_retry_loop`) duplicates the `VerificationOutcome::Fail` arm directly below it. Could fall through to the existing failure-handling code. **Category: Simplification.**
 
-### 39. `finalize_task` reimplements verify+review inline instead of calling `try_verify`
+### 39. `finalize_branch` reimplements verify+review inline instead of calling `try_verify`
 
-`src/orchestrator.rs` — `finalize_task` runs verification and file-level review inline rather than delegating to `try_verify` (which already encapsulates both). The two code paths must be kept in sync manually. **Category: Separation.**
+`src/orchestrator.rs` — `finalize_branch` runs verification and file-level review inline rather than delegating to `try_verify` (which already encapsulates both). The two code paths must be kept in sync manually. **Category: Separation.**
 
 ### 40. Missing graceful error degradation in `try_file_level_review`
 
@@ -172,3 +172,43 @@
 ### 41. `branch_skips_file_level_review` test relies on event assertion only
 
 `src/orchestrator.rs` — The test verifies branches skip file-level review by checking for zero `FileLevelReviewCompleted` events for the root task. It cannot distinguish "correctly skipped the call" from "incorrectly called but returned Pass." A stronger test would verify the agent method is never invoked. **Category: Testing.**
+
+### 42. Duplicate `record_to_vault` across orchestrator and task
+
+`src/orchestrator/mod.rs` and `src/task/leaf.rs` — Both implement the same vault recording logic (try New, fallback to Append on VersionConflict, accumulate usage, emit event). The orchestrator version is used for branch operations; the task version for leaf operations. Should be consolidated. **Category: Separation.**
+
+### 43. Duplicate `try_verify`/`try_file_level_review` across orchestrator and task
+
+`src/orchestrator/mod.rs` and `src/task/leaf.rs` — Both implement verify + file-level-review logic. The orchestrator version serves branch paths; the task version serves leaf paths. Core agent interaction is identical. **Category: Separation.**
+
+### 44. Duplicate `check_scope`/`check_scope_circuit_breaker` across orchestrator and task
+
+`src/orchestrator/mod.rs` and `src/task/leaf.rs` — Both extract magnitude and project_root, call `git_diff_numstat`, call `evaluate_scope`. Orchestrator version used in branch fix loop; task version in leaf fix loop. **Category: Separation.**
+
+### 45. `__agent_error__` sentinel string for error propagation
+
+`src/task/leaf.rs` and `src/orchestrator/mod.rs` — `Task::execute_leaf` returns `TaskOutcome::Failed { reason: "__agent_error__: ..." }` and the orchestrator parses it with `strip_prefix`. Stringly-typed error channel. A `Result<TaskOutcome, anyhow::Error>` return type would eliminate this. **Category: Design.**
+
+### 46. `ChildResponse`/`BranchResult` dead scaffolding
+
+`src/task/branch.rs` — Both enums are `#[allow(dead_code)]` with no consumers. Placed as interface types for future branch migration. **Category: Design.**
+
+### 47. `emit_usage_event` sends `phase_cost_usd: 0.0`
+
+`src/task/leaf.rs` — Task-level `emit_usage_event` always sends `phase_cost_usd: 0.0` while the orchestrator's `accumulate_usage` sends the actual value. Inconsistent usage event data. **Category: Correctness.**
+
+### 48. DESIGN.md describes unimplemented features as current
+
+`docs/DESIGN.md` — Simplification review (line 52), aggregate simplification (line 64), and user-level config (line 713) are described as current behavior but are listed as not implemented in STATUS.md. **Category: Documentation.**
+
+### 49. Testing gaps from orchestrator refactor
+
+`src/task/leaf.rs` has ~450 lines with zero unit tests. `src/task/mod.rs` mutation methods (`trailing_attempts_at_tier`, `record_attempt`, `record_discoveries`, `append_checkpoint_guidance`) lack unit tests. `src/task/scope.rs` missing tests for `lines_deleted` and `lines_modified` exceeded paths. **Category: Testing.**
+
+### 50. `ancestor_goals` may duplicate parent goal
+
+`src/orchestrator/context.rs` — `TreeContext::ancestor_goals` includes the immediate parent's goal, which is also available via `parent_goal`. Consumers iterating `ancestor_goals` get the parent goal twice if they also check `parent_goal`. **Category: Correctness.**
+
+### 51. Test uses `std::env::temp_dir()` for checkpoint test
+
+`src/orchestrator/mod.rs` — `checkpoint_saves_state` test uses `std::env::temp_dir()`. Per CLAUDE.md, AppContainer sandboxing requires project-local dirs. Should use `TempDir::new_in()` with a project-local path. **Category: Testing.**

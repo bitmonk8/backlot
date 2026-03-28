@@ -3,6 +3,7 @@
 pub mod assess;
 pub mod branch;
 pub mod leaf;
+pub mod scope;
 pub mod verify;
 
 use serde::{Deserialize, Serialize};
@@ -221,6 +222,85 @@ impl Task {
             recovery_rounds: 0,
             usage: TaskUsage::zero(),
         }
+    }
+
+    pub const fn set_assessment(
+        &mut self,
+        path: TaskPath,
+        model: Model,
+        magnitude: Option<Magnitude>,
+    ) {
+        self.path = Some(path);
+        self.current_model = Some(model);
+        self.magnitude = magnitude;
+    }
+
+    pub fn record_attempt(&mut self, attempt: Attempt, is_fix: bool) {
+        if is_fix {
+            self.fix_attempts.push(attempt);
+        } else {
+            self.attempts.push(attempt);
+        }
+    }
+
+    /// Extend task discoveries and return the count added.
+    pub fn record_discoveries(&mut self, discoveries: Vec<String>) -> usize {
+        let count = discoveries.len();
+        self.discoveries.extend(discoveries);
+        count
+    }
+
+    pub const fn set_model(&mut self, model: Model) {
+        self.current_model = Some(model);
+    }
+
+    pub fn set_decomposition_rationale(&mut self, rationale: String) {
+        self.decomposition_rationale = Some(rationale);
+    }
+
+    pub fn set_checkpoint_guidance(&mut self, guidance: Option<String>) {
+        self.checkpoint_guidance = guidance;
+    }
+
+    pub fn append_checkpoint_guidance(&mut self, new_guidance: &str) {
+        self.checkpoint_guidance = Some(self.checkpoint_guidance.take().map_or_else(
+            || new_guidance.to_owned(),
+            |existing| format!("{existing}\n{new_guidance}"),
+        ));
+    }
+
+    pub const fn increment_fix_rounds(&mut self) -> u32 {
+        self.verification_fix_rounds += 1;
+        self.verification_fix_rounds
+    }
+
+    pub const fn increment_recovery_rounds(&mut self) -> u32 {
+        self.recovery_rounds += 1;
+        self.recovery_rounds
+    }
+
+    pub fn accumulate_usage(&mut self, meta: &crate::agent::SessionMeta) {
+        self.usage.accumulate(
+            meta.input_tokens,
+            meta.output_tokens,
+            meta.cache_creation_input_tokens,
+            meta.cache_read_input_tokens,
+            meta.cost_usd,
+            meta.tool_calls,
+            meta.total_latency_ms,
+        );
+    }
+
+    /// Count consecutive trailing attempts at the given model tier.
+    pub fn trailing_attempts_at_tier(&self, model: Model, is_fix: bool) -> u32 {
+        let list = if is_fix {
+            &self.fix_attempts
+        } else {
+            &self.attempts
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let count = list.iter().rev().take_while(|a| a.model == model).count() as u32;
+        count
     }
 }
 

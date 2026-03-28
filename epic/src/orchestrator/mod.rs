@@ -1,58 +1,22 @@
 // Recursive task execution, DFS traversal, state persistence, resume.
 
-use crate::agent::{
-    AgentService, ChildStatus, ChildSummary, SessionMeta, SiblingSummary, TaskContext,
-};
+pub mod context;
+pub mod services;
+
+use crate::agent::{AgentService, SessionMeta, TaskContext};
 use crate::config::project::LimitsConfig;
 use crate::events::{Event, EventSender};
 use crate::state::EpicState;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, SubtaskSpec};
-use crate::task::verify::VerificationOutcome;
-use crate::task::{
-    Attempt, LeafResult, Magnitude, Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase,
-};
+use crate::task::scope::{self, ScopeCheck};
+use crate::task::verify::{VerificationOutcome, VerifyOutcome};
+use crate::task::{Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
+use services::Services;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use thiserror::Error;
-
-const GIT_DIFF_TIMEOUT_SECS: u64 = 30;
-
-async fn git_diff_numstat(project_root: &Path) -> Option<String> {
-    let git_future = tokio::process::Command::new("git")
-        .args(["diff", "--numstat", "HEAD"])
-        .current_dir(project_root)
-        .output();
-
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(GIT_DIFF_TIMEOUT_SECS),
-        git_future,
-    )
-    .await
-    .ok()?
-    .ok()?;
-
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        None
-    }
-}
-
-enum VerifyOutcome {
-    Passed,
-    Failed(String),
-}
-
-/// Distinguishes first-execution from fix-loop retry behavior.
-/// Keeps the shared retry-with-escalation loop in one place.
-enum LeafRetryMode {
-    /// First attempt at a leaf task (no prior failure context).
-    Execute,
-    /// Re-executing after a verification failure.
-    Fix { initial_failure: String },
-}
 
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
@@ -62,123 +26,49 @@ pub enum OrchestratorError {
     Agent(#[from] anyhow::Error),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum ScopeCheck {
-    WithinBounds,
-    Exceeded {
-        metric: String,
-        actual: u64,
-        limit: u64,
-    },
-}
-
-fn evaluate_scope(numstat_output: &str, magnitude: &Magnitude) -> ScopeCheck {
-    let mut total_added: u64 = 0;
-    let mut total_deleted: u64 = 0;
-    let mut total_modified: u64 = 0;
-
-    for line in numstat_output.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        // Binary files show "-" for counts; skip them.
-        let Ok(added) = parts[0].parse::<u64>() else {
-            continue;
-        };
-        let Ok(deleted) = parts[1].parse::<u64>() else {
-            continue;
-        };
-        let modified = added.min(deleted);
-        total_added += added - modified;
-        total_deleted += deleted - modified;
-        total_modified += modified;
-    }
-
-    let multiplier = 3;
-    // Skip dimensions where the estimate is zero — zero means "unconstrained"
-    // (the LLM omitted this dimension). Checking 3×0 = 0 would trip on any change.
-    if magnitude.max_lines_added > 0 && total_added > magnitude.max_lines_added * multiplier {
-        return ScopeCheck::Exceeded {
-            metric: "lines_added".into(),
-            actual: total_added,
-            limit: magnitude.max_lines_added * multiplier,
-        };
-    }
-    if magnitude.max_lines_modified > 0
-        && total_modified > magnitude.max_lines_modified * multiplier
-    {
-        return ScopeCheck::Exceeded {
-            metric: "lines_modified".into(),
-            actual: total_modified,
-            limit: magnitude.max_lines_modified * multiplier,
-        };
-    }
-    if magnitude.max_lines_deleted > 0 && total_deleted > magnitude.max_lines_deleted * multiplier {
-        return ScopeCheck::Exceeded {
-            metric: "lines_deleted".into(),
-            actual: total_deleted,
-            limit: magnitude.max_lines_deleted * multiplier,
-        };
-    }
-
-    ScopeCheck::WithinBounds
-}
-
 pub struct Orchestrator<A: AgentService> {
-    agent: A,
+    services: Services<A>,
     state: EpicState,
-    events: EventSender,
-    state_path: Option<PathBuf>,
-    project_root: Option<PathBuf>,
-    limits: LimitsConfig,
-    vault: Option<std::sync::Arc<vault::Vault>>,
 }
 
 impl<A: AgentService> Orchestrator<A> {
     pub fn new(agent: A, state: EpicState, events: EventSender) -> Self {
         Self {
-            agent,
+            services: Services {
+                agent,
+                events,
+                vault: None,
+                limits: LimitsConfig::default(),
+                project_root: None,
+                state_path: None,
+            },
             state,
-            events,
-            state_path: None,
-            project_root: None,
-            limits: LimitsConfig::default(),
-            vault: None,
         }
     }
 
     pub const fn with_limits(mut self, limits: LimitsConfig) -> Self {
-        self.limits = limits;
+        self.services.limits = limits;
         self
     }
 
     pub fn with_state_path(mut self, path: PathBuf) -> Self {
-        self.state_path = Some(path);
+        self.services.state_path = Some(path);
         self
     }
 
     pub fn with_project_root(mut self, path: PathBuf) -> Self {
-        self.project_root = Some(path);
+        self.services.project_root = Some(path);
         self
     }
 
     pub fn with_vault(mut self, vault: std::sync::Arc<vault::Vault>) -> Self {
-        self.vault = Some(vault);
+        self.services.vault = Some(vault);
         self
     }
 
     fn accumulate_usage(&mut self, task_id: TaskId, meta: &SessionMeta) {
         let total_cost = if let Some(task) = self.state.get_mut(task_id) {
-            task.usage.accumulate(
-                meta.input_tokens,
-                meta.output_tokens,
-                meta.cache_creation_input_tokens,
-                meta.cache_read_input_tokens,
-                meta.cost_usd,
-                meta.tool_calls,
-                meta.total_latency_ms,
-            );
+            task.accumulate_usage(meta);
             Some(task.usage.cost_usd)
         } else {
             None
@@ -194,7 +84,7 @@ impl<A: AgentService> Orchestrator<A> {
 
     /// Record content to vault (best-effort). Errors are logged, not propagated.
     async fn record_to_vault(&mut self, task_id: TaskId, name: &str, content: &str) {
-        let Some(ref vault) = self.vault else {
+        let Some(ref vault) = self.services.vault else {
             return;
         };
         let result = match vault.record(name, content, vault::RecordMode::New).await {
@@ -220,7 +110,7 @@ impl<A: AgentService> Orchestrator<A> {
 
     /// Reorganize vault documents (best-effort). Errors are logged, not propagated.
     async fn reorganize_vault(&mut self, task_id: TaskId) {
-        let Some(ref vault) = self.vault else {
+        let Some(ref vault) = self.services.vault else {
             return;
         };
         match vault.reorganize().await {
@@ -241,10 +131,10 @@ impl<A: AgentService> Orchestrator<A> {
 
     pub async fn run(&mut self, root_id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
         // Clamp minimum values to 1 to prevent zero-iteration loops.
-        self.limits.retry_budget = self.limits.retry_budget.max(1);
-        self.limits.branch_fix_rounds = self.limits.branch_fix_rounds.max(1);
-        self.limits.root_fix_rounds = self.limits.root_fix_rounds.max(1);
-        self.limits.max_total_tasks = self.limits.max_total_tasks.max(1);
+        self.services.limits.retry_budget = self.services.limits.retry_budget.max(1);
+        self.services.limits.branch_fix_rounds = self.services.limits.branch_fix_rounds.max(1);
+        self.services.limits.root_fix_rounds = self.services.limits.root_fix_rounds.max(1);
+        self.services.limits.max_total_tasks = self.services.limits.max_total_tasks.max(1);
 
         self.state.set_root_id(root_id);
         // Register all tasks for TUI (root + any pre-existing subtasks on resume).
@@ -274,7 +164,7 @@ impl<A: AgentService> Orchestrator<A> {
     /// Write state to disk if a state path is configured. Best-effort: logs
     /// but does not propagate write errors to avoid aborting the run.
     fn checkpoint_save(&self) {
-        if let Some(ref path) = self.state_path {
+        if let Some(ref path) = self.services.state_path {
             if let Err(e) = self.state.save(path) {
                 eprintln!("warning: state checkpoint failed: {e}");
             }
@@ -282,7 +172,7 @@ impl<A: AgentService> Orchestrator<A> {
     }
 
     fn emit(&self, event: Event) {
-        let _ = self.events.send(event);
+        let _ = self.services.events.send(event);
     }
 
     fn transition(&mut self, id: TaskId, phase: TaskPhase) -> Result<(), OrchestratorError> {
@@ -306,6 +196,17 @@ impl<A: AgentService> Orchestrator<A> {
         Ok(outcome)
     }
 
+    fn complete_or_fail(
+        &mut self,
+        id: TaskId,
+        outcome: TaskOutcome,
+    ) -> Result<TaskOutcome, OrchestratorError> {
+        match outcome {
+            TaskOutcome::Success => self.complete_task_verified(id),
+            TaskOutcome::Failed { reason } => self.fail_task(id, reason),
+        }
+    }
+
     fn complete_task_verified(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
         self.transition(id, TaskPhase::Completed)?;
         self.emit(Event::TaskCompleted {
@@ -319,7 +220,7 @@ impl<A: AgentService> Orchestrator<A> {
     async fn try_verify(&mut self, id: TaskId) -> Result<VerifyOutcome, OrchestratorError> {
         let verify_model = self.verification_model(id)?;
         let ctx = self.build_context(id)?;
-        match self.agent.verify(&ctx, verify_model).await {
+        match self.services.agent.verify(&ctx, verify_model).await {
             Ok(agent_result) => {
                 self.accumulate_usage(id, &agent_result.meta);
                 match agent_result.value.outcome {
@@ -364,6 +265,7 @@ impl<A: AgentService> Orchestrator<A> {
         let review_model = self.verification_model(id)?;
         let review_ctx = self.build_context(id)?;
         let review_result = self
+            .services
             .agent
             .file_level_review(&review_ctx, review_model)
             .await?;
@@ -386,12 +288,12 @@ impl<A: AgentService> Orchestrator<A> {
     #[must_use]
     fn check_task_limit(&self, parent_id: TaskId, count: usize) -> Option<String> {
         let current = self.state.task_count();
-        let max = self.limits.max_total_tasks as usize;
+        let max = self.services.limits.max_total_tasks as usize;
         if current + count > max {
             self.emit(Event::TaskLimitReached { task_id: parent_id });
             Some(format!(
                 "task limit reached ({current} tasks, max {})",
-                self.limits.max_total_tasks
+                self.services.limits.max_total_tasks
             ))
         } else {
             None
@@ -458,119 +360,8 @@ impl<A: AgentService> Orchestrator<A> {
         Ok(child_ids)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn build_context(&self, id: TaskId) -> Result<TaskContext, OrchestratorError> {
-        let task = self
-            .state
-            .get(id)
-            .ok_or(OrchestratorError::TaskNotFound(id))?
-            .clone();
-
-        let parent = task.parent_id.and_then(|pid| self.state.get(pid));
-
-        let parent_goal = parent.map(|p| p.goal.clone());
-
-        let mut ancestor_goals = Vec::new();
-        let mut cursor = task.parent_id;
-        while let Some(pid) = cursor {
-            if let Some(parent) = self.state.get(pid) {
-                ancestor_goals.push(parent.goal.clone());
-                cursor = parent.parent_id;
-            } else {
-                break;
-            }
-        }
-
-        let (completed_siblings, pending_sibling_goals) = parent.map_or_else(
-            || (Vec::new(), Vec::new()),
-            |parent| {
-                let mut completed = Vec::new();
-                let mut pending = Vec::new();
-                for &sib_id in &parent.subtask_ids {
-                    if sib_id == id {
-                        continue;
-                    }
-                    let Some(sib) = self.state.get(sib_id) else {
-                        continue;
-                    };
-                    match sib.phase {
-                        TaskPhase::Completed => {
-                            completed.push(SiblingSummary {
-                                id: sib_id,
-                                goal: sib.goal.clone(),
-                                outcome: TaskOutcome::Success,
-                                discoveries: sib.discoveries.clone(),
-                            });
-                        }
-                        TaskPhase::Failed => {
-                            let reason = sib
-                                .attempts
-                                .iter()
-                                .rev()
-                                .find_map(|a| a.error.clone())
-                                .unwrap_or_else(|| "unknown".into());
-                            completed.push(SiblingSummary {
-                                id: sib_id,
-                                goal: sib.goal.clone(),
-                                outcome: TaskOutcome::Failed { reason },
-                                discoveries: sib.discoveries.clone(),
-                            });
-                        }
-                        _ => {
-                            pending.push(sib.goal.clone());
-                        }
-                    }
-                }
-                (completed, pending)
-            },
-        );
-
-        // Checkpoint guidance: look at the parent task's stored guidance.
-        let checkpoint_guidance = parent.and_then(|p| p.checkpoint_guidance.clone());
-
-        // Build child summaries for branch tasks.
-        let children = task
-            .subtask_ids
-            .iter()
-            .filter_map(|&cid| {
-                let child = self.state.get(cid)?;
-                let status = match child.phase {
-                    TaskPhase::Completed => ChildStatus::Completed,
-                    TaskPhase::Failed => {
-                        let reason = child
-                            .attempts
-                            .iter()
-                            .rev()
-                            .find_map(|a| a.error.clone())
-                            .unwrap_or_else(|| "unknown".into());
-                        ChildStatus::Failed { reason }
-                    }
-                    TaskPhase::Pending => ChildStatus::Pending,
-                    _ => ChildStatus::InProgress,
-                };
-                Some(ChildSummary {
-                    goal: child.goal.clone(),
-                    status,
-                    discoveries: child.discoveries.clone(),
-                })
-            })
-            .collect();
-
-        // Parent discoveries and decomposition rationale for recovery context.
-        let parent_discoveries = parent.map_or_else(Vec::new, |p| p.discoveries.clone());
-        let parent_decomposition_rationale = parent.and_then(|p| p.decomposition_rationale.clone());
-
-        Ok(TaskContext {
-            task,
-            parent_goal,
-            ancestor_goals,
-            completed_siblings,
-            pending_sibling_goals,
-            checkpoint_guidance,
-            children,
-            parent_discoveries,
-            parent_decomposition_rationale,
-        })
+        context::build_context(&self.state, id)
     }
 
     async fn check_scope_circuit_breaker(
@@ -587,15 +378,15 @@ impl<A: AgentService> Orchestrator<A> {
             None => return Ok(ScopeCheck::WithinBounds),
         };
 
-        let project_root = match &self.project_root {
+        let project_root = match &self.services.project_root {
             Some(p) => p.clone(),
             None => return Ok(ScopeCheck::WithinBounds),
         };
 
-        let numstat = git_diff_numstat(&project_root).await;
+        let numstat = scope::git_diff_numstat(&project_root).await;
 
         Ok(numstat.map_or(ScopeCheck::WithinBounds, |stdout| {
-            evaluate_scope(&stdout, &magnitude)
+            scope::evaluate_scope(&stdout, &magnitude)
         }))
     }
 
@@ -622,31 +413,32 @@ impl<A: AgentService> Orchestrator<A> {
                 }
             }
 
-            // Resume: task was mid-verification. Re-verify without re-executing.
+            // Resume: task was mid-verification or mid-execution with path set.
             {
                 let task = self
                     .state
                     .get(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
-                if task.path.is_some() && task.phase == TaskPhase::Verifying {
-                    return self.finalize_task(id, TaskOutcome::Success).await;
-                }
-            }
+                let path = task.path.clone();
+                let phase = task.phase;
 
-            // Resume: task was mid-execution with path already set. Skip assessment.
-            {
-                let task = self
-                    .state
-                    .get(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?;
-                if let (Some(path), TaskPhase::Executing) = (&task.path, task.phase) {
-                    let path = path.clone();
-                    self.transition(id, TaskPhase::Executing)?;
-                    let outcome = match path {
-                        TaskPath::Leaf => self.execute_leaf(id).await?,
-                        TaskPath::Branch => self.execute_branch(id).await?,
+                if let (Some(p), TaskPhase::Verifying) = (&path, phase) {
+                    return match p {
+                        TaskPath::Leaf => self.run_leaf(id).await,
+                        TaskPath::Branch => self.finalize_branch(id, TaskOutcome::Success).await,
                     };
-                    return self.finalize_task(id, outcome).await;
+                }
+
+                if let (Some(p), TaskPhase::Executing) = (&path, phase) {
+                    let p = p.clone();
+                    self.transition(id, TaskPhase::Executing)?;
+                    return match p {
+                        TaskPath::Leaf => self.run_leaf(id).await,
+                        TaskPath::Branch => {
+                            let outcome = self.execute_branch(id).await?;
+                            self.finalize_branch(id, outcome).await
+                        }
+                    };
                 }
             }
 
@@ -666,7 +458,7 @@ impl<A: AgentService> Orchestrator<A> {
                     rationale: "Root task always branches".into(),
                     magnitude: None,
                 }
-            } else if depth >= self.limits.max_depth {
+            } else if depth >= self.services.limits.max_depth {
                 AssessmentResult {
                     path: TaskPath::Leaf,
                     model: Model::Sonnet,
@@ -675,7 +467,7 @@ impl<A: AgentService> Orchestrator<A> {
                 }
             } else {
                 let ctx = self.build_context(id)?;
-                let agent_result = self.agent.assess(&ctx).await?;
+                let agent_result = self.services.agent.assess(&ctx).await?;
                 self.accumulate_usage(id, &agent_result.meta);
                 agent_result.value
             };
@@ -686,9 +478,11 @@ impl<A: AgentService> Orchestrator<A> {
                     .state
                     .get_mut(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
-                task.path = Some(assessment.path.clone());
-                task.current_model = Some(assessment.model);
-                task.magnitude.clone_from(&assessment.magnitude);
+                task.set_assessment(
+                    assessment.path.clone(),
+                    assessment.model,
+                    assessment.magnitude.clone(),
+                );
             }
 
             self.emit(Event::PathSelected {
@@ -703,12 +497,13 @@ impl<A: AgentService> Orchestrator<A> {
 
             self.transition(id, TaskPhase::Executing)?;
 
-            let outcome = match assessment.path {
-                TaskPath::Leaf => self.execute_leaf(id).await?,
-                TaskPath::Branch => self.execute_branch(id).await?,
-            };
-
-            self.finalize_task(id, outcome).await
+            match assessment.path {
+                TaskPath::Leaf => self.run_leaf(id).await,
+                TaskPath::Branch => {
+                    let outcome = self.execute_branch(id).await?;
+                    self.finalize_branch(id, outcome).await
+                }
+            }
         })
     }
 
@@ -717,16 +512,11 @@ impl<A: AgentService> Orchestrator<A> {
             .state
             .get(id)
             .ok_or(OrchestratorError::TaskNotFound(id))?;
-        match task.path {
-            Some(TaskPath::Leaf) => {
-                let impl_model = task.current_model.unwrap_or(Model::Haiku);
-                Ok(impl_model.clamp(Model::Haiku, Model::Sonnet))
-            }
-            _ => Ok(Model::Sonnet),
-        }
+        Ok(task.verification_model())
     }
 
-    async fn finalize_task(
+    /// Branch-only finalization: verify + fix loop. Leaf tasks use `Task::execute_leaf`.
+    async fn finalize_branch(
         &mut self,
         id: TaskId,
         outcome: TaskOutcome,
@@ -736,54 +526,20 @@ impl<A: AgentService> Orchestrator<A> {
 
             let verify_model = self.verification_model(id)?;
             let ctx = self.build_context(id)?;
-            let agent_result = self.agent.verify(&ctx, verify_model).await?;
+            let agent_result = self.services.agent.verify(&ctx, verify_model).await?;
             self.accumulate_usage(id, &agent_result.meta);
 
             match agent_result.value.outcome {
-                VerificationOutcome::Pass => {
-                    // File-level review for leaf tasks: catch intent mismatches
-                    // that build/lint/test cannot detect.
-                    if let Some(fail_reason) = self.try_file_level_review(id).await? {
-                        let task = self
-                            .state
-                            .get(id)
-                            .ok_or(OrchestratorError::TaskNotFound(id))?;
-                        let is_fix_task = task.is_fix_task;
-
-                        if is_fix_task {
-                            self.fail_task(id, fail_reason)
-                        } else {
-                            self.leaf_retry_loop(
-                                id,
-                                LeafRetryMode::Fix {
-                                    initial_failure: fail_reason,
-                                },
-                            )
-                            .await
-                        }
-                    } else {
-                        self.complete_task_verified(id)
-                    }
-                }
+                VerificationOutcome::Pass => self.complete_task_verified(id),
                 VerificationOutcome::Fail { reason } => {
                     let task = self
                         .state
                         .get(id)
                         .ok_or(OrchestratorError::TaskNotFound(id))?;
-                    let is_leaf = task.path == Some(TaskPath::Leaf);
                     let is_fix_task = task.is_fix_task;
 
                     if is_fix_task {
-                        // Fix tasks (leaf or branch) cannot trigger fix loops — prevents recursive fix chains.
                         self.fail_task(id, reason)
-                    } else if is_leaf {
-                        self.leaf_retry_loop(
-                            id,
-                            LeafRetryMode::Fix {
-                                initial_failure: reason,
-                            },
-                        )
-                        .await
                     } else {
                         self.branch_fix_loop(id, &reason).await
                     }
@@ -795,227 +551,6 @@ impl<A: AgentService> Orchestrator<A> {
                 unreachable!("non-Success outcome must be Failed");
             };
             self.fail_task(id, reason)
-        }
-    }
-
-    /// Shared retry-with-escalation loop for both first execution and fix loops.
-    /// Haiku→Sonnet→Opus escalation, retries-at-tier counting, checkpoint saves,
-    /// attempt recording, and event emission are handled uniformly; the mode enum
-    /// controls which agent call, events, attempt list, and success/exhaustion
-    /// handling to use.
-    #[allow(clippy::too_many_lines)]
-    async fn leaf_retry_loop(
-        &mut self,
-        id: TaskId,
-        mode: LeafRetryMode,
-    ) -> Result<TaskOutcome, OrchestratorError> {
-        let is_fix = matches!(mode, LeafRetryMode::Fix { .. });
-        let mut failure_reason = match &mode {
-            LeafRetryMode::Fix { initial_failure } => Some(initial_failure.clone()),
-            LeafRetryMode::Execute => None,
-        };
-
-        // Resume-safe: read current model and count consecutive trailing
-        // attempts at that tier so we don't grant extra retries after a crash.
-        let task = self
-            .state
-            .get(id)
-            .ok_or(OrchestratorError::TaskNotFound(id))?;
-        let mut current_model = task.current_model.unwrap_or(Model::Haiku);
-        let attempts_list = if is_fix {
-            &task.fix_attempts
-        } else {
-            &task.attempts
-        };
-        #[allow(clippy::cast_possible_truncation)]
-        let mut retries_at_tier: u32 = attempts_list
-            .iter()
-            .rev()
-            .take_while(|a| a.model == current_model)
-            .count() as u32;
-
-        // Drain any stale tier exhaustion from a crash before escalation.
-        while retries_at_tier >= self.limits.retry_budget {
-            if let Some(next_model) = current_model.escalate() {
-                self.emit_escalation(id, current_model, next_model, is_fix);
-                let task = self
-                    .state
-                    .get_mut(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?;
-                task.current_model = Some(next_model);
-                current_model = next_model;
-                retries_at_tier = 0;
-                self.checkpoint_save();
-            } else if is_fix {
-                return self.fail_task(
-                    id,
-                    failure_reason.unwrap_or_else(|| "all tiers exhausted".into()),
-                );
-            } else {
-                let last_error = self
-                    .state
-                    .get(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?
-                    .attempts
-                    .last()
-                    .and_then(|a| a.error.clone())
-                    .unwrap_or_else(|| "all tiers exhausted".into());
-                return Ok(TaskOutcome::Failed { reason: last_error });
-            }
-        }
-
-        loop {
-            // Scope circuit breaker (fix mode only — first execution hasn't
-            // produced changes yet).
-            if is_fix {
-                match self.check_scope_circuit_breaker(id).await? {
-                    ScopeCheck::WithinBounds => {}
-                    ScopeCheck::Exceeded {
-                        metric,
-                        actual,
-                        limit,
-                    } => {
-                        return self.fail_task(
-                            id,
-                            format!("SCOPE_EXCEEDED: {metric} actual={actual} limit={limit}"),
-                        );
-                    }
-                }
-            }
-
-            // Agent call — execute_leaf or fix_leaf.
-            let ctx = self.build_context(id)?;
-            let agent_result = if is_fix {
-                let reason = failure_reason.as_deref().unwrap_or("unknown failure");
-                #[allow(clippy::cast_possible_truncation)]
-                let attempt_number = self
-                    .state
-                    .get(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?
-                    .fix_attempts
-                    .len() as u32
-                    + 1;
-                self.emit(Event::FixAttempt {
-                    task_id: id,
-                    attempt: attempt_number,
-                    model: current_model,
-                });
-                self.agent
-                    .fix_leaf(&ctx, current_model, reason, attempt_number)
-                    .await?
-            } else {
-                self.agent.execute_leaf(&ctx, current_model).await?
-            };
-            self.accumulate_usage(id, &agent_result.meta);
-            let LeafResult {
-                outcome,
-                discoveries,
-            } = agent_result.value;
-
-            // Record attempt and discoveries.
-            let vault_content = {
-                let task = self
-                    .state
-                    .get_mut(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?;
-                let attempt = Attempt {
-                    model: current_model,
-                    succeeded: outcome == TaskOutcome::Success,
-                    error: match &outcome {
-                        TaskOutcome::Success => None,
-                        TaskOutcome::Failed { reason } => Some(reason.clone()),
-                    },
-                };
-                if is_fix {
-                    task.fix_attempts.push(attempt);
-                } else {
-                    task.attempts.push(attempt);
-                }
-                if discoveries.is_empty() {
-                    None
-                } else {
-                    let count = discoveries.len();
-                    let content = discoveries.join("\n");
-                    task.discoveries.extend(discoveries);
-                    self.emit(Event::DiscoveriesRecorded { task_id: id, count });
-                    Some(content)
-                }
-            };
-
-            if let Some(content) = vault_content {
-                self.record_to_vault(id, "FINDINGS", &content).await;
-            }
-
-            self.checkpoint_save();
-
-            // Handle success.
-            if outcome == TaskOutcome::Success {
-                if is_fix {
-                    // Re-verify after successful fix.
-                    match self.try_verify(id).await? {
-                        VerifyOutcome::Passed => return Ok(TaskOutcome::Success),
-                        VerifyOutcome::Failed(reason) => failure_reason = Some(reason),
-                    }
-                } else {
-                    return Ok(outcome);
-                }
-            } else if is_fix {
-                if let TaskOutcome::Failed { reason } = &outcome {
-                    failure_reason = Some(reason.clone());
-                }
-            }
-
-            retries_at_tier += 1;
-
-            if retries_at_tier < self.limits.retry_budget {
-                // Retry event (execute mode only).
-                if !is_fix {
-                    self.emit(Event::RetryAttempt {
-                        task_id: id,
-                        attempt: retries_at_tier,
-                        model: current_model,
-                    });
-                }
-                continue;
-            }
-
-            // Escalate model tier.
-            if let Some(next_model) = current_model.escalate() {
-                self.emit_escalation(id, current_model, next_model, is_fix);
-                let task = self
-                    .state
-                    .get_mut(id)
-                    .ok_or(OrchestratorError::TaskNotFound(id))?;
-                task.current_model = Some(next_model);
-                current_model = next_model;
-                retries_at_tier = 0;
-                continue;
-            }
-
-            // All tiers exhausted — terminal failure.
-            if is_fix {
-                return self.fail_task(
-                    id,
-                    failure_reason.unwrap_or_else(|| "all tiers exhausted".into()),
-                );
-            }
-            return Ok(outcome);
-        }
-    }
-
-    fn emit_escalation(&self, id: TaskId, from: Model, to: Model, is_fix: bool) {
-        if is_fix {
-            self.emit(Event::FixModelEscalated {
-                task_id: id,
-                from,
-                to,
-            });
-        } else {
-            self.emit(Event::ModelEscalated {
-                task_id: id,
-                from,
-                to,
-            });
         }
     }
 
@@ -1033,9 +568,9 @@ impl<A: AgentService> Orchestrator<A> {
             .is_none();
 
         let max_rounds = if is_root {
-            self.limits.root_fix_rounds
+            self.services.limits.root_fix_rounds
         } else {
-            self.limits.branch_fix_rounds
+            self.services.limits.branch_fix_rounds
         };
         let mut failure_reason = initial_failure.to_owned();
 
@@ -1056,8 +591,7 @@ impl<A: AgentService> Orchestrator<A> {
                     .state
                     .get_mut(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
-                task.verification_fix_rounds += 1;
-                task.verification_fix_rounds
+                task.increment_fix_rounds()
             };
 
             // Sonnet for rounds 1-3, Opus for round 4 (root only).
@@ -1090,6 +624,7 @@ impl<A: AgentService> Orchestrator<A> {
             let ctx = self.build_context(id)?;
             // Agent errors treated as failed round (best-effort, like recovery).
             let decomposition = match self
+                .services
                 .agent
                 .design_fix_subtasks(&ctx, model, &failure_reason, round)
                 .await
@@ -1138,8 +673,20 @@ impl<A: AgentService> Orchestrator<A> {
         }
     }
 
-    async fn execute_leaf(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
-        self.leaf_retry_loop(id, LeafRetryMode::Execute).await
+    async fn run_leaf(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
+        let tree = context::build_tree_context(&self.state, id)?;
+        let task = self
+            .state
+            .get_mut(id)
+            .ok_or(OrchestratorError::TaskNotFound(id))?;
+        let outcome = task.execute_leaf(&tree, &self.services).await;
+        // Agent-level errors propagated as infrastructure failures.
+        if let TaskOutcome::Failed { ref reason } = outcome {
+            if let Some(msg) = reason.strip_prefix("__agent_error__: ") {
+                return Err(OrchestratorError::Agent(anyhow::anyhow!("{msg}")));
+            }
+        }
+        self.complete_or_fail(id, outcome)
     }
 
     #[allow(clippy::too_many_lines)] // Linear sequence of branch steps; splitting adds indirection.
@@ -1160,6 +707,7 @@ impl<A: AgentService> Orchestrator<A> {
             let decompose_model = task.current_model.unwrap_or(Model::Sonnet);
             let ctx = self.build_context(id)?;
             let agent_result = self
+                .services
                 .agent
                 .design_and_decompose(&ctx, decompose_model)
                 .await?;
@@ -1171,7 +719,7 @@ impl<A: AgentService> Orchestrator<A> {
                     .state
                     .get_mut(id)
                     .ok_or(OrchestratorError::TaskNotFound(id))?;
-                task.decomposition_rationale = Some(decomposition.rationale);
+                task.set_decomposition_rationale(decomposition.rationale);
             }
 
             if let Some(reason) = self.check_task_limit(id, decomposition.subtasks.len()) {
@@ -1223,7 +771,12 @@ impl<A: AgentService> Orchestrator<A> {
                 if !child_discoveries.is_empty() {
                     let ctx = self.build_context(id)?;
                     // Agent errors treated as Proceed (best-effort, like recovery).
-                    let decision = match self.agent.checkpoint(&ctx, &child_discoveries).await {
+                    let decision = match self
+                        .services
+                        .agent
+                        .checkpoint(&ctx, &child_discoveries)
+                        .await
+                    {
                         Ok(agent_result) => {
                             self.accumulate_usage(id, &agent_result.meta);
                             agent_result.value
@@ -1245,11 +798,7 @@ impl<A: AgentService> Orchestrator<A> {
                                 .state
                                 .get_mut(id)
                                 .ok_or(OrchestratorError::TaskNotFound(id))?;
-                            task.checkpoint_guidance =
-                                Some(match task.checkpoint_guidance.take() {
-                                    Some(existing) => format!("{existing}\n{guidance}"),
-                                    None => guidance,
-                                });
+                            task.append_checkpoint_guidance(&guidance);
                             self.record_to_vault(id, "FINDINGS", &vault_content).await;
                             self.checkpoint_save();
                         }
@@ -1260,7 +809,7 @@ impl<A: AgentService> Orchestrator<A> {
                                     .state
                                     .get_mut(id)
                                     .ok_or(OrchestratorError::TaskNotFound(id))?;
-                                task.checkpoint_guidance = None;
+                                task.set_checkpoint_guidance(None);
                             }
                             let escalation_reason = format!(
                                 "checkpoint escalation: discoveries invalidate current plan. Discoveries: {}",
@@ -1339,7 +888,7 @@ impl<A: AgentService> Orchestrator<A> {
         }
 
         // Check recovery round budget.
-        let max_recovery = self.limits.max_recovery_rounds;
+        let max_recovery = self.services.limits.max_recovery_rounds;
         if task.recovery_rounds >= max_recovery {
             return Ok(Some(TaskOutcome::Failed {
                 reason: format!("recovery rounds exhausted ({max_recovery}): {failure_reason}"),
@@ -1352,7 +901,12 @@ impl<A: AgentService> Orchestrator<A> {
         // Agent errors treated as unrecoverable (avoids aborting the entire run
         // due to transient errors like rate limits or malformed responses).
         let ctx = self.build_context(parent_id)?;
-        let strategy = match self.agent.assess_recovery(&ctx, failure_reason).await {
+        let strategy = match self
+            .services
+            .agent
+            .assess_recovery(&ctx, failure_reason)
+            .await
+        {
             Ok(agent_result) => {
                 self.accumulate_usage(parent_id, &agent_result.meta);
                 match agent_result.value {
@@ -1384,15 +938,14 @@ impl<A: AgentService> Orchestrator<A> {
             round,
         });
 
-        // Increment recovery round counter before subtask creation so that a
-        // crash between subtask creation and counter update does not grant an
+        // Increment before subtask creation so a crash does not grant an
         // extra recovery round on resume.
         {
             let task = self
                 .state
                 .get_mut(parent_id)
                 .ok_or(OrchestratorError::TaskNotFound(parent_id))?;
-            task.recovery_rounds = round;
+            task.increment_recovery_rounds();
         }
         self.checkpoint_save();
 
@@ -1400,6 +953,7 @@ impl<A: AgentService> Orchestrator<A> {
         // Agent errors treated as failed recovery round (round already consumed).
         let ctx = self.build_context(parent_id)?;
         let plan = match self
+            .services
             .agent
             .design_recovery_subtasks(&ctx, failure_reason, &strategy, round)
             .await
@@ -1472,8 +1026,7 @@ impl<A: AgentService> Orchestrator<A> {
         let count = plan.subtasks.len();
 
         // Read parent's recovery round counter before creating subtasks so that
-        // children inherit it during creation (prevents exponential cost growth
-        // — audit B7, U1-R2).
+        // children inherit it during creation (prevents exponential cost growth).
         let parent_rounds = self
             .state
             .get(parent_id)
@@ -1495,10 +1048,11 @@ impl<A: AgentService> Orchestrator<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{ChildStatus, ChildSummary, SiblingSummary};
     use crate::events::{self, EventReceiver};
     use crate::task::branch::{DecompositionResult, SubtaskSpec};
     use crate::task::verify::{VerificationOutcome, VerificationResult};
-    use crate::task::{LeafResult, Magnitude, MagnitudeEstimate, RecoveryPlan, TaskPath};
+    use crate::task::{Attempt, LeafResult, Magnitude, MagnitudeEstimate, RecoveryPlan, TaskPath};
     use crate::test_support::MockAgentService;
 
     fn pass_verification() -> VerificationResult {
@@ -1819,7 +1373,7 @@ mod tests {
         queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.state.set_root_id(root_id);
-        orch.state_path = Some(state_path.clone());
+        orch.services.state_path = Some(state_path.clone());
 
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3001,78 +2555,13 @@ mod tests {
         );
     }
 
-    // --- evaluate_scope pure function tests ---
-
-    #[test]
-    fn evaluate_scope_within_bounds() {
-        let output = "10\t5\tfile1.rs\n3\t0\tfile2.rs";
-        let magnitude = Magnitude {
-            max_lines_added: 10,
-            max_lines_modified: 5,
-            max_lines_deleted: 5,
-        };
-        // file1: added=10, deleted=5 → modified=min(10,5)=5 → net_added=5, net_deleted=0
-        // file2: added=3, deleted=0 → modified=0 → net_added=3, net_deleted=0
-        // totals: added=8, modified=5, deleted=0
-        // 3x limits: added=30, modified=15, deleted=15
-        // All within bounds.
-        assert_eq!(evaluate_scope(output, &magnitude), ScopeCheck::WithinBounds);
-    }
-
-    #[test]
-    fn evaluate_scope_exceeded() {
-        let output = "100\t0\tfile1.rs";
-        let magnitude = Magnitude {
-            max_lines_added: 10,
-            max_lines_modified: 5,
-            max_lines_deleted: 5,
-        };
-        // 100 added > 30 (3×10).
-        let result = evaluate_scope(output, &magnitude);
-        match result {
-            ScopeCheck::Exceeded {
-                metric,
-                actual,
-                limit,
-            } => {
-                assert_eq!(metric, "lines_added");
-                assert_eq!(actual, 100);
-                assert_eq!(limit, 30);
-            }
-            ScopeCheck::WithinBounds => panic!("expected Exceeded"),
-        }
-    }
-
-    #[test]
-    fn evaluate_scope_binary_files_skipped() {
-        let output = "-\t-\tbinary.png\n5\t2\tcode.rs";
-        let magnitude = Magnitude {
-            max_lines_added: 10,
-            max_lines_modified: 5,
-            max_lines_deleted: 5,
-        };
-        // Binary line skipped. code.rs: added=5, deleted=2 → modified=2 → net_added=3, net_deleted=0.
-        // All within 3x bounds.
-        assert_eq!(evaluate_scope(output, &magnitude), ScopeCheck::WithinBounds);
-    }
-
-    #[test]
-    fn evaluate_scope_empty_output() {
-        let magnitude = Magnitude {
-            max_lines_added: 10,
-            max_lines_modified: 5,
-            max_lines_deleted: 5,
-        };
-        assert_eq!(evaluate_scope("", &magnitude), ScopeCheck::WithinBounds);
-    }
-
     /// Resume mid-fix-loop: pre-existing `fix_attempts` are counted so `retries_at_tier` is correct.
     #[tokio::test]
     async fn leaf_fix_persists_and_resumes() {
         let mock = MockAgentService::new();
 
         // The child is already in Verifying with 2 fix_attempts at Haiku.
-        // execute_task sees Verifying → finalize_task(Success) → verify → fail → leaf_retry_loop(Fix).
+        // execute_task sees Verifying → finalize_branch(Success) → verify → fail → leaf_retry_loop(Fix).
         // leaf_retry_loop initializes retries_at_tier=2 from the 2 existing fix_attempts.
         // Loop: scope check (WithinBounds, no magnitude) → fix(success) → record(#3) → verify(pass).
 
@@ -5275,7 +4764,7 @@ mod tests {
 
         queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.state_path = Some(state_path.clone());
+        orch.services.state_path = Some(state_path.clone());
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
 
@@ -5385,7 +4874,7 @@ mod tests {
 
         queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.limits = limits;
+        orch.services.limits = limits;
 
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -5456,7 +4945,7 @@ mod tests {
         };
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.limits = limits;
+        orch.services.limits = limits;
 
         let result = orch.run(root_id).await.unwrap();
         assert!(
@@ -5530,7 +5019,7 @@ mod tests {
 
         queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.limits = limits;
+        orch.services.limits = limits;
 
         let result = orch.run(root_id).await.unwrap();
         assert!(matches!(result, TaskOutcome::Failed { .. }));
@@ -5631,7 +5120,7 @@ mod tests {
 
         queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.limits = limits;
+        orch.services.limits = limits;
 
         let result = orch.run(root_id).await.unwrap();
         assert!(matches!(result, TaskOutcome::Failed { .. }));
@@ -5684,7 +5173,7 @@ mod tests {
 
         queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.limits = limits;
+        orch.services.limits = limits;
 
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -5736,7 +5225,7 @@ mod tests {
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
 
-        let captured = orch.agent.verify_models.lock().unwrap().clone();
+        let captured = orch.services.agent.verify_models.lock().unwrap().clone();
         // First verify call is child (leaf Haiku), second is root (branch Sonnet).
         assert_eq!(captured[0], Model::Haiku);
     }
@@ -5780,7 +5269,7 @@ mod tests {
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
 
-        let captured = orch.agent.verify_models.lock().unwrap().clone();
+        let captured = orch.services.agent.verify_models.lock().unwrap().clone();
         assert_eq!(captured[0], Model::Sonnet);
     }
 
@@ -5823,7 +5312,7 @@ mod tests {
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
 
-        let captured = orch.agent.verify_models.lock().unwrap().clone();
+        let captured = orch.services.agent.verify_models.lock().unwrap().clone();
         // Opus is clamped to Sonnet for leaf verification.
         assert_eq!(captured[0], Model::Sonnet);
     }
@@ -5862,7 +5351,7 @@ mod tests {
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
 
-        let captured = orch.agent.verify_models.lock().unwrap().clone();
+        let captured = orch.services.agent.verify_models.lock().unwrap().clone();
         // Second verify call is for root (branch) — always Sonnet.
         assert_eq!(captured[1], Model::Sonnet);
     }
@@ -5902,7 +5391,7 @@ mod tests {
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
 
-        let captured = orch.agent.decompose_models.lock().unwrap().clone();
+        let captured = orch.services.agent.decompose_models.lock().unwrap().clone();
         // Root's assessment is hardcoded to Model::Sonnet.
         assert_eq!(captured[0], Model::Sonnet);
     }
@@ -5936,7 +5425,7 @@ mod tests {
 
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         // Set limit so tight that 1 existing + 2 new > 2.
-        orch.limits.max_total_tasks = 2;
+        orch.services.limits.max_total_tasks = 2;
         let result = orch.run(root_id).await.unwrap();
         let TaskOutcome::Failed { reason } = &result else {
             panic!("expected TaskOutcome::Failed, got {result:?}");
@@ -6021,7 +5510,7 @@ mod tests {
         queue_file_level_reviews(&mock, 1);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         // root(1) + child(2) = 2 tasks. Fix would add a 3rd. Set limit to 2.
-        orch.limits.max_total_tasks = 2;
+        orch.services.limits.max_total_tasks = 2;
         let result = orch.run(root_id).await.unwrap();
         let TaskOutcome::Failed { reason } = &result else {
             panic!("expected TaskOutcome::Failed, got {result:?}");
@@ -6075,7 +5564,7 @@ mod tests {
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         // root(1) + child(2) = 2 tasks. Recovery would add 3rd. Set limit to 2.
-        orch.limits.max_total_tasks = 2;
+        orch.services.limits.max_total_tasks = 2;
         let result = orch.run(root_id).await.unwrap();
         let TaskOutcome::Failed { reason } = &result else {
             panic!("expected TaskOutcome::Failed, got {result:?}");
@@ -6148,7 +5637,7 @@ mod tests {
 
         queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.limits.max_total_tasks = 100;
+        orch.services.limits.max_total_tasks = 100;
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
 
@@ -6223,7 +5712,7 @@ mod tests {
         };
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.limits = limits;
+        orch.services.limits = limits;
 
         let result = orch.run(root_id).await.unwrap();
 
@@ -6280,7 +5769,7 @@ mod tests {
             .push_back(pass_verification());
 
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.limits.max_total_tasks = 0;
+        orch.services.limits.max_total_tasks = 0;
         // max_total_tasks=0 is clamped to 1. Root (1 task) + 1 child = 2 > 1,
         // so decomposition is still blocked. The key assertion: no panic from
         // a zero limit, and the clamp actually took effect.
@@ -6347,7 +5836,7 @@ mod tests {
         queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         // root(1) + 2 children = 3, limit = 3 → 3 is NOT > 3 → allowed.
-        orch.limits.max_total_tasks = 3;
+        orch.services.limits.max_total_tasks = 3;
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
         assert_eq!(orch.state.task_count(), 3);
@@ -6625,7 +6114,7 @@ mod tests {
 
         queue_file_level_reviews(&mock, 1);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
-        orch.limits = limits;
+        orch.services.limits = limits;
         let result = orch.run(root_id).await.unwrap();
         assert!(matches!(result, TaskOutcome::Failed { .. }));
 
@@ -6689,7 +6178,7 @@ mod tests {
         assert_eq!(child.fix_attempts.len(), 9);
     }
 
-    /// Initial `verify()` returning `Err` in `finalize_task` (outside any fix loop)
+    /// Initial `verify()` returning `Err` in `finalize_branch` (outside any fix loop)
     /// must propagate as `Err` from `run()`, not be swallowed into `Ok(Failed)`.
     #[tokio::test]
     async fn initial_verify_error_is_fatal() {

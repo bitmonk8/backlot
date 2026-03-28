@@ -16,17 +16,20 @@ struct Task {
     verification_criteria: Vec<String>,
     path: Option<TaskPath>,         // None before assessment, then Leaf or Branch
     phase: TaskPhase,               // Pending → Assessing → Executing → Verifying → Completed | Failed
-    model: Option<Model>,           // Selected by assessment
-    current_model: Option<Model>,   // Differs from model after escalation
+    current_model: Option<Model>,   // Selected by assessment, changes on escalation
     attempts: Vec<Attempt>,         // Retry/escalation history
     fix_attempts: Vec<Attempt>,     // Fix-specific attempts (separate from initial)
     subtask_ids: Vec<TaskId>,       // Empty for leaves
     magnitude_estimate: Option<MagnitudeEstimate>,  // Set by parent for leaves
+    magnitude: Option<Magnitude>,   // Concrete line-count bounds from assessment
     discoveries: Vec<String>,       // Context propagation summaries
+    checkpoint_guidance: Option<String>,  // Accumulated checkpoint guidance from parent
     decomposition_rationale: Option<String>,
     depth: u32,                     // Root = 0, depth cap configurable (default 8)
     verification_fix_rounds: u32,   // Branch fix round counter
     is_fix_task: bool,              // Created by fix loop vs original decomposition
+    recovery_rounds: u32,           // Branch recovery round counter
+    usage: TaskUsage,               // Accumulated token/cost usage
 }
 ```
 
@@ -100,6 +103,45 @@ Cheapest to most expensive:
 4. Parent Opus recovery assessment (max `max_recovery_rounds` per branch, default 2)
 5. Branch failure → escalate to grandparent
 6. Global task count cap (`max_total_tasks`, default 100)
+
+---
+
+## Orchestrator Architecture
+
+### Coordinator / Task Split
+
+The orchestrator is a pure coordinator. Tasks own their behavior.
+
+- **Leaf tasks** execute their full lifecycle internally via `Task::execute_leaf()`: agent calls, retry/escalation (Haiku -> Sonnet -> Opus), verification gates, file-level review, fix loop, scope circuit breaker. The orchestrator calls `run_leaf()` which builds a `TreeContext`, gets `&mut Task`, calls `execute_leaf`, and handles completion/failure.
+
+- **Branch tasks** have decomposition, checkpoint, and recovery logic in the orchestrator (cross-task coordination). The `ChildResponse` and `BranchResult` enums in `task/branch.rs` define the interface for future migration.
+
+- **`Services<A>`** bundles shared infrastructure (agent, events, vault, limits, paths) passed to task methods during execution.
+
+- **`TreeContext`** is a read-only owned snapshot of tree state (parent goal, siblings, children, checkpoint guidance) built by the orchestrator before calling task methods. Resolves `&state` / `&mut task` borrow conflicts.
+
+### Task Self-Contained Mutations
+
+`Task` has mutation methods for operations that only touch the task itself: `set_assessment`, `record_attempt`, `record_discoveries`, `set_model`, `set_decomposition_rationale`, `set_checkpoint_guidance`, `append_checkpoint_guidance`, `increment_fix_rounds`, `increment_recovery_rounds`, `accumulate_usage`, `trailing_attempts_at_tier`. The orchestrator calls these instead of directly mutating task fields.
+
+### File Structure
+
+```
+orchestrator/
+  mod.rs          Coordinator: run(), execute_task(), run_leaf(), run_branch(),
+                  create_subtasks(), fail_pending_children(), branch_fix_loop,
+                  attempt_recovery, checkpoint handling
+  context.rs      TreeContext struct, build_tree_context(), build_context()
+  services.rs     Services<A> struct
+task/
+  mod.rs          Task struct, types, self-contained mutation methods
+  leaf.rs         Task::execute_leaf(): full lifecycle (execute -> verify -> fix loop)
+  branch.rs       SubtaskSpec, DecompositionResult, CheckpointDecision,
+                  ChildResponse, BranchResult enums
+  scope.rs        Scope circuit breaker: git_diff_numstat, evaluate_scope, ScopeCheck
+  assess.rs       AssessmentResult
+  verify.rs       VerificationOutcome, VerificationResult, VerifyOutcome
+```
 
 ---
 
@@ -347,11 +389,11 @@ Before each fix attempt (leaf or branch), measure actual change magnitude:
 3. If any metric exceeds 3x the estimate: fail with `SCOPE_EXCEEDED`, roll back
 
 ```rust
+// Orchestrator method — gets project_root from self.services
 async fn check_scope_circuit_breaker(
     &self,
     task_id: TaskId,
-    workspace: &Path,
-) -> Result<ScopeCheck>;
+) -> Result<ScopeCheck, OrchestratorError>;
 
 enum ScopeCheck {
     WithinBounds,
