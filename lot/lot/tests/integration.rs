@@ -1316,10 +1316,10 @@ fn test_allow_network_false_blocks_connections() {
 fn test_allow_network_true_has_resolv_conf() {
     eprintln!("[diag] === test_allow_network_true_has_resolv_conf ===");
 
-    if !std::path::Path::new("/etc/resolv.conf").exists() {
-        eprintln!("[diag] SKIP: /etc/resolv.conf absent on host");
-        return;
-    }
+    assert!(
+        std::path::Path::new("/etc/resolv.conf").exists(),
+        "/etc/resolv.conf absent on host — test requires a working DNS configuration"
+    );
 
     let tmp = make_temp_dir();
     let scratch = make_temp_dir();
