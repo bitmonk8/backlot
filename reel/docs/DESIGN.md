@@ -361,7 +361,6 @@ Downloads and caches prebuilt binaries at compile time:
 Supported platforms: Windows (x86_64, aarch64), Linux (x86_64, aarch64), macOS
 (x86_64, aarch64).
 
-Skip env vars: `NU_SKIP_DOWNLOAD=1`, `RG_SKIP_DOWNLOAD=1`.
 
 The runtime resolves `NU_CACHE_DIR` via `resolve_tool_dir()` — see NuShell Session section.
 

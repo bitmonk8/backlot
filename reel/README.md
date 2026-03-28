@@ -39,7 +39,7 @@ Rust 1.85+ (edition 2024).
 cargo build --release
 ```
 
-The build script downloads prebuilt NuShell 0.111.0 and ripgrep 14.1.1 binaries for the target platform, verifies SHA-256 checksums, and caches in `target/nu-cache/`. Set `NU_SKIP_DOWNLOAD=1` or `RG_SKIP_DOWNLOAD=1` for offline builds.
+The build script downloads prebuilt NuShell 0.111.0 and ripgrep 14.1.1 binaries for the target platform, verifies SHA-256 checksums, and caches in `target/nu-cache/`. Downloads are skipped when the cached binary and its verification sentinel already exist.
 
 ## Quick start
 

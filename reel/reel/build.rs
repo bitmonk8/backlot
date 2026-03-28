@@ -5,10 +5,8 @@
 // them under `target/nu-cache/`. The runtime uses `NU_CACHE_DIR` (emitted as a
 // compile-time env var) to locate both binaries.
 //
-// Set `NU_SKIP_DOWNLOAD=1` or `RG_SKIP_DOWNLOAD=1` to skip individual
-// downloads (offline builds, CI with pre-populated cache). The runtime
-// passes rg's absolute path via `REEL_RG_PATH`; if unavailable, `reel grep`
-// falls back to bare `rg` (which does not work under AppContainer).
+// The runtime passes rg's absolute path via `REEL_RG_PATH`; if unavailable,
+// `reel grep` falls back to bare `rg` (which does not work under AppContainer).
 
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -213,19 +211,12 @@ fn download_and_cache(
     download_base_url: &str,
     asset: &PlatformAsset,
     cache_dir: &Path,
-    skip_env_var: &str,
 ) {
     let binary_path = cache_dir.join(asset.binary_name);
     let sentinel = cache_dir.join(format!(".verified-{}", asset.asset_name));
 
     // Already downloaded and verified.
     if sentinel.exists() && binary_path.exists() {
-        return;
-    }
-
-    // Offline escape hatch.
-    if std::env::var(skip_env_var).is_ok_and(|v| v == "1") {
-        eprintln!("{skip_env_var}=1: skipping {label} binary download");
         return;
     }
 
@@ -267,9 +258,6 @@ fn download_and_cache(
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=NU_SKIP_DOWNLOAD");
-    println!("cargo:rerun-if-env-changed=RG_SKIP_DOWNLOAD");
-
     let target_os = std::env::var("CARGO_CFG_TARGET_OS")
         .unwrap_or_else(|e| panic!("CARGO_CFG_TARGET_OS not set: {e}"));
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
@@ -295,7 +283,6 @@ fn main() {
         &format!("https://github.com/nushell/nushell/releases/download/{NU_VERSION}"),
         &nu_asset,
         &cache_dir,
-        "NU_SKIP_DOWNLOAD",
     );
 
     // ripgrep
@@ -306,7 +293,6 @@ fn main() {
         &format!("https://github.com/BurntSushi/ripgrep/releases/download/{RG_VERSION}"),
         &rg_asset,
         &cache_dir,
-        "RG_SKIP_DOWNLOAD",
     );
 
     // Write reel nu config files to the cache directory.
