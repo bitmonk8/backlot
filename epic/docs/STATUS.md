@@ -8,7 +8,7 @@
 
 - Recursive problem-solver orchestrator with DFS execution, retry/escalation, fix loops, recovery re-decomposition, checkpoint adjust/escalate
 - `ReelAgent` implementing `AgentService` (9 methods) — thin adapter building `reel::AgentRequestConfig` per phase, delegates tool loop and tool execution to reel crate
-- **Reel crate** (`../reel/reel`, rev `93f35ef`) — standalone agent session layer extracted from epic. Contains: `Agent` runtime (tool loop with resume), 6 built-in tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `NuShell`), `NuSession` (persistent `nu --mcp` process inside lot sandbox), `ToolHandler` trait for custom tool dispatch, `ToolGrant` bitflags (WRITE/TOOLS/NETWORK), `ModelRegistry`/`ProviderRegistry` re-exports from flick. Nu config — `reel_config.nu` and `reel_env.nu` written to `target/nu-cache/` by `build.rs`, custom commands (`reel read`, `reel write`, `reel edit`, `reel glob`, `reel grep`). `REEL_RG_PATH` env var for rg binary injection. `RunResult` exposes `Usage` (tokens + cost), `TurnRecord` transcript, and per-call API latency.
+- **Reel crate** (git rev `93f35ef`) — standalone agent session layer extracted from epic. Contains: `Agent` runtime (tool loop with resume), 6 built-in tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `NuShell`), `NuSession` (persistent `nu --mcp` process inside lot sandbox), `ToolHandler` trait for custom tool dispatch, `ToolGrant` bitflags (WRITE/TOOLS/NETWORK), `ModelRegistry`/`ProviderRegistry` re-exports from flick. Nu config — `reel_config.nu` and `reel_env.nu` written to `target/nu-cache/` by `build.rs`, custom commands (`reel read`, `reel write`, `reel edit`, `reel glob`, `reel grep`). `REEL_RG_PATH` env var for rg binary injection. `RunResult` exposes `Usage` (tokens + cost), `TurnRecord` transcript, and per-call API latency.
 - State persistence via `.epic/state.json` — atomic writes, resume, goal mismatch detection, corrupt state handling, cycle-safe DFS
 - TUI via ratatui + crossterm — task tree, worklog, metrics panels, keyboard controls
 - CLI via clap — `init`, `run <goal>`, `resume`, `status`, `setup` subcommands
@@ -21,10 +21,10 @@
 - Verification & fix loops — leaf fix loop with model escalation (Haiku→Sonnet→Opus, 3 retries per tier), branch fix loop (3 Sonnet rounds + 1 Opus round for root), scope circuit breaker (3x magnitude estimate via `git diff --numstat`).
 - Recovery — Opus recovery assessment, incremental vs full re-decomposition, recovery round budgets inherited to prevent exponential growth.
 - **Usage tracking** — `TaskUsage` on each task accumulates tokens, cost, tool calls, and API latency across all agent phases. `SessionMeta` + `AgentResult<T>` wrapper propagates per-call metadata from reel through `AgentService` to the orchestrator. `UsageUpdated` event drives real-time TUI updates. `EpicState::total_usage()` aggregates across all tasks. Usage persisted in `state.json` via `#[serde(default)]` (backward-compatible). TUI metrics panel shows cost. Header shows running cost. Headless and `epic status` print usage summary with cache hit ratio.
-- Event system — 20 event variants driving TUI and JSONL logging.
-- CI pipeline — GitHub Actions (fmt, clippy, test, build) on ubuntu, macOS, Windows. Rust 1.93.1 toolchain. All epic jobs green on all platforms. Dependencies use pinned git revs (lot, reel, flick).
+- Event system — 23 event variants driving TUI.
+- CI pipeline — GitHub Actions (fmt, clippy, test, build) on ubuntu, macOS, Windows. Rust 1.93.1 toolchain. All epic jobs green on all platforms. Dependencies use pinned git revs (lot, reel, vault, flick).
 - Testability infrastructure — `ClientFactory`/`ToolExecutor` traits (reel, internal), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
-- **Vault integration** — Document store via sibling `vault` crate (`../vault/vault`). `VaultConfig` in `epic.toml` (`[vault]` section, `enabled = false` by default). Vault constructed at startup, bootstrapped on new runs. `ResearchQuery` custom tool (reel `ToolHandler`) injected into execute, decompose, fix, and recovery design phases — agents query accumulated project knowledge on demand. Discovery recording at 4 orchestrator integration points (leaf discoveries, verification failures, checkpoint adjust, recovery). Vault reorganize runs after root branch children complete. Usage tracking folds vault costs into per-task `TaskUsage`. Vault events drive TUI worklog. All vault operations are best-effort (failures logged, not propagated).
+- **Vault integration** — Document store via `vault` crate (git rev `f7ecea1`). `VaultConfig` in `epic.toml` (`[vault]` section, `enabled = false` by default). Vault constructed at startup, bootstrapped on new runs. `ResearchQuery` custom tool (reel `ToolHandler`) injected into execute, decompose, fix, and recovery design phases — agents query accumulated project knowledge on demand. Discovery recording at 4 orchestrator integration points (leaf discoveries, verification failures, checkpoint adjust, recovery). Vault reorganize runs after root branch children complete. Usage tracking folds vault costs into per-task `TaskUsage`. Vault events drive TUI worklog. All vault operations are best-effort (failures logged, not propagated).
 - **Test counts** — Epic: 233 tests (all pass). Reel: 142 pass, 3 fail (AppContainer sandbox access issues in `reel read`/`write`/`edit` custom command tests — see `reel/docs/ISSUES.md` #9c).
 
 ## What Is NOT Implemented
@@ -55,11 +55,11 @@ No GitHub/GitLab PR creation, issue tracking, or similar integrations.
 
 ### Reel Extraction
 
-Agent session layer extracted into standalone `reel` workspace at `../reel/` (library crate at `../reel/reel`). Epic is now a thin consumer. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the original spec.
+Agent session layer extracted into standalone `reel` crate. Epic is now a thin consumer. See [REEL_EXTRACTION.md](REEL_EXTRACTION.md) for the original spec.
 
 ### CI Pipeline Fix
 
-Replaced local path dependencies (`../lot`, `../reel/reel`) with pinned git rev dependencies so CI builds work in isolation on all platforms. Added `.gitattributes` with `eol=lf` to eliminate cross-platform `rustfmt` divergence. Fixed clippy lints for newer toolchain. Fixed `reel_config.nu` compatibility with nu 0.111.0 (`str replace --string` flag removed). Fixed lot sandbox policy to allow write-path children under read-path parents (needed for session temp dirs inside read-only project roots).
+Replaced local path dependencies with pinned git rev dependencies so CI builds work in isolation on all platforms. Added `.gitattributes` with `eol=lf` to eliminate cross-platform `rustfmt` divergence. Fixed clippy lints for newer toolchain. Fixed `reel_config.nu` compatibility with nu 0.111.0 (`str replace --string` flag removed). Fixed lot sandbox policy to allow write-path children under read-path parents (needed for session temp dirs inside read-only project roots).
 
 ### Reel Upgrade and Usage Tracking
 
@@ -67,7 +67,7 @@ Bumped reel from rev `51eb559` to `93f35ef`, picking up session transcripts, cac
 
 ### Vault Integration
 
-Integrated the `vault` sibling crate as epic's document store and research service. Vault is a file-based knowledge store at `.epic/docs/` with four operations (bootstrap, record, query, reorganize) backed by a reel agent (librarian). Integration points: `VaultConfig` in `epic.toml`, vault construction and bootstrap in `main.rs`, `ResearchQuery` custom tool via reel `ToolHandler` injected into 5 agent phases, discovery recording at 4 orchestrator sites, vault reorganize before root verification, usage tracking via `SessionMeta::from_vault`, 3 vault event variants for TUI. All vault operations are best-effort. 10 new tests (4 knowledge module, 6 config).
+Integrated the `vault` crate (git rev `f7ecea1`) as epic's document store and research service. Vault is a file-based knowledge store at `.epic/docs/` with four operations (bootstrap, record, query, reorganize) backed by a reel agent (librarian). Integration points: `VaultConfig` in `epic.toml`, vault construction and bootstrap in `main.rs`, `ResearchQuery` custom tool via reel `ToolHandler` injected into 5 agent phases, discovery recording at 4 orchestrator sites, vault reorganize before root verification, usage tracking via `SessionMeta::from_vault`, 3 vault event variants for TUI. All vault operations are best-effort. 10 new tests (4 knowledge module, 6 config).
 
 ## Work Candidates
 
