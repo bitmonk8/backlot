@@ -31,7 +31,7 @@
 
 These features are described in DESIGN.md but have no corresponding code:
 
-- **Research Service scope parameter** — DESIGN.md describes `research_query(question, scope)` with PROJECT/WEB/BOTH scopes. The current `ResearchQuery` tool queries vault documents only (equivalent to PROJECT scope). WEB scope (web search gap-filling) is not implemented.
+- **Research Service gap-filling** — The spec describes a three-step workflow: (1) query DocumentStore for existing knowledge, (2) identify gaps in coverage, (3) fill gaps by exploring the project codebase (`_explore_project_gap()`) and/or web search (`_search_web_gap()`), controlled by a `ResearchScope` parameter (PROJECT/WEB/BOTH). The current implementation only does step 1 — `vault.query()` reads stored documents in `.epic/docs/` and returns an answer with coverage assessment. The coverage signal (full/partial/none) is returned but never acted on. No gap identification, no project codebase exploration, no web search fallback.
 - **File-level review** — Leaf verification does not include a separate file-level review step. Deferred per code comment in `verify.rs`.
 - **Simplification review** — No local simplification review on leaf output, no aggregate simplification review on branch output. Both deferred.
 - **Branch verification separation** — Branch verification is a single agent call, not separated into correctness + completeness + aggregate simplification reviews as described in DESIGN.md.
@@ -71,4 +71,12 @@ Integrated the `vault` crate (git rev `f7ecea1`) as epic's document store and re
 
 ## Work Candidates
 
-(none)
+### 1. Complete the Research Service
+
+The Research Service currently performs vault document queries only. The spec describes a gap-filling workflow that explores the actual project codebase and web to answer questions the vault cannot. Missing pieces:
+
+1. **Gap identification** — After `vault.query()` returns coverage (full/partial/none), determine what information is still needed. Currently the coverage signal is returned to the agent but never acted on by the research service itself.
+2. **Project codebase exploration** (`PROJECT` scope) — When vault coverage is insufficient, spawn a Haiku agent with read tools (Read, Glob, Grep, NuShell) scoped to the project root to explore the actual codebase and fill knowledge gaps. Record findings back into vault.
+3. **Web search** (`WEB` scope) — When vault + project exploration leave gaps, fill them via web search. Record findings back into vault.
+4. **Scope parameter** — Add `ResearchScope` (PROJECT/WEB/BOTH) to the `ResearchQuery` tool interface so callers can control where to look.
+5. **Return type enrichment** — Spec returns `ResearchResult { answer, document_refs, gaps_filled }`. Current implementation returns formatted text. Align with spec.
