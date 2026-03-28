@@ -26,7 +26,7 @@
 - Testability infrastructure — `ClientFactory`/`ToolExecutor` traits (reel, internal), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
 - **Vault integration** — Document store via `vault` crate (git rev `f7ecea1`). `VaultConfig` in `epic.toml` (`[vault]` section, `enabled = false` by default). Vault constructed at startup, bootstrapped on new runs. `ResearchQuery` custom tool (reel `ToolHandler`) injected into execute, decompose, fix, and recovery design phases — agents query accumulated project knowledge on demand. Discovery recording at 4 orchestrator integration points (leaf discoveries, verification failures, checkpoint adjust, recovery). Vault reorganize runs after root branch children complete. Usage tracking folds vault costs into per-task `TaskUsage`. Vault events drive TUI worklog. All vault operations are best-effort (failures logged, not propagated).
 - **Research Service gap-filling** — `ResearchQuery` tool implements a multi-step pipeline: (1) query vault for existing knowledge, (2) identify information gaps via Haiku structured-output call, (3) fill gaps by spawning Haiku agents with read-only tools to explore the project codebase, (4) synthesize final answer combining vault knowledge and exploration findings. Optional `scope` parameter: `vault` (stored knowledge only) or `project` (default, vault + codebase exploration). Exploration findings are recorded back into vault. All internal agent calls use Haiku ("fast" model key). Returns structured `ResearchResult { answer, document_refs, gaps_filled }`. Web search scope deferred.
-- **Test counts** — Epic: 233 tests (all pass). Reel: 142 pass, 3 fail (AppContainer sandbox access issues in `reel read`/`write`/`edit` custom command tests — see `reel/docs/ISSUES.md` #9c).
+- **Test counts** — Epic: 253 tests (all pass). Reel: 142 pass, 3 fail (AppContainer sandbox access issues in `reel read`/`write`/`edit` custom command tests — see `reel/docs/ISSUES.md` #9c).
 
 ## What Is NOT Implemented
 
@@ -67,10 +67,26 @@ Bumped reel from rev `51eb559` to `93f35ef`, picking up session transcripts, cac
 
 ### Vault Integration
 
-Integrated the `vault` crate (git rev `f7ecea1`) as epic's document store and research service. Vault is a file-based knowledge store at `.epic/docs/` with four operations (bootstrap, record, query, reorganize) backed by a reel agent (librarian). Integration points: `VaultConfig` in `epic.toml`, vault construction and bootstrap in `main.rs`, `ResearchQuery` custom tool via reel `ToolHandler` injected into 5 agent phases, discovery recording at 4 orchestrator sites, vault reorganize before root verification, usage tracking via `SessionMeta::from_vault`, 3 vault event variants for TUI. All vault operations are best-effort. 10 new tests (4 knowledge module, 6 config).
+Integrated the `vault` crate (git rev `f7ecea1`) as epic's document store and research service. Vault is a file-based knowledge store at `.epic/docs/` with four operations (bootstrap, record, query, reorganize) backed by a reel agent (librarian). Integration points: `VaultConfig` in `epic.toml`, vault construction and bootstrap in `main.rs`, `ResearchQuery` custom tool via reel `ToolHandler` injected into 5 agent phases, discovery recording at 4 orchestrator sites, vault reorganize before root verification, usage tracking via `SessionMeta::from_vault`, 3 vault event variants for TUI. All vault operations are best-effort.
+
+### Research Service Gap-Filling
+
+Extended `ResearchQuery` from vault-query-only to a multi-step gap-filling pipeline: vault query → gap identification (Haiku structured output) → codebase exploration (Haiku with read-only tools, capped at 5 gaps) → synthesis. Added `ResearchScope` enum with optional `scope` tool parameter (`vault`/`project`). Graceful degradation at each step. Exploration findings recorded back to vault. `run_haiku<T>()` generic helper and `vault_only_result()` helper keep the implementation DRY. `Arc<reel::Agent>` shared between `ReelAgent` and `ResearchTool`. 24 tests in knowledge module.
 
 ## Work Candidates
 
-### 1. Web Search Scope for Research Service
+### 1. File-Level Review
+
+Leaf verification does not include a separate file-level review step (deferred per code comment in `verify.rs`). Adding it would catch issues before verification commands run, reducing wasted fix-loop iterations. Model: `max(Haiku, implementing_model)`, capped at Sonnet.
+
+### 2. Branch Verification Separation
+
+Branch verification is currently a single agent call. Splitting into correctness + completeness + aggregate simplification reviews (as designed in DESIGN.md) would improve branch-level quality and make fix-loop targeting more precise.
+
+### 3. Web Search Scope for Research Service
 
 The Research Service gap-filling pipeline is implemented for PROJECT scope (vault + codebase exploration). WEB scope (web search to fill gaps that codebase exploration cannot) is deferred. Adding it requires a web search tool grant and integration with a search provider.
+
+### 4. User-Level Config Fallback
+
+Only project-level config (`epic.toml`, `.epic/config.toml`) is loaded. No `~/.config/epic/config.toml` resolution for user defaults.
