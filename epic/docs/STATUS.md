@@ -77,7 +77,7 @@ Extended `ResearchQuery` from vault-query-only to a multi-step gap-filling pipel
 
 ### 1. File-Level Review
 
-Leaf verification does not include a separate file-level review step (deferred per code comment in `verify.rs`). Adding it would catch issues before verification commands run, reducing wasted fix-loop iterations. Model: `max(Haiku, implementing_model)`, capped at Sonnet.
+Leaf verification does not include a separate file-level review step (deferred per code comment in `verify.rs`). Runs after verification gates pass — catches requirement/intent mismatches that build/lint/test cannot detect. Without it, these surface at branch verification, requiring expensive branch fix rounds instead of cheap leaf fix iterations. Model: `max(Haiku, implementing_model)`, capped at Sonnet.
 
 ### 2. Branch Verification Separation
 
