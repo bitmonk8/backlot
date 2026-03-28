@@ -119,7 +119,13 @@ src/                              Total   Core   Test
 
 **Notable**: `orchestrator.rs` is 50% of all source and 69% of all test code. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`.
 
-## Work Candidates
+## Next Up
+
+### Orchestrator Refactor
+
+Refactor the god-object `orchestrator.rs` (1,493 core lines, 5,851 test lines) into a clean coordinator + task-behavior architecture. Tasks gain their execution logic; orchestrator becomes a thin coordinator that never does task work. Full design in [ORCHESTRATOR_REFACTOR.md](ORCHESTRATOR_REFACTOR.md).
+
+## Other Work Candidates
 
 ### 1. Branch Verification Separation
 
