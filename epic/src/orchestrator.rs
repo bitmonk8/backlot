@@ -132,6 +132,7 @@ pub struct Orchestrator<A: AgentService> {
     state_path: Option<PathBuf>,
     project_root: Option<PathBuf>,
     limits: LimitsConfig,
+    vault: Option<std::sync::Arc<vault::Vault>>,
 }
 
 impl<A: AgentService> Orchestrator<A> {
@@ -143,6 +144,7 @@ impl<A: AgentService> Orchestrator<A> {
             state_path: None,
             project_root: None,
             limits: LimitsConfig::default(),
+            vault: None,
         }
     }
 
@@ -158,6 +160,11 @@ impl<A: AgentService> Orchestrator<A> {
 
     pub fn with_project_root(mut self, path: PathBuf) -> Self {
         self.project_root = Some(path);
+        self
+    }
+
+    pub fn with_vault(mut self, vault: std::sync::Arc<vault::Vault>) -> Self {
+        self.vault = Some(vault);
         self
     }
 
@@ -182,6 +189,53 @@ impl<A: AgentService> Orchestrator<A> {
                 phase_cost_usd: meta.cost_usd,
                 total_cost_usd,
             });
+        }
+    }
+
+    /// Record content to vault (best-effort). Errors are logged, not propagated.
+    async fn record_to_vault(&mut self, task_id: TaskId, name: &str, content: &str) {
+        let Some(ref vault) = self.vault else {
+            return;
+        };
+        let result = match vault.record(name, content, vault::RecordMode::New).await {
+            Err(vault::RecordError::VersionConflict(_)) => {
+                vault.record(name, content, vault::RecordMode::Append).await
+            }
+            other => other,
+        };
+        match result {
+            Ok((_refs, _warnings, meta)) => {
+                let session_meta = SessionMeta::from_vault(&meta);
+                self.accumulate_usage(task_id, &session_meta);
+                self.emit(Event::VaultRecorded {
+                    task_id,
+                    document: name.to_string(),
+                });
+            }
+            Err(e) => {
+                eprintln!("warning: vault record failed for {name}: {e}");
+            }
+        }
+    }
+
+    /// Reorganize vault documents (best-effort). Errors are logged, not propagated.
+    async fn reorganize_vault(&mut self, task_id: TaskId) {
+        let Some(ref vault) = self.vault else {
+            return;
+        };
+        match vault.reorganize().await {
+            Ok((report, _warnings, meta)) => {
+                let session_meta = SessionMeta::from_vault(&meta);
+                self.accumulate_usage(task_id, &session_meta);
+                self.emit(Event::VaultReorganizeCompleted {
+                    merged: report.merged.len(),
+                    restructured: report.restructured.len(),
+                    deleted: report.deleted.len(),
+                });
+            }
+            Err(e) => {
+                eprintln!("warning: vault reorganize failed: {e}");
+            }
         }
     }
 
@@ -274,6 +328,8 @@ impl<A: AgentService> Orchestrator<A> {
                         Ok(VerifyOutcome::Passed)
                     }
                     VerificationOutcome::Fail { reason } => {
+                        self.record_to_vault(id, "VERIFICATION_FAILURE", &reason)
+                            .await;
                         self.checkpoint_save();
                         Ok(VerifyOutcome::Failed(reason))
                     }
@@ -795,7 +851,7 @@ impl<A: AgentService> Orchestrator<A> {
             } = agent_result.value;
 
             // Record attempt and discoveries.
-            {
+            let vault_content = {
                 let task = self
                     .state
                     .get_mut(id)
@@ -813,11 +869,19 @@ impl<A: AgentService> Orchestrator<A> {
                 } else {
                     task.attempts.push(attempt);
                 }
-                if !discoveries.is_empty() {
+                if discoveries.is_empty() {
+                    None
+                } else {
                     let count = discoveries.len();
+                    let content = discoveries.join("\n");
                     task.discoveries.extend(discoveries);
                     self.emit(Event::DiscoveriesRecorded { task_id: id, count });
+                    Some(content)
                 }
+            };
+
+            if let Some(content) = vault_content {
+                self.record_to_vault(id, "FINDINGS", &content).await;
             }
 
             self.checkpoint_save();
@@ -1111,6 +1175,10 @@ impl<A: AgentService> Orchestrator<A> {
                         CheckpointDecision::Proceed => {}
                         CheckpointDecision::Adjust { guidance } => {
                             self.emit(Event::CheckpointAdjust { task_id: id });
+                            let vault_content = format!(
+                                "Checkpoint adjust.\nDiscoveries: {}\nGuidance: {guidance}",
+                                child_discoveries.join("; ")
+                            );
                             let task = self
                                 .state
                                 .get_mut(id)
@@ -1120,6 +1188,7 @@ impl<A: AgentService> Orchestrator<A> {
                                     Some(existing) => format!("{existing}\n{guidance}"),
                                     None => guidance,
                                 });
+                            self.record_to_vault(id, "FINDINGS", &vault_content).await;
                             self.checkpoint_save();
                         }
                         CheckpointDecision::Escalate => {
@@ -1160,6 +1229,9 @@ impl<A: AgentService> Orchestrator<A> {
                 break;
             }
         }
+
+        // Reorganize vault after all children complete (before verification).
+        self.reorganize_vault(id).await;
 
         // Guard: if every non-fix child failed (recovery exhausted or skipped),
         // the branch itself must report failure rather than vacuous success.
@@ -1237,6 +1309,13 @@ impl<A: AgentService> Orchestrator<A> {
                 }));
             }
         };
+
+        self.record_to_vault(
+            parent_id,
+            "FINDINGS",
+            &format!("Recovery round {round}.\nFailure: {failure_reason}\nStrategy: {strategy}"),
+        )
+        .await;
 
         self.emit(Event::RecoveryStarted {
             task_id: parent_id,

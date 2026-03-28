@@ -76,3 +76,43 @@
 ### 17. README describes lot as "via reel" but epic depends on lot directly
 
 `README.md` — epic calls `lot::appcontainer_prerequisites_met` and `lot::grant_appcontainer_prerequisites` directly for Windows setup. The dependency is legitimate (CLI concern, not agent session concern) but the README is misleading. **Category: Documentation.**
+
+### 18. TUI `VaultBootstrapCompleted` handler doesn't track cost
+
+`src/tui/mod.rs` — The `VaultBootstrapCompleted` event handler adds a worklog entry but does not add `cost_usd` to `self.total_cost_usd`. Vault record/reorganize costs are tracked (via `accumulate_usage` → `UsageUpdated`), but bootstrap cost is omitted from the TUI running cost total. **Category: Correctness.**
+
+### 19. `std::mem::forget(tmp)` leaks TempDir in test helper
+
+`src/knowledge.rs` — `make_dummy_vault()` calls `std::mem::forget(tmp)` to keep the TempDir alive, but this leaks directories on every test run. Should return the TempDir alongside the vault so it is dropped at test end. **Category: Testing.**
+
+### 20. No orchestrator tests for vault integration paths
+
+`src/orchestrator.rs` — `record_to_vault`, `reorganize_vault`, and all 4 integration points (discoveries, verification failure, checkpoint adjust, recovery) have zero test coverage. Vault is always `None` in existing tests. Testing requires either a trait abstraction for vault or a tempdir-based vault with mock providers. **Category: Testing.**
+
+### 21. `ResearchTool::execute` untested
+
+`src/knowledge.rs` — Three branches (empty question error, successful query, query failure) have no test coverage. The empty-question branch could be tested with the existing `make_dummy_vault` helper. **Category: Testing.**
+
+### 22. Vault cost folding in `run_request` untested
+
+`src/agent/reel_adapter.rs` — When `with_research` is true and vault is attached, the code drains the research sink and accumulates token counts/costs into session metadata. This field-by-field arithmetic has no test verifying correctness. **Category: Testing.**
+
+### 23. SessionMeta field-by-field accumulation is fragile
+
+`src/agent/reel_adapter.rs` — Vault cost folding manually adds 7 fields of `SessionMeta`. If `SessionMeta` gains a field, this code silently omits it. Should be an `AddAssign` impl or `merge` method on `SessionMeta`. **Category: Fragility.**
+
+### 24. Vault construction duplicates registry building
+
+`src/main.rs` — Vault construction builds `ModelRegistry` and `ProviderRegistry` a second time (identical to what `ReelAgent::new` does internally). Should share the registries or extract a common factory. **Category: Simplification.**
+
+### 25. `SessionMeta::from_vault` placed far from type definition
+
+`src/knowledge.rs` — `from_run_result` lives in `src/agent/mod.rs` near `SessionMeta`'s definition, but `from_vault` is in `src/knowledge.rs`. Splits the type's constructor API across two files. Should be consolidated in `agent/mod.rs`. **Category: Placement.**
+
+### 26. `vault_content` variable name is directionally confusing
+
+`src/orchestrator.rs` — At lines ~852 and ~1176, `vault_content` holds content destined *for* the vault, but the name reads as content *from* the vault. Consider `content_for_vault` or `findings_to_record`. **Category: Naming.**
+
+### 27. Module `knowledge.rs` name doesn't match contents
+
+`src/knowledge.rs` — Named `knowledge` but contains vault-integration glue: tool handler, metadata conversion, formatting. A name like `vault_bridge` would better describe the actual contents. **Category: Naming.**

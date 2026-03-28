@@ -136,7 +136,7 @@ Epic delegates agent execution to reel. No direct Flick calls — reel owns the 
 
 **Startup**: Epic builds a `reel::AgentEnvironment` once, containing the model registry (built from `ModelConfig` + credential name), provider registry (loaded from flick's config directory), project root, and call timeout. A `reel::Agent` is constructed from this environment.
 
-**Per agent call**: Epic builds a `reel::AgentRequestConfig` containing a `reel::RequestConfig` (model key, system prompt, output schema), a `reel::ToolGrant` (phase-dependent), and custom tools (currently empty). Then calls `reel::Agent::run()`.
+**Per agent call**: Epic builds a `reel::AgentRequestConfig` containing a `reel::RequestConfig` (model key, system prompt, output schema), a `reel::ToolGrant` (phase-dependent), and custom tools (`ResearchQuery` vault tool when vault is enabled, otherwise empty). Then calls `reel::Agent::run()`.
 
 **Return**: Reel returns `reel::RunResult<T>` with the parsed output, token usage, tool call count, and response hash.
 
@@ -157,53 +157,72 @@ Epic delegates agent execution to reel. No direct Flick calls — reel owns the 
 
 ## Document Store
 
+> **Implementation**: The vault sibling crate (`../vault/vault`) implements the document store. See vault's own `docs/DESIGN.md` for detailed internals.
+
 ### Storage
 
 Centralized knowledge at `.epic/docs/`. All tasks see all accumulated knowledge, organized by topic. File-based (markdown). Small document counts make this sufficient; SQLite index can layer on later.
 
-### Core Documents
-
-| Document | Purpose |
-|---|---|
-| EPIC.md | Project overview + document index |
-| REQUIREMENTS.md | Captured from interactive session |
-| CHANGELOG.md | Append-only mutation log |
-| FINDINGS.md | Accumulated discoveries |
-| DESIGN.md | Design decisions |
-| Topic-specific | Created as needed by librarian |
+Vault's storage structure:
+- `raw/` — client-provided content (versioned: `NAME_1.md`, `NAME_2.md`, ...)
+- `derived/` — librarian-produced documents (merged, restructured by librarian)
+- `CHANGELOG.md` — append-only JSONL mutation log
 
 ### Operations
 
-1. **Bootstrap** (pre-TUI): Convert requirements into initial document set
-2. **Query**: Search documents for relevant knowledge. Returns extract + source references
-3. **Record**: Write findings. Librarian decides file placement, merging, restructuring
+1. **Bootstrap** (pre-orchestrator): Convert goal text into initial document set (`PROJECT.md`, `REQUIREMENTS.md`)
+2. **Query**: Read-only search against derived documents. Returns `QueryResult { coverage, answer, extracts }`
+3. **Record**: Write findings to raw, librarian integrates into derived. Used for discoveries, verification failures, checkpoint decisions, recovery strategies
+4. **Reorganize**: Full sweep of derived documents — merge, split, deduplicate. Called after root branch children complete
 
 ### Librarian
 
-A Haiku agent (read-only tools) manages document placement, merging, and restructuring. Prevents unbounded growth. Handles deduplication.
+A reel agent manages document placement, merging, and restructuring. Vault constructs its own `reel::Agent` with `project_root` set to the vault storage root (separate from epic's project root). Per-operation model selection via `VaultConfig`.
 
 ### Research Service
 
-Exposed as a tool to calling agents:
+Exposed as a `ResearchQuery` custom tool via reel's `ToolHandler` trait. Injected into `AgentRequestConfig::custom_tools` for execute, decompose, fix, and recovery design phases.
 
 ```
-research_query(question, scope) -> ResearchResult {
-    answer: String,
-    document_refs: Vec<String>,  // "FILENAME > Section" format
-    gaps_filled: u32,
-}
+ResearchQuery { question: String } -> formatted text (coverage + answer + extracts)
 ```
 
-Scope: PROJECT (codebase exploration), WEB (web search), or BOTH.
+Internally calls `vault.query(question)`. The vault librarian reads derived documents and synthesizes an answer.
 
-Workflow:
-1. Check DocumentStore for existing knowledge
-2. Identify gaps
-3. Fill gaps via codebase exploration or web search (Haiku)
-4. Store results in DocumentStore
-5. Return structured answer with provenance
+**Scope parameter deferred**: DESIGN.md originally described `scope: PROJECT | WEB | BOTH`. Current implementation queries vault documents only (equivalent to PROJECT). WEB scope (web search gap-filling) can be layered later.
 
 Demand-driven — called when an agent hits uncertainty, not as a mandatory preamble.
+
+### Integration Points
+
+| Site | Operation | Document |
+|---|---|---|
+| Leaf produces discoveries | `record` | `FINDINGS` |
+| Verification fails | `record` | `VERIFICATION_FAILURE` |
+| Checkpoint adjust | `record` | `FINDINGS` |
+| Recovery assessment | `record` | `FINDINGS` |
+| Root branch children complete | `reorganize` | — |
+| Bootstrap (new run) | `bootstrap` | — |
+
+All vault operations are best-effort. Failures are logged but never abort the orchestrator run.
+
+### Usage Tracking
+
+Vault returns `SessionMetadata` from every operation. Converted to epic's `SessionMeta` via `SessionMeta::from_vault()` and accumulated on the task that triggered the operation. Vault query costs from the `ResearchQuery` tool are captured via an `Arc<Mutex<Vec<SessionMeta>>>` sink drained after each agent run, then folded into the calling task's usage.
+
+### Configuration
+
+```toml
+[vault]
+enabled = true              # default false
+storage = ".epic/docs"      # relative to project root
+bootstrap_model = "balanced"
+query_model = "fast"
+record_model = "fast"
+reorganize_model = "balanced"
+```
+
+Model names are reel registry keys resolved against epic's `ModelConfig`.
 
 ---
 
@@ -609,6 +628,10 @@ RecoveryStarted { task_id, round }
 RecoveryPlanSelected { task_id, approach }
 RecoverySubtasksCreated { task_id, count, round }
 TaskLimitReached { task_id }
+UsageUpdated { task_id, phase_cost_usd, total_cost_usd }
+VaultBootstrapCompleted { cost_usd }
+VaultRecorded { task_id, document }
+VaultReorganizeCompleted { merged, restructured, deleted }
 ```
 
 Events also feed structured JSONL file logging for post-run analysis.

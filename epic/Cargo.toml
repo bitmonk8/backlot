@@ -18,6 +18,7 @@ crossterm = "0.28"
 lot = { git = "https://github.com/bitmonk8/lot", rev = "f131ad9", features = ["tokio"] }
 tempfile = "3"
 reel = { git = "https://github.com/bitmonk8/reel", rev = "93f35ef" }
+vault = { git = "https://github.com/bitmonk8/vault", rev = "f7ecea1" }
 
 [lints.rust]
 unsafe_code = "deny"

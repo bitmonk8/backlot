@@ -10,6 +10,7 @@ use crate::agent::wire::{
 };
 use crate::agent::{AgentResult, AgentService, SessionMeta, TaskContext};
 use crate::config::project::{ModelConfig, VerificationStep};
+use crate::knowledge;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
 use crate::task::verify::VerificationResult;
@@ -17,6 +18,7 @@ use crate::task::{LeafResult, Model, RecoveryPlan};
 use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -59,7 +61,7 @@ pub const fn model_key(model: Model) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Build a `ModelRegistry` from epic's `ModelConfig` and credential name.
-fn build_model_registry(
+pub fn build_model_registry(
     model_config: &ModelConfig,
     credential_name: &str,
 ) -> anyhow::Result<reel::ModelRegistry> {
@@ -90,6 +92,7 @@ fn build_model_registry(
 pub struct ReelAgent {
     agent: reel::Agent,
     verification_steps: Vec<VerificationStep>,
+    vault: Option<Arc<vault::Vault>>,
 }
 
 impl ReelAgent {
@@ -114,10 +117,20 @@ impl ReelAgent {
         Ok(Self {
             agent: reel::Agent::new(env),
             verification_steps,
+            vault: None,
         })
     }
 
+    /// Attach a vault instance for `ResearchQuery` tool support.
+    pub fn with_vault(mut self, vault: Arc<vault::Vault>) -> Self {
+        self.vault = Some(vault);
+        self
+    }
+
     /// Run an agent call with the given grant (empty grant = structured, no tools).
+    ///
+    /// When `with_research` is true and a vault is attached, the `ResearchQuery`
+    /// custom tool is injected so the agent can query accumulated project knowledge.
     async fn run_request<T: DeserializeOwned>(
         &self,
         system_prompt: &str,
@@ -125,6 +138,7 @@ impl ReelAgent {
         model: Model,
         grant: reel::ToolGrant,
         output_schema: serde_json::Value,
+        with_research: bool,
     ) -> anyhow::Result<AgentResult<T>> {
         let config = reel::RequestConfig::builder()
             .model(model_key(model))
@@ -133,14 +147,40 @@ impl ReelAgent {
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build request config: {e}"))?;
 
+        let (custom_tools, research_sink) = if with_research {
+            self.vault.as_ref().map_or_else(
+                || (Vec::new(), None),
+                |v| {
+                    let (tool, sink) = knowledge::build_research_tool(v);
+                    (vec![tool], Some(sink))
+                },
+            )
+        } else {
+            (Vec::new(), None)
+        };
+
         let request = reel::AgentRequestConfig {
             config,
             grant,
-            custom_tools: Vec::new(),
+            custom_tools,
             write_paths: Vec::new(),
         };
         let result: reel::RunResult<T> = self.agent.run(&request, query).await?;
-        let meta = SessionMeta::from_run_result(&result);
+        let mut meta = SessionMeta::from_run_result(&result);
+
+        // Fold vault query costs into session metadata.
+        if let Some(sink) = research_sink {
+            for vault_meta in sink.lock().unwrap().drain(..) {
+                meta.input_tokens += vault_meta.input_tokens;
+                meta.output_tokens += vault_meta.output_tokens;
+                meta.cache_creation_input_tokens += vault_meta.cache_creation_input_tokens;
+                meta.cache_read_input_tokens += vault_meta.cache_read_input_tokens;
+                meta.cost_usd += vault_meta.cost_usd;
+                meta.tool_calls += vault_meta.tool_calls;
+                meta.total_latency_ms += vault_meta.total_latency_ms;
+            }
+        }
+
         Ok(AgentResult {
             value: result.output,
             meta,
@@ -155,7 +195,7 @@ impl ReelAgent {
         let grant = execute_grant();
         let schema = wire::task_outcome_schema();
         let AgentResult { value: wire, meta }: AgentResult<TaskOutcomeWire> = self
-            .run_request(&pair.system_prompt, &pair.query, model, grant, schema)
+            .run_request(&pair.system_prompt, &pair.query, model, grant, schema, true)
             .await?;
         Ok(AgentResult {
             value: LeafResult::try_from(wire)?,
@@ -176,6 +216,7 @@ impl ReelAgent {
                 model,
                 readonly_grant(),
                 schema,
+                true,
             )
             .await?;
         Ok(AgentResult {
@@ -200,6 +241,7 @@ impl ReelAgent {
             Model::Sonnet,
             readonly_grant(),
             schema,
+            false,
         )
         .await
     }
@@ -220,6 +262,7 @@ impl AgentService for ReelAgent {
                 Model::Haiku,
                 reel::ToolGrant::empty(),
                 schema,
+                false,
             )
             .await?;
         Ok(AgentResult {
@@ -282,6 +325,7 @@ impl AgentService for ReelAgent {
                 model,
                 readonly_grant(),
                 schema,
+                false,
             )
             .await?;
         Ok(AgentResult {
@@ -304,6 +348,7 @@ impl AgentService for ReelAgent {
                 Model::Haiku,
                 reel::ToolGrant::empty(),
                 schema,
+                false,
             )
             .await?;
         Ok(AgentResult {
@@ -326,6 +371,7 @@ impl AgentService for ReelAgent {
                 Model::Opus,
                 reel::ToolGrant::empty(),
                 schema,
+                false,
             )
             .await?;
         Ok(AgentResult {
@@ -351,6 +397,7 @@ impl AgentService for ReelAgent {
                 Model::Opus,
                 readonly_grant(),
                 schema,
+                true,
             )
             .await?;
         Ok(AgentResult {

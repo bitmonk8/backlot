@@ -19,6 +19,9 @@ pub struct EpicConfig {
 
     #[serde(default, rename = "verification")]
     pub verification_steps: Vec<VerificationStep>,
+
+    #[serde(default)]
+    pub vault: VaultConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +66,57 @@ pub struct VerificationStep {
     pub timeout: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "default_vault_storage")]
+    pub storage: String,
+
+    #[serde(default = "default_vault_bootstrap_model")]
+    pub bootstrap_model: String,
+
+    #[serde(default = "default_vault_query_model")]
+    pub query_model: String,
+
+    #[serde(default = "default_vault_record_model")]
+    pub record_model: String,
+
+    #[serde(default = "default_vault_reorganize_model")]
+    pub reorganize_model: String,
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            storage: default_vault_storage(),
+            bootstrap_model: default_vault_bootstrap_model(),
+            query_model: default_vault_query_model(),
+            record_model: default_vault_record_model(),
+            reorganize_model: default_vault_reorganize_model(),
+        }
+    }
+}
+
 // Defaults
+
+fn default_vault_storage() -> String {
+    ".epic/docs".into()
+}
+fn default_vault_bootstrap_model() -> String {
+    "balanced".into()
+}
+fn default_vault_query_model() -> String {
+    "fast".into()
+}
+fn default_vault_record_model() -> String {
+    "fast".into()
+}
+fn default_vault_reorganize_model() -> String {
+    "balanced".into()
+}
 
 fn default_root() -> String {
     ".".into()
@@ -204,6 +257,22 @@ impl EpicConfig {
                 "limits.max_total_tasks must be <= 10000, got {}",
                 l.max_total_tasks
             );
+        }
+
+        if self.vault.enabled {
+            if self.vault.storage.is_empty() {
+                anyhow::bail!("vault.storage must not be empty when vault is enabled");
+            }
+            for (field, val) in [
+                ("bootstrap_model", &self.vault.bootstrap_model),
+                ("query_model", &self.vault.query_model),
+                ("record_model", &self.vault.record_model),
+                ("reorganize_model", &self.vault.reorganize_model),
+            ] {
+                if val.is_empty() {
+                    anyhow::bail!("vault.{field} must not be empty when vault is enabled");
+                }
+            }
         }
 
         for (i, step) in self.verification_steps.iter().enumerate() {
@@ -505,5 +574,64 @@ file_tool_forwarders = true
             err.contains("command"),
             "error should mention command: {err}"
         );
+    }
+
+    #[test]
+    fn vault_config_defaults() {
+        let config = VaultConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.storage, ".epic/docs");
+        assert_eq!(config.bootstrap_model, "balanced");
+        assert_eq!(config.query_model, "fast");
+        assert_eq!(config.record_model, "fast");
+        assert_eq!(config.reorganize_model, "balanced");
+    }
+
+    #[test]
+    fn vault_config_round_trips() {
+        let toml_str = r#"
+[vault]
+enabled = true
+storage = ".epic/knowledge"
+bootstrap_model = "strong"
+query_model = "fast"
+record_model = "fast"
+reorganize_model = "balanced"
+"#;
+        let config: EpicConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.vault.enabled);
+        assert_eq!(config.vault.storage, ".epic/knowledge");
+        assert_eq!(config.vault.bootstrap_model, "strong");
+    }
+
+    #[test]
+    fn vault_disabled_by_default_in_empty_config() {
+        let config: EpicConfig = toml::from_str("").unwrap();
+        assert!(!config.vault.enabled);
+    }
+
+    #[test]
+    fn vault_enabled_empty_storage_fails_validation() {
+        let mut config = EpicConfig::default();
+        config.vault.enabled = true;
+        config.vault.storage = String::new();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("vault.storage"), "{err}");
+    }
+
+    #[test]
+    fn vault_enabled_empty_model_fails_validation() {
+        let mut config = EpicConfig::default();
+        config.vault.enabled = true;
+        config.vault.query_model = String::new();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("query_model"), "{err}");
+    }
+
+    #[test]
+    fn vault_disabled_skips_model_validation() {
+        let mut config = EpicConfig::default();
+        config.vault.query_model = String::new();
+        config.validate().unwrap();
     }
 }

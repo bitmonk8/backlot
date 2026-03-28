@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod events;
 mod init;
+pub(crate) mod knowledge;
 mod orchestrator;
 mod sandbox;
 mod state;
@@ -23,6 +24,7 @@ use tui::TuiApp;
 
 use anyhow::bail;
 use clap::Parser;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::main]
@@ -93,13 +95,41 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let timeout = Duration::from_secs(300);
 
-    let agent = ReelAgent::new(
+    let mut agent = ReelAgent::new(
         project_root.clone(),
         &cli.credential,
         timeout,
         &epic_config.models,
         epic_config.verification_steps.clone(),
     )?;
+
+    // Construct vault if enabled.
+    let vault_handle: Option<Arc<vault::Vault>> = if epic_config.vault.enabled {
+        let storage_root = project_root.join(&epic_config.vault.storage);
+        std::fs::create_dir_all(&storage_root)?;
+        let model_registry =
+            agent::reel_adapter::build_model_registry(&epic_config.models, &cli.credential)?;
+        let provider_registry = reel::ProviderRegistry::load_default()
+            .map_err(|e| anyhow::anyhow!("failed to load provider registry for vault: {e}"))?;
+        let env = vault::VaultEnvironment {
+            storage_root,
+            model_registry,
+            provider_registry,
+            models: vault::VaultModels {
+                bootstrap: epic_config.vault.bootstrap_model.clone(),
+                query: epic_config.vault.query_model.clone(),
+                record: epic_config.vault.record_model.clone(),
+                reorganize: epic_config.vault.reorganize_model.clone(),
+            },
+        };
+        Some(Arc::new(vault::Vault::new(env)?))
+    } else {
+        None
+    };
+
+    if let Some(ref v) = vault_handle {
+        agent = agent.with_vault(v.clone());
+    }
 
     let (state, root_id, goal_text) = match &cli.command {
         Command::Run { goal } => {
@@ -143,10 +173,34 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     };
 
     let (tx, rx) = event_channel();
+
+    // Bootstrap vault on new runs (not resume).
+    if let Some(ref v) = vault_handle {
+        let storage_root = project_root.join(&epic_config.vault.storage);
+        if !storage_root.join("CHANGELOG.md").exists() {
+            eprintln!("Bootstrapping vault knowledge base...");
+            match v.bootstrap(&goal_text).await {
+                Ok((_warnings, meta)) => {
+                    let _ = tx.send(events::Event::VaultBootstrapCompleted {
+                        cost_usd: meta.cost_usd,
+                    });
+                    eprintln!("Vault bootstrap complete (${:.4})", meta.cost_usd);
+                }
+                Err(e) => {
+                    eprintln!("Warning: vault bootstrap failed: {e}");
+                }
+            }
+        }
+    }
+
     let mut orchestrator = Orchestrator::new(agent, state, tx)
         .with_limits(epic_config.limits)
         .with_state_path(state_path.clone())
         .with_project_root(project_root.clone());
+
+    if let Some(v) = vault_handle {
+        orchestrator = orchestrator.with_vault(v);
+    }
 
     if cli.no_tui {
         drop(rx);

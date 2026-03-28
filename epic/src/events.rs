@@ -92,6 +92,18 @@ pub enum Event {
         phase_cost_usd: f64,
         total_cost_usd: f64,
     },
+    VaultBootstrapCompleted {
+        cost_usd: f64,
+    },
+    VaultRecorded {
+        task_id: TaskId,
+        document: String,
+    },
+    VaultReorganizeCompleted {
+        merged: usize,
+        restructured: usize,
+        deleted: usize,
+    },
 }
 
 pub type EventSender = mpsc::UnboundedSender<Event>;

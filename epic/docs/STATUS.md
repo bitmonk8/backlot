@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Core orchestration implemented. Knowledge layer not started.**
+**Core orchestration and knowledge layer implemented. Review layer not started.**
 
 ## What Is Implemented
 
@@ -24,14 +24,14 @@
 - Event system — 20 event variants driving TUI and JSONL logging.
 - CI pipeline — GitHub Actions (fmt, clippy, test, build) on ubuntu, macOS, Windows. Rust 1.93.1 toolchain. All epic jobs green on all platforms. Dependencies use pinned git revs (lot, reel, flick).
 - Testability infrastructure — `ClientFactory`/`ToolExecutor` traits (reel, internal), `git_diff_numstat` extraction (orchestrator), shared `MockAgentService` (`test_support`), `TaskPhase::try_transition`, `PartialEq` on `LeafResult`/`RecoveryPlan`, stdin injection in init
-- **Test counts** — Epic: 223 tests (all pass). Reel: 142 pass, 3 fail (AppContainer sandbox access issues in `reel read`/`write`/`edit` custom command tests — see `reel/docs/ISSUES.md` #9c).
+- **Vault integration** — Document store via sibling `vault` crate (`../vault/vault`). `VaultConfig` in `epic.toml` (`[vault]` section, `enabled = false` by default). Vault constructed at startup, bootstrapped on new runs. `ResearchQuery` custom tool (reel `ToolHandler`) injected into execute, decompose, fix, and recovery design phases — agents query accumulated project knowledge on demand. Discovery recording at 4 orchestrator integration points (leaf discoveries, verification failures, checkpoint adjust, recovery). Vault reorganize runs after root branch children complete. Usage tracking folds vault costs into per-task `TaskUsage`. Vault events drive TUI worklog. All vault operations are best-effort (failures logged, not propagated).
+- **Test counts** — Epic: 233 tests (all pass). Reel: 142 pass, 3 fail (AppContainer sandbox access issues in `reel read`/`write`/`edit` custom command tests — see `reel/docs/ISSUES.md` #9c).
 
 ## What Is NOT Implemented
 
 These features are described in DESIGN.md but have no corresponding code:
 
-- **Document Store** — No `.epic/docs/` persistence, no librarian agent, no bootstrap/query/record operations. Discoveries exist only in-memory on `task.discoveries`.
-- **Research Service** — No `research_query` tool, no gap-filling via web search or codebase exploration, no integration with document store. Not exposed as a tool during any agent phase.
+- **Research Service scope parameter** — DESIGN.md describes `research_query(question, scope)` with PROJECT/WEB/BOTH scopes. The current `ResearchQuery` tool queries vault documents only (equivalent to PROJECT scope). WEB scope (web search gap-filling) is not implemented.
 - **File-level review** — Leaf verification does not include a separate file-level review step. Deferred per code comment in `verify.rs`.
 - **Simplification review** — No local simplification review on leaf output, no aggregate simplification review on branch output. Both deferred.
 - **Branch verification separation** — Branch verification is a single agent call, not separated into correctness + completeness + aggregate simplification reviews as described in DESIGN.md.
@@ -64,6 +64,10 @@ Replaced local path dependencies (`../lot`, `../reel/reel`) with pinned git rev 
 ### Reel Upgrade and Usage Tracking
 
 Bumped reel from rev `51eb559` to `93f35ef`, picking up session transcripts, cache token fields, and per-call API latency. Added `TaskUsage` type, `SessionMeta`/`AgentResult<T>` wrapper, changed all 9 `AgentService` methods to return metadata alongside domain results. Orchestrator accumulates usage at all 10 agent call sites. `UsageUpdated` event feeds TUI metrics panel. Headless and `epic status` output usage summary. Transcript persistence deferred (reel's `TurnRecord` does not derive `Serialize`).
+
+### Vault Integration
+
+Integrated the `vault` sibling crate as epic's document store and research service. Vault is a file-based knowledge store at `.epic/docs/` with four operations (bootstrap, record, query, reorganize) backed by a reel agent (librarian). Integration points: `VaultConfig` in `epic.toml`, vault construction and bootstrap in `main.rs`, `ResearchQuery` custom tool via reel `ToolHandler` injected into 5 agent phases, discovery recording at 4 orchestrator sites, vault reorganize before root verification, usage tracking via `SessionMeta::from_vault`, 3 vault event variants for TUI. All vault operations are best-effort. 10 new tests (4 knowledge module, 6 config).
 
 ## Work Candidates
 

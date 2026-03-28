@@ -339,6 +339,32 @@ impl TuiApp {
                 }
                 self.total_cost_usd += phase_cost_usd;
             }
+            Event::VaultBootstrapCompleted { cost_usd } => {
+                self.worklog.push(WorklogEntry::info(
+                    format!("vault bootstrap completed (${cost_usd:.4})"),
+                    self.session_start,
+                ));
+            }
+            Event::VaultRecorded {
+                task_id, document, ..
+            } => {
+                self.worklog.push(WorklogEntry::info(
+                    format!("{task_id} recorded to vault: {document}"),
+                    self.session_start,
+                ));
+            }
+            Event::VaultReorganizeCompleted {
+                merged,
+                restructured,
+                deleted,
+            } => {
+                self.worklog.push(WorklogEntry::info(
+                    format!(
+                        "vault reorganized: {merged} merged, {restructured} restructured, {deleted} deleted"
+                    ),
+                    self.session_start,
+                ));
+            }
         }
 
         // Evict oldest entries if worklog exceeds cap.
