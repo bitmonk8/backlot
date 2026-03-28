@@ -150,7 +150,7 @@ Guidelines:
 - Verify your changes compile/work before reporting success.
 - Report any discoveries (unexpected findings, architectural insights) in the discoveries field.
 - Work within the scope of this single task. Do not refactor unrelated code or expand scope beyond the stated goal.
-- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project.
+- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project. Optional scope parameter: 'vault' (stored knowledge only) or 'project' (default, vault + codebase exploration to fill gaps).
 
 Respond with the required JSON schema when done."
         .into();
@@ -181,7 +181,7 @@ Guidelines:
 - Aim for 2-5 subtasks. Fewer is better if the work can be cleanly divided.
 - Each subtask should represent the minimum scope needed. Avoid over-decomposing into too many subtasks.
 - Explore the codebase with tools before decomposing to understand the current state.
-- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project.
+- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project. Optional scope parameter: 'vault' (stored knowledge only) or 'project' (default, vault + codebase exploration to fill gaps).
 
 Respond with the required JSON schema."
         .into();
@@ -212,7 +212,7 @@ Guidelines:
 - Verify your fixes compile/work before reporting success.
 - Report any discoveries (unexpected findings, architectural insights) in the discoveries field.
 - Focus narrowly on fixing the specific verification failure. Do not expand scope.
-- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project.
+- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project. Optional scope parameter: 'vault' (stored knowledge only) or 'project' (default, vault + codebase exploration to fill gaps).
 
 Respond with the required JSON schema when done."
         .into();
@@ -250,7 +250,7 @@ Guidelines:
 - Use magnitude estimates: small (< 1 session), medium (1-2 sessions), large (multiple sessions / further decomposition likely).
 - Keep fix subtasks minimal and focused — do not duplicate work already done by prior subtasks.
 - Explore the codebase with tools before creating fix subtasks to understand the current state.
-- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project.
+- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project. Optional scope parameter: 'vault' (stored knowledge only) or 'project' (default, vault + codebase exploration to fill gaps).
 
 Respond with the required JSON schema."
         .into();
@@ -383,7 +383,7 @@ Guidelines:
 - Prefer incremental when the failure is isolated. Use full only when the approach itself is wrong.
 - Explore the codebase with tools to understand the current state before designing recovery subtasks.
 - Aim for 1-4 recovery subtasks. Fewer is better.
-- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project.
+- The ResearchQuery tool is available to query accumulated project knowledge, prior discoveries, and design decisions. Use it when you need context about the project. Optional scope parameter: 'vault' (stored knowledge only) or 'project' (default, vault + codebase exploration to fill gaps).
 
 Respond with the required JSON schema."
         .into();

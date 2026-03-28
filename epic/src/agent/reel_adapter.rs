@@ -90,7 +90,7 @@ pub fn build_model_registry(
 
 /// `ReelAgent` delegates to `reel::Agent` for tool loop execution.
 pub struct ReelAgent {
-    agent: reel::Agent,
+    agent: Arc<reel::Agent>,
     verification_steps: Vec<VerificationStep>,
     vault: Option<Arc<vault::Vault>>,
 }
@@ -115,7 +115,7 @@ impl ReelAgent {
         };
 
         Ok(Self {
-            agent: reel::Agent::new(env),
+            agent: Arc::new(reel::Agent::new(env)),
             verification_steps,
             vault: None,
         })
@@ -151,7 +151,7 @@ impl ReelAgent {
             self.vault.as_ref().map_or_else(
                 || (Vec::new(), None),
                 |v| {
-                    let (tool, sink) = knowledge::build_research_tool(v);
+                    let (tool, sink) = knowledge::build_research_tool(v, &self.agent);
                     (vec![tool], Some(sink))
                 },
             )
@@ -168,7 +168,7 @@ impl ReelAgent {
         let result: reel::RunResult<T> = self.agent.run(&request, query).await?;
         let mut meta = SessionMeta::from_run_result(&result);
 
-        // Fold vault query costs into session metadata.
+        // Fold research pipeline costs into session metadata.
         if let Some(sink) = research_sink {
             for vault_meta in sink.lock().unwrap().drain(..) {
                 meta.input_tokens += vault_meta.input_tokens;

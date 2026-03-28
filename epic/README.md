@@ -98,6 +98,19 @@ When a child task fails within a branch, epic attempts recovery:
 3. Two approaches: **incremental** (preserve completed work, append recovery tasks) or **full re-decomposition** (replace remaining pending siblings)
 4. Max 2 recovery rounds per branch (budget inherited by nested branches to prevent exponential growth)
 
+### Knowledge Store and Research Service
+
+Epic maintains a persistent knowledge base at `.epic/docs/` via the vault crate. The vault stores project knowledge, discoveries, and design decisions accumulated across agent sessions.
+
+The `ResearchQuery` tool is available to agents during execution and decomposition phases. When called, it runs a multi-step pipeline:
+
+1. **Query vault** for existing knowledge
+2. **Identify gaps** in coverage (Haiku, structured output)
+3. **Explore the codebase** to fill gaps (Haiku with read-only tools)
+4. **Synthesize** a final answer combining vault knowledge and exploration findings
+
+An optional `scope` parameter controls behavior: `vault` (stored knowledge only) or `project` (default, vault + codebase exploration). Exploration findings are recorded back into the vault for future queries.
+
 ### Scope Circuit Breaker
 
 Each task carries a magnitude estimate (small/medium/large) mapping to expected line counts. Before verification, `git diff --numstat` is compared against 3x the estimate. If the actual change exceeds the threshold, the task is failed to prevent unbounded scope creep.
@@ -219,6 +232,7 @@ src/
 ├── state.rs                 # EpicState: task tree, JSON persistence, DFS ordering
 ├── events.rs                # Event enum (19 variants), channel types
 ├── init.rs                  # epic init: agent-driven project exploration
+├── knowledge.rs             # ResearchTool: vault + gap-filling pipeline
 ├── sandbox.rs               # Container/VM detection (best-effort)
 ├── test_support.rs          # MockAgentService, test helpers
 ├── agent/
@@ -247,6 +261,7 @@ src/
 | Crate | Purpose |
 |-------|---------|
 | `reel` | Agent session layer (tool loop, NuShell, sandbox) |
+| `vault` | Document store (knowledge persistence, query, record) |
 | `tokio` | Async runtime |
 | `clap` | CLI argument parsing |
 | `ratatui` + `crossterm` | Terminal UI |

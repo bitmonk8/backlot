@@ -116,3 +116,39 @@
 ### 27. Module `knowledge.rs` name doesn't match contents
 
 `src/knowledge.rs` — Named `knowledge` but contains vault-integration glue: tool handler, metadata conversion, formatting. A name like `vault_bridge` would better describe the actual contents. **Category: Naming.**
+
+### 28. `record_findings` called per-gap instead of batched
+
+`src/knowledge.rs` — Each gap's exploration findings trigger a separate `vault.record()` call (each involves a librarian LLM call). Batching all findings into a single record call after the exploration loop would reduce vault LLM costs. **Category: Performance.**
+
+### 29. `run_pipeline` has no test coverage (concrete dependencies)
+
+`src/knowledge.rs` — `ResearchTool` takes concrete `Arc<vault::Vault>` and `Arc<reel::Agent>`. Neither type is behind a trait, so `run_pipeline`'s 6+ branching paths (short-circuits, fallbacks, exploration loop) cannot be unit-tested. Extracting a trait or using a callback-based design would enable testing. **Category: Testing.**
+
+### 30. Document name collision from 40-char truncation
+
+`src/knowledge.rs` — `record_findings` generates vault document names by taking the first 40 alphanumeric chars of the question. Different questions with identical prefixes produce the same document name, causing unrelated findings to merge via the Append fallback. **Category: Correctness.**
+
+### 31. `ResearchScope::Project` name hides vault-inclusive behavior
+
+`src/knowledge.rs` — `Project` scope means "vault + codebase exploration" but the name implies codebase-only. A name like `VaultAndProject` or `Full` would be clearer. **Category: Naming.**
+
+### 32. Hand-coded JSON schemas rebuilt on every call
+
+`src/knowledge.rs` — `gap_analysis_schema()`, `exploration_result_schema()`, and `synthesis_schema()` build `serde_json::Value` via `json!()` on every invocation. Could use `LazyLock` statics. Risk of schema/struct drift since schemas are manually maintained. **Category: Simplification.**
+
+### 33. Wire types and schemas not in `agent/wire.rs`
+
+`src/knowledge.rs` — The 4 internal wire types (`GapAnalysis`, `ExplorationResult`, `Finding`, `SynthesisResult`) and 3 schema generators break the project convention of placing all wire types in `src/agent/wire.rs`. **Category: Placement.**
+
+### 34. `TempDir::new()` in knowledge tests uses system temp
+
+`src/knowledge.rs` — `make_dummy_vault()` uses `TempDir::new()` which creates under `%TEMP%`. Per CLAUDE.md, AppContainer sandboxing requires project-local dirs. Should use `TempDir::new_in()`. **Category: Testing.**
+
+### 35. Pre-existing: stale test names reference old NU grant
+
+`src/agent/reel_adapter.rs` — `execute_grant_includes_write_and_nu` and `readonly_grant_includes_nu_not_write` reference the old `NU` grant name (now `TOOLS`). **Category: Cruft.**
+
+### 36. Pre-existing: stale NU references and event count in README/DESIGN
+
+`README.md` — References old `NU` grant name at lines 52, 61, 64-66. States "19 event types" (should be 23). `docs/DESIGN.md` — Per-Phase Tool Grants table uses `NU` at lines 113-116. **Category: Cruft.**

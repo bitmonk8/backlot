@@ -184,12 +184,35 @@ A reel agent manages document placement, merging, and restructuring. Vault const
 Exposed as a `ResearchQuery` custom tool via reel's `ToolHandler` trait. Injected into `AgentRequestConfig::custom_tools` for execute, decompose, fix, and recovery design phases.
 
 ```
-ResearchQuery { question: String } -> formatted text (coverage + answer + extracts)
+ResearchQuery { question: String, scope?: "vault" | "project" }
+  -> formatted text (gaps_filled + answer + document_refs)
 ```
 
-Internally calls `vault.query(question)`. The vault librarian reads derived documents and synthesizes an answer.
+Implements a multi-step gap-filling pipeline:
 
-**Scope parameter deferred**: DESIGN.md originally described `scope: PROJECT | WEB | BOTH`. Current implementation queries vault documents only (equivalent to PROJECT). WEB scope (web search gap-filling) can be layered later.
+```
+research_query(question, scope)
+    |-- Step 1: vault.query(question) -> QueryResult with coverage
+    |-- Step 2: If coverage != Full -> gap identification (Haiku, no tools, structured output)
+    |           Returns list of specific gaps
+    |-- Step 3: If gaps exist and scope == Project:
+    |   |-- For each gap:
+    |       |-- Spawn Haiku agent with read-only tools to explore codebase
+    |       |-- vault.record() findings (best-effort)
+    |-- Step 4: Synthesis (Haiku, no tools) -- combine vault knowledge + exploration findings
+    |-- Return ResearchResult { answer, document_refs, gaps_filled }
+```
+
+Short-circuit paths:
+- Full coverage from vault: return vault answer immediately (no gap analysis)
+- Vault-only scope: return vault answer immediately (no exploration)
+- Gap analysis says sufficient: return vault answer (no exploration)
+
+All internal agent calls use Haiku ("fast" model key). Exploration agents get `ToolGrant::TOOLS` (read-only: Read, Glob, Grep, NuShell). Each pipeline step's usage is tracked in the usage sink and folded into the calling task's cost.
+
+**Scope parameter**: `vault` queries stored knowledge only. `project` (default) queries vault then explores the codebase to fill gaps. WEB scope (web search) is deferred.
+
+**Error handling**: Each pipeline step degrades gracefully. Gap identification failure falls back to vault answer. Exploration failure for a gap is logged and skipped. Synthesis failure falls back to vault answer with raw findings appended. Vault record operations are best-effort.
 
 Demand-driven — called when an agent hits uncertainty, not as a mandatory preamble.
 
