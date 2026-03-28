@@ -1048,7 +1048,7 @@ impl<A: AgentService> Orchestrator<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{ChildStatus, ChildSummary, SiblingSummary};
+    use crate::agent::ChildStatus;
     use crate::events::{self, EventReceiver};
     use crate::task::branch::{DecompositionResult, SubtaskSpec};
     use crate::task::verify::{VerificationOutcome, VerificationResult};
