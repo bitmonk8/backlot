@@ -1099,7 +1099,7 @@ pub(crate) mod test_support {
     clippy::match_same_arms
 )]
 mod tests {
-    use super::test_support::{isolated_session, sandbox_test_base, require_nu};
+    use super::test_support::{isolated_session, require_nu, sandbox_test_base};
     use super::*;
 
     /// Creates a `TempDir` with a nested session temp dir and builds a sandbox policy.

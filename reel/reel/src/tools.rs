@@ -647,7 +647,7 @@ fn format_nu_output(raw: String) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::nu_session::test_support::{isolated_session, sandbox_test_base, require_nu};
+    use crate::nu_session::test_support::{isolated_session, require_nu, sandbox_test_base};
     use tempfile::TempDir;
 
     /// Helper: execute a tool in a fresh temp dir (for tests that don't need
