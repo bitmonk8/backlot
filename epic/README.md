@@ -85,7 +85,9 @@ name = "lint"
 command = ["cargo", "clippy", "--", "-D", "warnings"]
 ```
 
-On verification failure, fix loops attempt to repair the work:
+After verification gates pass for leaf tasks, a **file-level review** checks that source file changes align with the task's goal and verification criteria. This catches intent/requirement mismatches that build/lint/test cannot detect. Review failures feed into the fix loop.
+
+On verification or review failure, fix loops attempt to repair the work:
 - **Leaf fix loop**: Retry with model escalation (Sonnet → Opus), scope circuit breaker prevents runaway changes
 - **Branch fix loop**: Opus agent designs targeted fix subtasks (3 rounds for non-root, 4 for root)
 
@@ -121,7 +123,7 @@ Task state is persisted to `.epic/state.json` with atomic writes (write to temp,
 
 ### Event System
 
-The orchestrator emits events for every state change (19 event types). The TUI consumes these to render a live task tree, worklog, and metrics panel. In headless mode, events are printed to stderr.
+The orchestrator emits events for every state change (24 event types). The TUI consumes these to render a live task tree, worklog, and metrics panel. In headless mode, events are printed to stderr.
 
 ## Usage
 
@@ -230,13 +232,13 @@ src/
 ├── cli.rs                   # Clap CLI definition
 ├── orchestrator.rs          # DFS task execution, retry/escalation, fix/recovery loops
 ├── state.rs                 # EpicState: task tree, JSON persistence, DFS ordering
-├── events.rs                # Event enum (19 variants), channel types
+├── events.rs                # Event enum (24 variants), channel types
 ├── init.rs                  # epic init: agent-driven project exploration
 ├── knowledge.rs             # ResearchTool: vault + gap-filling pipeline
 ├── sandbox.rs               # Container/VM detection (best-effort)
 ├── test_support.rs          # MockAgentService, test helpers
 ├── agent/
-│   ├── mod.rs               # AgentService trait (9 async methods)
+│   ├── mod.rs               # AgentService trait (10 async methods)
 │   ├── reel_adapter.rs      # ReelAgent: thin adapter over reel::Agent
 │   ├── wire.rs              # Wire format types, structured output schemas
 │   └── prompts.rs           # Prompt assembly for all agent calls

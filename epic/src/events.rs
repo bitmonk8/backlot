@@ -71,6 +71,10 @@ pub enum Event {
         count: usize,
         round: u32,
     },
+    FileLevelReviewCompleted {
+        task_id: TaskId,
+        passed: bool,
+    },
     RecoveryStarted {
         task_id: TaskId,
         round: u32,

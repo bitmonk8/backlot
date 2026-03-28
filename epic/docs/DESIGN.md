@@ -647,6 +647,7 @@ FixAttempt { task_id, attempt, model }
 FixModelEscalated { task_id, from, to }
 BranchFixRound { task_id, round, model }
 FixSubtasksCreated { task_id, count, round }
+FileLevelReviewCompleted { task_id, passed }
 RecoveryStarted { task_id, round }
 RecoveryPlanSelected { task_id, approach }
 RecoverySubtasksCreated { task_id, count, round }

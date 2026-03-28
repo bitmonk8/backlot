@@ -324,8 +324,12 @@ impl<A: AgentService> Orchestrator<A> {
                 self.accumulate_usage(id, &agent_result.meta);
                 match agent_result.value.outcome {
                     VerificationOutcome::Pass => {
-                        self.complete_task_verified(id)?;
-                        Ok(VerifyOutcome::Passed)
+                        if let Some(fail_reason) = self.try_file_level_review(id).await? {
+                            Ok(VerifyOutcome::Failed(fail_reason))
+                        } else {
+                            self.complete_task_verified(id)?;
+                            Ok(VerifyOutcome::Passed)
+                        }
                     }
                     VerificationOutcome::Fail { reason } => {
                         self.record_to_vault(id, "VERIFICATION_FAILURE", &reason)
@@ -340,6 +344,40 @@ impl<A: AgentService> Orchestrator<A> {
                 self.checkpoint_save();
                 Ok(VerifyOutcome::Failed(format!("verification error: {e}")))
             }
+        }
+    }
+
+    /// Run file-level review for leaf tasks after verification passes.
+    /// Returns `Some(reason)` on failure, `None` on pass or skip (non-leaf).
+    async fn try_file_level_review(
+        &mut self,
+        id: TaskId,
+    ) -> Result<Option<String>, OrchestratorError> {
+        let task = self
+            .state
+            .get(id)
+            .ok_or(OrchestratorError::TaskNotFound(id))?;
+        if task.path != Some(TaskPath::Leaf) {
+            return Ok(None);
+        }
+
+        let review_model = self.verification_model(id)?;
+        let review_ctx = self.build_context(id)?;
+        let review_result = self
+            .agent
+            .file_level_review(&review_ctx, review_model)
+            .await?;
+        self.accumulate_usage(id, &review_result.meta);
+
+        let passed = review_result.value.outcome == VerificationOutcome::Pass;
+        self.emit(Event::FileLevelReviewCompleted {
+            task_id: id,
+            passed,
+        });
+
+        match review_result.value.outcome {
+            VerificationOutcome::Pass => Ok(None),
+            VerificationOutcome::Fail { reason } => Ok(Some(reason)),
         }
     }
 
@@ -702,7 +740,31 @@ impl<A: AgentService> Orchestrator<A> {
             self.accumulate_usage(id, &agent_result.meta);
 
             match agent_result.value.outcome {
-                VerificationOutcome::Pass => self.complete_task_verified(id),
+                VerificationOutcome::Pass => {
+                    // File-level review for leaf tasks: catch intent mismatches
+                    // that build/lint/test cannot detect.
+                    if let Some(fail_reason) = self.try_file_level_review(id).await? {
+                        let task = self
+                            .state
+                            .get(id)
+                            .ok_or(OrchestratorError::TaskNotFound(id))?;
+                        let is_fix_task = task.is_fix_task;
+
+                        if is_fix_task {
+                            self.fail_task(id, fail_reason)
+                        } else {
+                            self.leaf_retry_loop(
+                                id,
+                                LeafRetryMode::Fix {
+                                    initial_failure: fail_reason,
+                                },
+                            )
+                            .await
+                        }
+                    } else {
+                        self.complete_task_verified(id)
+                    }
+                }
                 VerificationOutcome::Fail { reason } => {
                     let task = self
                         .state
@@ -1446,6 +1508,31 @@ mod tests {
         }
     }
 
+    fn pass_file_level_review() -> VerificationResult {
+        VerificationResult {
+            outcome: VerificationOutcome::Pass,
+            details: "file-level review passed".into(),
+        }
+    }
+
+    fn fail_file_level_review(reason: &str) -> VerificationResult {
+        VerificationResult {
+            outcome: VerificationOutcome::Fail {
+                reason: reason.into(),
+            },
+            details: "file-level review failed".into(),
+        }
+    }
+
+    fn queue_file_level_reviews(mock: &MockAgentService, count: usize) {
+        for _ in 0..count {
+            mock.file_level_review_responses
+                .lock()
+                .unwrap()
+                .push_back(pass_file_level_review());
+        }
+    }
+
     fn one_subtask_decomposition() -> DecompositionResult {
         DecompositionResult {
             subtasks: vec![SubtaskSpec {
@@ -1534,6 +1621,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -1600,6 +1688,7 @@ mod tests {
                 .push_back(pass_verification());
         }
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -1643,6 +1732,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -1726,6 +1816,7 @@ mod tests {
         // Clean up any previous run.
         let _ = std::fs::remove_file(&state_path);
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.state.set_root_id(root_id);
         orch.state_path = Some(state_path.clone());
@@ -1807,6 +1898,7 @@ mod tests {
         state.insert(pending_child);
 
         let (tx, _rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -1867,6 +1959,7 @@ mod tests {
         state.insert(child);
 
         let (tx, _rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -1940,6 +2033,7 @@ mod tests {
         state.insert(grandchild);
 
         let (tx, _rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 3);
         let mut orch = Orchestrator::new(mock, state, tx);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -1994,6 +2088,7 @@ mod tests {
         state.insert(child);
 
         let (tx, _rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -2048,6 +2143,7 @@ mod tests {
         );
         state.insert(root);
         let (tx, _rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx);
 
         // Root is not at depth 0 but has no parent, so it's forced to Branch.
@@ -2121,6 +2217,7 @@ mod tests {
                 .push_back(pass_verification());
         }
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -2242,6 +2339,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -2306,6 +2404,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -2471,6 +2570,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -2573,6 +2673,7 @@ mod tests {
         // Mid fails → recovery assessment for root.
         mock.recovery_responses.lock().unwrap().push_back(None);
 
+        queue_file_level_reviews(&mock, 4);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert!(matches!(result, TaskOutcome::Failed { .. }));
@@ -2700,6 +2801,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 4);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -2777,6 +2879,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -2877,6 +2980,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3030,6 +3134,7 @@ mod tests {
         state.insert(child);
 
         let (tx, _rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3113,6 +3218,7 @@ mod tests {
         state.insert(child);
 
         let (tx, mut rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3213,6 +3319,7 @@ mod tests {
             }
         }
 
+        queue_file_level_reviews(&mock, 5);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3353,6 +3460,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3450,6 +3558,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3649,6 +3758,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3791,6 +3901,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3870,6 +3981,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -3973,6 +4085,7 @@ mod tests {
                 .push_back(pass_verification());
         }
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -4088,6 +4201,7 @@ mod tests {
                 .push_back(pass_verification());
         }
 
+        queue_file_level_reviews(&mock, 4);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -4164,6 +4278,7 @@ mod tests {
         // Recovery assess: not recoverable.
         mock.recovery_responses.lock().unwrap().push_back(None);
 
+        queue_file_level_reviews(&mock, 1);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert!(matches!(result, TaskOutcome::Failed { .. }));
@@ -4207,6 +4322,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -4291,6 +4407,7 @@ mod tests {
                 .push_back(pass_verification());
         }
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -4391,6 +4508,7 @@ mod tests {
                 .push_back(pass_verification());
         }
 
+        queue_file_level_reviews(&mock, 4);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -4470,6 +4588,7 @@ mod tests {
         // No recovery_responses needed — attempt_recovery rejects fix tasks before
         // consulting the agent.
 
+        queue_file_level_reviews(&mock, 1);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
 
         // Mark the root as a fix task so attempt_recovery rejects it.
@@ -4605,6 +4724,7 @@ mod tests {
         // No recovery_responses needed — attempt_recovery will bail out
         // before calling assess_recovery because recovery_rounds >= max_recovery_rounds.
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
 
         // Pre-set recovery_rounds to max_recovery_rounds so escalation exhausts immediately.
@@ -4755,6 +4875,7 @@ mod tests {
                 .push_back(pass_verification());
         }
 
+        queue_file_level_reviews(&mock, 4);
         let (mut orch, root_id, mut rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -4863,6 +4984,7 @@ mod tests {
         state.insert(child);
 
         let (tx, mut rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -4980,6 +5102,7 @@ mod tests {
         state.insert(child);
 
         let (tx, mut rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -5078,6 +5201,7 @@ mod tests {
         state.insert(child);
 
         let (tx, mut rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -5149,6 +5273,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let state_path = tmp.path().to_path_buf();
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.state_path = Some(state_path.clone());
         let result = orch.run(root_id).await.unwrap();
@@ -5206,6 +5331,7 @@ mod tests {
         let root = Task::new(root_id, None, "deep root".into(), vec!["passes".into()], 1);
         state.insert(root);
         let (tx, _rx) = events::event_channel();
+        queue_file_level_reviews(&mock, 2);
         let mut orch = Orchestrator::new(mock, state, tx).with_limits(limits);
 
         let result = orch.run(root_id).await.unwrap();
@@ -5257,6 +5383,7 @@ mod tests {
             ..LimitsConfig::default()
         };
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
 
@@ -5401,6 +5528,7 @@ mod tests {
             ..LimitsConfig::default()
         };
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
 
@@ -5501,6 +5629,7 @@ mod tests {
             ..LimitsConfig::default()
         };
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
 
@@ -5553,6 +5682,7 @@ mod tests {
             ..LimitsConfig::default()
         };
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
 
@@ -5601,6 +5731,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -5644,6 +5775,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -5686,6 +5818,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -5724,6 +5857,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -5763,6 +5897,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -5883,6 +6018,7 @@ mod tests {
                 rationale: "fix".into(),
             });
 
+        queue_file_level_reviews(&mock, 1);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         // root(1) + child(2) = 2 tasks. Fix would add a 3rd. Set limit to 2.
         orch.limits.max_total_tasks = 2;
@@ -6010,6 +6146,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits.max_total_tasks = 100;
         let result = orch.run(root_id).await.unwrap();
@@ -6207,6 +6344,7 @@ mod tests {
                 .push_back(pass_verification());
         }
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         // root(1) + 2 children = 3, limit = 3 → 3 is NOT > 3 → allowed.
         orch.limits.max_total_tasks = 3;
@@ -6273,6 +6411,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -6320,6 +6459,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification());
 
+        queue_file_level_reviews(&mock, 2);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -6383,6 +6523,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification()); // root re-verify passes
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -6449,6 +6590,7 @@ mod tests {
             .unwrap()
             .push_back(pass_verification()); // root re-verify passes
 
+        queue_file_level_reviews(&mock, 3);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         let result = orch.run(root_id).await.unwrap();
         assert_eq!(result, TaskOutcome::Success);
@@ -6481,6 +6623,7 @@ mod tests {
             ..LimitsConfig::default()
         };
 
+        queue_file_level_reviews(&mock, 1);
         let (mut orch, root_id, _rx) = make_orchestrator(mock);
         orch.limits = limits;
         let result = orch.run(root_id).await.unwrap();
@@ -6899,5 +7042,304 @@ mod tests {
         let ctx = orch.build_context(parent_id).unwrap();
         assert_eq!(ctx.children.len(), 1, "should skip dangling subtask ID");
         assert_eq!(ctx.children[0].goal, "real child");
+    }
+
+    // -----------------------------------------------------------------------
+    // File-level review tests
+    // -----------------------------------------------------------------------
+
+    /// Leaf passes file-level review -> completes normally.
+    #[tokio::test]
+    async fn file_level_review_pass_completes() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Child verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // File-level review passes.
+        mock.file_level_review_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_file_level_review());
+
+        // Root verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
+        assert_eq!(
+            orch.state.get(child_id).unwrap().phase,
+            TaskPhase::Completed
+        );
+
+        // FileLevelReviewCompleted event emitted with passed=true.
+        let mut saw_review_passed = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::FileLevelReviewCompleted { task_id, passed } if task_id == child_id && passed)
+            {
+                saw_review_passed = true;
+            }
+        }
+        assert!(
+            saw_review_passed,
+            "FileLevelReviewCompleted(passed=true) event not found"
+        );
+    }
+
+    /// Leaf fails file-level review -> enters fix loop.
+    #[tokio::test]
+    async fn file_level_review_fail_triggers_fix_loop() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // File-level review fails.
+        mock.file_level_review_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_file_level_review("missing error handling"));
+
+        // Fix attempt succeeds.
+        mock.fix_leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Re-verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // File-level review passes on second try.
+        mock.file_level_review_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_file_level_review());
+
+        // Root verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let child_id = orch.state.get(root_id).unwrap().subtask_ids[0];
+        let child = orch.state.get(child_id).unwrap();
+        assert_eq!(child.phase, TaskPhase::Completed);
+        assert_eq!(child.fix_attempts.len(), 1);
+
+        // Both review events emitted: failed then passed.
+        let mut review_events: Vec<bool> = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Event::FileLevelReviewCompleted { task_id, passed } = event {
+                if task_id == child_id {
+                    review_events.push(passed);
+                }
+            }
+        }
+        assert_eq!(
+            review_events,
+            vec![false, true],
+            "expected [failed, passed] review events"
+        );
+    }
+
+    /// Branch tasks skip file-level review, completing directly after verification.
+    #[tokio::test]
+    async fn branch_skips_file_level_review() {
+        let mock = MockAgentService::new();
+
+        mock.decompose_responses
+            .lock()
+            .unwrap()
+            .push_back(one_subtask_decomposition());
+
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Child verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Root (branch) verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // No file_review_responses queued for root — branch tasks skip review.
+        // If branch tried to call file_level_review, the default mock would
+        // pass; but we verify no event is emitted for the root.
+
+        queue_file_level_reviews(&mock, 2);
+        let (mut orch, root_id, mut rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        // No FileLevelReviewCompleted event for the root (branch) task.
+        let mut root_review_events = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::FileLevelReviewCompleted { task_id, .. } if task_id == root_id)
+            {
+                root_review_events += 1;
+            }
+        }
+        assert_eq!(
+            root_review_events, 0,
+            "branch tasks should not emit FileLevelReviewCompleted"
+        );
+    }
+
+    /// Fix task (`is_fix_task=true`) that fails file-level review -> fails immediately (no fix loop).
+    #[tokio::test]
+    async fn fix_task_file_review_fail_no_fix_loop() {
+        let mock = MockAgentService::new();
+
+        // Root branches, original child succeeds, root verify fails.
+        setup_branch_with_failing_root_verify(&mock, "root check failed");
+
+        // Original child consumes file review from queue before fix subtask.
+        mock.file_level_review_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_file_level_review());
+
+        // Branch fix round 1: design returns 1 fix subtask.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+
+        // Fix subtask: assessed as leaf.
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+
+        // Fix subtask executes successfully.
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+
+        // Fix subtask verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        // Fix subtask file-level review FAILS -> must fail immediately (is_fix_task).
+        mock.file_level_review_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_file_level_review("fix incomplete"));
+
+        // Root re-verification after round 1 (fix subtask failed).
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(fail_verification("root still failing"));
+
+        // Round 2: fix subtask succeeds fully.
+        mock.fix_subtask_responses
+            .lock()
+            .unwrap()
+            .push_back(one_fix_subtask_decomposition());
+        mock.assess_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_assessment());
+        mock.leaf_responses
+            .lock()
+            .unwrap()
+            .push_back(leaf_success());
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+        mock.file_level_review_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_file_level_review());
+
+        // Root re-verification passes.
+        mock.verify_responses
+            .lock()
+            .unwrap()
+            .push_back(pass_verification());
+
+        let (mut orch, root_id, _rx) = make_orchestrator(mock);
+        let result = orch.run(root_id).await.unwrap();
+        assert_eq!(result, TaskOutcome::Success);
+
+        let root = orch.state.get(root_id).unwrap();
+        assert_eq!(root.verification_fix_rounds, 2);
+
+        // Fix subtask from round 1 should have failed (no fix loop entered).
+        let fix1_id = root.subtask_ids[1];
+        let fix1 = orch.state.get(fix1_id).unwrap();
+        assert!(fix1.is_fix_task);
+        assert_eq!(fix1.phase, TaskPhase::Failed);
+        assert_eq!(
+            fix1.fix_attempts.len(),
+            0,
+            "fix task should not enter fix loop on file-level review failure"
+        );
     }
 }

@@ -14,6 +14,7 @@ pub struct MockAgentService {
     pub decompose_responses: Mutex<VecDeque<DecompositionResult>>,
     pub fix_subtask_responses: Mutex<VecDeque<DecompositionResult>>,
     pub verify_responses: Mutex<VecDeque<VerificationResult>>,
+    pub file_level_review_responses: Mutex<VecDeque<VerificationResult>>,
     pub checkpoint_responses: Mutex<VecDeque<CheckpointDecision>>,
     pub checkpoint_errors: Mutex<VecDeque<String>>,
     pub verify_errors: Mutex<HashMap<TaskId, VecDeque<Option<String>>>>,
@@ -33,6 +34,7 @@ impl MockAgentService {
             decompose_responses: Mutex::new(VecDeque::new()),
             fix_subtask_responses: Mutex::new(VecDeque::new()),
             verify_responses: Mutex::new(VecDeque::new()),
+            file_level_review_responses: Mutex::new(VecDeque::new()),
             checkpoint_responses: Mutex::new(VecDeque::new()),
             checkpoint_errors: Mutex::new(VecDeque::new()),
             verify_errors: Mutex::new(HashMap::new()),
@@ -168,6 +170,19 @@ impl AgentService for MockAgentService {
             .pop_front()
             .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no verify response queued"))
+    }
+
+    async fn file_level_review(
+        &self,
+        _ctx: &TaskContext,
+        _model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        self.file_level_review_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .map(mock_result)
+            .ok_or_else(|| anyhow::anyhow!("no file_level_review response queued"))
     }
 
     async fn checkpoint(

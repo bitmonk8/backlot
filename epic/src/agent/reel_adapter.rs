@@ -334,6 +334,29 @@ impl AgentService for ReelAgent {
         })
     }
 
+    async fn file_level_review(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        let pair = prompts::build_file_level_review(ctx);
+        let schema = wire::verification_schema();
+        let AgentResult { value: wire, meta }: AgentResult<VerificationWire> = self
+            .run_request(
+                &pair.system_prompt,
+                &pair.query,
+                model,
+                readonly_grant(),
+                schema,
+                false,
+            )
+            .await?;
+        Ok(AgentResult {
+            value: VerificationResult::try_from(wire)?,
+            meta,
+        })
+    }
+
     async fn checkpoint(
         &self,
         ctx: &TaskContext,

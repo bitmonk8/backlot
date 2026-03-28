@@ -149,6 +149,26 @@
 
 `src/agent/reel_adapter.rs` — `execute_grant_includes_write_and_nu` and `readonly_grant_includes_nu_not_write` reference the old `NU` grant name (now `TOOLS`). **Category: Cruft.**
 
-### 36. Pre-existing: stale NU references and event count in README/DESIGN
+### 36. Pre-existing: stale NU references in README/DESIGN
 
-`README.md` — References old `NU` grant name at lines 52, 61, 64-66. States "19 event types" (should be 23). `docs/DESIGN.md` — Per-Phase Tool Grants table uses `NU` at lines 113-116. **Category: Cruft.**
+`README.md` — References old `NU` grant name at lines 52, 61, 64-66. `docs/DESIGN.md` — Per-Phase Tool Grants table uses `NU` at lines 113-116. **Category: Cruft.**
+
+### 37. `file_level_review` in `ReelAgent` is verbatim copy of `verify`
+
+`src/agent/reel_adapter.rs` — `file_level_review` is identical to `verify` except for the prompt builder call. Both construct `verification_schema()`, call `run_request` with `readonly_grant()`, and `TryFrom` the wire type. Extract a shared helper parameterized by `PromptPair`. **Category: Simplification.**
+
+### 38. Duplicate failure-routing in `finalize_task` for file-level review
+
+`src/orchestrator.rs` — When file-level review fails in `finalize_task`, the failure-handling logic (is_fix_task check, routing to `fail_task` vs `leaf_retry_loop`) duplicates the `VerificationOutcome::Fail` arm directly below it. Could fall through to the existing failure-handling code. **Category: Simplification.**
+
+### 39. `finalize_task` reimplements verify+review inline instead of calling `try_verify`
+
+`src/orchestrator.rs` — `finalize_task` runs verification and file-level review inline rather than delegating to `try_verify` (which already encapsulates both). The two code paths must be kept in sync manually. **Category: Separation.**
+
+### 40. Missing graceful error degradation in `try_file_level_review`
+
+`src/orchestrator.rs` — When `file_level_review()` returns `Err(e)`, the `?` operator propagates it as a fatal `OrchestratorError::Agent`, aborting the run. By contrast, `try_verify` catches agent errors and degrades to `VerifyOutcome::Failed`. A transient agent error during file-level review crashes the run. **Category: Correctness.**
+
+### 41. `branch_skips_file_level_review` test relies on event assertion only
+
+`src/orchestrator.rs` — The test verifies branches skip file-level review by checking for zero `FileLevelReviewCompleted` events for the root task. It cannot distinguish "correctly skipped the call" from "incorrectly called but returned Pass." A stronger test would verify the agent method is never invoked. **Category: Testing.**

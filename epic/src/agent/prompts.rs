@@ -326,6 +326,40 @@ subtask implementations."
     }
 }
 
+pub fn build_file_level_review(ctx: &TaskContext) -> PromptPair {
+    let system_prompt = "\
+You are a file-level reviewer in a recursive problem-solving system.
+
+A task has been implemented and passed build/lint/test verification. Your job is to
+independently verify that the actual source file changes correctly implement the
+task's goal and verification criteria.
+
+This is semantic review — you are checking intent and correctness, not just
+compilation or test passage.
+
+Guidelines:
+- Read the actual modified files to verify changes.
+- Check that every verification criterion is addressed in the implementation.
+- Look for: missing changes, incorrect implementations, logic errors, unintended side effects.
+- Report pass only if the implementation correctly fulfills all criteria.
+- Provide detailed explanation of what was reviewed and any issues found.
+
+Respond with the required JSON schema."
+        .into();
+
+    let query = format!(
+        "{context}\n\n\
+         Review the actual source files changed by this task. Verify that the \
+         implementation correctly fulfills the goal and all verification criteria.",
+        context = format_context(ctx),
+    );
+
+    PromptPair {
+        system_prompt,
+        query,
+    }
+}
+
 pub fn build_checkpoint(ctx: &TaskContext, discoveries: &[String]) -> PromptPair {
     let system_prompt = "\
 You are a checkpoint reviewer in a recursive problem-solving system.
@@ -503,6 +537,16 @@ mod tests {
             parent_discoveries: Vec::new(),
             parent_decomposition_rationale: None,
         }
+    }
+
+    #[test]
+    fn file_level_review_prompt_contains_context() {
+        let ctx = test_context();
+        let pair = build_file_level_review(&ctx);
+        assert!(pair.query.contains("implement feature X"));
+        assert!(pair.query.contains("tests pass"));
+        assert!(pair.system_prompt.contains("file-level reviewer"));
+        assert!(pair.system_prompt.contains("semantic review"));
     }
 
     #[test]

@@ -132,6 +132,13 @@ pub trait AgentService: Send + Sync {
         model: Model,
     ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<VerificationResult>>> + Send;
 
+    /// File-level review: verify source files reflect intended changes.
+    fn file_level_review(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<VerificationResult>>> + Send;
+
     /// Inter-subtask checkpoint after a child reports discoveries.
     fn checkpoint(
         &self,
