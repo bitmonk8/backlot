@@ -1035,16 +1035,16 @@ pub(crate) mod test_support {
             .is_ok()
     }
 
-    /// Skip the current test if nu is not available.
-    macro_rules! skip_no_nu {
+    /// Panic if nu is not available — tests must never silently skip.
+    macro_rules! require_nu {
         () => {
-            if !$crate::nu_session::test_support::nu_available() {
-                eprintln!("SKIP: nu binary not available");
-                return;
-            }
+            assert!(
+                $crate::nu_session::test_support::nu_available(),
+                "nu binary not available — build with `cargo build` first"
+            );
         };
     }
-    pub(crate) use skip_no_nu;
+    pub(crate) use require_nu;
 
     /// Base directory for sandbox test temp dirs.
     pub fn sandbox_test_base() -> PathBuf {
@@ -1099,7 +1099,7 @@ pub(crate) mod test_support {
     clippy::match_same_arms
 )]
 mod tests {
-    use super::test_support::{isolated_session, sandbox_test_base, skip_no_nu};
+    use super::test_support::{isolated_session, sandbox_test_base, require_nu};
     use super::*;
 
     /// Creates a `TempDir` with a nested session temp dir and builds a sandbox policy.
@@ -2024,7 +2024,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_spawn_creates_session() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
@@ -2032,7 +2032,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_spawn_is_idempotent() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
@@ -2045,7 +2045,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_drop_cleans_up() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         {
             let (session, _tool) = isolated_session();
@@ -2056,7 +2056,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_kill_then_evaluate_respawns() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
@@ -2068,7 +2068,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_evaluate_simple_echo() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         let result = try_eval(
@@ -2086,7 +2086,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_evaluate_error_command() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         let result = try_eval(
@@ -2104,7 +2104,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_evaluate_stderr_none_on_success() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         let result = try_eval(&session, "1 + 1", 30, tmp.path(), ToolGrant::TOOLS).await;
@@ -2128,7 +2128,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_evaluate_multiple_sequential() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         let result = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::TOOLS).await;
@@ -2145,7 +2145,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_custom_command_reel_read() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2161,7 +2161,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_custom_command_reel_write() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2177,7 +2177,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_custom_command_reel_glob() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2194,7 +2194,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_custom_command_reel_edit() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2214,7 +2214,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_custom_command_reel_grep() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2229,7 +2229,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_timeout_kills_process() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         let result = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::TOOLS).await;
@@ -2256,7 +2256,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_grant_change_respawns() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         let result = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::TOOLS).await;
@@ -2277,7 +2277,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_generation_prevents_stale_writeback() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
@@ -2302,7 +2302,7 @@ mod tests {
     #[tokio::test]
     async fn integration_project_root_change_respawns() {
         // Changing project root between evaluations triggers respawn (issue #7).
-        skip_no_nu!();
+        require_nu!();
         let tmp1 = tmp_sandbox_project();
         let tmp2 = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
@@ -2319,7 +2319,7 @@ mod tests {
     #[tokio::test]
     async fn integration_network_grant_change_respawns() {
         // Adding NETWORK grant triggers respawn (issue #38).
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         let result1 = try_eval(&session, "echo 'no-net'", 30, tmp.path(), ToolGrant::TOOLS).await;
@@ -2355,7 +2355,7 @@ mod tests {
         // cannot distinguish sequential reuse from concurrent spawn without
         // exposing internal state (e.g. process IDs). The test confirms
         // correctness but not concurrency.
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         let root = tmp.path().to_path_buf();
@@ -2376,7 +2376,7 @@ mod tests {
     async fn integration_kill_during_evaluate_discards_process() {
         // kill() during Phase 2 (blocking I/O) bumps generation. Phase 3
         // sees the mismatch and discards the process (issue #46).
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         let (session, _tool) = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
@@ -2402,7 +2402,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_env_filtering_rg_available() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = tmp_sandbox_project();
         std::fs::write(tmp.path().join("needle.txt"), "haystack\n").unwrap();
         let (session, _tool) = isolated_session();
@@ -2434,7 +2434,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     async fn integration_sandbox_read_only_prevents_writes() {
         // read_path policy must block file creation/mutation inside the project root.
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2564,7 +2564,7 @@ mod tests {
         // A read-only session can write to its per-session temp dir, but must
         // not be able to pivot that access back to the project root — e.g.
         // copy a file to temp, modify it, then write it back.
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2631,7 +2631,7 @@ mod tests {
     #[tokio::test]
     async fn integration_sandbox_write_grant_permits_writes() {
         // Write grant must allow file creation in the project root.
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2661,7 +2661,7 @@ mod tests {
     async fn integration_sandbox_write_paths_permits_subdir_writes() {
         // write_paths must allow writes to a specific subdirectory while
         // the rest of the project root remains read-only.
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2726,12 +2726,10 @@ mod tests {
         // Control: rg works when invoked directly (no sandbox). Proves the
         // binary is present and functional, isolating AppContainer as the
         // cause when rg fails inside the sandbox.
-        skip_no_nu!();
+        require_nu!();
         let tool_dir = option_env!("NU_CACHE_DIR").map(std::path::Path::new);
-        let Some(rg_binary) = resolve_rg_binary(tool_dir) else {
-            eprintln!("skipping: rg binary not found");
-            return;
-        };
+        let rg_binary = resolve_rg_binary(tool_dir)
+            .expect("rg binary not found — build with `cargo build` first");
 
         // Invoke rg directly — no sandbox, no nu.
         let output = std::process::Command::new(&rg_binary)
@@ -2758,7 +2756,7 @@ mod tests {
         // Requires NUL device ACL grant (via lot::grant_appcontainer_prerequisites) to pass.
         // Without it, nu's MCP mode opens \\.\NUL for child stdin,
         // AppContainer denies access (os error 5), and rg fails.
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2812,7 +2810,7 @@ mod tests {
     /// or specifically blocks CreateProcess (child process spawning).
     #[tokio::test]
     async fn integration_sandbox_diagnose_rg_access() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2915,7 +2913,7 @@ mod tests {
     /// being blocked, not file access. If unreadable, the issue is ACLs.
     #[tokio::test]
     async fn integration_sandbox_rg_file_readable() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -2980,7 +2978,7 @@ mod tests {
     #[tokio::test]
     async fn integration_execute_tool_read_end_to_end() {
         // Full path: execute_tool("Read") → translate_tool_call → nu session → parse result.
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -3015,7 +3013,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_write_end_to_end() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -3046,7 +3044,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_glob_end_to_end() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -3078,7 +3076,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_edit_end_to_end() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -3122,7 +3120,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_grep_end_to_end() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -3161,7 +3159,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_nushell_end_to_end() {
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -3194,7 +3192,7 @@ mod tests {
     #[tokio::test]
     async fn integration_execute_tool_grant_denied() {
         // execute_tool checks grants before touching nu session.
-        skip_no_nu!();
+        require_nu!();
         let env = sandbox_env();
         let tmp = &env.project;
         let session = &env.session;
@@ -3357,7 +3355,7 @@ mod tests {
         // Without NETWORK grant, the sandbox should block outbound network access.
         // A local loopback listener ensures the port is open — any failure is
         // due to sandbox denial, not network unavailability.
-        skip_no_nu!();
+        require_nu!();
         let (_listener, port) = loopback_listener();
         let env = sandbox_env();
         let tmp = &env.project;
@@ -3431,7 +3429,7 @@ mod tests {
         // A responding loopback listener provides a real HTTP 200 response so
         // that `http get` succeeds and the test reaches the Ok path, where we
         // verify no sandbox denial occurred.
-        skip_no_nu!();
+        require_nu!();
         let port = spawn_http_responder();
         let env = sandbox_env();
         let tmp = &env.project;

@@ -477,7 +477,7 @@ and reusability.
   "operation not permitted", "not allowed", "seatbelt", "sandbox denial",
   "sandbox-exec", "appcontainer", "seccomp"). Both
   network tests use it, keeping the keyword list in one place.
-- `skip_no_nu!()` macro skips integration tests when nu binary is unavailable.
+- `require_nu!()` macro panics if nu binary is unavailable — tests must never silently skip.
 - Mock `ClientFactory` and `ToolExecutor` for agent-level tests without real
   providers.
 

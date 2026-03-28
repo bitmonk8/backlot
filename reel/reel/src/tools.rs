@@ -647,7 +647,7 @@ fn format_nu_output(raw: String) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::nu_session::test_support::{isolated_session, sandbox_test_base, skip_no_nu};
+    use crate::nu_session::test_support::{isolated_session, sandbox_test_base, require_nu};
     use tempfile::TempDir;
 
     /// Helper: execute a tool in a fresh temp dir (for tests that don't need
@@ -1984,7 +1984,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_read() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
         let (session, _tool) = isolated_session();
         let file = tmp.path().join("hello.txt");
@@ -2007,7 +2007,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_write() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
         let (session, _tool) = isolated_session();
         let file = tmp.path().join("out.txt");
@@ -2034,7 +2034,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_edit() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
         let (session, _tool) = isolated_session();
         let file = tmp.path().join("edit_me.txt");
@@ -2063,7 +2063,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_glob() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
         let (session, _tool) = isolated_session();
         std::fs::write(tmp.path().join("foo.txt"), "").unwrap();
@@ -2087,7 +2087,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_grep() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
         let (session, _tool) = isolated_session();
         std::fs::write(tmp.path().join("searchme.txt"), "needle in haystack\n").unwrap();
@@ -2111,7 +2111,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_write_denied_without_grant() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
         let (session, _tool) = isolated_session();
         let input = serde_json::json!({
@@ -2129,7 +2129,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_read_nonexistent() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
         let (session, _tool) = isolated_session();
         let input = serde_json::json!({
@@ -2145,7 +2145,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_execute_tool_edit_no_match() {
-        skip_no_nu!();
+        require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
         let (session, _tool) = isolated_session();
         let file = tmp.path().join("edit_nomatch.txt");
