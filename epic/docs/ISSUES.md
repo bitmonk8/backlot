@@ -181,17 +181,17 @@
 
 `src/orchestrator/mod.rs` and `src/task/leaf.rs` — Both implement verify + file-level-review logic. The orchestrator version serves branch paths; the task version serves leaf paths. Core agent interaction is identical. **Category: Separation.**
 
-### 44. Duplicate `check_scope`/`check_scope_circuit_breaker` across orchestrator and task
+### 44. Duplicate `check_scope` across leaf and branch task modules
 
-`src/orchestrator/mod.rs` and `src/task/leaf.rs` — Both extract magnitude and project_root, call `git_diff_numstat`, call `evaluate_scope`. Orchestrator version used in branch fix loop; task version in leaf fix loop. **Category: Separation.**
+`src/task/leaf.rs` (`check_scope`) and `src/task/branch.rs` (`check_branch_scope`) — Both extract magnitude and project_root, call `git_diff_numstat`, call `evaluate_scope`. Same logic in two Task methods. Should be consolidated into a shared helper on Task. **Category: Separation.**
 
 ### 45. `__agent_error__` sentinel string for error propagation
 
 `src/task/leaf.rs` and `src/orchestrator/mod.rs` — `Task::execute_leaf` returns `TaskOutcome::Failed { reason: "__agent_error__: ..." }` and the orchestrator parses it with `strip_prefix`. Stringly-typed error channel. A `Result<TaskOutcome, anyhow::Error>` return type would eliminate this. **Category: Design.**
 
-### 46. `ChildResponse`/`BranchResult` dead scaffolding
+### 46. (Resolved) `ChildResponse` now used; `BranchResult` removed
 
-`src/task/branch.rs` — Both enums are `#[allow(dead_code)]` with no consumers. Placed as interface types for future branch migration. **Category: Design.**
+`src/task/branch.rs` — `ChildResponse` is now used by `handle_checkpoint` and the orchestrator's checkpoint handling. `BranchResult` was removed as dead code. **Category: Resolved.**
 
 ### 47. `emit_usage_event` sends `phase_cost_usd: 0.0`
 
@@ -212,3 +212,27 @@
 ### 51. Test uses `std::env::temp_dir()` for checkpoint test
 
 `src/orchestrator/mod.rs` — `checkpoint_saves_state` test uses `std::env::temp_dir()`. Per CLAUDE.md, AppContainer sandboxing requires project-local dirs. Should use `TempDir::new_in()` with a project-local path. **Category: Testing.**
+
+### 52. `BranchVerifyOutcome` duplicates `VerifyOutcome`
+
+`src/task/branch.rs` — `BranchVerifyOutcome { Passed, Failed { reason } }` is structurally identical to `task::verify::VerifyOutcome { Passed, Failed(String) }`. Could reuse `VerifyOutcome` and eliminate the redundant type. **Category: Simplification.**
+
+### 53. Duplicated supersede_pending loop in orchestrator
+
+`src/orchestrator/mod.rs` — The loop marking pending children as `Failed` and emitting `TaskCompleted` events appears in both `execute_branch` (checkpoint escalation) and `attempt_recovery` (child failure). Same pattern, ~20 lines each. Should extract an `apply_recovery_plan` or `supersede_pending_children` helper. **Category: Separation.**
+
+### 54. Recovery eligibility policy split across Task and Orchestrator
+
+`src/task/branch.rs` (`handle_checkpoint` lines 311-319) and `src/orchestrator/mod.rs` (`attempt_recovery` lines 900-912) — Both check `is_fix_task` and `recovery_budget_check` before recovery. Policy is duplicated across layers. Extract a shared `try_recovery` method on Task. **Category: Separation.**
+
+### 55. Event emission in `assess_and_design_recovery` violates stated design principle
+
+`src/task/branch.rs` — `assess_and_design_recovery` emits `RecoveryStarted` and `RecoveryPlanSelected` events and records to vault. The file's header comment states Task methods contain "decision logic and self-contained operations" while coordination stays in the orchestrator. Event emission is coordination. **Category: Separation.**
+
+### 56. No direct unit tests for branch Task methods
+
+`src/task/branch.rs` — 7 new Task methods (`verify_branch`, `fix_round_budget_check`, `design_fix`, `recovery_budget_check`, `assess_and_design_recovery`, `handle_checkpoint`, `check_branch_scope`) are tested only indirectly through orchestrator integration tests. Direct unit tests (especially for `fix_round_budget_check` boundary cases and `handle_checkpoint` three-way branching) would catch regressions independently. **Category: Testing.**
+
+### 57. `handle_checkpoint` chains classification + adjust + full escalation pipeline
+
+`src/task/branch.rs` — `handle_checkpoint` classifies discoveries, handles adjust (vault + events), and on escalate runs the full recovery pipeline (budget check, assess, design). The escalation arm (~30 lines) could be extracted into `escalate_to_recovery` for independent testing and reuse. **Category: Separation.**

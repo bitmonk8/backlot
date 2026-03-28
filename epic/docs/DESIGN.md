@@ -114,11 +114,11 @@ The orchestrator is a pure coordinator. Tasks own their behavior.
 
 - **Leaf tasks** execute their full lifecycle internally via `Task::execute_leaf()`: agent calls, retry/escalation (Haiku -> Sonnet -> Opus), verification gates, file-level review, fix loop, scope circuit breaker. The orchestrator calls `run_leaf()` which builds a `TreeContext`, gets `&mut Task`, calls `execute_leaf`, and handles completion/failure.
 
-- **Branch tasks** have decomposition, checkpoint, and recovery logic in the orchestrator (cross-task coordination). The `ChildResponse` and `BranchResult` enums in `task/branch.rs` define the interface for future migration.
+- **Branch tasks** own decision logic via Task methods in `task/branch.rs`: `verify_branch()`, `fix_round_budget_check()`, `design_fix()`, `recovery_budget_check()`, `assess_and_design_recovery()`, `handle_checkpoint()`, `check_branch_scope()`. Each method receives `TreeContext` + `Services`, makes agent calls, mutates only `self`, and returns a structured decision enum (`BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision`, `ChildResponse`). The orchestrator acts on these decisions by performing cross-task operations: creating subtasks, executing children, failing pending siblings.
 
 - **`Services<A>`** bundles shared infrastructure (agent, events, vault, limits, paths) passed to task methods during execution.
 
-- **`TreeContext`** is a read-only owned snapshot of tree state (parent goal, siblings, children, checkpoint guidance) built by the orchestrator before calling task methods. Resolves `&state` / `&mut task` borrow conflicts.
+- **`TreeContext`** is a read-only owned snapshot of tree state (parent goal, siblings, children, checkpoint guidance) built by the orchestrator before calling task methods. Resolves `&state` / `&mut task` borrow conflicts. Rebuilt before each Task method call when task state may have changed.
 
 ### Task Self-Contained Mutations
 
@@ -128,16 +128,23 @@ The orchestrator is a pure coordinator. Tasks own their behavior.
 
 ```
 orchestrator/
-  mod.rs          Coordinator: run(), execute_task(), run_leaf(), run_branch(),
-                  create_subtasks(), fail_pending_children(), branch_fix_loop,
-                  attempt_recovery, checkpoint handling
+  mod.rs          Thin coordinator: run(), execute_task(), run_leaf(),
+                  execute_branch() (decomposition + child loop),
+                  finalize_branch() (delegates to Task::verify_branch),
+                  branch_fix_loop() (delegates to Task fix/design methods),
+                  attempt_recovery() (delegates to Task recovery methods),
+                  create_subtasks(), fail_pending_children()
   context.rs      TreeContext struct, build_tree_context(), build_context()
   services.rs     Services<A> struct
 task/
   mod.rs          Task struct, types, self-contained mutation methods
   leaf.rs         Task::execute_leaf(): full lifecycle (execute -> verify -> fix loop)
-  branch.rs       SubtaskSpec, DecompositionResult, CheckpointDecision,
-                  ChildResponse, BranchResult enums
+  branch.rs       Branch decision types (SubtaskSpec, DecompositionResult,
+                  CheckpointDecision, BranchVerifyOutcome, FixBudgetCheck,
+                  RecoveryDecision, ChildResponse) and
+                  Task methods (verify_branch, fix_round_budget_check,
+                  design_fix, recovery_budget_check, assess_and_design_recovery,
+                  handle_checkpoint, check_branch_scope)
   scope.rs        Scope circuit breaker: git_diff_numstat, evaluate_scope, ScopeCheck
   assess.rs       AssessmentResult
   verify.rs       VerificationOutcome, VerificationResult, VerifyOutcome
@@ -389,11 +396,11 @@ Before each fix attempt (leaf or branch), measure actual change magnitude:
 3. If any metric exceeds 3x the estimate: fail with `SCOPE_EXCEEDED`, roll back
 
 ```rust
-// Orchestrator method — gets project_root from self.services
-async fn check_scope_circuit_breaker(
+// Task method — leaf uses check_scope(), branch uses check_branch_scope()
+async fn check_branch_scope<A: AgentService>(
     &self,
-    task_id: TaskId,
-) -> Result<ScopeCheck, OrchestratorError>;
+    svc: &Services<A>,
+) -> ScopeCheck;
 
 enum ScopeCheck {
     WithinBounds,

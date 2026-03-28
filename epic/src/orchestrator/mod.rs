@@ -8,8 +8,8 @@ use crate::config::project::LimitsConfig;
 use crate::events::{Event, EventSender};
 use crate::state::EpicState;
 use crate::task::assess::AssessmentResult;
-use crate::task::branch::{CheckpointDecision, SubtaskSpec};
-use crate::task::scope::{self, ScopeCheck};
+use crate::task::branch::SubtaskSpec;
+use crate::task::scope::ScopeCheck;
 use crate::task::verify::{VerificationOutcome, VerifyOutcome};
 use crate::task::{Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
 use services::Services;
@@ -364,32 +364,6 @@ impl<A: AgentService> Orchestrator<A> {
         context::build_context(&self.state, id)
     }
 
-    async fn check_scope_circuit_breaker(
-        &self,
-        task_id: TaskId,
-    ) -> Result<ScopeCheck, OrchestratorError> {
-        let task = self
-            .state
-            .get(task_id)
-            .ok_or(OrchestratorError::TaskNotFound(task_id))?;
-
-        let magnitude = match &task.magnitude {
-            Some(m) => m.clone(),
-            None => return Ok(ScopeCheck::WithinBounds),
-        };
-
-        let project_root = match &self.services.project_root {
-            Some(p) => p.clone(),
-            None => return Ok(ScopeCheck::WithinBounds),
-        };
-
-        let numstat = scope::git_diff_numstat(&project_root).await;
-
-        Ok(numstat.map_or(ScopeCheck::WithinBounds, |stdout| {
-            scope::evaluate_scope(&stdout, &magnitude)
-        }))
-    }
-
     // Returns boxed future to support recursion (execute_task → execute_branch → execute_task).
     fn execute_task(
         &mut self,
@@ -524,20 +498,17 @@ impl<A: AgentService> Orchestrator<A> {
         if outcome == TaskOutcome::Success {
             self.transition(id, TaskPhase::Verifying)?;
 
-            let verify_model = self.verification_model(id)?;
-            let ctx = self.build_context(id)?;
-            let agent_result = self.services.agent.verify(&ctx, verify_model).await?;
-            self.accumulate_usage(id, &agent_result.meta);
+            let tree = context::build_tree_context(&self.state, id)?;
+            let task = self
+                .state
+                .get_mut(id)
+                .ok_or(OrchestratorError::TaskNotFound(id))?;
+            let verify_outcome = task.verify_branch(&tree, &self.services).await?;
+            let is_fix_task = task.is_fix_task;
 
-            match agent_result.value.outcome {
-                VerificationOutcome::Pass => self.complete_task_verified(id),
-                VerificationOutcome::Fail { reason } => {
-                    let task = self
-                        .state
-                        .get(id)
-                        .ok_or(OrchestratorError::TaskNotFound(id))?;
-                    let is_fix_task = task.is_fix_task;
-
+            match verify_outcome {
+                crate::task::branch::BranchVerifyOutcome::Passed => self.complete_task_verified(id),
+                crate::task::branch::BranchVerifyOutcome::Failed { reason } => {
                     if is_fix_task {
                         self.fail_task(id, reason)
                     } else {
@@ -554,7 +525,6 @@ impl<A: AgentService> Orchestrator<A> {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // Single loop with distinct phases; splitting adds indirection.
     async fn branch_fix_loop(
         &mut self,
         id: TaskId,
@@ -567,24 +537,22 @@ impl<A: AgentService> Orchestrator<A> {
             .parent_id
             .is_none();
 
-        let max_rounds = if is_root {
-            self.services.limits.root_fix_rounds
-        } else {
-            self.services.limits.branch_fix_rounds
-        };
         let mut failure_reason = initial_failure.to_owned();
 
         loop {
-            // Check round budget before starting a new round.
-            let current_rounds = self
-                .state
-                .get(id)
-                .ok_or(OrchestratorError::TaskNotFound(id))?
-                .verification_fix_rounds;
-
-            if current_rounds >= max_rounds {
-                return self.fail_task(id, failure_reason);
-            }
+            // Check round budget via Task method.
+            let model = {
+                let task = self
+                    .state
+                    .get(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                match task.fix_round_budget_check(is_root, &self.services.limits) {
+                    crate::task::branch::FixBudgetCheck::Exhausted => {
+                        return self.fail_task(id, failure_reason);
+                    }
+                    crate::task::branch::FixBudgetCheck::WithinBudget { model } => model,
+                }
+            };
 
             let round = {
                 let task = self
@@ -594,24 +562,24 @@ impl<A: AgentService> Orchestrator<A> {
                 task.increment_fix_rounds()
             };
 
-            // Sonnet for rounds 1-3, Opus for round 4 (root only).
-            let model = if round <= 3 {
-                Model::Sonnet
-            } else {
-                Model::Opus
-            };
-
-            match self.check_scope_circuit_breaker(id).await? {
-                ScopeCheck::WithinBounds => {}
-                ScopeCheck::Exceeded {
-                    metric,
-                    actual,
-                    limit,
-                } => {
-                    return self.fail_task(
-                        id,
-                        format!("SCOPE_EXCEEDED: {metric} actual={actual} limit={limit}"),
-                    );
+            // Scope circuit breaker via Task method.
+            {
+                let task = self
+                    .state
+                    .get(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                match task.check_branch_scope(&self.services).await {
+                    ScopeCheck::WithinBounds => {}
+                    ScopeCheck::Exceeded {
+                        metric,
+                        actual,
+                        limit,
+                    } => {
+                        return self.fail_task(
+                            id,
+                            format!("SCOPE_EXCEEDED: {metric} actual={actual} limit={limit}"),
+                        );
+                    }
                 }
             }
 
@@ -621,46 +589,39 @@ impl<A: AgentService> Orchestrator<A> {
                 model,
             });
 
-            let ctx = self.build_context(id)?;
-            // Agent errors treated as failed round (best-effort, like recovery).
-            let decomposition = match self
-                .services
-                .agent
-                .design_fix_subtasks(&ctx, model, &failure_reason, round)
-                .await
-            {
-                Ok(agent_result) => {
-                    self.accumulate_usage(id, &agent_result.meta);
-                    agent_result.value
-                }
-                Err(e) => {
-                    eprintln!("warning: fix subtask design failed: {e}");
-                    failure_reason = format!("fix design failed: {e}");
+            // Design fix subtasks via Task method.
+            let tree = context::build_tree_context(&self.state, id)?;
+            let specs = {
+                let task = self
+                    .state
+                    .get_mut(id)
+                    .ok_or(OrchestratorError::TaskNotFound(id))?;
+                task.design_fix(&tree, &self.services, &failure_reason, round, model)
+                    .await?
+            };
+
+            let subtask_specs = match specs {
+                Ok(s) => s,
+                Err(reason) => {
+                    failure_reason = reason;
                     self.checkpoint_save();
                     continue;
                 }
             };
 
-            if decomposition.subtasks.is_empty() {
-                "fix agent produced no subtasks".clone_into(&mut failure_reason);
-                self.checkpoint_save();
-                continue;
-            }
-
-            if let Some(reason) = self.check_task_limit(id, decomposition.subtasks.len()) {
+            if let Some(reason) = self.check_task_limit(id, subtask_specs.len()) {
                 return self.fail_task(id, reason);
             }
 
-            let fix_child_ids =
-                self.create_subtasks(id, decomposition.subtasks, true, true, None)?;
+            // Cross-task: create subtasks (stays in orchestrator).
+            let fix_child_ids = self.create_subtasks(id, subtask_specs, true, true, None)?;
             self.emit(Event::FixSubtasksCreated {
                 task_id: id,
                 count: fix_child_ids.len(),
                 round,
             });
 
-            // Execute each fix subtask. Task-level failures (Ok(Failed)) are tolerated;
-            // infrastructure errors (Err) propagate and abort the run.
+            // Cross-task: execute each fix subtask (stays in orchestrator).
             for &child_id in &fix_child_ids {
                 let _child_outcome = self.execute_task(child_id).await?;
             }
@@ -689,7 +650,7 @@ impl<A: AgentService> Orchestrator<A> {
         self.complete_or_fail(id, outcome)
     }
 
-    #[allow(clippy::too_many_lines)] // Linear sequence of branch steps; splitting adds indirection.
+    #[allow(clippy::too_many_lines)]
     async fn execute_branch(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
         // Resume: reuse existing subtasks if already decomposed.
         let existing_subtasks = self
@@ -769,59 +730,73 @@ impl<A: AgentService> Orchestrator<A> {
                     .clone();
 
                 if !child_discoveries.is_empty() {
-                    let ctx = self.build_context(id)?;
-                    // Agent errors treated as Proceed (best-effort, like recovery).
-                    let decision = match self
-                        .services
-                        .agent
-                        .checkpoint(&ctx, &child_discoveries)
-                        .await
-                    {
-                        Ok(agent_result) => {
-                            self.accumulate_usage(id, &agent_result.meta);
-                            agent_result.value
-                        }
-                        Err(e) => {
-                            eprintln!("warning: checkpoint classification failed: {e}");
-                            CheckpointDecision::Proceed
-                        }
+                    use crate::task::branch::ChildResponse;
+
+                    let tree = context::build_tree_context(&self.state, id)?;
+                    let response = {
+                        let task = self
+                            .state
+                            .get_mut(id)
+                            .ok_or(OrchestratorError::TaskNotFound(id))?;
+                        task.handle_checkpoint(&tree, &self.services, &child_discoveries)
+                            .await?
                     };
-                    match decision {
-                        CheckpointDecision::Proceed => {}
-                        CheckpointDecision::Adjust { guidance } => {
-                            self.emit(Event::CheckpointAdjust { task_id: id });
-                            let vault_content = format!(
-                                "Checkpoint adjust.\nDiscoveries: {}\nGuidance: {guidance}",
-                                child_discoveries.join("; ")
-                            );
-                            let task = self
-                                .state
-                                .get_mut(id)
-                                .ok_or(OrchestratorError::TaskNotFound(id))?;
-                            task.append_checkpoint_guidance(&guidance);
-                            self.record_to_vault(id, "FINDINGS", &vault_content).await;
-                            self.checkpoint_save();
-                        }
-                        CheckpointDecision::Escalate => {
-                            self.emit(Event::CheckpointEscalate { task_id: id });
-                            {
-                                let task = self
+                    self.checkpoint_save();
+
+                    match response {
+                        ChildResponse::Continue => {}
+                        ChildResponse::NeedRecoverySubtasks {
+                            specs,
+                            supersede_pending,
+                        } => {
+                            // Cross-task: mark pending children as Failed.
+                            if supersede_pending {
+                                let existing_child_ids = self
                                     .state
-                                    .get_mut(id)
-                                    .ok_or(OrchestratorError::TaskNotFound(id))?;
-                                task.set_checkpoint_guidance(None);
+                                    .get(id)
+                                    .ok_or(OrchestratorError::TaskNotFound(id))?
+                                    .subtask_ids
+                                    .clone();
+                                for &eid in &existing_child_ids {
+                                    let existing_child = self
+                                        .state
+                                        .get_mut(eid)
+                                        .ok_or(OrchestratorError::TaskNotFound(eid))?;
+                                    if existing_child.phase == TaskPhase::Pending {
+                                        existing_child.phase = TaskPhase::Failed;
+                                        self.emit(Event::TaskCompleted {
+                                            task_id: eid,
+                                            outcome: TaskOutcome::Failed {
+                                                reason: "superseded by recovery re-decomposition"
+                                                    .into(),
+                                            },
+                                        });
+                                    }
+                                }
                             }
-                            let escalation_reason = format!(
-                                "checkpoint escalation: discoveries invalidate current plan. Discoveries: {}",
-                                child_discoveries.join("; ")
-                            );
-                            if let Some(recovery_outcome) =
-                                self.attempt_recovery(id, &escalation_reason).await?
-                            {
-                                return Ok(recovery_outcome);
+                            // Cross-task: check task limit and create subtasks.
+                            if let Some(msg) = self.check_task_limit(id, specs.len()) {
+                                return Ok(TaskOutcome::Failed {
+                                    reason: format!("{msg}: checkpoint escalation"),
+                                });
                             }
-                            // Recovery succeeded: restart child loop.
+                            let count = specs.len();
+                            let parent_rounds = self
+                                .state
+                                .get(id)
+                                .ok_or(OrchestratorError::TaskNotFound(id))?
+                                .recovery_rounds;
+                            self.create_subtasks(id, specs, false, true, Some(parent_rounds))?;
+                            self.emit(Event::RecoverySubtasksCreated {
+                                task_id: id,
+                                count,
+                                round: parent_rounds,
+                            });
+                            // Restart child loop.
                             break;
+                        }
+                        ChildResponse::Failed(reason) => {
+                            return Ok(TaskOutcome::Failed { reason });
                         }
                     }
                 }
@@ -869,12 +844,13 @@ impl<A: AgentService> Orchestrator<A> {
     /// Attempt recovery after a child failure. Returns `Some(Failed)` if recovery
     /// is not possible or rounds are exhausted. Returns `None` if recovery subtasks
     /// were created successfully (caller should restart the child loop).
-    #[allow(clippy::too_many_lines)] // Linear sequence of recovery steps; splitting adds indirection.
     async fn attempt_recovery(
         &mut self,
         parent_id: TaskId,
         failure_reason: &str,
     ) -> Result<Option<TaskOutcome>, OrchestratorError> {
+        use crate::task::branch::RecoveryDecision;
+
         let task = self
             .state
             .get(parent_id)
@@ -887,9 +863,9 @@ impl<A: AgentService> Orchestrator<A> {
             }));
         }
 
-        // Check recovery round budget.
-        let max_recovery = self.services.limits.max_recovery_rounds;
-        if task.recovery_rounds >= max_recovery {
+        // Check recovery round budget via Task method.
+        if !task.recovery_budget_check(&self.services.limits) {
+            let max_recovery = self.services.limits.max_recovery_rounds;
             return Ok(Some(TaskOutcome::Failed {
                 reason: format!("recovery rounds exhausted ({max_recovery}): {failure_reason}"),
             }));
@@ -897,151 +873,82 @@ impl<A: AgentService> Orchestrator<A> {
 
         let round = task.recovery_rounds + 1;
 
-        // Step 1: assess whether recovery is possible.
-        // Agent errors treated as unrecoverable (avoids aborting the entire run
-        // due to transient errors like rate limits or malformed responses).
-        let ctx = self.build_context(parent_id)?;
-        let strategy = match self
-            .services
-            .agent
-            .assess_recovery(&ctx, failure_reason)
-            .await
-        {
-            Ok(agent_result) => {
-                self.accumulate_usage(parent_id, &agent_result.meta);
-                match agent_result.value {
-                    Some(s) => s,
-                    None => {
-                        return Ok(Some(TaskOutcome::Failed {
-                            reason: failure_reason.to_string(),
-                        }));
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("warning: recovery assessment failed: {e}");
-                return Ok(Some(TaskOutcome::Failed {
-                    reason: failure_reason.to_string(),
-                }));
-            }
-        };
+        // assess_and_design_recovery increments recovery_rounds internally
+        // after assessment succeeds but before design.
+        // Checkpoint after the call since the task may have been mutated.
 
-        self.record_to_vault(
-            parent_id,
-            "FINDINGS",
-            &format!("Recovery round {round}.\nFailure: {failure_reason}\nStrategy: {strategy}"),
-        )
-        .await;
-
-        self.emit(Event::RecoveryStarted {
-            task_id: parent_id,
-            round,
-        });
-
-        // Increment before subtask creation so a crash does not grant an
-        // extra recovery round on resume.
-        {
+        // Assess and design recovery via Task method.
+        let tree = context::build_tree_context(&self.state, parent_id)?;
+        let decision = {
             let task = self
                 .state
                 .get_mut(parent_id)
                 .ok_or(OrchestratorError::TaskNotFound(parent_id))?;
-            task.increment_recovery_rounds();
-        }
+            task.assess_and_design_recovery(&tree, &self.services, failure_reason, round)
+                .await?
+        };
         self.checkpoint_save();
 
-        // Step 2: design recovery subtasks (Opus).
-        // Agent errors treated as failed recovery round (round already consumed).
-        let ctx = self.build_context(parent_id)?;
-        let plan = match self
-            .services
-            .agent
-            .design_recovery_subtasks(&ctx, failure_reason, &strategy, round)
-            .await
-        {
-            Ok(agent_result) => {
-                self.accumulate_usage(parent_id, &agent_result.meta);
-                agent_result.value
-            }
-            Err(e) => {
-                eprintln!("warning: recovery plan design failed: {e}");
-                return Ok(Some(TaskOutcome::Failed {
-                    reason: format!("recovery design failed: {failure_reason}"),
-                }));
-            }
-        };
+        match decision {
+            RecoveryDecision::Unrecoverable { reason } => Ok(Some(TaskOutcome::Failed { reason })),
+            RecoveryDecision::Plan {
+                specs,
+                supersede_pending,
+            } => {
+                // Cross-task: mark pending children as Failed for full re-decomposition.
+                if supersede_pending {
+                    let child_ids = self
+                        .state
+                        .get(parent_id)
+                        .ok_or(OrchestratorError::TaskNotFound(parent_id))?
+                        .subtask_ids
+                        .clone();
 
-        if plan.subtasks.is_empty() {
-            return Ok(Some(TaskOutcome::Failed {
-                reason: format!("recovery produced no subtasks: {failure_reason}"),
-            }));
-        }
-
-        let approach = if plan.full_redecomposition {
-            "full"
-        } else {
-            "incremental"
-        };
-        self.emit(Event::RecoveryPlanSelected {
-            task_id: parent_id,
-            approach: approach.into(),
-        });
-
-        // For full re-decomposition, mark remaining pending children as Failed.
-        if plan.full_redecomposition {
-            let child_ids = self
-                .state
-                .get(parent_id)
-                .ok_or(OrchestratorError::TaskNotFound(parent_id))?
-                .subtask_ids
-                .clone();
-
-            for &child_id in &child_ids {
-                let child = self
-                    .state
-                    .get_mut(child_id)
-                    .ok_or(OrchestratorError::TaskNotFound(child_id))?;
-                if child.phase == TaskPhase::Pending {
-                    child.phase = TaskPhase::Failed;
-                    self.emit(Event::TaskCompleted {
-                        task_id: child_id,
-                        outcome: TaskOutcome::Failed {
-                            reason: "superseded by recovery re-decomposition".into(),
-                        },
-                    });
+                    for &child_id in &child_ids {
+                        let child = self
+                            .state
+                            .get_mut(child_id)
+                            .ok_or(OrchestratorError::TaskNotFound(child_id))?;
+                        if child.phase == TaskPhase::Pending {
+                            child.phase = TaskPhase::Failed;
+                            self.emit(Event::TaskCompleted {
+                                task_id: child_id,
+                                outcome: TaskOutcome::Failed {
+                                    reason: "superseded by recovery re-decomposition".into(),
+                                },
+                            });
+                        }
+                    }
                 }
+
+                // Cross-task: check task limit and create recovery subtasks.
+                if let Some(msg) = self.check_task_limit(parent_id, specs.len()) {
+                    return Ok(Some(TaskOutcome::Failed {
+                        reason: format!("{msg}: {failure_reason}"),
+                    }));
+                }
+
+                let count = specs.len();
+
+                // Read parent's recovery round counter before creating subtasks so that
+                // children inherit it during creation (prevents exponential cost growth).
+                let parent_rounds = self
+                    .state
+                    .get(parent_id)
+                    .ok_or(OrchestratorError::TaskNotFound(parent_id))?
+                    .recovery_rounds;
+                self.create_subtasks(parent_id, specs, false, true, Some(parent_rounds))?;
+
+                self.emit(Event::RecoverySubtasksCreated {
+                    task_id: parent_id,
+                    count,
+                    round,
+                });
+
+                // Return None to signal caller should restart the child loop.
+                Ok(None)
             }
         }
-
-        // Step 3: create recovery subtasks (appended to parent's subtask_ids).
-        // Recovery subtasks are NOT marked is_fix_task: they are full tasks that
-        // get their own assessment, verification, and fix loops, but inherit the parent's recovery budget.
-        // Recursion is bounded by config.limits.max_depth, each level's recovery budget,
-        // and the global max_total_tasks cap.
-        if let Some(msg) = self.check_task_limit(parent_id, plan.subtasks.len()) {
-            return Ok(Some(TaskOutcome::Failed {
-                reason: format!("{msg}: {failure_reason}"),
-            }));
-        }
-
-        let count = plan.subtasks.len();
-
-        // Read parent's recovery round counter before creating subtasks so that
-        // children inherit it during creation (prevents exponential cost growth).
-        let parent_rounds = self
-            .state
-            .get(parent_id)
-            .ok_or(OrchestratorError::TaskNotFound(parent_id))?
-            .recovery_rounds;
-        self.create_subtasks(parent_id, plan.subtasks, false, true, Some(parent_rounds))?;
-
-        self.emit(Event::RecoverySubtasksCreated {
-            task_id: parent_id,
-            count,
-            round,
-        });
-
-        // Return None to signal caller should restart the child loop.
-        Ok(None)
     }
 }
 
@@ -1050,7 +957,7 @@ mod tests {
     use super::*;
     use crate::agent::ChildStatus;
     use crate::events::{self, EventReceiver};
-    use crate::task::branch::{DecompositionResult, SubtaskSpec};
+    use crate::task::branch::{CheckpointDecision, DecompositionResult, SubtaskSpec};
     use crate::task::verify::{VerificationOutcome, VerificationResult};
     use crate::task::{Attempt, LeafResult, Magnitude, MagnitudeEstimate, RecoveryPlan, TaskPath};
     use crate::test_support::MockAgentService;
@@ -1817,7 +1724,8 @@ mod tests {
             .with_project_root(PathBuf::from("/nonexistent/path"));
 
         // git will fail on a nonexistent path → best-effort WithinBounds.
-        let result = orch.check_scope_circuit_breaker(task_id).await.unwrap();
+        let task = orch.state.get(task_id).unwrap();
+        let result = task.check_branch_scope(&orch.services).await;
         assert!(matches!(result, ScopeCheck::WithinBounds));
     }
 
@@ -1833,7 +1741,8 @@ mod tests {
         let (tx, _rx) = events::event_channel();
         let orch = Orchestrator::new(mock, state, tx);
 
-        let result = orch.check_scope_circuit_breaker(task_id).await.unwrap();
+        let task = orch.state.get(task_id).unwrap();
+        let result = task.check_branch_scope(&orch.services).await;
         assert!(matches!(result, ScopeCheck::WithinBounds));
     }
 
