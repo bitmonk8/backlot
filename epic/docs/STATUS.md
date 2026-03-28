@@ -77,6 +77,48 @@ Extended `ResearchQuery` from vault-query-only to a multi-step gap-filling pipel
 
 Added file-level review as a leaf verification sub-phase. After verification gates pass for a leaf task, a separate agent call reviews the actual source file changes for intent/requirement alignment. Reuses `VerificationResult`/`VerificationWire`/`verification_schema()` types and `verification_model()` model selection. On failure, feeds into the existing leaf fix loop (or fails immediately for fix tasks). Branch tasks skip file-level review. `try_file_level_review()` helper called from both `finalize_task` (initial execution) and `try_verify` (fix loop re-verification). New `FileLevelReviewCompleted` event variant. `build_file_level_review` prompt builder. 4 new orchestrator tests.
 
+## Source Summary
+
+24 files, 14,657 lines. Test code (58%) outweighs core (42%).
+
+```
+src/                              Total   Core   Test
+├── main.rs                         359    357      2
+├── orchestrator.rs               7,345  1,494  5,851
+├── knowledge.rs                    969    612    357
+├── state.rs                        428    115    313
+├── events.rs                       118    118      0
+├── cli.rs                           69     46     23
+├── init.rs                         582    347    235
+├── sandbox.rs                      262    132    130
+├── test_support.rs                 232      0    232
+├── agent/
+│   ├── mod.rs                      184    184      0
+│   ├── prompts.rs                  879    510    369
+│   ├── reel_adapter.rs             497    432     65
+│   └── wire.rs                     731    414    317
+├── config/
+│   ├── mod.rs                        3      3      0
+│   └── project.rs                  637    294    343
+├── task/
+│   ├── mod.rs                      373    226    147
+│   ├── assess.rs                    12     12      0
+│   ├── branch.rs                    24     24      0
+│   ├── leaf.rs                       2      2      0
+│   └── verify.rs                    19     19      0
+└── tui/
+    ├── mod.rs                      620    503    117
+    ├── task_tree.rs                134    134      0
+    ├── metrics.rs                   96     96      0
+    └── worklog.rs                   82     82      0
+                                 ──────  ─────  ─────
+                                 14,657  6,156  8,501
+```
+
+**Classification**: "Test" = lines inside `#[cfg(test)]` modules + `test_support.rs` (entirely test infrastructure). "Core" = everything else. All source is in `src/` — no `build.rs`, `tests/`, `benches/`, or `examples/` directories.
+
+**Notable**: `orchestrator.rs` is 50% of all source and 69% of all test code. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`.
+
 ## Work Candidates
 
 ### 1. Branch Verification Separation
