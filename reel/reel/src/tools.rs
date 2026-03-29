@@ -1986,7 +1986,7 @@ mod tests {
     async fn integration_execute_tool_read() {
         require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let file = tmp.path().join("hello.txt");
         std::fs::write(&file, "hello world").unwrap();
         let input = serde_json::json!({
@@ -2009,7 +2009,7 @@ mod tests {
     async fn integration_execute_tool_write() {
         require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let file = tmp.path().join("out.txt");
         let input = serde_json::json!({
             "file_path": file.to_str().unwrap().replace('\\', "/"),
@@ -2036,7 +2036,7 @@ mod tests {
     async fn integration_execute_tool_edit() {
         require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let file = tmp.path().join("edit_me.txt");
         std::fs::write(&file, "aaa bbb ccc").unwrap();
         let input = serde_json::json!({
@@ -2065,7 +2065,7 @@ mod tests {
     async fn integration_execute_tool_glob() {
         require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         std::fs::write(tmp.path().join("foo.txt"), "").unwrap();
         std::fs::write(tmp.path().join("bar.txt"), "").unwrap();
         let input = serde_json::json!({
@@ -2089,7 +2089,7 @@ mod tests {
     async fn integration_execute_tool_grep() {
         require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         std::fs::write(tmp.path().join("searchme.txt"), "needle in haystack\n").unwrap();
         let input = serde_json::json!({
             "pattern": "needle",
@@ -2113,7 +2113,7 @@ mod tests {
     async fn integration_execute_tool_write_denied_without_grant() {
         require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let input = serde_json::json!({
             "file_path": tmp.path().join("nope.txt").to_str().unwrap().replace('\\', "/"),
             "content": "should fail"
@@ -2131,7 +2131,7 @@ mod tests {
     async fn integration_execute_tool_read_nonexistent() {
         require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let input = serde_json::json!({
             "file_path": tmp.path().join("does_not_exist.txt").to_str().unwrap().replace('\\', "/")
         });
@@ -2147,7 +2147,7 @@ mod tests {
     async fn integration_execute_tool_edit_no_match() {
         require_nu!();
         let tmp = TempDir::new_in(sandbox_test_base()).unwrap();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let file = tmp.path().join("edit_nomatch.txt");
         std::fs::write(&file, "aaa bbb ccc").unwrap();
         let input = serde_json::json!({

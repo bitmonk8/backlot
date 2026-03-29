@@ -517,6 +517,59 @@ impl NuSession {
         }
     }
 
+    /// Synchronous kill for use in `Drop` impls where an async runtime is
+    /// not available (or re-entrant `block_on` would panic).
+    ///
+    /// Spins briefly on `try_lock` to handle the case where an async task
+    /// just released the lock but the runtime hasn't yielded yet.  Falls
+    /// back to `NuProcess::drop` cleanup if the lock can't be acquired.
+    pub fn kill_sync(&self) {
+        let mut st = {
+            let mut guard = None;
+            for _ in 0..100 {
+                if let Ok(g) = self.state.try_lock() {
+                    guard = Some(g);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            match guard {
+                Some(g) => g,
+                None => return,
+            }
+        };
+        st.generation += 1;
+
+        if let Some(ref handle) = st.inflight_child {
+            let mut guard = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(ref mut child) = *guard {
+                let _ = child.kill();
+            }
+        }
+        st.inflight_child = None;
+
+        if let Some(ref handle) = st.inflight_stdin {
+            let mut guard = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take();
+        }
+        st.inflight_stdin = None;
+
+        if let Some(proc) = st.process.take() {
+            let mut child_guard = proc
+                .child_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(child) = child_guard.take() {
+                let _ = child.kill();
+                bounded_reap(|| child.try_wait(), std::time::Duration::from_secs(5));
+            }
+        }
+    }
+
     async fn evaluate_inner(
         &self,
         command: &str,
@@ -1075,15 +1128,63 @@ pub(crate) mod test_support {
         dest
     }
 
+    /// Wrapper returned by `isolated_session()`.  Ensures the nu process
+    /// is synchronously killed and reaped before the tool `TempDir` is
+    /// deleted, preventing leaked sandbox directories on Windows where
+    /// `TempDir::drop` silently fails when files are still held open.
+    pub struct IsolatedSession {
+        pub session: NuSession,
+        tool: Option<tempfile::TempDir>,
+    }
+
+    impl IsolatedSession {
+        /// Path to the isolated tool directory (contains nu.exe, rg.exe, etc.).
+        pub fn tool_path(&self) -> &Path {
+            self.tool.as_ref().expect("tool dir still alive").path()
+        }
+    }
+
+    impl std::ops::Deref for IsolatedSession {
+        type Target = NuSession;
+        fn deref(&self) -> &NuSession {
+            &self.session
+        }
+    }
+
+    impl Drop for IsolatedSession {
+        fn drop(&mut self) {
+            self.session.kill_sync();
+            // On Windows, file handles from the killed process may linger
+            // briefly after the child exits. `TempDir::drop` does a single
+            // `remove_dir_all` attempt which silently fails if files are
+            // still locked.  Retry the removal so the sandbox directories
+            // don't accumulate on disk.
+            if cfg!(windows) {
+                if let Some(tool) = self.tool.take() {
+                    let path = tool.keep(); // disarm TempDir auto-cleanup
+                    for _ in 0..20 {
+                        if std::fs::remove_dir_all(&path).is_ok() {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    // Best-effort failed — leave dir on disk rather than panic.
+                }
+            }
+        }
+    }
+
     /// Create a NuSession with an isolated copy of the build-time tool dir.
     ///
     /// Each test gets its own tool dir so concurrent AppContainer profiles
     /// do not interfere via ACL grant/restore on a shared directory.
-    /// The returned `TempDir` must be held alive for the test duration.
-    pub fn isolated_session() -> (NuSession, tempfile::TempDir) {
+    pub fn isolated_session() -> IsolatedSession {
         let tool = tmp_sandbox_tool_dir();
         let session = NuSession::with_tool_dir(tool.path().to_path_buf());
-        (session, tool)
+        IsolatedSession {
+            session,
+            tool: Some(tool),
+        }
     }
 }
 
@@ -1099,7 +1200,7 @@ pub(crate) mod test_support {
     clippy::match_same_arms
 )]
 mod tests {
-    use super::test_support::{isolated_session, require_nu, sandbox_test_base};
+    use super::test_support::{isolated_session, require_nu, sandbox_test_base, IsolatedSession};
     use super::*;
 
     /// Creates a `TempDir` with a nested session temp dir and builds a sandbox policy.
@@ -1967,28 +2068,23 @@ mod tests {
     }
 
     /// Sandbox test environment with isolated project and tool directories.
-    /// Field order matters: Rust drops fields in declaration order.
-    /// `session` must drop first so the nu process is killed before
-    /// the TempDirs try to delete nu.exe / rg.exe on Windows.
+    ///
+    /// `IsolatedSession` handles synchronous kill-and-reap on drop, so
+    /// the nu child releases file handles before `TempDir` cleanup runs.
     ///
     /// This is the required entry point for tests that need a sandbox
     /// environment (session + project directory). Do **not** construct
     /// `NuSession` directly in tests — use `sandbox_env()` or
     /// `isolated_session()` to ensure proper isolation.
     struct SandboxTestEnv {
-        session: NuSession,
+        session: IsolatedSession,
         project: tempfile::TempDir,
-        _tool: tempfile::TempDir,
     }
 
     fn sandbox_env() -> SandboxTestEnv {
         let project = tmp_sandbox_project();
-        let (session, tool) = isolated_session();
-        SandboxTestEnv {
-            project,
-            _tool: tool,
-            session,
-        }
+        let session = isolated_session();
+        SandboxTestEnv { session, project }
     }
 
     /// Format a path for use in nu commands (forward slashes).
@@ -2026,7 +2122,7 @@ mod tests {
     async fn integration_spawn_creates_session() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
     }
 
@@ -2034,7 +2130,7 @@ mod tests {
     async fn integration_spawn_is_idempotent() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
         // Second spawn with same params is a no-op.
         session
@@ -2048,7 +2144,7 @@ mod tests {
         require_nu!();
         let tmp = tmp_sandbox_project();
         {
-            let (session, _tool) = isolated_session();
+            let session = isolated_session();
             try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
         }
         // No panic or zombie = pass.
@@ -2058,7 +2154,7 @@ mod tests {
     async fn integration_kill_then_evaluate_respawns() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
         session.kill().await;
         let result = try_eval(&session, "echo 'alive'", 30, tmp.path(), ToolGrant::TOOLS).await;
@@ -2070,7 +2166,7 @@ mod tests {
     async fn integration_evaluate_simple_echo() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let result = try_eval(
             &session,
             "echo 'hello world'",
@@ -2088,7 +2184,7 @@ mod tests {
     async fn integration_evaluate_error_command() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let result = try_eval(
             &session,
             "error make { msg: 'test error' }",
@@ -2106,7 +2202,7 @@ mod tests {
     async fn integration_evaluate_stderr_none_on_success() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let result = try_eval(&session, "1 + 1", 30, tmp.path(), ToolGrant::TOOLS).await;
         let out = result.unwrap();
         assert!(!out.is_error);
@@ -2130,7 +2226,7 @@ mod tests {
     async fn integration_evaluate_multiple_sequential() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let result = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::TOOLS).await;
         let out1 = result.unwrap();
         assert!(!out1.is_error);
@@ -2231,7 +2327,7 @@ mod tests {
     async fn integration_timeout_kills_process() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let result = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::TOOLS).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2258,7 +2354,7 @@ mod tests {
     async fn integration_grant_change_respawns() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let result = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::TOOLS).await;
         let out1 = result.unwrap();
         assert!(!out1.is_error);
@@ -2279,7 +2375,7 @@ mod tests {
     async fn integration_generation_prevents_stale_writeback() {
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
         let gen_before = {
             let st = session.state.lock().await;
@@ -2305,7 +2401,7 @@ mod tests {
         require_nu!();
         let tmp1 = tmp_sandbox_project();
         let tmp2 = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let result1 = try_eval(&session, "echo 'root1'", 30, tmp1.path(), ToolGrant::TOOLS).await;
         assert!(!result1.unwrap().is_error);
         let gen1 = session.state.lock().await.generation;
@@ -2321,7 +2417,7 @@ mod tests {
         // Adding NETWORK grant triggers respawn (issue #38).
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let result1 = try_eval(&session, "echo 'no-net'", 30, tmp.path(), ToolGrant::TOOLS).await;
         assert!(!result1.unwrap().is_error);
         let gen1 = session.state.lock().await.generation;
@@ -2357,7 +2453,7 @@ mod tests {
         // correctness but not concurrency.
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let root = tmp.path().to_path_buf();
         let grant = ToolGrant::TOOLS;
         // Pre-spawn so the fast path is available for the first caller.
@@ -2378,7 +2474,7 @@ mod tests {
         // sees the mismatch and discards the process (issue #46).
         require_nu!();
         let tmp = tmp_sandbox_project();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
 
         let root = tmp.path().to_path_buf();
@@ -2405,7 +2501,7 @@ mod tests {
         require_nu!();
         let tmp = tmp_sandbox_project();
         std::fs::write(tmp.path().join("needle.txt"), "haystack\n").unwrap();
-        let (session, _tool) = isolated_session();
+        let session = isolated_session();
         let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
         // Use REEL_RG_PATH (absolute path) instead of bare `^rg`. NuShell's
         // PATH-based command lookup fails under AppContainer on Windows.
@@ -2762,7 +2858,7 @@ mod tests {
         let session = &env.session;
         let grant = ToolGrant::TOOLS;
 
-        let tool_path = env._tool.path().to_path_buf();
+        let tool_path = env.session.tool_path().to_path_buf();
 
         // Trigger session spawn (applies sandbox ACLs via lot).
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
@@ -2816,7 +2912,7 @@ mod tests {
         let session = &env.session;
         let grant = ToolGrant::TOOLS;
 
-        let tool_path = env._tool.path().to_path_buf();
+        let tool_path = env.session.tool_path().to_path_buf();
 
         // Trigger session spawn.
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
@@ -2919,7 +3015,7 @@ mod tests {
         let session = &env.session;
         let grant = ToolGrant::TOOLS;
 
-        let tool_path = env._tool.path().to_path_buf();
+        let tool_path = env.session.tool_path().to_path_buf();
 
         // Trigger session spawn (applies sandbox ACLs via lot).
         let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
