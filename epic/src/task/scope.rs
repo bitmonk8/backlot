@@ -158,4 +158,58 @@ mod tests {
         };
         assert_eq!(evaluate_scope(output, &magnitude), ScopeCheck::WithinBounds);
     }
+
+    // --- Integration tests for Task::check_branch_scope (moved from orchestrator) ---
+
+    use super::{super::Task, super::TaskId};
+    use crate::config::project::LimitsConfig;
+    use crate::events;
+    use crate::orchestrator::services::Services;
+    use crate::test_support::MockAgentService;
+    use std::path::PathBuf;
+
+    /// Task with magnitude set but no git repo → `WithinBounds` (best-effort).
+    #[tokio::test]
+    async fn check_branch_scope_within_bounds() {
+        let mock = MockAgentService::new();
+        let (tx, _rx) = events::event_channel();
+        let services = Services {
+            agent: mock,
+            events: tx,
+            vault: None,
+            limits: LimitsConfig::default(),
+            project_root: Some(PathBuf::from("/nonexistent/path")),
+            state_path: None,
+        };
+
+        let mut task = Task::new(TaskId(0), None, "test".into(), vec![], 0);
+        task.magnitude = Some(Magnitude {
+            max_lines_added: 10,
+            max_lines_modified: 5,
+            max_lines_deleted: 3,
+        });
+
+        // git will fail on a nonexistent path → best-effort WithinBounds.
+        let result = task.check_branch_scope(&services).await;
+        assert!(matches!(result, ScopeCheck::WithinBounds));
+    }
+
+    /// Task with no magnitude → `WithinBounds` (skip check).
+    #[tokio::test]
+    async fn check_branch_scope_skipped_no_magnitude() {
+        let mock = MockAgentService::new();
+        let (tx, _rx) = events::event_channel();
+        let services = Services {
+            agent: mock,
+            events: tx,
+            vault: None,
+            limits: LimitsConfig::default(),
+            project_root: None,
+            state_path: None,
+        };
+
+        let task = Task::new(TaskId(0), None, "test".into(), vec![], 0);
+        let result = task.check_branch_scope(&services).await;
+        assert!(matches!(result, ScopeCheck::WithinBounds));
+    }
 }

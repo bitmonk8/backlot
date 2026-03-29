@@ -131,7 +131,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         agent = agent.with_vault(v.clone());
     }
 
-    let (state, root_id, goal_text) = match &cli.command {
+    let (mut state, root_id, goal_text) = match &cli.command {
         Command::Run { goal } => {
             if state_path.exists() {
                 let (existing, rid, persisted_goal) = load_and_validate_state(&state_path)?;
@@ -193,7 +193,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         }
     }
 
-    let mut orchestrator = Orchestrator::new(agent, state, tx)
+    let mut orchestrator = Orchestrator::new(agent, tx)
         .with_limits(epic_config.limits)
         .with_state_path(state_path.clone())
         .with_project_root(project_root.clone());
@@ -204,8 +204,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     if cli.no_tui {
         drop(rx);
-        let outcome = orchestrator.run(root_id).await?;
-        let state = orchestrator.into_state();
+        let outcome = orchestrator.run(&mut state, root_id).await?;
         state.save(&state_path)?;
         let usage = state.total_usage();
         println!("Epic completed: {outcome:?}");
@@ -217,8 +216,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         let mut tui_app = TuiApp::new(goal_text);
 
         let orch_handle = tokio::spawn(async move {
-            let result = orchestrator.run(root_id).await;
-            let state = orchestrator.into_state();
+            let result = orchestrator.run(&mut state, root_id).await;
             (result, state)
         });
 

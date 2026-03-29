@@ -110,47 +110,48 @@ Orchestrator's `finalize_branch`, `branch_fix_loop`, `attempt_recovery`, and `ex
 
 ## Source Summary
 
-27 files, 15,207 lines.
+28 files, 15,221 lines (6,866 core, 8,355 test).
 
 ```
-src/                              Total
-├── main.rs                         359
-├── knowledge.rs                    969
-├── state.rs                        428
-├── events.rs                       118
-├── cli.rs                           69
-├── init.rs                         582
-├── sandbox.rs                      262
-├── test_support.rs                 232
+src/                              Total   Core   Test
+├── main.rs                         357     12    345
+├── knowledge.rs                    969    612    357
+├── state.rs                        428    115    313
+├── events.rs                       118    118      0
+├── cli.rs                           69     46     23
+├── init.rs                         582    347    235
+├── sandbox.rs                      262    132    130
+├── test_support.rs                 232      0    232
 ├── agent/
-│   ├── mod.rs                      184
-│   ├── prompts.rs                  879
-│   ├── reel_adapter.rs             497
-│   └── wire.rs                     731
+│   ├── mod.rs                      184    184      0
+│   ├── prompts.rs                  879    510    369
+│   ├── reel_adapter.rs             497    432     65
+│   └── wire.rs                     731    414    317
 ├── config/
-│   ├── mod.rs                        3
-│   └── project.rs                  637
+│   ├── mod.rs                        3      3      0
+│   └── project.rs                  637    294    343
 ├── orchestrator/
-│   ├── mod.rs                    6,743
-│   ├── context.rs                  154
-│   └── services.rs                  16
+│   ├── mod.rs                      972    972      0
+│   ├── tests.rs                  5,733      0  5,733
+│   ├── context.rs                  154    154      0
+│   └── services.rs                  16     16      0
 ├── task/
-│   ├── mod.rs                      453
-│   ├── assess.rs                    12
-│   ├── branch.rs                   344
-│   ├── leaf.rs                     417
-│   ├── scope.rs                    161
-│   └── verify.rs                    25
+│   ├── mod.rs                      453    306    147
+│   ├── assess.rs                    12     12      0
+│   ├── branch.rs                   344    344      0
+│   ├── leaf.rs                     417    417      0
+│   ├── scope.rs                    215     91    124
+│   └── verify.rs                    25     25      0
 └── tui/
-    ├── mod.rs                      620
-    ├── task_tree.rs                134
-    ├── metrics.rs                   96
-    └── worklog.rs                   82
-                                 ──────
-                                 15,207
+    ├── mod.rs                      620    503    117
+    ├── task_tree.rs                134    134      0
+    ├── metrics.rs                   96     96      0
+    └── worklog.rs                   82     82      0
+                                 ──────  ─────  ─────
+                                 15,221  6,866  8,355
 ```
 
-All source is in `src/`. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`.
+All source is in `src/`. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`. Orchestrator integration tests (5,733 lines) live in `orchestrator/tests.rs`, separate from the 972-line coordinator. `Orchestrator` does not own `EpicState` — callers retain ownership and pass `&mut EpicState` to `run()`.
 
 ## Next Up
 
