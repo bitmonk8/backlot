@@ -744,13 +744,14 @@ mod tests {
 
     #[test]
     fn schemas_have_required_fields() {
-        let cases: Vec<(fn() -> serde_json::Value, &[&str])> = vec![
+        #[allow(clippy::type_complexity)]
+        let cases: &[(fn() -> serde_json::Value, &[&str])] = &[
             (task_outcome_schema, &["outcome"]),
             (assessment_schema, &["path", "model", "rationale"]),
             (decomposition_schema, &["subtasks", "rationale"]),
             (verification_schema, &["outcome", "details"]),
         ];
-        for (schema_fn, expected) in &cases {
+        for (schema_fn, expected) in cases {
             let schema = schema_fn();
             let required = schema["required"].as_array().unwrap();
             for field in *expected {

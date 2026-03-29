@@ -361,6 +361,7 @@ max_total_tasks = 42
 
     #[test]
     fn validate_zero_fields_rejected() {
+        #[allow(clippy::type_complexity)]
         let cases: &[(&str, fn(&mut LimitsConfig))] = &[
             ("max_depth", |l| l.max_depth = 0),
             ("max_recovery_rounds", |l| l.max_recovery_rounds = 0),

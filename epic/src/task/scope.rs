@@ -170,7 +170,7 @@ mod tests {
         };
         match evaluate_scope(output, &magnitude) {
             ScopeCheck::Exceeded { metric, .. } => assert_eq!(metric, "lines_modified"),
-            other => panic!("expected Exceeded for lines_modified, got {other:?}"),
+            ScopeCheck::WithinBounds => panic!("expected Exceeded for lines_modified"),
         }
     }
 
@@ -184,7 +184,7 @@ mod tests {
         };
         match evaluate_scope(output, &magnitude) {
             ScopeCheck::Exceeded { metric, .. } => assert_eq!(metric, "lines_deleted"),
-            other => panic!("expected Exceeded for lines_deleted, got {other:?}"),
+            ScopeCheck::WithinBounds => panic!("expected Exceeded for lines_deleted"),
         }
     }
 

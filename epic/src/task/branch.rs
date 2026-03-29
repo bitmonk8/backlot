@@ -367,7 +367,7 @@ mod tests {
             t.verification_fix_rounds = rounds;
             match (t.fix_round_budget_check(is_root, &limits), expected) {
                 (FixBudgetCheck::WithinBudget { model }, Some(exp)) => {
-                    assert_eq!(model, exp, "rounds={rounds} is_root={is_root}")
+                    assert_eq!(model, exp, "rounds={rounds} is_root={is_root}");
                 }
                 (FixBudgetCheck::Exhausted, None) => {}
                 (result, _) => panic!("rounds={rounds} is_root={is_root}: unexpected {result:?}"),
