@@ -24,9 +24,9 @@ vault = { git = "https://github.com/bitmonk8/vault", rev = "f7ecea1" }
 unsafe_code = "deny"
 
 [lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
 # Commonly disabled pedantic lints (too noisy / too opinionated)
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
