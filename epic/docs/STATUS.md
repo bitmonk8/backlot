@@ -110,11 +110,11 @@ Orchestrator's `finalize_branch`, `branch_fix_loop`, `attempt_recovery`, and `ex
 
 ### Test Suite Audit Cleanup
 
-Applied recommendations from `docs/TEST_AUDIT.md`. Removed 13 low-value tests (derived-trait smoke tests, duplicates, test-only helper tests). Merged ~28 tests into 8 parameterized/table-driven tests across 7 files. Added 8 coverage gap tests for HIGH/MEDIUM priority gaps: `VerificationWire` fail variant, `CheckpointWire` escalate variant, invalid outcome/model rejection, scope circuit breaker `lines_modified`/`lines_deleted` exceeded paths. Net: 265 -> 235 tests, 15,151 -> 14,881 lines (-270).
+Applied test suite audit recommendations. Removed 13 low-value tests (derived-trait smoke tests, duplicates, test-only helper tests). Merged ~28 tests into 8 parameterized/table-driven tests across 7 files. Added 8 coverage gap tests for HIGH/MEDIUM priority gaps: `VerificationWire` fail variant, `CheckpointWire` escalate variant, invalid outcome/model rejection, scope circuit breaker `lines_modified`/`lines_deleted` exceeded paths. Net: 265 -> 235 tests, 15,151 -> 14,881 lines (-270).
 
 ### Test Suite Audit Completion (MockBuilder, Merges, Coverage Gaps)
 
-Completed all remaining recommendations from `docs/TEST_AUDIT.md`:
+Completed all remaining test suite audit recommendations:
 
 - **MockBuilder pattern**: Added `MockBuilder` struct in `test_support.rs` with fluent API wrapping `MockAgentService` construction. 30+ builder methods for common mock patterns (assess, execute, verify, decompose, checkpoint, recovery). Rewrote all orchestrator tests to use the builder (71 pre-merge, 67 post-merge), eliminating the 4-line `lock().unwrap().push_back()` ceremony per mock response.
 - **Merged 3 orchestrator test pairs**: (a) Deleted `depth_cap_forces_leaf`, kept `custom_max_depth_forces_leaf`. (b) Merged `branch_fix_subtasks_no_recursive_fix` + `leaf_fix_subtask_no_recursive_fix_loop` + `branch_fix_subtask_no_recursive_fix_loop` into `fix_subtasks_no_recursive_fix`. (c) Deleted `recovery_full_redecomposition_skips_pending`, kept `recovery_full_redecomp_preserves_completed_siblings`.
