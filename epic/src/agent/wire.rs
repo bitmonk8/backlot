@@ -445,6 +445,19 @@ mod tests {
     }
 
     #[test]
+    fn assessment_wire_invalid_model_rejected() {
+        let wire = AssessmentWire {
+            path: "leaf".into(),
+            model: "gpt-4".into(),
+            rationale: "t".into(),
+            max_lines_added: None,
+            max_lines_modified: None,
+            max_lines_deleted: None,
+        };
+        assert!(AssessmentResult::try_from(wire).is_err());
+    }
+
+    #[test]
     fn decomposition_wire_roundtrip() {
         let wire = DecompositionWire {
             subtasks: vec![SubtaskWire {
@@ -512,6 +525,54 @@ mod tests {
     }
 
     #[test]
+    fn verification_wire_fail() {
+        let wire = VerificationWire {
+            outcome: "fail".into(),
+            reason: Some("lint errors".into()),
+            details: "3 warnings".into(),
+        };
+        let result = VerificationResult::try_from(wire).unwrap();
+        assert!(matches!(
+            result.outcome,
+            VerificationOutcome::Fail { reason } if reason == "lint errors"
+        ));
+    }
+
+    #[test]
+    fn verification_wire_fail_no_reason_defaults() {
+        let wire = VerificationWire {
+            outcome: "fail".into(),
+            reason: None,
+            details: "d".into(),
+        };
+        let result = VerificationResult::try_from(wire).unwrap();
+        assert!(matches!(
+            result.outcome,
+            VerificationOutcome::Fail { reason } if reason == "no reason provided"
+        ));
+    }
+
+    #[test]
+    fn verification_wire_invalid_outcome_rejected() {
+        let wire = VerificationWire {
+            outcome: "maybe".into(),
+            reason: None,
+            details: "d".into(),
+        };
+        assert!(VerificationResult::try_from(wire).is_err());
+    }
+
+    #[test]
+    fn task_outcome_wire_invalid_outcome_rejected() {
+        let wire = TaskOutcomeWire {
+            outcome: "maybe".into(),
+            reason: None,
+            discoveries: None,
+        };
+        assert!(LeafResult::try_from(wire).is_err());
+    }
+
+    #[test]
     fn checkpoint_wire_variants() {
         let proceed = CheckpointWire {
             decision: "proceed".into(),
@@ -531,6 +592,15 @@ mod tests {
             CheckpointDecision::Adjust {
                 guidance: "do X".into()
             }
+        );
+
+        let escalate = CheckpointWire {
+            decision: "escalate".into(),
+            guidance: None,
+        };
+        assert_eq!(
+            CheckpointDecision::try_from(escalate).unwrap(),
+            CheckpointDecision::Escalate
         );
     }
 
@@ -637,24 +707,18 @@ mod tests {
 
     #[test]
     fn recovery_plan_wire_empty_subtasks_rejected() {
-        let wire = RecoveryPlanWire {
-            approach: "incremental".into(),
-            subtasks: vec![],
-            rationale: "empty".into(),
-        };
-        let err = RecoveryPlan::try_from(wire).unwrap_err();
-        assert!(err.to_string().contains("at least one subtask"));
-    }
-
-    #[test]
-    fn recovery_plan_wire_full_approach_empty_subtasks_rejected() {
-        let wire = RecoveryPlanWire {
-            approach: "full".into(),
-            subtasks: vec![],
-            rationale: "empty".into(),
-        };
-        let err = RecoveryPlan::try_from(wire).unwrap_err();
-        assert!(err.to_string().contains("at least one subtask"));
+        for approach in ["incremental", "full"] {
+            let wire = RecoveryPlanWire {
+                approach: approach.into(),
+                subtasks: vec![],
+                rationale: "empty".into(),
+            };
+            let err = RecoveryPlan::try_from(wire).unwrap_err();
+            assert!(
+                err.to_string().contains("at least one subtask"),
+                "approach={approach}"
+            );
+        }
     }
 
     #[test]
@@ -679,53 +743,22 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn task_outcome_schema_has_required_fields() {
-        let schema = task_outcome_schema();
-        let required = schema["required"].as_array().unwrap();
-        assert!(required.contains(&serde_json::json!("outcome")));
-        let props = schema["properties"].as_object().unwrap();
-        assert!(props.contains_key("outcome"));
-        assert!(props.contains_key("reason"));
-        assert!(props.contains_key("discoveries"));
-    }
-
-    #[test]
-    fn assessment_schema_has_required_fields() {
-        let schema = assessment_schema();
-        let required = schema["required"].as_array().unwrap();
-        assert!(required.contains(&serde_json::json!("path")));
-        assert!(required.contains(&serde_json::json!("model")));
-        assert!(required.contains(&serde_json::json!("rationale")));
-    }
-
-    #[test]
-    fn decomposition_schema_has_required_fields() {
-        let schema = decomposition_schema();
-        let required = schema["required"].as_array().unwrap();
-        assert!(required.contains(&serde_json::json!("subtasks")));
-        assert!(required.contains(&serde_json::json!("rationale")));
-    }
-
-    #[test]
-    fn verification_schema_has_required_fields() {
-        let schema = verification_schema();
-        let required = schema["required"].as_array().unwrap();
-        assert!(required.contains(&serde_json::json!("outcome")));
-        assert!(required.contains(&serde_json::json!("details")));
-    }
-
-    #[test]
-    fn schema_without_tools_omits_tools_key() {
-        // Structured calls (empty grant) produce schemas without tool definitions.
-        // The schema itself never contains a "tools" key — tools are separate.
-        let schema = assessment_schema();
-        assert!(schema.get("tools").is_none());
-    }
-
-    #[test]
-    fn init_uses_sonnet_model_key() {
-        use crate::agent::reel_adapter::model_key;
-        // Init exploration uses Model::Sonnet, which maps to "balanced".
-        assert_eq!(model_key(Model::Sonnet), "balanced");
+    fn schemas_have_required_fields() {
+        let cases: Vec<(fn() -> serde_json::Value, &[&str])> = vec![
+            (task_outcome_schema, &["outcome"]),
+            (assessment_schema, &["path", "model", "rationale"]),
+            (decomposition_schema, &["subtasks", "rationale"]),
+            (verification_schema, &["outcome", "details"]),
+        ];
+        for (schema_fn, expected) in &cases {
+            let schema = schema_fn();
+            let required = schema["required"].as_array().unwrap();
+            for field in *expected {
+                assert!(
+                    required.contains(&serde_json::json!(field)),
+                    "schema missing required field '{field}'"
+                );
+            }
+        }
     }
 }

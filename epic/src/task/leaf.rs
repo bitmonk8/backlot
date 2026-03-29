@@ -422,34 +422,19 @@ mod tests {
     use crate::task::{TaskId, TaskPath};
 
     #[test]
-    fn verification_model_leaf_haiku() {
-        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
-        t.path = Some(TaskPath::Leaf);
-        t.current_model = Some(Model::Haiku);
-        assert_eq!(t.verification_model(), Model::Haiku);
-    }
-
-    #[test]
-    fn verification_model_leaf_sonnet() {
-        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
-        t.path = Some(TaskPath::Leaf);
-        t.current_model = Some(Model::Sonnet);
-        assert_eq!(t.verification_model(), Model::Sonnet);
-    }
-
-    #[test]
-    fn verification_model_leaf_opus_capped_to_sonnet() {
-        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
-        t.path = Some(TaskPath::Leaf);
-        t.current_model = Some(Model::Opus);
-        assert_eq!(t.verification_model(), Model::Sonnet);
-    }
-
-    #[test]
-    fn verification_model_branch_always_sonnet() {
-        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
-        t.path = Some(TaskPath::Branch);
-        t.current_model = Some(Model::Haiku);
-        assert_eq!(t.verification_model(), Model::Sonnet);
+    fn verification_model_cases() {
+        let cases = [
+            (TaskPath::Leaf, Model::Haiku, Model::Haiku),
+            (TaskPath::Leaf, Model::Sonnet, Model::Sonnet),
+            (TaskPath::Leaf, Model::Opus, Model::Sonnet), // capped
+            (TaskPath::Branch, Model::Haiku, Model::Sonnet), // branch always Sonnet
+        ];
+        for (path, current, expected) in cases {
+            let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+            let label = format!("path={path:?} model={current:?}");
+            t.path = Some(path);
+            t.current_model = Some(current);
+            assert_eq!(t.verification_model(), expected, "{label}");
+        }
     }
 }

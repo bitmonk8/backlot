@@ -8,12 +8,11 @@
 
 ### 2. Missing wire-type edge-case tests
 
-`src/agent/wire.rs` — Several conversion error paths lack test coverage:
-- `VerificationWire` with `outcome: "fail"` (both with and without `reason`)
-- `parse_model_name` with invalid input (e.g., `"gpt4"`)
-- `TaskOutcomeWire` with invalid outcome (e.g., `"partial"`)
+`src/agent/wire.rs` — Some conversion error paths lack test coverage:
 - `DetectedStepWire` conversion: default timeout (300) when `timeout` is `None`
 - `SubtaskWire` with invalid magnitude (e.g., `"huge"`)
+
+Previously also missing: `VerificationWire` fail variant, `parse_model_name` invalid input, `TaskOutcomeWire` invalid outcome, `CheckpointWire` escalate variant — all now covered by test audit cleanup.
 
 **Category: Testing.**
 
@@ -203,7 +202,7 @@
 
 ### 49. Testing gaps from orchestrator refactor
 
-`src/task/leaf.rs` has ~450 lines with zero unit tests. `src/task/mod.rs` mutation methods (`trailing_attempts_at_tier`, `record_attempt`, `record_discoveries`, `append_checkpoint_guidance`) lack unit tests. `src/task/scope.rs` missing tests for `lines_deleted` and `lines_modified` exceeded paths. **Category: Testing.**
+`src/task/leaf.rs` has ~450 lines with zero unit tests. `src/task/mod.rs` mutation methods (`trailing_attempts_at_tier`, `record_attempt`, `record_discoveries`, `append_checkpoint_guidance`) lack unit tests. `src/task/scope.rs` `lines_deleted` and `lines_modified` exceeded paths now covered by test audit cleanup. **Category: Testing.**
 
 ### 50. `ancestor_goals` may duplicate parent goal
 
@@ -236,3 +235,11 @@
 ### 57. `handle_checkpoint` chains classification + adjust + full escalation pipeline
 
 `src/task/branch.rs` — `handle_checkpoint` classifies discoveries, handles adjust (vault + events), and on escalate runs the full recovery pipeline (budget check, assess, design). The escalation arm (~30 lines) could be extracted into `escalate_to_recovery` for independent testing and reuse. **Category: Separation.**
+
+### 58. New parameterized test pairs could be further consolidated
+
+`src/agent/wire.rs` — `verification_wire_fail` and `verification_wire_fail_no_reason_defaults` share identical structure and could be a single table-driven test. Same for `src/task/scope.rs` — `evaluate_scope_lines_modified_exceeded` and `evaluate_scope_lines_deleted_exceeded`. **Category: Simplification.**
+
+### 59. Parameterized test names use generic `_cases` suffix
+
+`src/task/branch.rs` `fix_budget_check_cases` and `src/task/leaf.rs` `verification_model_cases` — The `_cases` suffix doesn't communicate the behavior space being tested. More descriptive names (e.g., `fix_budget_model_selection_and_exhaustion`, `verification_model_caps_and_overrides`) would improve readability. **Category: Naming.**

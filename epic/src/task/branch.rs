@@ -54,6 +54,7 @@ pub enum BranchVerifyOutcome {
 }
 
 /// Result of checking the fix round budget.
+#[derive(Debug)]
 pub enum FixBudgetCheck {
     WithinBudget { model: Model },
     Exhausted,
@@ -352,47 +353,26 @@ mod tests {
     // --- fix_round_budget_check ---
 
     #[test]
-    fn fix_budget_within_budget_sonnet() {
-        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
-        t.verification_fix_rounds = 0;
+    fn fix_budget_check_cases() {
+        // (rounds, is_root, expected model or None for Exhausted)
+        let cases: &[(u32, bool, Option<Model>)] = &[
+            (0, false, Some(Model::Sonnet)), // within budget, Sonnet
+            (3, true, Some(Model::Opus)),    // root Opus round
+            (3, false, None),                // non-root exhausted
+            (4, true, None),                 // root exhausted
+        ];
         let limits = LimitsConfig::default(); // branch=3, root=4
-        match t.fix_round_budget_check(false, &limits) {
-            FixBudgetCheck::WithinBudget { model } => assert_eq!(model, Model::Sonnet),
-            FixBudgetCheck::Exhausted => panic!("expected WithinBudget"),
+        for &(rounds, is_root, expected) in cases {
+            let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+            t.verification_fix_rounds = rounds;
+            match (t.fix_round_budget_check(is_root, &limits), expected) {
+                (FixBudgetCheck::WithinBudget { model }, Some(exp)) => {
+                    assert_eq!(model, exp, "rounds={rounds} is_root={is_root}")
+                }
+                (FixBudgetCheck::Exhausted, None) => {}
+                (result, _) => panic!("rounds={rounds} is_root={is_root}: unexpected {result:?}"),
+            }
         }
-    }
-
-    #[test]
-    fn fix_budget_opus_round() {
-        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
-        t.verification_fix_rounds = 3; // next round is 4 → Opus
-        let limits = LimitsConfig::default();
-        match t.fix_round_budget_check(true, &limits) {
-            FixBudgetCheck::WithinBudget { model } => assert_eq!(model, Model::Opus),
-            FixBudgetCheck::Exhausted => panic!("expected WithinBudget"),
-        }
-    }
-
-    #[test]
-    fn fix_budget_exhausted_nonroot() {
-        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
-        t.verification_fix_rounds = 3; // == branch_fix_rounds default
-        let limits = LimitsConfig::default();
-        assert!(matches!(
-            t.fix_round_budget_check(false, &limits),
-            FixBudgetCheck::Exhausted
-        ));
-    }
-
-    #[test]
-    fn fix_budget_exhausted_root() {
-        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
-        t.verification_fix_rounds = 4; // == root_fix_rounds default
-        let limits = LimitsConfig::default();
-        assert!(matches!(
-            t.fix_round_budget_check(true, &limits),
-            FixBudgetCheck::Exhausted
-        ));
     }
 
     // --- recovery_budget_check ---

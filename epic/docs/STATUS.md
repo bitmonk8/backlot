@@ -28,7 +28,7 @@
 - **Vault integration** — Document store via `vault` crate (git rev `f7ecea1`). `VaultConfig` in `epic.toml` (`[vault]` section, `enabled = false` by default). Vault constructed at startup, bootstrapped on new runs. `ResearchQuery` custom tool (reel `ToolHandler`) injected into execute, decompose, fix, and recovery design phases — agents query accumulated project knowledge on demand. Discovery recording at 4 orchestrator integration points (leaf discoveries, verification failures, checkpoint adjust, recovery). Vault reorganize runs after root branch children complete. Usage tracking folds vault costs into per-task `TaskUsage`. Vault events drive TUI worklog. All vault operations are best-effort (failures logged, not propagated).
 - **Research Service gap-filling** — `ResearchQuery` tool implements a multi-step pipeline: (1) query vault for existing knowledge, (2) identify information gaps via Haiku structured-output call, (3) fill gaps by spawning Haiku agents with read-only tools to explore the project codebase, (4) synthesize final answer combining vault knowledge and exploration findings. Optional `scope` parameter: `vault` (stored knowledge only) or `project` (default, vault + codebase exploration). Exploration findings are recorded back into vault. All internal agent calls use Haiku ("fast" model key). Returns structured `ResearchResult { answer, document_refs, gaps_filled }`. Web search scope deferred.
 - **Branch logic migration** — Branch decision logic (verification, fix budget check, fix design, recovery assessment/design, checkpoint handling, scope check) extracted from orchestrator into `Task` methods in `task/branch.rs`. Orchestrator retains cross-task coordination (child execution, subtask creation, pending child failure). `BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision` enums define the Task-to-orchestrator interface.
-- **Test counts** — 265 tests (all pass).
+- **Test counts** — 235 tests (all pass).
 
 ## What Is NOT Implemented
 
@@ -72,7 +72,7 @@ Integrated the `vault` crate (git rev `f7ecea1`) as epic's document store and re
 
 ### Research Service Gap-Filling
 
-Extended `ResearchQuery` from vault-query-only to a multi-step gap-filling pipeline: vault query → gap identification (Haiku structured output) → codebase exploration (Haiku with read-only tools, capped at 5 gaps) → synthesis. Added `ResearchScope` enum with optional `scope` tool parameter (`vault`/`project`). Graceful degradation at each step. Exploration findings recorded back to vault. `run_haiku<T>()` generic helper and `vault_only_result()` helper keep the implementation DRY. `Arc<reel::Agent>` shared between `ReelAgent` and `ResearchTool`. 24 tests in knowledge module.
+Extended `ResearchQuery` from vault-query-only to a multi-step gap-filling pipeline: vault query → gap identification (Haiku structured output) → codebase exploration (Haiku with read-only tools, capped at 5 gaps) → synthesis. Added `ResearchScope` enum with optional `scope` tool parameter (`vault`/`project`). Graceful degradation at each step. Exploration findings recorded back to vault. `run_haiku<T>()` generic helper and `vault_only_result()` helper keep the implementation DRY. `Arc<reel::Agent>` shared between `ReelAgent` and `ResearchTool`. 18 tests in knowledge module.
 
 ### File-Level Review
 
@@ -108,15 +108,19 @@ Orchestrator's `finalize_branch`, `branch_fix_loop`, `attempt_recovery`, and `ex
 
 `task/branch.rs` grew from 50 to 344 lines. Orchestrator shrank from 6,834 to 6,743 lines.
 
+### Test Suite Audit Cleanup
+
+Applied recommendations from `docs/TEST_AUDIT.md`. Removed 13 low-value tests (derived-trait smoke tests, duplicates, test-only helper tests). Merged ~28 tests into 8 parameterized/table-driven tests across 7 files. Added 8 coverage gap tests for HIGH/MEDIUM priority gaps: `VerificationWire` fail variant, `CheckpointWire` escalate variant, invalid outcome/model rejection, scope circuit breaker `lines_modified`/`lines_deleted` exceeded paths. Net: 265 → 235 tests, 15,151 → 14,881 lines (-270). MockBuilder pattern and orchestrator merge candidates deferred.
+
 ## Source Summary
 
-28 files, 15,151 lines (6,848 core, 8,303 test).
+28 files, 14,907 lines (6,375 core, 8,532 test).
 
 ```
 src/                              Total   Core   Test
 ├── main.rs                         357     12    345
-├── knowledge.rs                    969    612    357
-├── state.rs                        428    115    313
+├── knowledge.rs                    903    612    291
+├── state.rs                        400    115    285
 ├── events.rs                       118    118      0
 ├── cli.rs                           69     46     23
 ├── init.rs                         582    347    235
@@ -124,23 +128,23 @@ src/                              Total   Core   Test
 ├── test_support.rs                 232      0    232
 ├── agent/
 │   ├── mod.rs                      184    184      0
-│   ├── prompts.rs                  879    510    369
+│   ├── prompts.rs                  861    510    351
 │   ├── reel_adapter.rs             497    432     65
-│   └── wire.rs                     731    414    317
+│   └── wire.rs                     764    414    350
 ├── config/
 │   ├── mod.rs                        3      3      0
-│   └── project.rs                  637    294    343
+│   └── project.rs                  578    294    284
 ├── orchestrator/
 │   ├── mod.rs                      972    972      0
-│   ├── tests.rs                  5,351      0  5,351
+│   ├── tests.rs                  5,284      0  5,284
 │   ├── context.rs                  357    155    202
 │   └── services.rs                  16     16      0
 ├── task/
-│   ├── mod.rs                      453    306    147
+│   ├── mod.rs                      420    306    114
 │   ├── assess.rs                    12     12      0
-│   ├── branch.rs                   415    345     70
-│   ├── leaf.rs                     455    418     37
-│   ├── scope.rs                    215     91    124
+│   ├── branch.rs                   395    346     49
+│   ├── leaf.rs                     440    418     22
+│   ├── scope.rs                    244     91    153
 │   └── verify.rs                    25     25      0
 └── tui/
     ├── mod.rs                      620    503    117
@@ -148,10 +152,10 @@ src/                              Total   Core   Test
     ├── metrics.rs                   96     96      0
     └── worklog.rs                   82     82      0
                                  ──────  ─────  ─────
-                                 15,151  6,848  8,303
+                                 14,907  6,375  8,532
 ```
 
-All source is in `src/`. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`. Orchestrator integration tests (5,351 lines) live in `orchestrator/tests.rs`, separate from the 972-line coordinator. `Orchestrator` does not own `EpicState` — callers retain ownership and pass `&mut EpicState` to `run()`.
+All source is in `src/`. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`. Orchestrator integration tests (5,284 lines) live in `orchestrator/tests.rs`, separate from the 972-line coordinator. `Orchestrator` does not own `EpicState` — callers retain ownership and pass `&mut EpicState` to `run()`.
 
 ## Next Up
 

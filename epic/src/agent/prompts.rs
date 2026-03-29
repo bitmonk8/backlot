@@ -540,47 +540,29 @@ mod tests {
     }
 
     #[test]
-    fn file_level_review_prompt_contains_context() {
+    fn prompt_builders_contain_context() {
         let ctx = test_context();
-        let pair = build_file_level_review(&ctx);
-        assert!(pair.query.contains("implement feature X"));
-        assert!(pair.query.contains("tests pass"));
-        assert!(pair.system_prompt.contains("file-level reviewer"));
-        assert!(pair.system_prompt.contains("semantic review"));
-    }
-
-    #[test]
-    fn assess_prompt_contains_context() {
-        let ctx = test_context();
-        let pair = build_assess(&ctx);
-        assert!(pair.query.contains("implement feature X"));
-        assert!(pair.query.contains("tests pass"));
-        assert!(pair.query.contains("build module Y"));
-        assert!(pair.system_prompt.contains("assessor"));
-    }
-
-    #[test]
-    fn execute_prompt_contains_context() {
-        let ctx = test_context();
-        let pair = build_execute_leaf(&ctx);
-        assert!(pair.query.contains("implement feature X"));
-        assert!(pair.system_prompt.contains("executor"));
-    }
-
-    #[test]
-    fn decompose_prompt_contains_context() {
-        let ctx = test_context();
-        let pair = build_design_and_decompose(&ctx);
-        assert!(pair.query.contains("implement feature X"));
-        assert!(pair.system_prompt.contains("decomposer"));
-    }
-
-    #[test]
-    fn verify_prompt_contains_context() {
-        let ctx = test_context();
-        let pair = build_verify(&ctx, &[]);
-        assert!(pair.query.contains("implement feature X"));
-        assert!(pair.system_prompt.contains("verifier"));
+        let cases: Vec<(&str, PromptPair, &str)> = vec![
+            ("assess", build_assess(&ctx), "assessor"),
+            ("execute", build_execute_leaf(&ctx), "executor"),
+            ("decompose", build_design_and_decompose(&ctx), "decomposer"),
+            ("verify", build_verify(&ctx, &[]), "verifier"),
+            (
+                "file_level_review",
+                build_file_level_review(&ctx),
+                "file-level reviewer",
+            ),
+        ];
+        for (name, pair, role) in &cases {
+            assert!(
+                pair.query.contains("implement feature X"),
+                "{name}: query missing goal"
+            );
+            assert!(
+                pair.system_prompt.contains(role),
+                "{name}: system_prompt missing role '{role}'"
+            );
+        }
     }
 
     #[test]

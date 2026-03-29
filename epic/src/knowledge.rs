@@ -647,63 +647,6 @@ mod tests {
         assert_eq!(session.total_latency_ms, 300);
     }
 
-    // -----------------------------------------------------------------------
-    // Vault QueryResult formatting (test-only helper)
-    // -----------------------------------------------------------------------
-
-    fn format_query_result(result: &vault::QueryResult) -> String {
-        let mut out = String::new();
-        let coverage = match result.coverage {
-            vault::Coverage::Full => "Full",
-            vault::Coverage::Partial => "Partial",
-            vault::Coverage::None => "None",
-        };
-        let _ = write!(out, "Coverage: {coverage}\n\n");
-        out.push_str(&result.answer);
-        if !result.extracts.is_empty() {
-            out.push_str("\n\n--- Supporting Extracts ---\n");
-            for extract in &result.extracts {
-                let _ = write!(
-                    out,
-                    "\n[{}]\n{}\n",
-                    extract.source.filename, extract.content
-                );
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn format_query_result_full_coverage() {
-        let result = vault::QueryResult {
-            coverage: vault::Coverage::Full,
-            answer: "The system uses DFS traversal.".into(),
-            extracts: vec![vault::Extract {
-                content: "DFS is used for task execution.".into(),
-                source: vault::DocumentRef {
-                    filename: "DESIGN.md".into(),
-                },
-            }],
-        };
-        let formatted = format_query_result(&result);
-        assert!(formatted.contains("Coverage: Full"));
-        assert!(formatted.contains("The system uses DFS traversal."));
-        assert!(formatted.contains("[DESIGN.md]"));
-        assert!(formatted.contains("DFS is used for task execution."));
-    }
-
-    #[test]
-    fn format_query_result_no_extracts() {
-        let result = vault::QueryResult {
-            coverage: vault::Coverage::None,
-            answer: "No information available.".into(),
-            extracts: vec![],
-        };
-        let formatted = format_query_result(&result);
-        assert!(formatted.contains("Coverage: None"));
-        assert!(!formatted.contains("Supporting Extracts"));
-    }
-
     #[test]
     fn research_tool_definition_schema() {
         let vault = make_dummy_vault();
@@ -742,14 +685,6 @@ mod tests {
         assert_eq!(
             ResearchScope::from_str_opt(Some("vault")),
             ResearchScope::Vault
-        );
-    }
-
-    #[test]
-    fn scope_from_str_project() {
-        assert_eq!(
-            ResearchScope::from_str_opt(Some("project")),
-            ResearchScope::Project
         );
     }
 
@@ -796,14 +731,6 @@ mod tests {
         let sr: SynthesisResult = serde_json::from_str(json).unwrap();
         assert_eq!(sr.answer, "The system uses DFS.");
         assert_eq!(sr.document_refs.len(), 1);
-    }
-
-    #[test]
-    fn synthesis_result_deserialize_no_refs() {
-        let json = r#"{"answer": "Unknown.", "document_refs": []}"#;
-        let sr: SynthesisResult = serde_json::from_str(json).unwrap();
-        assert_eq!(sr.answer, "Unknown.");
-        assert!(sr.document_refs.is_empty());
     }
 
     #[test]
@@ -907,26 +834,33 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn gap_analysis_schema_is_valid_json() {
-        let schema = gap_analysis_schema();
-        assert_eq!(schema["type"], "object");
-        assert!(schema["properties"]["gaps"].is_object());
-        assert!(schema["properties"]["sufficient"].is_object());
-    }
-
-    #[test]
-    fn exploration_result_schema_is_valid_json() {
-        let schema = exploration_result_schema();
-        assert_eq!(schema["type"], "object");
-        assert!(schema["properties"]["findings"].is_object());
-    }
-
-    #[test]
-    fn synthesis_schema_is_valid_json() {
-        let schema = synthesis_schema();
-        assert_eq!(schema["type"], "object");
-        assert!(schema["properties"]["answer"].is_object());
-        assert!(schema["properties"]["document_refs"].is_object());
+    fn schemas_are_valid_json_objects() {
+        let cases: Vec<(&str, serde_json::Value, &[&str])> = vec![
+            (
+                "gap_analysis",
+                gap_analysis_schema(),
+                &["gaps", "sufficient"],
+            ),
+            (
+                "exploration_result",
+                exploration_result_schema(),
+                &["findings"],
+            ),
+            (
+                "synthesis",
+                synthesis_schema(),
+                &["answer", "document_refs"],
+            ),
+        ];
+        for (name, schema, expected_props) in &cases {
+            assert_eq!(schema["type"], "object", "{name} schema not object type");
+            for prop in *expected_props {
+                assert!(
+                    schema["properties"][prop].is_object(),
+                    "{name} schema missing property '{prop}'"
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

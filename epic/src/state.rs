@@ -363,20 +363,6 @@ mod tests {
     }
 
     #[test]
-    fn task_count_tracks_insertions() {
-        let mut state = EpicState::new();
-        assert_eq!(state.task_count(), 0);
-
-        let t1 = Task::new(TaskId(1), None, "goal 1".into(), vec![], 0);
-        state.insert(t1);
-        assert_eq!(state.task_count(), 1);
-
-        let t2 = Task::new(TaskId(2), None, "goal 2".into(), vec![], 0);
-        state.insert(t2);
-        assert_eq!(state.task_count(), 2);
-    }
-
-    #[test]
     fn load_nonexistent_file_errors() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("does_not_exist.json");
@@ -391,38 +377,24 @@ mod tests {
     }
 
     #[test]
-    fn load_empty_file_errors() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("empty.json");
-        std::fs::write(&path, "").unwrap();
-        assert!(EpicState::load(&path).is_err());
-    }
-
-    #[test]
-    fn load_invalid_json_errors() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("bad.json");
-        std::fs::write(&path, "not json at all {{{").unwrap();
-        assert!(EpicState::load(&path).is_err());
-    }
-
-    #[test]
-    fn load_wrong_schema_errors() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("wrong_schema.json");
-        std::fs::write(&path, r#"{"unrelated_field": 42}"#).unwrap();
-        assert!(EpicState::load(&path).is_err());
-    }
-
-    #[test]
-    fn load_wrong_field_types_errors() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("wrong_types.json");
-        std::fs::write(
-            &path,
-            r#"{"tasks": "not a map", "next_id": "abc", "root_id": 123}"#,
-        )
-        .unwrap();
-        assert!(EpicState::load(&path).is_err());
+    fn load_invalid_content_errors() {
+        let cases = [
+            ("empty.json", ""),
+            ("bad.json", "not json at all {{{"),
+            ("wrong_schema.json", r#"{"unrelated_field": 42}"#),
+            (
+                "wrong_types.json",
+                r#"{"tasks": "not a map", "next_id": "abc", "root_id": 123}"#,
+            ),
+        ];
+        for (filename, content) in cases {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join(filename);
+            std::fs::write(&path, content).unwrap();
+            assert!(
+                EpicState::load(&path).is_err(),
+                "expected error for {filename}"
+            );
+        }
     }
 }

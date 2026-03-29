@@ -159,6 +159,35 @@ mod tests {
         assert_eq!(evaluate_scope(output, &magnitude), ScopeCheck::WithinBounds);
     }
 
+    #[test]
+    fn evaluate_scope_lines_modified_exceeded() {
+        // 50 added, 50 deleted → min(50,50) = 50 modified
+        let output = "50\t50\tfile.rs";
+        let magnitude = Magnitude {
+            max_lines_added: 100,
+            max_lines_modified: 5,
+            max_lines_deleted: 100,
+        };
+        match evaluate_scope(output, &magnitude) {
+            ScopeCheck::Exceeded { metric, .. } => assert_eq!(metric, "lines_modified"),
+            other => panic!("expected Exceeded for lines_modified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_scope_lines_deleted_exceeded() {
+        let output = "0\t100\tfile.rs";
+        let magnitude = Magnitude {
+            max_lines_added: 100,
+            max_lines_modified: 100,
+            max_lines_deleted: 5,
+        };
+        match evaluate_scope(output, &magnitude) {
+            ScopeCheck::Exceeded { metric, .. } => assert_eq!(metric, "lines_deleted"),
+            other => panic!("expected Exceeded for lines_deleted, got {other:?}"),
+        }
+    }
+
     // --- Integration tests for Task::check_branch_scope (moved from orchestrator) ---
 
     use super::{super::Task, super::TaskId};

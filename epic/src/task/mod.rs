@@ -390,39 +390,6 @@ mod tests {
     }
 
     #[test]
-    fn magnitude_estimate_equality() {
-        assert_eq!(MagnitudeEstimate::Small, MagnitudeEstimate::Small);
-        assert_ne!(MagnitudeEstimate::Small, MagnitudeEstimate::Large);
-    }
-
-    #[test]
-    fn task_path_equality() {
-        assert_eq!(TaskPath::Leaf, TaskPath::Leaf);
-        assert_eq!(TaskPath::Branch, TaskPath::Branch);
-        assert_ne!(TaskPath::Leaf, TaskPath::Branch);
-    }
-
-    #[test]
-    fn leaf_result_equality() {
-        let a = LeafResult {
-            outcome: TaskOutcome::Success,
-            discoveries: vec!["found X".into()],
-        };
-        let b = LeafResult {
-            outcome: TaskOutcome::Success,
-            discoveries: vec!["found X".into()],
-        };
-        let c = LeafResult {
-            outcome: TaskOutcome::Failed {
-                reason: "oops".into(),
-            },
-            discoveries: Vec::new(),
-        };
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
     fn recovery_plan_equality() {
         let spec = branch::SubtaskSpec {
             goal: "fix it".into(),

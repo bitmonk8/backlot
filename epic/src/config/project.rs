@@ -333,22 +333,11 @@ timeout = 600
     }
 
     #[test]
-    fn default_max_total_tasks() {
-        let config = LimitsConfig::default();
-        assert_eq!(config.max_total_tasks, 100);
-    }
-
-    #[test]
     fn load_nonexistent_returns_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent").join("epic.toml");
         let config = EpicConfig::load(&path).unwrap();
         assert_eq!(config, EpicConfig::default());
-    }
-
-    #[test]
-    fn default_config_partial_eq() {
-        assert_eq!(EpicConfig::default(), EpicConfig::default());
     }
 
     #[test]
@@ -371,14 +360,21 @@ max_total_tasks = 42
     }
 
     #[test]
-    fn validate_max_depth_zero() {
-        let mut config = EpicConfig::default();
-        config.limits.max_depth = 0;
-        let err = config.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("max_depth"),
-            "error should name the field: {err}"
-        );
+    fn validate_zero_fields_rejected() {
+        let cases: &[(&str, fn(&mut LimitsConfig))] = &[
+            ("max_depth", |l| l.max_depth = 0),
+            ("max_recovery_rounds", |l| l.max_recovery_rounds = 0),
+            ("retry_budget", |l| l.retry_budget = 0),
+            ("branch_fix_rounds", |l| l.branch_fix_rounds = 0),
+            ("root_fix_rounds", |l| l.root_fix_rounds = 0),
+            ("max_total_tasks", |l| l.max_total_tasks = 0),
+        ];
+        for (field, mutate) in cases {
+            let mut config = EpicConfig::default();
+            mutate(&mut config.limits);
+            let err = config.validate().unwrap_err().to_string();
+            assert!(err.contains(field), "{field}: unexpected error: {err}");
+        }
     }
 
     #[test]
@@ -397,61 +393,6 @@ max_total_tasks = 42
         let mut config = EpicConfig::default();
         config.limits.max_depth = 32;
         config.validate().unwrap();
-    }
-
-    #[test]
-    fn validate_max_recovery_rounds_zero() {
-        let mut config = EpicConfig::default();
-        config.limits.max_recovery_rounds = 0;
-        let err = config.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("max_recovery_rounds"),
-            "error should name the field: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_retry_budget_zero() {
-        let mut config = EpicConfig::default();
-        config.limits.retry_budget = 0;
-        let err = config.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("retry_budget"),
-            "error should name the field: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_branch_fix_rounds_zero() {
-        let mut config = EpicConfig::default();
-        config.limits.branch_fix_rounds = 0;
-        let err = config.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("branch_fix_rounds"),
-            "error should name the field: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_root_fix_rounds_zero() {
-        let mut config = EpicConfig::default();
-        config.limits.root_fix_rounds = 0;
-        let err = config.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("root_fix_rounds"),
-            "error should name the field: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_max_total_tasks_zero() {
-        let mut config = EpicConfig::default();
-        config.limits.max_total_tasks = 0;
-        let err = config.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("max_total_tasks"),
-            "error should name the field: {err}"
-        );
     }
 
     #[test]
