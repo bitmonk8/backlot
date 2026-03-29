@@ -28,7 +28,7 @@
 - **Vault integration** — Document store via `vault` crate (git rev `f7ecea1`). `VaultConfig` in `epic.toml` (`[vault]` section, `enabled = false` by default). Vault constructed at startup, bootstrapped on new runs. `ResearchQuery` custom tool (reel `ToolHandler`) injected into execute, decompose, fix, and recovery design phases — agents query accumulated project knowledge on demand. Discovery recording at 4 orchestrator integration points (leaf discoveries, verification failures, checkpoint adjust, recovery). Vault reorganize runs after root branch children complete. Usage tracking folds vault costs into per-task `TaskUsage`. Vault events drive TUI worklog. All vault operations are best-effort (failures logged, not propagated).
 - **Research Service gap-filling** — `ResearchQuery` tool implements a multi-step pipeline: (1) query vault for existing knowledge, (2) identify information gaps via Haiku structured-output call, (3) fill gaps by spawning Haiku agents with read-only tools to explore the project codebase, (4) synthesize final answer combining vault knowledge and exploration findings. Optional `scope` parameter: `vault` (stored knowledge only) or `project` (default, vault + codebase exploration). Exploration findings are recorded back into vault. All internal agent calls use Haiku ("fast" model key). Returns structured `ResearchResult { answer, document_refs, gaps_filled }`. Web search scope deferred.
 - **Branch logic migration** — Branch decision logic (verification, fix budget check, fix design, recovery assessment/design, checkpoint handling, scope check) extracted from orchestrator into `Task` methods in `task/branch.rs`. Orchestrator retains cross-task coordination (child execution, subtask creation, pending child failure). `BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision` enums define the Task-to-orchestrator interface.
-- **Test counts** — 259 tests (all pass).
+- **Test counts** — 265 tests (all pass).
 
 ## What Is NOT Implemented
 
@@ -110,7 +110,7 @@ Orchestrator's `finalize_branch`, `branch_fix_loop`, `attempt_recovery`, and `ex
 
 ## Source Summary
 
-28 files, 15,221 lines (6,866 core, 8,355 test).
+28 files, 15,151 lines (6,848 core, 8,303 test).
 
 ```
 src/                              Total   Core   Test
@@ -132,14 +132,14 @@ src/                              Total   Core   Test
 │   └── project.rs                  637    294    343
 ├── orchestrator/
 │   ├── mod.rs                      972    972      0
-│   ├── tests.rs                  5,733      0  5,733
-│   ├── context.rs                  154    154      0
+│   ├── tests.rs                  5,351      0  5,351
+│   ├── context.rs                  357    155    202
 │   └── services.rs                  16     16      0
 ├── task/
 │   ├── mod.rs                      453    306    147
 │   ├── assess.rs                    12     12      0
-│   ├── branch.rs                   344    344      0
-│   ├── leaf.rs                     417    417      0
+│   ├── branch.rs                   415    345     70
+│   ├── leaf.rs                     455    418     37
 │   ├── scope.rs                    215     91    124
 │   └── verify.rs                    25     25      0
 └── tui/
@@ -148,10 +148,10 @@ src/                              Total   Core   Test
     ├── metrics.rs                   96     96      0
     └── worklog.rs                   82     82      0
                                  ──────  ─────  ─────
-                                 15,221  6,866  8,355
+                                 15,151  6,848  8,303
 ```
 
-All source is in `src/`. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`. Orchestrator integration tests (5,733 lines) live in `orchestrator/tests.rs`, separate from the 972-line coordinator. `Orchestrator` does not own `EpicState` — callers retain ownership and pass `&mut EpicState` to `run()`.
+All source is in `src/`. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`. Orchestrator integration tests (5,351 lines) live in `orchestrator/tests.rs`, separate from the 972-line coordinator. `Orchestrator` does not own `EpicState` — callers retain ownership and pass `&mut EpicState` to `run()`.
 
 ## Next Up
 

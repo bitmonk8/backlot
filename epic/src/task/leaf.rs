@@ -415,3 +415,41 @@ impl Task {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::{TaskId, TaskPath};
+
+    #[test]
+    fn verification_model_leaf_haiku() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.path = Some(TaskPath::Leaf);
+        t.current_model = Some(Model::Haiku);
+        assert_eq!(t.verification_model(), Model::Haiku);
+    }
+
+    #[test]
+    fn verification_model_leaf_sonnet() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.path = Some(TaskPath::Leaf);
+        t.current_model = Some(Model::Sonnet);
+        assert_eq!(t.verification_model(), Model::Sonnet);
+    }
+
+    #[test]
+    fn verification_model_leaf_opus_capped_to_sonnet() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.path = Some(TaskPath::Leaf);
+        t.current_model = Some(Model::Opus);
+        assert_eq!(t.verification_model(), Model::Sonnet);
+    }
+
+    #[test]
+    fn verification_model_branch_always_sonnet() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.path = Some(TaskPath::Branch);
+        t.current_model = Some(Model::Haiku);
+        assert_eq!(t.verification_model(), Model::Sonnet);
+    }
+}

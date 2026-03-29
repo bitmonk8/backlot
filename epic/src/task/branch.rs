@@ -342,3 +342,74 @@ impl Task {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::project::LimitsConfig;
+    use crate::task::TaskId;
+
+    // --- fix_round_budget_check ---
+
+    #[test]
+    fn fix_budget_within_budget_sonnet() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.verification_fix_rounds = 0;
+        let limits = LimitsConfig::default(); // branch=3, root=4
+        match t.fix_round_budget_check(false, &limits) {
+            FixBudgetCheck::WithinBudget { model } => assert_eq!(model, Model::Sonnet),
+            FixBudgetCheck::Exhausted => panic!("expected WithinBudget"),
+        }
+    }
+
+    #[test]
+    fn fix_budget_opus_round() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.verification_fix_rounds = 3; // next round is 4 → Opus
+        let limits = LimitsConfig::default();
+        match t.fix_round_budget_check(true, &limits) {
+            FixBudgetCheck::WithinBudget { model } => assert_eq!(model, Model::Opus),
+            FixBudgetCheck::Exhausted => panic!("expected WithinBudget"),
+        }
+    }
+
+    #[test]
+    fn fix_budget_exhausted_nonroot() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.verification_fix_rounds = 3; // == branch_fix_rounds default
+        let limits = LimitsConfig::default();
+        assert!(matches!(
+            t.fix_round_budget_check(false, &limits),
+            FixBudgetCheck::Exhausted
+        ));
+    }
+
+    #[test]
+    fn fix_budget_exhausted_root() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.verification_fix_rounds = 4; // == root_fix_rounds default
+        let limits = LimitsConfig::default();
+        assert!(matches!(
+            t.fix_round_budget_check(true, &limits),
+            FixBudgetCheck::Exhausted
+        ));
+    }
+
+    // --- recovery_budget_check ---
+
+    #[test]
+    fn recovery_budget_within() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.recovery_rounds = 1;
+        let limits = LimitsConfig::default(); // max_recovery_rounds=2
+        assert!(t.recovery_budget_check(&limits));
+    }
+
+    #[test]
+    fn recovery_budget_exhausted() {
+        let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        t.recovery_rounds = 2;
+        let limits = LimitsConfig::default();
+        assert!(!t.recovery_budget_check(&limits));
+    }
+}
