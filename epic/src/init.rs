@@ -579,4 +579,29 @@ mod tests {
         assert_eq!(limits.retry_budget, 7);
         assert_eq!(limits.max_total_tasks, defaults.max_total_tasks);
     }
+
+    #[test]
+    fn edit_step_returns_none_on_empty_command() {
+        // A step with empty command: default_cmd is "" so read_line_or_default
+        // returns "" on empty input, split_whitespace produces empty vec -> None.
+        let step = DetectedStepWire {
+            name: "build".into(),
+            command: vec![],
+            timeout: Some(300),
+            rationale: "detected".into(),
+        };
+        // Accept default name, accept default (empty) command, no timeout prompt reached.
+        let mut lines = mock_lines(vec!["", ""]);
+        let result = edit_step(&step, &mut lines).unwrap();
+        assert!(result.is_none(), "empty command should return None");
+    }
+
+    #[test]
+    fn present_and_confirm_eof_mid_interaction_errors() {
+        let findings = sample_findings(vec![sample_step("build", &["cargo", "build"])]);
+        // No lines at all -- triggers `read_line_checked` bail on EOF.
+        let mut lines = mock_lines(vec![]);
+        let result = present_and_confirm(findings, &mut lines);
+        assert!(result.is_err(), "EOF mid-interaction should error");
+    }
 }

@@ -900,4 +900,13 @@ mod tests {
         };
         Arc::new(reel::Agent::new(env))
     }
+
+    #[test]
+    fn max_gaps_cap_is_five() {
+        assert_eq!(MAX_GAPS, 5);
+
+        // Verify that .take(MAX_GAPS) on a longer list produces exactly 5.
+        let gaps: Vec<String> = (0..10).map(|i| format!("gap {i}")).collect();
+        assert_eq!(gaps.iter().take(MAX_GAPS).count(), 5);
+    }
 }

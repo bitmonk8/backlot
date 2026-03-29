@@ -858,4 +858,23 @@ mod tests {
             "no-path prompt should not contain path-specific guidance",
         );
     }
+
+    #[test]
+    fn explore_for_init_produces_prompt_pair() {
+        let pair = build_explore_for_init();
+        assert!(
+            pair.system_prompt.contains("project analyzer"),
+            "system_prompt should contain 'project analyzer', got: {}",
+            pair.system_prompt,
+        );
+        assert!(
+            pair.query.contains("verification steps"),
+            "query should mention 'verification steps', got: {}",
+            pair.query,
+        );
+        assert!(
+            pair.system_prompt.contains("Cargo.toml"),
+            "system_prompt should mention common build markers like 'Cargo.toml'",
+        );
+    }
 }

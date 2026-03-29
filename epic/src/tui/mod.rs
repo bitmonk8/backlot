@@ -617,4 +617,25 @@ mod tests {
         let clamped = (app.tree_scroll + 1).min(app.tasks.len());
         assert_eq!(clamped, 1);
     }
+
+    #[test]
+    fn usage_updated_accumulates_cost() {
+        let mut app = app();
+        register(&mut app, 0, None, "root", 0);
+        app.handle_event(Event::UsageUpdated {
+            task_id: TaskId(0),
+            phase_cost_usd: 0.01,
+            total_cost_usd: 0.01,
+        });
+        assert!((app.total_cost_usd - 0.01).abs() < f64::EPSILON);
+        assert!((app.tasks[&TaskId(0)].cost_usd - 0.01).abs() < f64::EPSILON);
+
+        app.handle_event(Event::UsageUpdated {
+            task_id: TaskId(0),
+            phase_cost_usd: 0.02,
+            total_cost_usd: 0.03,
+        });
+        assert!((app.total_cost_usd - 0.03).abs() < f64::EPSILON);
+        assert!((app.tasks[&TaskId(0)].cost_usd - 0.03).abs() < f64::EPSILON);
+    }
 }

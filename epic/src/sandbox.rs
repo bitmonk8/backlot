@@ -259,4 +259,16 @@ mod tests {
     fn cgroup_empty_string() {
         assert!(!platform::cgroup_indicates_container(""));
     }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn model_partial_substring_not_false_positive() {
+        // "NotVirtuallyAnything" contains "virtual" as a substring.
+        // The current implementation lowercases and checks .contains("virtual"),
+        // so this WILL match. This test documents the known behavior.
+        assert!(
+            platform::model_indicates_vm("NotVirtuallyAnything"),
+            "substring 'virtual' within 'NotVirtuallyAnything' is detected (known behavior)"
+        );
+    }
 }

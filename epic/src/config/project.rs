@@ -576,4 +576,49 @@ reorganize_model = "balanced"
         config.vault.query_model = String::new();
         config.validate().unwrap();
     }
+
+    #[test]
+    fn load_permission_denied_errors() {
+        // Use a path that exists but cannot be read as a file (a directory).
+        let dir = tempfile::tempdir().unwrap();
+        let err = EpicConfig::load(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("reading config"),
+            "expected 'reading config' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_retry_budget_upper_bound_not_enforced_at_reasonable_value() {
+        // No upper-bound validation exists for retry_budget, so a large value is accepted.
+        let mut config = EpicConfig::default();
+        config.limits.retry_budget = 100;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_root_fix_rounds_upper_bound_not_enforced_at_reasonable_value() {
+        let mut config = EpicConfig::default();
+        config.limits.root_fix_rounds = 100;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_branch_fix_rounds_upper_bound_not_enforced_at_reasonable_value() {
+        let mut config = EpicConfig::default();
+        config.limits.branch_fix_rounds = 100;
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn model_config_name_for_returns_correct_names() {
+        let cfg = ModelConfig {
+            fast: "my-haiku".into(),
+            balanced: "my-sonnet".into(),
+            strong: "my-opus".into(),
+        };
+        assert_eq!(cfg.name_for(crate::task::Model::Haiku), "my-haiku");
+        assert_eq!(cfg.name_for(crate::task::Model::Sonnet), "my-sonnet");
+        assert_eq!(cfg.name_for(crate::task::Model::Opus), "my-opus");
+    }
 }

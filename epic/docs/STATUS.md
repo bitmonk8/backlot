@@ -28,7 +28,7 @@
 - **Vault integration** — Document store via `vault` crate (git rev `f7ecea1`). `VaultConfig` in `epic.toml` (`[vault]` section, `enabled = false` by default). Vault constructed at startup, bootstrapped on new runs. `ResearchQuery` custom tool (reel `ToolHandler`) injected into execute, decompose, fix, and recovery design phases — agents query accumulated project knowledge on demand. Discovery recording at 4 orchestrator integration points (leaf discoveries, verification failures, checkpoint adjust, recovery). Vault reorganize runs after root branch children complete. Usage tracking folds vault costs into per-task `TaskUsage`. Vault events drive TUI worklog. All vault operations are best-effort (failures logged, not propagated).
 - **Research Service gap-filling** — `ResearchQuery` tool implements a multi-step pipeline: (1) query vault for existing knowledge, (2) identify information gaps via Haiku structured-output call, (3) fill gaps by spawning Haiku agents with read-only tools to explore the project codebase, (4) synthesize final answer combining vault knowledge and exploration findings. Optional `scope` parameter: `vault` (stored knowledge only) or `project` (default, vault + codebase exploration). Exploration findings are recorded back into vault. All internal agent calls use Haiku ("fast" model key). Returns structured `ResearchResult { answer, document_refs, gaps_filled }`. Web search scope deferred.
 - **Branch logic migration** — Branch decision logic (verification, fix budget check, fix design, recovery assessment/design, checkpoint handling, scope check) extracted from orchestrator into `Task` methods in `task/branch.rs`. Orchestrator retains cross-task coordination (child execution, subtask creation, pending child failure). `BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision` enums define the Task-to-orchestrator interface.
-- **Test counts** — 235 tests (all pass).
+- **Test counts** — 245 tests (all pass).
 
 ## What Is NOT Implemented
 
@@ -110,33 +110,42 @@ Orchestrator's `finalize_branch`, `branch_fix_loop`, `attempt_recovery`, and `ex
 
 ### Test Suite Audit Cleanup
 
-Applied recommendations from `docs/TEST_AUDIT.md`. Removed 13 low-value tests (derived-trait smoke tests, duplicates, test-only helper tests). Merged ~28 tests into 8 parameterized/table-driven tests across 7 files. Added 8 coverage gap tests for HIGH/MEDIUM priority gaps: `VerificationWire` fail variant, `CheckpointWire` escalate variant, invalid outcome/model rejection, scope circuit breaker `lines_modified`/`lines_deleted` exceeded paths. Net: 265 → 235 tests, 15,151 → 14,881 lines (-270). MockBuilder pattern and orchestrator merge candidates deferred.
+Applied recommendations from `docs/TEST_AUDIT.md`. Removed 13 low-value tests (derived-trait smoke tests, duplicates, test-only helper tests). Merged ~28 tests into 8 parameterized/table-driven tests across 7 files. Added 8 coverage gap tests for HIGH/MEDIUM priority gaps: `VerificationWire` fail variant, `CheckpointWire` escalate variant, invalid outcome/model rejection, scope circuit breaker `lines_modified`/`lines_deleted` exceeded paths. Net: 265 -> 235 tests, 15,151 -> 14,881 lines (-270).
+
+### Test Suite Audit Completion (MockBuilder, Merges, Coverage Gaps)
+
+Completed all remaining recommendations from `docs/TEST_AUDIT.md`:
+
+- **MockBuilder pattern**: Added `MockBuilder` struct in `test_support.rs` with fluent API wrapping `MockAgentService` construction. 30+ builder methods for common mock patterns (assess, execute, verify, decompose, checkpoint, recovery). Rewrote all orchestrator tests to use the builder (71 pre-merge, 67 post-merge), eliminating the 4-line `lock().unwrap().push_back()` ceremony per mock response.
+- **Merged 3 orchestrator test pairs**: (a) Deleted `depth_cap_forces_leaf`, kept `custom_max_depth_forces_leaf`. (b) Merged `branch_fix_subtasks_no_recursive_fix` + `leaf_fix_subtask_no_recursive_fix_loop` + `branch_fix_subtask_no_recursive_fix_loop` into `fix_subtasks_no_recursive_fix`. (c) Deleted `recovery_full_redecomposition_skips_pending`, kept `recovery_full_redecomp_preserves_completed_siblings`.
+- **14 coverage gap tests added** across 8 files: `DetectedStepWire` default timeout, `SubtaskWire` invalid magnitude, `build_explore_for_init` prompt content, `UsageUpdated` TUI event handler, `next_id` overflow path, `EpicConfig::load` permission denied, config upper-bound tests (3), `ModelConfig::name_for`, `edit_step` returning None, EOF mid-interaction, `MAX_GAPS` cap, sandbox substring behavior.
+- Net: 235 -> 245 tests, 14,907 -> 12,714 lines (-2,193). Orchestrator tests: 5,284 -> 2,497 lines (-53%).
 
 ## Source Summary
 
-28 files, 14,907 lines (6,375 core, 8,532 test).
+28 files, 12,714 lines (6,375 core, 6,339 test).
 
 ```
 src/                              Total   Core   Test
 ├── main.rs                         357     12    345
-├── knowledge.rs                    903    612    291
-├── state.rs                        400    115    285
+├── knowledge.rs                    912    612    300
+├── state.rs                        419    115    304
 ├── events.rs                       118    118      0
 ├── cli.rs                           69     46     23
-├── init.rs                         582    347    235
-├── sandbox.rs                      262    132    130
-├── test_support.rs                 232      0    232
+├── init.rs                         607    347    260
+├── sandbox.rs                      274    132    142
+├── test_support.rs                 648      0    648
 ├── agent/
 │   ├── mod.rs                      184    184      0
-│   ├── prompts.rs                  861    510    351
+│   ├── prompts.rs                  880    510    370
 │   ├── reel_adapter.rs             497    432     65
-│   └── wire.rs                     764    414    350
+│   └── wire.rs                     791    414    377
 ├── config/
 │   ├── mod.rs                        3      3      0
-│   └── project.rs                  578    294    284
+│   └── project.rs                  624    294    330
 ├── orchestrator/
 │   ├── mod.rs                      972    972      0
-│   ├── tests.rs                  5,284      0  5,284
+│   ├── tests.rs                  2,497      0  2,497
 │   ├── context.rs                  357    155    202
 │   └── services.rs                  16     16      0
 ├── task/
@@ -147,15 +156,15 @@ src/                              Total   Core   Test
 │   ├── scope.rs                    244     91    153
 │   └── verify.rs                    25     25      0
 └── tui/
-    ├── mod.rs                      620    503    117
+    ├── mod.rs                      641    503    138
     ├── task_tree.rs                134    134      0
     ├── metrics.rs                   96     96      0
     └── worklog.rs                   82     82      0
                                  ──────  ─────  ─────
-                                 14,907  6,375  8,532
+                                 12,714  6,375  6,339
 ```
 
-All source is in `src/`. `test_support.rs` is a shared mock `AgentService` gated behind `#[cfg(test)]`. Orchestrator integration tests (5,284 lines) live in `orchestrator/tests.rs`, separate from the 972-line coordinator. `Orchestrator` does not own `EpicState` — callers retain ownership and pass `&mut EpicState` to `run()`.
+All source is in `src/`. `test_support.rs` is a shared `MockAgentService` + `MockBuilder` gated behind `#[cfg(test)]`. Orchestrator integration tests (2,497 lines) live in `orchestrator/tests.rs`, separate from the 972-line coordinator. `Orchestrator` does not own `EpicState` -- callers retain ownership and pass `&mut EpicState` to `run()`.
 
 ## Next Up
 

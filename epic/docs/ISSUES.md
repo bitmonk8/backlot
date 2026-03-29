@@ -243,3 +243,35 @@ Previously also missing: `VerificationWire` fail variant, `parse_model_name` inv
 ### 59. Parameterized test names use generic `_cases` suffix
 
 `src/task/branch.rs` `fix_budget_check_cases` and `src/task/leaf.rs` `verification_model_cases` — The `_cases` suffix doesn't communicate the behavior space being tested. More descriptive names (e.g., `fix_budget_model_selection_and_exhaustion`, `verification_model_caps_and_overrides`) would improve readability. **Category: Naming.**
+
+### 60. MockBuilder locks mutexes during exclusive `&mut self` access
+
+`src/test_support.rs` — Every builder method acquires a mutex lock on `MockAgentService` queues despite having exclusive `&mut self` access (zero contention during build). Could hold plain `VecDeque`/`HashMap` fields and wrap in `Mutex::new()` only in `build()`, eliminating ~30 lock/unlock calls. **Category: Simplification.**
+
+### 61. `MockBuilder::build()` takes `&mut self` instead of `self`
+
+`src/test_support.rs` — `build(&mut self)` uses `mem::replace` to extract the inner mock. No test reuses a builder after `build()`. A consuming `build(self)` signature would prevent accidental double-build at compile time. **Category: Simplification.**
+
+### 62. `decompose_one/two/three` are near-identical copy-paste
+
+`src/test_support.rs` — These three methods differ only in the number of `SubtaskSpec` entries. A single `decompose_n(count)` generating children alphabetically would replace all three. **Category: Simplification.**
+
+### 63. Duplicate struct construction in MockBuilder leaf/verify families
+
+`src/test_support.rs` — `leaf_success`/`leaf_failed`/`leaf_failures` are structurally identical to `fix_leaf_success`/`fix_leaf_failed`/`fix_leaf_failures` (different queue). Same for `verify_pass`/`verify_fail` vs `file_review_pass`/`file_review_fail`. Extract shared helpers parameterized by queue reference. **Category: Simplification.**
+
+### 64. Orchestrator resume tests share ~25-30 lines of state setup
+
+`src/orchestrator/tests.rs` — Five resume tests manually build near-identical state (root + child, set phases, populate attempts). A `make_resume_state(child_phase, child_model, attempts)` helper would consolidate the boilerplate. **Category: Simplification.**
+
+### 65. Event-drain-and-assert pattern repeated in orchestrator tests
+
+`src/orchestrator/tests.rs` — The `while let Ok(event) = rx.try_recv() { if matches!(...) { found = true; } } assert!(found)` pattern appears 5+ times. Extract a `drain_events(rx)` or `assert_event_found(rx, matcher, msg)` helper. **Category: Simplification.**
+
+### 66. `fix_subtasks_no_recursive_fix` bundles two independent test scenarios
+
+`src/orchestrator/tests.rs` — Contains two independent sub-tests (leaf fix + branch fix) in one `#[tokio::test]`. If Part 1 fails, Part 2 never runs. Could be two separate test functions. **Category: Separation.**
+
+### 67. MockAgentService doesn't assert queues are drained after test
+
+`src/test_support.rs` / `src/orchestrator/tests.rs` — If a refactoring causes fewer agent calls than expected, leftover mock responses are silently ignored. Adding `assert_all_consumed()` or a `Drop` impl that panics on non-empty queues would catch subtle coverage regressions. **Category: Testing.**

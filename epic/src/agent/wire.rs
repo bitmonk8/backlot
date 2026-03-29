@@ -762,4 +762,30 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn detected_step_wire_default_timeout() {
+        let wire = DetectedStepWire {
+            name: "Build".into(),
+            command: vec!["cargo".into(), "build".into()],
+            timeout: None,
+            rationale: "detected".into(),
+        };
+        let step = VerificationStep::from(wire);
+        assert_eq!(step.timeout, 300, "timeout should default to 300 when None");
+    }
+
+    #[test]
+    fn subtask_wire_invalid_magnitude_rejected() {
+        let wire = SubtaskWire {
+            goal: "do thing".into(),
+            verification_criteria: vec!["works".into()],
+            magnitude: "huge".into(),
+        };
+        let err = parse_subtask_wire(wire).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid magnitude"),
+            "expected 'invalid magnitude' error, got: {err}"
+        );
+    }
 }

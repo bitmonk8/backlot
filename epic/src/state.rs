@@ -397,4 +397,23 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn load_rejects_max_task_id_overflow() {
+        let mut state = EpicState::new();
+        let id = TaskId(u64::MAX);
+        state.insert(Task::new(id, None, "max".into(), vec![], 0));
+        state.next_id = 0; // deliberately low
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.json");
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        std::fs::write(&path, json).unwrap();
+
+        let err = EpicState::load(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("exhausted"),
+            "expected 'exhausted' error, got: {err}"
+        );
+    }
 }
