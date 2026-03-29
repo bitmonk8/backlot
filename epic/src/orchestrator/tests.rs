@@ -81,47 +81,6 @@ async fn two_children() {
     assert_eq!(state.get(root_id).unwrap().subtask_ids.len(), 2);
 }
 
-/// Haiku fails 3x -> escalate to Sonnet -> succeeds.
-#[tokio::test]
-async fn leaf_retry_and_escalation() {
-    let mock = MockBuilder::new()
-        .decompose_one()
-        .assess_leaf()
-        .leaf_failures(3, "haiku failed")
-        .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
-        .build();
-    let (orch, mut state, root_id, _rx) = make_orchestrator(mock);
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert_eq!(result, TaskOutcome::Success);
-
-    let child_id = state.get(root_id).unwrap().subtask_ids[0];
-    let child = state.get(child_id).unwrap();
-    assert_eq!(child.attempts.len(), 4);
-    assert_eq!(child.current_model, Some(Model::Sonnet));
-}
-
-/// All tiers exhausted -> leaf Failed -> parent Failed.
-#[tokio::test]
-async fn terminal_failure() {
-    let mock = MockBuilder::new()
-        .decompose_one()
-        .assess_leaf()
-        .leaf_failures(9, "persistent failure")
-        .recovery_unrecoverable()
-        .build();
-    let (orch, mut state, root_id, _rx) = make_orchestrator(mock);
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert!(matches!(result, TaskOutcome::Failed { .. }));
-
-    let child_id = state.get(root_id).unwrap().subtask_ids[0];
-    let child = state.get(child_id).unwrap();
-    assert_eq!(child.attempts.len(), 9);
-    assert_eq!(child.phase, TaskPhase::Failed);
-    assert_eq!(state.get(root_id).unwrap().phase, TaskPhase::Failed);
-}
-
 /// State is checkpointed to disk during execution.
 #[tokio::test]
 async fn checkpoint_saves_state() {
@@ -414,84 +373,6 @@ async fn discoveries_propagated_to_checkpoint() {
         found_discoveries_event,
         "DiscoveriesRecorded event not found"
     );
-}
-
-/// Leaf fix loop: verification fails -> `fix_leaf` succeeds -> re-verification passes.
-#[tokio::test]
-async fn leaf_fix_passes_on_retry() {
-    let mock = MockBuilder::new()
-        .decompose_one()
-        .assess_leaf()
-        .leaf_success()
-        .verify_fail("test X not passing")
-        .fix_leaf_success()
-        .verify_pass()
-        .verify_pass()
-        .file_review_passes(2)
-        .build();
-    let (orch, mut state, root_id, _rx) = make_orchestrator(mock);
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert_eq!(result, TaskOutcome::Success);
-
-    let child_id = state.get(root_id).unwrap().subtask_ids[0];
-    let child = state.get(child_id).unwrap();
-    assert_eq!(child.phase, TaskPhase::Completed);
-    assert_eq!(child.fix_attempts.len(), 1);
-    assert!(child.fix_attempts[0].succeeded);
-}
-
-/// Leaf fix loop: 3 failures at starting tier -> escalate -> fix succeeds -> verify passes.
-#[tokio::test]
-async fn leaf_fix_escalates_model() {
-    let mock = MockBuilder::new()
-        .decompose_one()
-        .assess_leaf()
-        .leaf_success()
-        .verify_fail("tests fail")
-        .fix_leaf_failures(3, "could not fix")
-        .fix_leaf_success()
-        .verify_pass()
-        .verify_pass()
-        .file_review_passes(2)
-        .build();
-    let (orch, mut state, root_id, mut rx) = make_orchestrator(mock);
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert_eq!(result, TaskOutcome::Success);
-
-    let child_id = state.get(root_id).unwrap().subtask_ids[0];
-    let child = state.get(child_id).unwrap();
-    assert_eq!(child.fix_attempts.len(), 4);
-    assert_eq!(child.current_model, Some(Model::Sonnet));
-
-    let mut found_escalation = false;
-    while let Ok(event) = rx.try_recv() {
-        if matches!(event, Event::FixModelEscalated { task_id, from: Model::Haiku, to: Model::Sonnet } if task_id == child_id)
-        {
-            found_escalation = true;
-        }
-    }
-    assert!(found_escalation, "FixModelEscalated event not found");
-}
-
-/// Leaf fix loop: all tiers exhausted (9 fix failures) -> terminal failure.
-#[tokio::test]
-async fn leaf_fix_terminal_failure() {
-    let mock = MockBuilder::new()
-        .decompose_one()
-        .assess_leaf()
-        .leaf_success()
-        .verify_fail("tests fail")
-        .fix_leaf_failures(9, "still broken")
-        .recovery_unrecoverable()
-        .build();
-    let (orch, mut state, root_id, _rx) = make_orchestrator(mock);
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert!(matches!(result, TaskOutcome::Failed { .. }));
-
-    let child_id = state.get(root_id).unwrap().subtask_ids[0];
-    let child = state.get(child_id).unwrap();
-    assert_eq!(child.fix_attempts.len(), 9);
-    assert_eq!(child.phase, TaskPhase::Failed);
 }
 
 /// Branch fix loop: root verification fails -> fix subtask created -> re-verify passes.
@@ -1702,35 +1583,6 @@ async fn leaf_retry_attempts_persisted_to_disk() {
 // Config wiring tests
 // -----------------------------------------------------------------------
 
-/// Custom `retry_budget`=1: Haiku fails once -> immediately escalates to Sonnet.
-#[tokio::test]
-async fn custom_retry_budget_escalates_early() {
-    let mock = MockBuilder::new()
-        .decompose_one()
-        .assess_leaf()
-        .leaf_failed("haiku failed")
-        .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
-        .build();
-
-    let limits = LimitsConfig {
-        retry_budget: 1,
-        ..LimitsConfig::default()
-    };
-
-    let (orch, mut state, root_id, _rx) = make_orchestrator(mock);
-    let orch = orch.with_limits(limits);
-
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert_eq!(result, TaskOutcome::Success);
-
-    let child_id = state.get(root_id).unwrap().subtask_ids[0];
-    let child = state.get(child_id).unwrap();
-    assert_eq!(child.attempts.len(), 2);
-    assert_eq!(child.current_model, Some(Model::Sonnet));
-}
-
 /// Custom `max_recovery_rounds`=1: recovery attempted once, refused on second failure.
 #[tokio::test]
 async fn custom_max_recovery_rounds_limits_recovery() {
@@ -2089,30 +1941,6 @@ async fn task_limit_exact_boundary_permits() {
     assert_eq!(state.task_count(), 3);
 }
 
-/// Leaf fix loop: `verify()` returns Err on first attempt, succeeds on second.
-#[tokio::test]
-async fn leaf_fix_verify_error_retries() {
-    let mut mb = MockBuilder::new();
-    mb.decompose_one()
-        .assess_leaf()
-        .leaf_success()
-        .verify_fail("tests fail");
-    mb.fix_leaf_success();
-    mb.verify_errors_sequence(TaskId(1), vec![None, Some("transient API error".into())]);
-    mb.fix_leaf_success();
-    mb.verify_pass();
-    mb.verify_pass();
-    mb.file_review_passes(2);
-    let (orch, mut state, root_id, _rx) = make_orchestrator(mb.build());
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert_eq!(result, TaskOutcome::Success);
-
-    let child_id = state.get(root_id).unwrap().subtask_ids[0];
-    let child = state.get(child_id).unwrap();
-    assert_eq!(child.phase, TaskPhase::Completed);
-    assert_eq!(child.fix_attempts.len(), 2);
-}
-
 /// Branch fix loop: `design_fix_subtasks()` returns Err on round 1, succeeds on round 2.
 #[tokio::test]
 async fn branch_fix_design_error_retries() {
@@ -2201,37 +2029,6 @@ async fn branch_fix_design_error_exhausts_budget() {
     let root = state.get(root_id).unwrap();
     assert_eq!(root.phase, TaskPhase::Failed);
     assert_eq!(root.verification_fix_rounds, 2);
-}
-
-/// All leaf fix retries across all tiers fail verification -> Failed.
-#[tokio::test]
-async fn leaf_fix_verify_error_exhausts_budget() {
-    let mut mb = MockBuilder::new();
-    mb.decompose_one()
-        .assess_leaf()
-        .leaf_success()
-        .verify_fail("tests fail");
-
-    let child_id = TaskId(1);
-    let mut errors: Vec<Option<String>> = vec![None];
-    errors.extend(std::iter::repeat_n(
-        Some("persistent verify error".into()),
-        9,
-    ));
-    mb.verify_errors_sequence(child_id, errors);
-    for _ in 0..9 {
-        mb.fix_leaf_success();
-    }
-    mb.recovery_unrecoverable().recovery_unrecoverable();
-
-    let (orch, mut state, root_id, _rx) = make_orchestrator(mb.build());
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert!(matches!(result, TaskOutcome::Failed { .. }));
-
-    let actual_child_id = state.get(root_id).unwrap().subtask_ids[0];
-    let child = state.get(actual_child_id).unwrap();
-    assert_eq!(child.phase, TaskPhase::Failed);
-    assert_eq!(child.fix_attempts.len(), 9);
 }
 
 /// Initial `verify()` returning `Err` must propagate as `Err` from `run()`.
@@ -2356,75 +2153,6 @@ async fn branch_succeeds_when_some_children_completed() {
 // -----------------------------------------------------------------------
 // File-level review tests
 // -----------------------------------------------------------------------
-
-/// Leaf passes file-level review -> completes normally.
-#[tokio::test]
-async fn file_level_review_pass_completes() {
-    let mock = MockBuilder::new()
-        .decompose_one()
-        .assess_leaf()
-        .leaf_success()
-        .verify_pass()
-        .file_review_pass()
-        .verify_pass()
-        .build();
-    let (orch, mut state, root_id, mut rx) = make_orchestrator(mock);
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert_eq!(result, TaskOutcome::Success);
-
-    let child_id = state.get(root_id).unwrap().subtask_ids[0];
-    assert_eq!(state.get(child_id).unwrap().phase, TaskPhase::Completed);
-
-    let mut saw_review_passed = false;
-    while let Ok(event) = rx.try_recv() {
-        if matches!(event, Event::FileLevelReviewCompleted { task_id, passed } if task_id == child_id && passed)
-        {
-            saw_review_passed = true;
-        }
-    }
-    assert!(
-        saw_review_passed,
-        "FileLevelReviewCompleted(passed=true) event not found"
-    );
-}
-
-/// Leaf fails file-level review -> enters fix loop.
-#[tokio::test]
-async fn file_level_review_fail_triggers_fix_loop() {
-    let mock = MockBuilder::new()
-        .decompose_one()
-        .assess_leaf()
-        .leaf_success()
-        .verify_pass()
-        .file_review_fail("missing error handling")
-        .fix_leaf_success()
-        .verify_pass()
-        .file_review_pass()
-        .verify_pass()
-        .build();
-    let (orch, mut state, root_id, mut rx) = make_orchestrator(mock);
-    let result = orch.run(&mut state, root_id).await.unwrap();
-    assert_eq!(result, TaskOutcome::Success);
-
-    let child_id = state.get(root_id).unwrap().subtask_ids[0];
-    let child = state.get(child_id).unwrap();
-    assert_eq!(child.phase, TaskPhase::Completed);
-    assert_eq!(child.fix_attempts.len(), 1);
-
-    let mut review_events: Vec<bool> = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        if let Event::FileLevelReviewCompleted { task_id, passed } = event {
-            if task_id == child_id {
-                review_events.push(passed);
-            }
-        }
-    }
-    assert_eq!(
-        review_events,
-        vec![false, true],
-        "expected [failed, passed] review events"
-    );
-}
 
 /// Branch tasks skip file-level review, completing directly after verification.
 #[tokio::test]

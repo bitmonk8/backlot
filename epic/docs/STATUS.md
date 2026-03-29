@@ -28,7 +28,7 @@
 - **Vault integration** — Document store via `vault` crate (git rev `f7ecea1`). `VaultConfig` in `epic.toml` (`[vault]` section, `enabled = false` by default). Vault constructed at startup, bootstrapped on new runs. `ResearchQuery` custom tool (reel `ToolHandler`) injected into execute, decompose, fix, and recovery design phases — agents query accumulated project knowledge on demand. Discovery recording at 4 orchestrator integration points (leaf discoveries, verification failures, checkpoint adjust, recovery). Vault reorganize runs after root branch children complete. Usage tracking folds vault costs into per-task `TaskUsage`. Vault events drive TUI worklog. All vault operations are best-effort (failures logged, not propagated).
 - **Research Service gap-filling** — `ResearchQuery` tool implements a multi-step pipeline: (1) query vault for existing knowledge, (2) identify information gaps via Haiku structured-output call, (3) fill gaps by spawning Haiku agents with read-only tools to explore the project codebase, (4) synthesize final answer combining vault knowledge and exploration findings. Optional `scope` parameter: `vault` (stored knowledge only) or `project` (default, vault + codebase exploration). Exploration findings are recorded back into vault. All internal agent calls use Haiku ("fast" model key). Returns structured `ResearchResult { answer, document_refs, gaps_filled }`. Web search scope deferred.
 - **Branch logic migration** — Branch decision logic (verification, fix budget check, fix design, recovery assessment/design, checkpoint handling, scope check) extracted from orchestrator into `Task` methods in `task/branch.rs`. Orchestrator retains cross-task coordination (child execution, subtask creation, pending child failure). `BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision` enums define the Task-to-orchestrator interface.
-- **Test counts** — 245 tests (all pass).
+- **Test counts** — 246 tests (all pass).
 
 ## What Is NOT Implemented
 
@@ -121,9 +121,13 @@ Completed all remaining test suite audit recommendations:
 - **14 coverage gap tests added** across 8 files: `DetectedStepWire` default timeout, `SubtaskWire` invalid magnitude, `build_explore_for_init` prompt content, `UsageUpdated` TUI event handler, `next_id` overflow path, `EpicConfig::load` permission denied, config upper-bound tests (3), `ModelConfig::name_for`, `edit_step` returning None, EOF mid-interaction, `MAX_GAPS` cap, sandbox substring behavior.
 - Net: 235 -> 245 tests, 14,907 -> 12,714 lines (-2,193). Orchestrator tests: 5,284 -> 2,497 lines (-53%).
 
+### Leaf Test Relocation
+
+Relocated 10 leaf-specific tests from `orchestrator/tests.rs` to `task/leaf.rs`, calling `Task::execute_leaf()` directly instead of routing through the orchestrator. Added 1 new test for the `is_fix_task` file-review-failure codepath. Tests relocated: retry/escalation (3), fix loop (5), file-level review (2). Orchestrator tests reduced from 67 to 57; leaf tests grew from 1 to 12. Net: 245 -> 246 tests.
+
 ## Source Summary
 
-28 files, 12,714 lines (6,375 core, 6,339 test).
+28 files, 12,740 lines (6,373 core, 6,367 test).
 
 ```
 src/                              Total   Core   Test
@@ -144,15 +148,15 @@ src/                              Total   Core   Test
 │   ├── mod.rs                        3      3      0
 │   └── project.rs                  624    294    330
 ├── orchestrator/
-│   ├── mod.rs                      972    972      0
-│   ├── tests.rs                  2,497      0  2,497
+│   ├── mod.rs                      972    970      2
+│   ├── tests.rs                  2,225      0  2,225
 │   ├── context.rs                  357    155    202
 │   └── services.rs                  16     16      0
 ├── task/
 │   ├── mod.rs                      420    306    114
 │   ├── assess.rs                    12     12      0
 │   ├── branch.rs                   395    346     49
-│   ├── leaf.rs                     440    418     22
+│   ├── leaf.rs                     738    418    320
 │   ├── scope.rs                    244     91    153
 │   └── verify.rs                    25     25      0
 └── tui/
@@ -161,10 +165,10 @@ src/                              Total   Core   Test
     ├── metrics.rs                   96     96      0
     └── worklog.rs                   82     82      0
                                  ──────  ─────  ─────
-                                 12,714  6,375  6,339
+                                 12,740  6,373  6,367
 ```
 
-All source is in `src/`. `test_support.rs` is a shared `MockAgentService` + `MockBuilder` gated behind `#[cfg(test)]`. Orchestrator integration tests (2,497 lines) live in `orchestrator/tests.rs`, separate from the 972-line coordinator. `Orchestrator` does not own `EpicState` -- callers retain ownership and pass `&mut EpicState` to `run()`.
+All source is in `src/`. `test_support.rs` is a shared `MockAgentService` + `MockBuilder` gated behind `#[cfg(test)]`. Orchestrator integration tests (2,225 lines) live in `orchestrator/tests.rs`, separate from the 972-line coordinator. Leaf-specific tests (320 lines) live in `task/leaf.rs`, calling `Task::execute_leaf()` directly. `Orchestrator` does not own `EpicState` -- callers retain ownership and pass `&mut EpicState` to `run()`.
 
 ## Next Up
 

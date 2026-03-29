@@ -275,3 +275,19 @@ Previously also missing: `VerificationWire` fail variant, `parse_model_name` inv
 ### 67. MockAgentService doesn't assert queues are drained after test
 
 `src/test_support.rs` / `src/orchestrator/tests.rs` — If a refactoring causes fewer agent calls than expected, leftover mock responses are silently ignored. Adding `assert_all_consumed()` or a `Drop` impl that panics on non-empty queues would catch subtle coverage regressions. **Category: Testing.**
+
+### 68. Duplicated event-draining pattern in leaf tests
+
+`src/task/leaf.rs` — Three tests (`leaf_fix_escalates_model`, `file_level_review_pass_completes`, `file_level_review_fail_triggers_fix_loop`) repeat a ~10-line `while let Ok(event) = rx.try_recv()` loop to scan for specific events. A shared `drain_events` helper would reduce duplication. Also duplicated in orchestrator tests (see issue 65). **Category: Simplification.**
+
+### 69. `empty_tree()` helper should be `TreeContext::default()`
+
+`src/task/leaf.rs` — `empty_tree()` manually constructs a `TreeContext` with all fields set to `None`/`Vec::new()`. Adding `#[derive(Default)]` to `TreeContext` (all fields are `Option` or `Vec`) would eliminate this 12-line helper and prevent duplication if branch tests need the same thing. **Category: Simplification.**
+
+### 70. `Services` construction duplicated across task test modules
+
+`src/task/leaf.rs` and `src/task/scope.rs` — Both independently wire up `Services<MockAgentService>` (leaf.rs via `make_services`, scope.rs inline). Consolidating into `test_support.rs` alongside `MockBuilder` would give a single point of change if `Services` gains a field. **Category: Separation.**
+
+### 71. Missing leaf-level test coverage for additional `execute_leaf` paths
+
+`src/task/leaf.rs` — Four `execute_leaf` code paths lack direct leaf-level tests: (1) resume from `Verifying` phase, (2) `is_fix_task` + verification `Fail` (not file-review fail), (3) `verify()` returning `Err` in `leaf_finalize` (`__agent_error__` prefix), (4) scope circuit breaker triggering in fix mode. Orchestrator tests cover these indirectly. **Category: Testing.**
