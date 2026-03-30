@@ -6,25 +6,25 @@ Extract the orchestrator (recursive problem-solver coordination engine) from epi
 
 **Key constraint**: Epic's `Task` struct, its lifecycle methods (`execute_leaf`, `verify_branch`, etc.), and all AI-specific logic stay in epic. The orchestrator crate defines the coordination algorithm and the trait contract that tasks must satisfy.
 
-Proposed crate name: **score** (Structured Coordinator for Orchestrated Recursive Execution). Open to alternatives.
+Crate name: **cue**.
 
 ---
 
 ## Architecture
 
 ```
-score (orchestrator crate)
-  - Defines: TaskNode trait, coordination loop, state machine, events, tree context
-  - Generic over: T: TaskNode
+cue (orchestrator crate)
+  - Defines: TaskNode trait, TaskStore trait, coordination loop, state machine, events, tree context
+  - Generic over: S: TaskStore
 
 epic (application crate)
-  - Defines: Task struct (implements score::TaskNode)
-  - Defines: ReelAgent (implements score::AgentService)
+  - Defines: Task struct (implements cue::TaskNode), EpicState (implements cue::TaskStore)
+  - Defines: AgentService trait, ReelAgent, Services (runtime deps injected into tasks)
   - Owns: CLI, TUI, prompts, wire formats, knowledge/research, config shell
-  - Depends on: score, reel, vault, lot
+  - Depends on: cue, reel, vault, lot
 ```
 
-The orchestrator never constructs tasks directly — it calls trait methods to create them. It never reads task fields directly — it calls trait accessors. It never performs AI operations — it calls trait lifecycle methods that epic implements.
+The orchestrator never constructs tasks directly — it calls `TaskStore` methods to create them. It never reads task fields directly — it calls trait accessors. It never performs AI operations — tasks receive runtime deps (agent, vault) at construction time and call them internally. The orchestrator has no knowledge of `AgentService` or any AI-specific types.
 
 ---
 
@@ -36,9 +36,9 @@ The orchestrator's coupling to Task is deep: ~15 field reads, ~12 mutation metho
 
 **`TaskNode`** — Data access, decisions, mutations, and lifecycle. Implemented by epic's `Task`.
 
-**`AgentService`** — Already exists. The orchestrator's interface to AI models. Stays as-is (already a trait). Implemented by epic's `ReelAgent`.
+**`TaskStore`** — Task creation, storage, lookup, cross-task queries, tree context building, and runtime re-injection after resume. Implemented by epic's `EpicState`.
 
-The lifecycle methods currently on Task (`execute_leaf`, `verify_branch`, etc.) call `AgentService` internally. They stay in epic as `TaskNode` method implementations.
+The lifecycle methods currently on Task (`execute_leaf`, `verify_branch`, etc.) call the agent service internally using runtime deps injected at task construction time. They stay in epic as `TaskNode` method implementations. The orchestrator has no knowledge of `AgentService` or any AI-specific types.
 
 ### Decision Collapsing
 
@@ -89,40 +89,38 @@ fn increment_fix_rounds(&mut self) -> u32;
 fn accumulate_usage(&mut self, meta: &SessionMeta) -> f64;  // returns new total cost
 
 // --- Lifecycle (async) ---
+// Tasks receive runtime deps (agent, vault, event sender) at construction time
+// via TaskStore::create_subtask / TaskStore::bind_runtime. No service parameter needed.
 
-async fn execute_leaf(&mut self, ctx: &TreeContext, svc: &Services<A>)
-    -> TaskOutcome;
+async fn execute_leaf(&mut self, ctx: &TreeContext) -> TaskOutcome;
 
-async fn verify_branch(&mut self, ctx: &TreeContext, svc: &Services<A>)
+async fn verify_branch(&mut self, ctx: &TreeContext)
     -> BranchVerifyOutcome;   // includes FailedNoFixLoop for fix tasks
 
-async fn fix_round_budget_check(&self, limits: &LimitsConfig)
+fn fix_round_budget_check(&self, limits: &LimitsConfig)
     -> FixBudgetCheck;        // no is_root param; task knows internally
 
-async fn check_branch_scope(&self, svc: &Services<A>)
-    -> ScopeCheck;
+async fn check_branch_scope(&self) -> ScopeCheck;
 
-async fn design_fix(&mut self, ctx: &TreeContext, svc: &Services<A>,
+async fn design_fix(&mut self, ctx: &TreeContext,
     failure_reason: &str, round: u32, model: Model)
     -> Result<DecompositionResult>;
 
-async fn handle_checkpoint(&mut self, ctx: &TreeContext, svc: &Services<A>,
+async fn handle_checkpoint(&mut self, ctx: &TreeContext,
     discoveries: &[String])
     -> ChildResponse;
 
 fn can_attempt_recovery(&self, limits: &LimitsConfig)
     -> RecoveryEligibility;   // collapses is_fix_task + budget + round
 
-async fn assess_and_design_recovery(&mut self, ctx: &TreeContext, svc: &Services<A>,
+async fn assess_and_design_recovery(&mut self, ctx: &TreeContext,
     failure_reason: &str, round: u32)
     -> RecoveryDecision;
-
-fn verification_model(&self) -> Model;
 ```
 
-**Trait surface**: 8 read accessors, 6 decision methods, 6 mutations, 9 lifecycle methods = **29 methods total**.
+**Trait surface**: 8 read accessors, 6 decision methods, 6 mutations, 8 lifecycle methods = **28 methods total**.
 
-Without collapsing: 16 read accessors, 9 mutations, 9 lifecycle methods = **34 methods total**, and the coordinator contains decision logic that belongs to the task.
+Without collapsing: 16 read accessors, 9 mutations, 8 lifecycle methods = **33 methods total**, and the coordinator contains decision logic that belongs to the task.
 
 The collapsed version is smaller AND cleaner — the coordinator becomes a pure state-machine driver that asks the task what to do, rather than inspecting task internals to decide.
 
@@ -141,6 +139,9 @@ trait TaskStore {
     fn set_root_id(&mut self, id: TaskId);
     fn save(&self, path: &Path) -> Result<()>;
 
+    // --- Runtime injection (called once after deserialization on resume) ---
+    fn bind_runtime(&mut self);
+
     // --- Task creation (replaces Task::new + field mutation in coordinator) ---
     fn create_subtask(&mut self, parent_id: TaskId, spec: &SubtaskSpec,
         mark_fix: bool, inherit_recovery_rounds: Option<u32>) -> TaskId;
@@ -150,42 +151,54 @@ trait TaskStore {
 
     // --- Tree context building (moved from orchestrator/context.rs) ---
     fn build_tree_context(&self, id: TaskId) -> Result<TreeContext, OrchestratorError>;
-    fn build_task_context(&self, id: TaskId) -> Result<TaskContext, OrchestratorError>;
 }
 ```
 
 Epic's `EpicState` implements `TaskStore` with `type Task = Task`.
 
 Key changes from the current design:
-- **`create_subtask`** replaces the coordinator's `Task::new()` + field mutation sequence. The store implementation (in epic) constructs the concrete Task from the SubtaskSpec. Coordinator no longer needs to know Task's constructor signature or mutable fields.
+- **`bind_runtime`** re-injects non-serializable runtime deps (agent, vault, event sender) into all tasks after deserializing `state.json` on resume. The store holds the shared runtime deps and iterates its task map. Not parameterized — the store implementation knows its own runtime types.
+- **`create_subtask`** replaces the coordinator's `Task::new()` + field mutation sequence. The store implementation (in epic) constructs the concrete Task from the SubtaskSpec and injects runtime deps. Coordinator no longer needs to know Task's constructor signature or mutable fields.
 - **`any_non_fix_child_succeeded`** absorbs the cross-task guard that currently reads `is_fix_task` + `phase` on each child. Removes `is_fix_task` from the TaskNode accessor surface.
-- **`build_tree_context` / `build_task_context`** move from `orchestrator/context.rs` into TaskStore. These are tree-level queries that access Task fields through the store's internal `HashMap`, not through the trait. This eliminates the need for TreeContext building to use TaskNode accessors (it uses concrete Task fields internally).
+- **`build_tree_context`** moves from `orchestrator/context.rs` into TaskStore. This is a tree-level query that accesses Task fields through the store's internal `HashMap`, not through the trait. This eliminates the need for TreeContext building to use TaskNode accessors (it uses concrete Task fields internally). `build_task_context` is not on the trait — `TaskContext` stays in epic and is built by Task internally from `TreeContext` + `&self`.
 
-### Services Becomes Non-Generic Over Task
+### Runtime Dependency Injection
 
-Currently `Services<A: AgentService>`. With the task trait approach, Services needs to carry things the lifecycle methods need — but those are epic's concern, not the orchestrator's. The orchestrator passes Services through to TaskNode methods opaquely.
+Tasks need runtime deps (agent, vault, event sender) for lifecycle methods. These are injected at construction time, not passed by the orchestrator.
 
-**Option A: Services carries the AgentService + infrastructure**
+**Construction path**: `TaskStore::create_subtask()` is implemented by epic's `EpicState`, which holds shared runtime deps (`Arc<ReelAgent>`, `Option<Arc<Vault>>`, `EventSender`). When creating a task, EpicState injects these into the `Task` struct.
+
+**Resume path**: Runtime deps are not serializable. After deserializing `state.json`, epic calls `TaskStore::bind_runtime()` to re-inject deps into all existing tasks. `bind_runtime()` is called once at startup before the orchestrator runs.
 
 ```rust
-// In orchestrator crate
-pub struct Services<A: AgentService> {
-    pub agent: A,
-    pub events: EventSender,
-    pub vault: Option<Arc<vault::Vault>>,
-    pub limits: LimitsConfig,
-    pub project_root: Option<PathBuf>,
-    pub state_path: Option<PathBuf>,
+// In epic — Task struct (not part of orchestrator crate)
+struct Task {
+    // ... serialized fields ...
+    #[serde(skip)]
+    runtime: Option<Arc<TaskRuntime>>,  // injected at construction or bind
+}
+
+struct TaskRuntime {
+    agent: ReelAgent,
+    vault: Option<Arc<vault::Vault>>,
+    events: EventSender,
+    project_root: PathBuf,
 }
 ```
 
-TaskNode lifecycle methods receive `&Services<A>`. Epic's Task implementation accesses `svc.agent` to make AI calls. This keeps the current pattern — Services is the orchestrator's injection point.
+The orchestrator never sees `TaskRuntime`, `ReelAgent`, or `Vault`. It calls `task.execute_leaf(ctx)` and the task uses its own runtime deps internally.
 
-**Option B: Services is opaque to the orchestrator**
+**Orchestrator's own needs**: The orchestrator needs to emit events (task registration, phase transitions) and check limits (task count cap). These are injected into the `Orchestrator` at construction:
 
-The orchestrator defines Services as a generic parameter too: `Orchestrator<T: TaskNode, S: ServiceBundle>`. This is more abstract but adds complexity for no clear benefit right now.
-
-**Recommendation**: Option A. Services stays concrete, parameterized by `AgentService`. The orchestrator crate defines Services and passes it through. Epic's TaskNode impls use it.
+```rust
+// In orchestrator crate
+pub struct Orchestrator<S: TaskStore> {
+    store: S,
+    events: EventSender,
+    limits: LimitsConfig,
+    state_path: Option<PathBuf>,
+}
+```
 
 ### What the Orchestrator Crate Defines
 
@@ -193,22 +206,22 @@ The orchestrator defines Services as a generic parameter too: `Orchestrator<T: T
 |---|---|
 | Core identity | `TaskId` |
 | State machine | `TaskPhase`, `TaskPath`, `Model` |
-| Decision enums | `BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision`, `ChildResponse`, `CheckpointDecision`, `ScopeCheck` |
+| Decision enums | `BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision`, `ChildResponse`, `CheckpointDecision`, `ScopeCheck`, `RecoveryEligibility`, `ResumePoint` |
 | Results | `TaskOutcome`, `LeafResult`, `RecoveryPlan`, `DecompositionResult`, `SubtaskSpec`, `AssessmentResult`, `VerificationOutcome`, `VerificationResult`, `VerifyOutcome` |
 | Data | `Attempt`, `Magnitude`, `MagnitudeEstimate`, `TaskUsage`, `SessionMeta`, `AgentResult<T>` |
-| Context | `TaskContext`, `TreeContext`, `SiblingSummary`, `ChildStatus`, `ChildSummary` |
-| Infrastructure | `Services<A>`, `EventSender`, `EventReceiver`, `Event`, `event_channel()` |
+| Context | `TreeContext`, `SiblingSummary`, `ChildStatus`, `ChildSummary` |
+| Infrastructure | `EventSender`, `EventReceiver`, `Event`, `event_channel()` |
 | Config | `LimitsConfig`, `VerificationStep` |
-| Traits | `TaskNode`, `TaskStore`, `AgentService` |
-| Coordinator | `Orchestrator<T, S, A>`, `OrchestratorError` |
+| Traits | `TaskNode`, `TaskStore` |
+| Coordinator | `Orchestrator<S: TaskStore>`, `OrchestratorError` |
 
 ### What Epic Defines
 
 | Category | Content |
 |---|---|
-| Task impl | `Task` struct, `impl TaskNode for Task`, all lifecycle method bodies |
-| State impl | `EpicState`, `impl TaskStore for EpicState` |
-| Agent impl | `ReelAgent`, `impl AgentService for ReelAgent` |
+| Task impl | `Task` struct, `TaskRuntime`, `impl TaskNode for Task`, all lifecycle method bodies |
+| State impl | `EpicState`, `impl TaskStore for EpicState`, `bind_runtime()` |
+| Agent layer | `AgentService` trait, `ReelAgent`, `Services` (runtime deps bundle) |
 | Prompts | All prompt assembly (`prompts.rs`) |
 | Wire formats | All LLM structured output types (`wire.rs`) |
 | Knowledge | `ResearchTool`, gap-filling pipeline |
@@ -223,35 +236,36 @@ The orchestrator defines Services as a generic parameter too: `Orchestrator<T: T
 
 | Current location | Content |
 |---|---|
-| `orchestrator/mod.rs` | Coordinator logic (now generic over `TaskNode + TaskStore`) |
-| `orchestrator/context.rs` | `TreeContext` struct + `build_tree_context()` (now calls `TaskNode` accessors) |
-| `orchestrator/services.rs` | `Services<A>` |
-| `agent/mod.rs` (partial) | `AgentService` trait, `TaskContext`, `SessionMeta`, `AgentResult<T>`, `SiblingSummary`, `ChildStatus`, `ChildSummary` |
+| `orchestrator/mod.rs` | Coordinator logic (now generic over `S: TaskStore`) |
+| `orchestrator/context.rs` | `TreeContext` struct (build logic moves to `TaskStore`) |
+| `agent/mod.rs` (partial) | `SessionMeta`, `AgentResult<T>`, `SiblingSummary`, `ChildStatus`, `ChildSummary` |
 | `events.rs` | `Event`, `EventSender`, `EventReceiver`, `event_channel()` |
 | `config/project.rs` (partial) | `LimitsConfig`, `VerificationStep` |
 
 Plus new trait definitions: `TaskNode`, `TaskStore`.
 
-Plus types currently in task/ that are part of the orchestration protocol (not task-specific): `TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`, `Attempt`, `Magnitude`, `MagnitudeEstimate`, `TaskUsage`, `LeafResult`, `RecoveryPlan`, `AssessmentResult`, `SubtaskSpec`, `DecompositionResult`, `CheckpointDecision`, `BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision`, `ChildResponse`, `ScopeCheck`, `VerificationOutcome`, `VerificationResult`, `VerifyOutcome`.
+Plus types currently in task/ that are part of the orchestration protocol (not task-specific): `TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`, `Attempt`, `Magnitude`, `MagnitudeEstimate`, `TaskUsage`, `LeafResult`, `RecoveryPlan`, `AssessmentResult`, `SubtaskSpec`, `DecompositionResult`, `CheckpointDecision`, `BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision`, `RecoveryEligibility`, `ResumePoint`, `ChildResponse`, `ScopeCheck`, `VerificationOutcome`, `VerificationResult`, `VerifyOutcome`.
 
 ### What Stays in Epic
 
 | Current location | Content | Why |
 |---|---|---|
-| `task/mod.rs` | `Task` struct, `Task::new()`, mutation method bodies | Concrete task implementation |
+| `task/mod.rs` | `Task` struct, `TaskRuntime`, `Task::new()`, mutation method bodies | Concrete task implementation |
 | `task/leaf.rs` | `Task::execute_leaf()` and helpers | AI-specific lifecycle logic |
 | `task/branch.rs` | Branch `Task` methods | AI-specific branch decisions |
-| `task/scope.rs` | `git_diff_numstat`, `evaluate_scope` | Could go either way; see below |
-| `state.rs` | `EpicState` struct + persistence | Concrete state implementation |
+| `task/scope.rs` | `git_diff_numstat`, `evaluate_scope` | Called from Task methods which stay in epic |
+| `state.rs` | `EpicState` struct + persistence + `bind_runtime()` | Concrete state implementation |
 | `main.rs` | CLI entry point | Application shell |
 | `cli.rs`, `init.rs` | CLI commands | Application shell |
 | `tui/` | TUI rendering | Presentation layer |
 | `sandbox.rs` | Container detection | Startup check |
+| `agent/mod.rs` (partial) | `AgentService` trait | Epic-specific (tasks call agents, not orchestrator) |
 | `agent/reel_adapter.rs` | `ReelAgent` | Concrete agent |
 | `agent/prompts.rs` | Prompt templates | Epic-specific |
 | `agent/wire.rs` | Wire format types | Epic-specific |
 | `knowledge.rs` | Research service | Epic-specific |
 | `config/project.rs` (partial) | `EpicConfig`, `ModelConfig`, `VaultConfig` | Epic-specific config |
+| `orchestrator/services.rs` | `Services<A>` | Replaced by runtime injection; no longer needed |
 | `test_support.rs` | `MockAgentService`, `MockBuilder` | See challenges section |
 
 ---
@@ -262,16 +276,16 @@ Plus types currently in task/ that are part of the orchestration protocol (not t
 
 The orchestrator currently calls `vault::Vault::record()` and `vault::Vault::reorganize()` directly in `orchestrator/mod.rs`.
 
-With Task staying in epic, most vault calls already route through Task lifecycle methods (leaf discovers → records to vault). The orchestrator's direct vault calls are:
+With runtime injection, most vault calls already route through Task lifecycle methods (leaf discovers → records to vault). The orchestrator's direct vault calls are:
 - `record()` for verification failures and checkpoint decisions (in coordinator code)
 - `reorganize()` after root branch children complete
 
-**Options**:
-- **(A) Accept vault dependency in orchestrator crate.** Vault remains in Services, orchestrator calls it directly for the coordinator-level operations.
-- **(B) Abstract vault behind a trait.** `DocumentStore` trait with `record()` and `reorganize()`. Orchestrator crate defines the trait, epic provides vault-backed impl.
-- **(C) Push vault calls into TaskNode.** Add methods like `record_discovery()`, `on_branch_children_complete()` to TaskNode. Task implementation handles vault internally.
+These coordinator-level vault operations need to be pushed into TaskNode or TaskStore methods so the orchestrator has no vault dependency. Options:
 
-**Recommendation**: **(B)** now makes more sense given the generic approach. If we're already defining TaskNode and TaskStore traits, adding a small DocumentStore trait is consistent. Keeps the orchestrator crate free of vault/reel dependencies entirely.
+- **(A) Push into TaskNode.** Add methods like `record_verification_failure(reason)`, `on_branch_children_complete()` to TaskNode. Task calls vault internally.
+- **(B) Push into TaskStore.** TaskStore gets `record_for_task(id, ...)` and `reorganize()`. EpicState holds the vault reference and delegates.
+
+**Recommendation**: **(A)**. The coordinator-level vault calls are always in the context of a specific task. Pushing them into TaskNode keeps the pattern consistent — the task owns all side effects, the orchestrator just coordinates.
 
 ### Scope Circuit Breaker
 
@@ -285,11 +299,11 @@ With Task staying in epic, most vault calls already route through Task lifecycle
 
 ### TreeContext Building
 
-`build_tree_context()` reads task fields to construct context. Currently uses direct field access on `Task`. After extraction, it calls `TaskNode` trait accessors.
+`build_tree_context()` reads ~10 task fields to construct context. Currently a free function in `orchestrator/context.rs` using direct field access on `Task`.
 
-This function moves to the orchestrator crate. It becomes generic: `build_tree_context<S: TaskStore>(store: &S, id: TaskId) -> TreeContext`.
+This becomes a `TaskStore` method (see Phase 2b). The store implementation accesses tasks through its internal `HashMap` using concrete `Task` fields, not through `TaskNode` trait accessors. This keeps the build logic simple and eliminates a large accessor surface from `TaskNode`.
 
-The `to_task_context()` method on TreeContext (which builds `TaskContext` from TreeContext + Task) also moves — it calls TaskNode accessors.
+The `TreeContext` struct itself moves to the orchestrator crate (it's part of the coordination protocol). The build logic lives in epic's `TaskStore` implementation.
 
 ---
 
@@ -361,7 +375,7 @@ Move the all-non-fix-children-failed guard (lines 845-854) from the coordinator 
 
 `build_tree_context` reads ~10 task fields to construct TreeContext. Currently a free function in `orchestrator/context.rs`. Move it to `EpicState::build_tree_context()`. The function accesses tasks through the internal HashMap, not through external accessors. This eliminates a large surface area from the trait boundary.
 
-Similarly move `build_context` (which combines TreeContext + task clone into TaskContext).
+`build_context` (which combines TreeContext + task clone into TaskContext) stays in epic — `TaskContext` is an epic-internal type built by Task from `TreeContext` + `&self`.
 
 #### 2c. Move `create_subtasks` task-construction logic into EpicState
 
@@ -371,9 +385,9 @@ Coordinator's `create_subtasks` (lines 327-384) calls `Task::new()` + sets field
 
 No behavioral changes — just file organization to make the extraction cut mechanical.
 
-#### 3a. Extract `AgentService` + context types from `agent/mod.rs`
+#### 3a. Extract context types from `agent/mod.rs`
 
-Move `AgentService`, `TaskContext`, `SessionMeta`, `AgentResult<T>`, `SiblingSummary`, `ChildStatus`, `ChildSummary` to `src/agent/traits.rs`. `agent/mod.rs` re-exports.
+Move `TaskContext`, `SessionMeta`, `AgentResult<T>`, `SiblingSummary`, `ChildStatus`, `ChildSummary` to a separate file (these move to the orchestrator crate). `AgentService` stays in `agent/mod.rs` — it is not extracted.
 
 #### 3b. Extract orchestration-protocol types from `task/mod.rs`
 
@@ -387,9 +401,9 @@ Move `SubtaskSpec`, `DecompositionResult`, `CheckpointDecision`, `BranchVerifyOu
 
 Move to `src/config/limits.rs`. `EpicConfig` imports them.
 
-#### 3e. Abstract vault behind `DocumentStore` trait
+#### 3e. Push coordinator-level vault calls into TaskNode
 
-Define trait with `record()` and `reorganize()` methods. Implement for `vault::Vault`. Change Services to hold `Option<Arc<dyn DocumentStore>>`.
+Move the orchestrator's direct vault calls (`record` for verification failures/checkpoint decisions, `reorganize` after root branch children complete) into TaskNode methods. Task handles vault internally via its injected runtime deps. Eliminates the orchestrator's vault dependency without a `DocumentStore` trait.
 
 #### 3f. Deduplicate verify/scope helpers
 
@@ -403,7 +417,7 @@ This is the final prep step. At this point the extraction boundary is clean and 
 
 ### Phase 5: Verify clean boundary
 
-Audit that the code destined for the orchestrator crate has no imports from: `tui`, `cli`, `init`, `sandbox`, `knowledge`, `reel_adapter`, `prompts`, `wire`, `vault` (now behind trait).
+Audit that the code destined for the orchestrator crate has no imports from: `tui`, `cli`, `init`, `sandbox`, `knowledge`, `reel_adapter`, `prompts`, `wire`, `vault`, `reel`, `flick`, `lot`, `AgentService`.
 
 ### Phase 6: Mechanical extraction
 
@@ -414,20 +428,18 @@ Move files to new crate, update import paths, publish, add git dependency.
 ## New Crate Structure
 
 ```
-score/
+cue/
 ├── Cargo.toml                # workspace root
-├── score/                     # library crate
+├── cue/                       # library crate
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs             # Public API re-exports
-│       ├── traits.rs          # TaskNode, TaskStore, AgentService, DocumentStore
+│       ├── traits.rs          # TaskNode, TaskStore
 │       ├── types.rs           # TaskId, TaskPhase, TaskPath, Model, Attempt, etc.
 │       ├── context.rs         # TaskContext, TreeContext, SiblingSummary, etc.
 │       ├── events.rs          # Event, EventSender, EventReceiver
 │       ├── config.rs          # LimitsConfig, VerificationStep
-│       ├── orchestrator/
-│       │   ├── mod.rs         # Coordinator (generic over TaskNode + TaskStore)
-│       │   └── services.rs    # Services<A>
+│       ├── orchestrator.rs    # Coordinator (Orchestrator<S: TaskStore>)
 │       └── outcomes.rs        # BranchVerifyOutcome, FixBudgetCheck, RecoveryDecision, etc.
 ```
 
@@ -450,18 +462,13 @@ No vault, reel, flick, or lot dependency. The orchestrator is a pure coordinatio
 
 ### 1. Test infrastructure split
 
-`MockAgentService` (648 lines) implements `AgentService` — this trait moves to the orchestrator crate. The mock must either:
-- Move to the orchestrator crate (behind `#[cfg(test)]` or a `test-support` feature)
-- Stay in epic and implement the trait from the orchestrator crate
-- Be split: orchestrator crate gets a minimal mock, epic keeps the full MockBuilder
-
-**Recommendation**: Orchestrator crate gets a minimal mock or test-support feature. Epic's `MockBuilder` wraps or re-exports it with epic-specific conveniences.
+`MockAgentService` (648 lines) implements `AgentService`. Since `AgentService` stays in epic (not extracted), the mock stays in epic unchanged. The orchestrator crate needs its own test infrastructure: a mock `TaskNode` and mock `TaskStore` to test the coordination algorithm in isolation. These are simpler — they just return canned decision enums and outcomes.
 
 ### 2. Async trait methods
 
 `TaskNode` has async lifecycle methods. Rust 2024 edition supports `async fn` in traits with `impl Future` return types (RPITIT). This works if the trait is not object-safe. If object safety is needed later, `async-trait` or manual boxing would be required.
 
-The orchestrator is currently generic (`Orchestrator<A: AgentService>`) not dynamic. Same pattern works: `Orchestrator<T: TaskNode, S: TaskStore<Task = T>, A: AgentService>`. Three type parameters is verbose but functional.
+The orchestrator is generic: `Orchestrator<S: TaskStore>`. Single type parameter — clean.
 
 ### 3. State file compatibility
 
@@ -475,7 +482,13 @@ Addressed by prep Phase 2c: `EpicState::create_subtask()` absorbs the `Task::new
 
 ## Open Questions
 
-1. **Crate name**: "score", "conductor", "grove", "arbor", or "epic-core"?
-2. **DocumentStore trait**: Worth the abstraction (zero sibling-crate deps), or accept vault dependency (simpler)?
-3. **Type parameter ergonomics**: `Orchestrator<T, S, A>` has three generic params. Could use associated types on `TaskStore` (`type Task: TaskNode`, `type Agent: AgentService`) to reduce to `Orchestrator<S: TaskStore>`.
-4. **`TaskContext` contains `Task` clone**: Currently `TaskContext` holds `task: Task`. After extraction, this needs to become generic or be refactored to hold TaskNode-accessible data. Moving `build_task_context` into `TaskStore` (Phase 2b) helps — the store knows the concrete Task type.
+None.
+
+## Resolved Questions
+
+- **Crate name**: `cue`.
+- **AgentService location**: Stays in epic. The orchestrator never calls agents — tasks receive runtime deps at construction and call agents internally. No `AgentService` trait in the orchestrator crate.
+- **Services<A>**: Eliminated. Replaced by runtime dependency injection at task construction time, with `TaskStore::bind_runtime()` for re-injection on resume.
+- **Type parameter ergonomics**: Resolved — `Orchestrator<S: TaskStore>` (single param). `TaskStore` has `type Task: TaskNode` as an associated type.
+- **DocumentStore trait**: Not needed. Vault calls pushed into TaskNode methods — orchestrator has no vault dependency.
+- **`TaskContext` contains `Task` clone**: `TaskContext` stays in epic. The orchestrator only passes `TreeContext` to TaskNode lifecycle methods. Epic's Task builds `TaskContext` internally from `TreeContext` + `&self` when making agent calls. `build_task_context` is not on the `TaskStore` trait.
