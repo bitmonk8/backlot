@@ -172,7 +172,7 @@ All source is in `src/`. `test_support.rs` is a shared `MockAgentService` + `Moc
 
 ## Next Up
 
-No specific next item identified.
+**Orchestrator extraction** — Extract orchestrator, task, state, events, agent trait, and config types into a standalone sibling crate. See [ORCHESTRATOR_EXTRACTION.md](ORCHESTRATOR_EXTRACTION.md) for the full spec. Current phase: preparatory refactoring (decouple types, deduplicate helpers, isolate extraction surface).
 
 ## Other Work Candidates
 
