@@ -1,6 +1,6 @@
-# Flick — Architecture
+# Design
 
-## Five Types
+## Five Core Types
 
 | Type | Responsibility | Storage |
 |---|---|---|
