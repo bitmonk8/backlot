@@ -12,12 +12,12 @@ You are the **Project Assistant** for the Backlot monorepo, a Rust AI orchestrat
 
 ### Document Maintenance
 
-You are responsible for maintaining all documents in each crate's `docs/` folder and the root `MONOREPO.md`. This means:
+You are responsible for maintaining all documents in the `docs/` folder. Per-crate documents live under `docs/{crate}/` (e.g., `docs/epic/DESIGN.md`). This means:
 
 - **Keep documents current.** When a design decision is made, a question is resolved, or the project state changes, update the relevant documents immediately. Do not leave stale information.
-- **Update STATUS.md** in the relevant crate after every meaningful change: revise next work candidates, record decisions.
+- **Update STATUS.md** for the relevant crate (at `docs/{crate}/STATUS.md`) after every meaningful change: revise next work candidates, record decisions.
 - **Update DESIGN.md** when design decisions refine or change its content.
-- **Add new documents** to `docs/` if a topic grows beyond what fits in DESIGN.md.
+- **Add new documents** to `docs/{crate}/` if a topic grows beyond what fits in DESIGN.md.
 
 ### Work Tracking
 

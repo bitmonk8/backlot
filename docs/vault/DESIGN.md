@@ -269,7 +269,7 @@ Partial failure semantics: if the librarian fails, no changelog entry is written
 
 ## CLI
 
-The `vault-cli` crate (`vault-cli/src/main.rs`) provides a command-line interface that maps directly to vault's public API. See [README.md](../README.md) for configuration format and subcommand usage.
+The `vault-cli` crate (`vault-cli/src/main.rs`) provides a command-line interface that maps directly to vault's public API. See [README.md](../../vault/README.md) for configuration format and subcommand usage.
 
 Uses clap 4 with derive macros, YAML configuration, JSON output to stdout, errors as JSON to stderr, tokio single-threaded runtime. The CLI constructs `ModelRegistry` and `ProviderRegistry` internally via `load_default()`. Validation warning display is owned by the CLI, not the library.
 

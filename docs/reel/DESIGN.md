@@ -1,6 +1,6 @@
 # Design
 
-[README](../README.md) is the primary entry point. This document covers
+[README](../../reel/README.md) is the primary entry point. This document covers
 implementation details, internal architecture, and design rationale.
 
 ---
