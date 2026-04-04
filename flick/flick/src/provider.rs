@@ -1,0 +1,270 @@
+pub mod chat_completions;
+pub mod http;
+pub mod messages;
+
+use std::pin::Pin;
+
+use crate::config::CacheRetention;
+use crate::context::Message;
+use crate::error::ProviderError;
+use crate::model::ReasoningLevel;
+use crate::provider_registry::ProviderInfo;
+
+/// Caller-specified tool selection strategy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolChoice {
+    /// Model decides whether to call tools (default API behavior).
+    Auto,
+    /// Model must call at least one tool.
+    Any,
+    /// Model must not call any tools.
+    None,
+    /// Model must call the named tool.
+    Tool(String),
+}
+
+/// Parameters for a provider request.
+pub struct RequestParams<'a> {
+    pub model: &'a str,
+    /// Maximum *output* tokens (not context window). Matches API field name.
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub system_prompt: Option<&'a str>,
+    pub messages: &'a [Message],
+    pub tools: &'a [ToolDefinition],
+    pub tool_choice: Option<ToolChoice>,
+    pub reasoning: Option<ReasoningLevel>,
+    pub output_schema: Option<&'a serde_json::Value>,
+    pub cache_retention: CacheRetention,
+}
+
+/// Tool definition sent to the model.
+#[derive(Debug, Clone)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Option<serde_json::Value>,
+}
+
+/// Complete response from a model provider.
+pub struct ModelResponse {
+    pub text: Option<String>,
+    pub thinking: Vec<ThinkingContent>,
+    pub tool_calls: Vec<ToolCallResponse>,
+    pub usage: UsageResponse,
+}
+
+/// A single thinking block from the response.
+pub struct ThinkingContent {
+    pub text: String,
+    pub signature: String,
+}
+
+/// A single tool call from the response.
+pub struct ToolCallResponse {
+    pub call_id: String,
+    pub tool_name: String,
+    pub arguments: String,
+}
+
+/// Token usage from a single response.
+/// `input_tokens` is non-cached input tokens (total minus `cache_creation` and `cache_read`).
+#[derive(Default)]
+pub struct UsageResponse {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+}
+
+impl UsageResponse {
+    /// Construct with normalized `input_tokens` (total minus cache tokens).
+    pub const fn normalized(
+        raw_input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: u64,
+    ) -> Self {
+        Self {
+            input_tokens: raw_input_tokens
+                .saturating_sub(cache_creation_input_tokens)
+                .saturating_sub(cache_read_input_tokens),
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        }
+    }
+}
+
+/// Concrete provider enum — enables test verification of constructed variant.
+pub enum ProviderInstance {
+    Messages(messages::MessagesProvider),
+    ChatCompletions(chat_completions::ChatCompletionsProvider),
+}
+
+impl DynProvider for ProviderInstance {
+    fn call_boxed<'a>(
+        &'a self,
+        params: RequestParams<'a>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
+    {
+        match self {
+            Self::Messages(p) => p.call_boxed(params),
+            Self::ChatCompletions(p) => p.call_boxed(params),
+        }
+    }
+
+    fn build_request(&self, params: RequestParams<'_>) -> Result<serde_json::Value, ProviderError> {
+        match self {
+            Self::Messages(p) => DynProvider::build_request(p, params),
+            Self::ChatCompletions(p) => DynProvider::build_request(p, params),
+        }
+    }
+}
+
+/// Construct a provider from resolved registry info.
+pub fn create_provider(provider_info: &ProviderInfo, client: reqwest::Client) -> ProviderInstance {
+    match provider_info.api {
+        crate::ApiKind::Messages => ProviderInstance::Messages(messages::MessagesProvider::new(
+            &provider_info.base_url,
+            provider_info.key.clone(),
+            client,
+        )),
+        crate::ApiKind::ChatCompletions => {
+            let compat = provider_info.compat.clone().unwrap_or_default();
+            ProviderInstance::ChatCompletions(chat_completions::ChatCompletionsProvider::new(
+                &provider_info.base_url,
+                provider_info.key.clone(),
+                compat,
+                client,
+            ))
+        }
+    }
+}
+
+/// Object-safe provider trait — implemented directly by each provider.
+pub trait DynProvider: Send + Sync {
+    fn call_boxed<'a>(
+        &'a self,
+        params: RequestParams<'a>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>;
+
+    fn build_request(&self, params: RequestParams<'_>) -> Result<serde_json::Value, ProviderError>;
+}
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use crate::context::{ContentBlock, Message, Role};
+    use crate::provider::ToolDefinition;
+
+    /// Single-user-message + empty-tools pair for `build_body` tests.
+    pub fn minimal_params() -> (Vec<Message>, Vec<ToolDefinition>) {
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        }];
+        (msgs, vec![])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ApiKind;
+    use crate::provider_registry::CompatFlags;
+
+    #[test]
+    fn normalized_no_cache() {
+        let u = UsageResponse::normalized(100, 50, 0, 0);
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.cache_creation_input_tokens, 0);
+        assert_eq!(u.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn normalized_with_cache() {
+        let u = UsageResponse::normalized(100, 50, 30, 20);
+        assert_eq!(u.input_tokens, 50);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.cache_creation_input_tokens, 30);
+        assert_eq!(u.cache_read_input_tokens, 20);
+    }
+
+    #[test]
+    fn normalized_saturates_to_zero() {
+        let u = UsageResponse::normalized(30, 10, 20, 20);
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 10);
+    }
+
+    #[test]
+    fn normalized_all_zeros() {
+        let u = UsageResponse::normalized(0, 0, 0, 0);
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 0);
+    }
+
+    #[test]
+    fn normalized_large_cache_no_overflow() {
+        let u = UsageResponse::normalized(100, 50, u64::MAX, u64::MAX);
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 50);
+    }
+
+    #[test]
+    fn create_provider_messages_variant() {
+        let info = ProviderInfo {
+            api: ApiKind::Messages,
+            base_url: "https://custom.anthropic.com".into(),
+            key: "test-key".into(),
+            compat: None,
+        };
+        let provider = create_provider(&info, reqwest::Client::new());
+        match &provider {
+            ProviderInstance::Messages(p) => {
+                assert_eq!(p.base_url(), "https://custom.anthropic.com");
+            }
+            ProviderInstance::ChatCompletions(_) => panic!("expected Messages variant"),
+        }
+    }
+
+    #[test]
+    fn create_provider_chat_completions_variant() {
+        let info = ProviderInfo {
+            api: ApiKind::ChatCompletions,
+            base_url: "https://custom.openai.com".into(),
+            key: "test-key".into(),
+            compat: Some(CompatFlags {
+                explicit_tool_choice_auto: true,
+            }),
+        };
+        let provider = create_provider(&info, reqwest::Client::new());
+        match &provider {
+            ProviderInstance::ChatCompletions(p) => {
+                assert_eq!(p.base_url(), "https://custom.openai.com");
+                assert!(p.compat().explicit_tool_choice_auto);
+            }
+            ProviderInstance::Messages(_) => panic!("expected ChatCompletions variant"),
+        }
+    }
+
+    #[test]
+    fn create_provider_chat_completions_default_flags() {
+        let info = ProviderInfo {
+            api: ApiKind::ChatCompletions,
+            base_url: "https://api.openai.com".into(),
+            key: "key".into(),
+            compat: None,
+        };
+        let provider = create_provider(&info, reqwest::Client::new());
+        match &provider {
+            ProviderInstance::ChatCompletions(p) => {
+                assert!(!p.compat().explicit_tool_choice_auto);
+            }
+            ProviderInstance::Messages(_) => panic!("expected ChatCompletions"),
+        }
+    }
+}

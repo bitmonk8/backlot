@@ -1,0 +1,1153 @@
+use reqwest::Client;
+
+use crate::config::CacheRetention;
+use crate::context::{ContentBlock, Message, Role};
+use crate::error::ProviderError;
+use crate::model::anthropic_budget_tokens;
+use std::pin::Pin;
+
+use crate::provider::{
+    DynProvider, ModelResponse, RequestParams, ThinkingContent, ToolCallResponse, UsageResponse,
+};
+
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const API_VERSION: &str = "2023-06-01";
+
+pub struct MessagesProvider {
+    base_url: String,
+    api_key: String,
+    client: Client,
+}
+
+impl MessagesProvider {
+    pub fn new(base_url: &str, api_key: String, client: Client) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
+            client,
+        }
+    }
+
+    /// Base URL for test verification.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    #[allow(clippy::unused_self)]
+    fn build_body(&self, params: &RequestParams<'_>) -> Result<serde_json::Value, ProviderError> {
+        // Anthropic API rejects requests with both temperature and thinking enabled.
+        if params.temperature.is_some() && params.reasoning.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "temperature and thinking (reasoning) cannot both be set for the Anthropic Messages API".into(),
+            ));
+        }
+
+        // Messages API always requires max_tokens.
+        // Resolve: explicit → registry → 8192.
+        let resolved_max = params.max_tokens.unwrap_or(8192);
+        let mut body = serde_json::json!({
+            "model": params.model,
+            "max_tokens": resolved_max,
+        });
+
+        if let Some(temp) = params.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
+
+        let cache_control = build_cache_control_value(params.cache_retention);
+
+        if let Some(system) = params.system_prompt {
+            let mut block = serde_json::json!({"type": "text", "text": system});
+            if let Some(cc) = &cache_control {
+                block["cache_control"] = cc.clone();
+            }
+            body["system"] = serde_json::json!([block]);
+        }
+
+        let mut messages: Vec<serde_json::Value> =
+            params.messages.iter().map(convert_message).collect();
+
+        if let Some(cc) = &cache_control {
+            annotate_last_user_cache_control(&mut messages, cc);
+        }
+
+        body["messages"] = serde_json::Value::Array(messages);
+
+        if !params.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = params
+                .tools
+                .iter()
+                .map(|t| {
+                    let mut tool = serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                    });
+                    if let Some(schema) = &t.input_schema {
+                        tool["input_schema"] = schema.clone();
+                    } else {
+                        tool["input_schema"] = serde_json::json!({"type": "object"});
+                    }
+                    tool
+                })
+                .collect();
+            body["tools"] = serde_json::Value::Array(tools);
+        }
+
+        if !params.tools.is_empty() {
+            if let Some(ref tc) = params.tool_choice {
+                body["tool_choice"] = match tc {
+                    crate::provider::ToolChoice::Auto => serde_json::json!({"type": "auto"}),
+                    crate::provider::ToolChoice::Any => serde_json::json!({"type": "any"}),
+                    crate::provider::ToolChoice::None => serde_json::json!({"type": "none"}),
+                    crate::provider::ToolChoice::Tool(name) => {
+                        serde_json::json!({"type": "tool", "name": name})
+                    }
+                };
+            }
+        }
+
+        if let Some(level) = params.reasoning {
+            let budget = anthropic_budget_tokens(level).min(resolved_max.saturating_sub(1));
+            if budget > 0 {
+                body["thinking"] = serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                });
+            }
+        }
+
+        if let Some(schema) = params.output_schema {
+            body["output_config"] = serde_json::json!({
+                "format": {
+                    "type": "json_schema",
+                    "schema": schema,
+                }
+            });
+        }
+
+        Ok(body)
+    }
+}
+
+impl DynProvider for MessagesProvider {
+    fn call_boxed<'a>(
+        &'a self,
+        params: RequestParams<'a>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ModelResponse, ProviderError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let body = self.build_body(&params)?;
+            let url = format!("{}/v1/messages", self.base_url);
+
+            let json = super::http::request_json(|| {
+                self.client
+                    .post(&url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", API_VERSION)
+                    .json(&body)
+            })
+            .await?;
+
+            parse_response(&json)
+        })
+    }
+
+    fn build_request(&self, params: RequestParams<'_>) -> Result<serde_json::Value, ProviderError> {
+        self.build_body(&params)
+    }
+}
+
+fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderError> {
+    let mut text = String::new();
+    let mut thinking = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    if let Some(content) = json["content"].as_array() {
+        for block in content {
+            match block["type"].as_str() {
+                Some("text") => {
+                    if let Some(t) = block["text"].as_str() {
+                        text.push_str(t);
+                    }
+                }
+                Some("thinking") => {
+                    let t = block["thinking"].as_str().unwrap_or("").to_string();
+                    let sig = block["signature"].as_str().unwrap_or("").to_string();
+                    thinking.push(ThinkingContent {
+                        text: t,
+                        signature: sig,
+                    });
+                }
+                Some("tool_use") => {
+                    let id = block["id"]
+                        .as_str()
+                        .ok_or_else(|| ProviderError::ResponseParse("tool_use missing id".into()))?
+                        .to_string();
+                    let name = block["name"]
+                        .as_str()
+                        .ok_or_else(|| {
+                            ProviderError::ResponseParse("tool_use missing name".into())
+                        })?
+                        .to_string();
+                    let input = &block["input"];
+                    let arguments = serde_json::to_string(input).unwrap_or_default();
+                    tool_calls.push(ToolCallResponse {
+                        call_id: id,
+                        tool_name: name,
+                        arguments,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let usage_obj = &json["usage"];
+    let raw_input_tokens = usage_obj["input_tokens"].as_u64().unwrap_or(0);
+    let output_tokens = usage_obj["output_tokens"].as_u64().unwrap_or(0);
+    let cache_creation = usage_obj["cache_creation_input_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let cache_read = usage_obj["cache_read_input_tokens"].as_u64().unwrap_or(0);
+
+    Ok(ModelResponse {
+        text: if text.is_empty() { None } else { Some(text) },
+        thinking,
+        tool_calls,
+        usage: UsageResponse::normalized(
+            raw_input_tokens,
+            output_tokens,
+            cache_creation,
+            cache_read,
+        ),
+    })
+}
+
+/// Build the `cache_control` JSON value for the given retention, or `None` for `CacheRetention::None`.
+fn build_cache_control_value(retention: CacheRetention) -> Option<serde_json::Value> {
+    match retention {
+        CacheRetention::None => None,
+        CacheRetention::Short => Some(serde_json::json!({"type": "ephemeral"})),
+        CacheRetention::Long => Some(serde_json::json!({"type": "ephemeral", "ttl": "1h"})),
+    }
+}
+
+/// Annotate the last content block of the last user-role message with `cache_control`.
+fn annotate_last_user_cache_control(
+    messages: &mut [serde_json::Value],
+    cache_control: &serde_json::Value,
+) {
+    for msg in messages.iter_mut().rev() {
+        if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
+            if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                if let Some(last_block) = content.last_mut() {
+                    last_block["cache_control"] = cache_control.clone();
+                }
+            }
+            break;
+        }
+    }
+}
+
+fn convert_message(msg: &Message) -> serde_json::Value {
+    let role = match msg.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+    };
+    let content: Vec<serde_json::Value> = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
+            // Omit thinking blocks with empty signature — unsigned thinking is
+            // invalid for round-tripping and would cause an API validation error.
+            ContentBlock::Thinking { signature, .. } if signature.is_empty() => None,
+            ContentBlock::Thinking { text, signature } => Some(
+                serde_json::json!({"type": "thinking", "thinking": text, "signature": signature}),
+            ),
+            ContentBlock::ToolUse { id, name, input } => Some(
+                serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input}),
+            ),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Some(serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "is_error": is_error,
+            })),
+            // Pass through unknown block types as-is for forward compatibility.
+            ContentBlock::Unknown(value) => Some(value.clone()),
+        })
+        .collect();
+    serde_json::json!({"role": role, "content": content})
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::context::{ContentBlock, Message, Role};
+
+    #[test]
+    fn convert_message_text() {
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        };
+        let json = convert_message(&msg);
+        assert_eq!(json["role"], "user");
+        assert_eq!(json["content"][0]["type"], "text");
+        assert_eq!(json["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn convert_message_thinking_with_signature() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                text: "reasoning here".into(),
+                signature: "sig_abc123".into(),
+            }],
+        };
+        let json = convert_message(&msg);
+        assert_eq!(json["content"][0]["type"], "thinking");
+        assert_eq!(json["content"][0]["thinking"], "reasoning here");
+        assert_eq!(json["content"][0]["signature"], "sig_abc123");
+    }
+
+    #[test]
+    fn convert_message_thinking_without_signature_omitted() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                text: "reasoning".into(),
+                signature: String::new(),
+            }],
+        };
+        let json = convert_message(&msg);
+        assert_eq!(json["content"].as_array().expect("content array").len(), 0);
+    }
+
+    #[test]
+    fn convert_message_tool_use() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({"path": "/tmp/test"}),
+            }],
+        };
+        let json = convert_message(&msg);
+        assert_eq!(json["content"][0]["type"], "tool_use");
+        assert_eq!(json["content"][0]["id"], "call_1");
+        assert_eq!(json["content"][0]["name"], "read_file");
+    }
+
+    #[test]
+    fn convert_message_tool_result() {
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "file contents".into(),
+                is_error: false,
+            }],
+        };
+        let json = convert_message(&msg);
+        assert_eq!(json["content"][0]["type"], "tool_result");
+        assert_eq!(json["content"][0]["tool_use_id"], "call_1");
+        assert_eq!(json["content"][0]["is_error"], false);
+    }
+
+    use super::super::test_helpers::minimal_params;
+
+    fn make_provider() -> MessagesProvider {
+        MessagesProvider::new(DEFAULT_BASE_URL, "test-key".into(), Client::new())
+    }
+
+    #[test]
+    fn build_body_minimal() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["model"], "claude-sonnet-4-20250514");
+        assert_eq!(body["max_tokens"], 1024);
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("system").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn build_body_none_max_tokens_known_model_uses_default() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: None,
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        // Provider falls back to 8192 when max_tokens is None
+        assert_eq!(body["max_tokens"], 8192);
+    }
+
+    #[test]
+    fn build_body_none_max_tokens_unknown_model_uses_8192() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "unknown-model",
+            max_tokens: None,
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["max_tokens"], 8192);
+    }
+
+    #[test]
+    fn build_body_with_system_and_temperature() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(2048),
+            temperature: Some(0.5),
+            system_prompt: Some("Be helpful"),
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["temperature"], 0.5);
+        // system prompt is array-of-content-blocks for cache_control support
+        assert!(body["system"].is_array());
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "Be helpful");
+    }
+
+    #[test]
+    fn build_body_with_tools() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "read_file".into(),
+            description: "Read a file".into(),
+            input_schema: Some(
+                serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            ),
+        }];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert!(body["tools"].is_array());
+        assert_eq!(body["tools"][0]["name"], "read_file");
+    }
+
+    #[test]
+    fn build_body_with_reasoning_no_temperature() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: Some(crate::model::ReasoningLevel::High),
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert!(body.get("temperature").is_none());
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 1023);
+    }
+
+    // -- parse_response tests --
+
+    #[test]
+    fn parse_response_text_only() {
+        let json = serde_json::json!({
+            "content": [{"type": "text", "text": "Hello world"}],
+            "usage": {"input_tokens": 100, "output_tokens": 50},
+            "stop_reason": "end_turn"
+        });
+        let resp = parse_response(&json).expect("should parse");
+        assert_eq!(resp.text.as_deref(), Some("Hello world"));
+        assert!(resp.tool_calls.is_empty());
+        assert!(resp.thinking.is_empty());
+        // No cache_read tokens, so input_tokens stays at 100
+        assert_eq!(resp.usage.input_tokens, 100);
+        assert_eq!(resp.usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn parse_response_tool_use() {
+        let json = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "I'll read that file."},
+                {"type": "tool_use", "id": "tc_1", "name": "read_file", "input": {"path": "/tmp"}}
+            ],
+            "usage": {"input_tokens": 50, "output_tokens": 30},
+            "stop_reason": "tool_use"
+        });
+        let resp = parse_response(&json).expect("should parse");
+        assert_eq!(resp.text.as_deref(), Some("I'll read that file."));
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].call_id, "tc_1");
+        assert_eq!(resp.tool_calls[0].tool_name, "read_file");
+        assert!(resp.tool_calls[0].arguments.contains("/tmp"));
+    }
+
+    #[test]
+    fn parse_response_thinking() {
+        let json = serde_json::json!({
+            "content": [
+                {"type": "thinking", "thinking": "Let me reason", "signature": "sig_abc"},
+                {"type": "text", "text": "Answer"}
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "stop_reason": "end_turn"
+        });
+        let resp = parse_response(&json).expect("should parse");
+        assert_eq!(resp.thinking.len(), 1);
+        assert_eq!(resp.thinking[0].text, "Let me reason");
+        assert_eq!(resp.thinking[0].signature, "sig_abc");
+        assert_eq!(resp.text.as_deref(), Some("Answer"));
+    }
+
+    #[test]
+    fn parse_response_cache_tokens() {
+        let json = serde_json::json!({
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 30,
+                "cache_read_input_tokens": 20
+            },
+            "stop_reason": "end_turn"
+        });
+        let resp = parse_response(&json).expect("should parse");
+        // input_tokens is normalized: 100 - 30 - 20 = 50
+        assert_eq!(resp.usage.input_tokens, 50);
+        assert_eq!(resp.usage.cache_creation_input_tokens, 30);
+        assert_eq!(resp.usage.cache_read_input_tokens, 20);
+    }
+
+    #[test]
+    fn parse_response_cache_tokens_saturates_to_zero() {
+        let json = serde_json::json!({
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 30,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 20
+            },
+            "stop_reason": "end_turn"
+        });
+        let resp = parse_response(&json).expect("should parse");
+        // 30 - (20 + 20) = -10, saturates to 0
+        assert_eq!(resp.usage.input_tokens, 0);
+        assert_eq!(resp.usage.cache_creation_input_tokens, 20);
+        assert_eq!(resp.usage.cache_read_input_tokens, 20);
+    }
+
+    #[test]
+    fn parse_response_multiple_tool_calls() {
+        let json = serde_json::json!({
+            "content": [
+                {"type": "tool_use", "id": "tc_1", "name": "read_file", "input": {"path": "/a"}},
+                {"type": "tool_use", "id": "tc_2", "name": "write_file", "input": {"path": "/b"}}
+            ],
+            "usage": {"input_tokens": 50, "output_tokens": 30},
+            "stop_reason": "tool_use"
+        });
+        let resp = parse_response(&json).expect("should parse");
+        assert_eq!(resp.tool_calls.len(), 2);
+        assert_eq!(resp.tool_calls[0].call_id, "tc_1");
+        assert_eq!(resp.tool_calls[1].call_id, "tc_2");
+    }
+
+    #[test]
+    fn build_body_with_output_schema() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: Some(&schema),
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
+        assert_eq!(
+            body["output_config"]["format"]["schema"]["properties"]["answer"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn build_body_without_output_schema_omits_output_config() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn convert_message_unknown_block_passes_through_raw_json() {
+        let raw = serde_json::json!({"type": "image", "url": "x"});
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Unknown(raw.clone())],
+        };
+        let json = convert_message(&msg);
+        let content = json["content"].as_array().expect("content array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["url"], "x");
+        assert_eq!(content[0], raw);
+    }
+
+    #[test]
+    fn parse_response_empty_content() {
+        let json = serde_json::json!({
+            "content": [],
+            "usage": {"input_tokens": 5, "output_tokens": 0},
+            "stop_reason": "end_turn"
+        });
+        let resp = parse_response(&json).expect("should parse");
+        assert!(resp.text.is_none());
+        assert!(resp.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn build_body_rejects_temperature_with_reasoning() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: Some(0.5),
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: Some(crate::model::ReasoningLevel::High),
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let err = provider
+            .build_body(&params)
+            .expect_err("should reject temperature+reasoning");
+        match err {
+            crate::error::ProviderError::InvalidRequest(msg) => {
+                assert!(msg.contains("temperature"));
+                assert!(msg.contains("thinking"));
+            }
+            other => panic!("expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_body_system_prompt_is_content_block_array() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: Some("You are a helpful assistant"),
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        let system = &body["system"];
+        assert!(system.is_array(), "system should be an array");
+        let blocks = system.as_array().expect("system array");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "You are a helpful assistant");
+    }
+
+    #[test]
+    fn build_body_tool_choice_auto() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Auto),
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["tool_choice"]["type"], "auto");
+    }
+
+    #[test]
+    fn build_body_tool_choice_any() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Any),
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["tool_choice"]["type"], "any");
+    }
+
+    #[test]
+    fn build_body_tool_choice_tool() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "read_file".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Tool("read_file".into())),
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], "read_file");
+    }
+
+    #[test]
+    fn build_body_tool_choice_none_variant() {
+        let provider = make_provider();
+        let (msgs, _) = minimal_params();
+        let tools = vec![crate::provider::ToolDefinition {
+            name: "t".into(),
+            description: "d".into(),
+            input_schema: None,
+        }];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::None),
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert_eq!(body["tool_choice"]["type"], "none");
+    }
+
+    #[test]
+    fn build_body_tool_choice_ignored_when_no_tools() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: Some(crate::provider::ToolChoice::Auto),
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    // --- Cache control breakpoint tests ---
+
+    #[test]
+    fn cache_short_system_block_has_ephemeral() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: Some("Be helpful"),
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        let system_block = &body["system"][0];
+        assert_eq!(system_block["cache_control"]["type"], "ephemeral");
+        assert!(
+            system_block["cache_control"].get("ttl").is_none(),
+            "Short retention must not include ttl"
+        );
+    }
+
+    #[test]
+    fn cache_short_last_user_block_has_ephemeral() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        // Single user message with one text block
+        let user_msg = &body["messages"][0];
+        assert_eq!(user_msg["role"], "user");
+        let last_block = user_msg["content"]
+            .as_array()
+            .expect("content array")
+            .last()
+            .expect("at least one block");
+        assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_long_includes_ttl() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: Some("System"),
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Long,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        let system_cc = &body["system"][0]["cache_control"];
+        assert_eq!(system_cc["type"], "ephemeral");
+        assert_eq!(system_cc["ttl"], "1h");
+
+        let user_cc = &body["messages"][0]["content"][0]["cache_control"];
+        assert_eq!(user_cc["type"], "ephemeral");
+        assert_eq!(user_cc["ttl"], "1h");
+    }
+
+    #[test]
+    fn cache_none_skips_injection() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: Some("System"),
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::None,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        assert!(
+            body["system"][0].get("cache_control").is_none(),
+            "None retention must not inject cache_control on system"
+        );
+        assert!(
+            body["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none(),
+            "None retention must not inject cache_control on user message"
+        );
+    }
+
+    #[test]
+    fn cache_multi_turn_only_last_user_gets_breakpoint() {
+        let provider = make_provider();
+        let msgs = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "first".into(),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "reply".into(),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "second".into(),
+                }],
+            },
+        ];
+        let tools = vec![];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        let messages = body["messages"].as_array().expect("messages array");
+
+        // First user message (index 0) must NOT have cache_control
+        assert!(
+            messages[0]["content"][0].get("cache_control").is_none(),
+            "first user message should not have cache_control"
+        );
+
+        // Last user message (index 2) MUST have cache_control
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn cache_user_message_with_multiple_blocks_annotates_last() {
+        let provider = make_provider();
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "block1".into(),
+                },
+                ContentBlock::Text {
+                    text: "block2".into(),
+                },
+            ],
+        }];
+        let tools = vec![];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("content array");
+        assert_eq!(content.len(), 2);
+        // First block: no cache_control
+        assert!(content[0].get("cache_control").is_none());
+        // Last block: has cache_control
+        assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn cache_no_system_prompt_only_user_annotated() {
+        let provider = make_provider();
+        let (msgs, tools) = minimal_params();
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: None,
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        // No system key at all
+        assert!(body.get("system").is_none());
+        // User message still gets breakpoint
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn cache_tool_result_user_message_is_last_user() {
+        // When the last user message contains tool results, it should get the breakpoint.
+        let provider = make_provider();
+        let msgs = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "query".into(),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tc_1".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "/tmp"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tc_1".into(),
+                    content: "file data".into(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let tools = vec![];
+        let params = crate::provider::RequestParams {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: Some(1024),
+            temperature: None,
+            system_prompt: Some("System"),
+            messages: &msgs,
+            tools: &tools,
+            tool_choice: None,
+            reasoning: None,
+            output_schema: None,
+            cache_retention: crate::config::CacheRetention::Short,
+        };
+        let body = provider.build_body(&params).expect("build_body");
+        let messages = body["messages"].as_array().expect("messages array");
+
+        // First user (index 0): no breakpoint
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+
+        // Last user (index 2, tool result): has breakpoint
+        let last_user_content = messages[2]["content"].as_array().expect("content array");
+        assert_eq!(
+            last_user_content.last().expect("block")["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+}
