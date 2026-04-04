@@ -1,0 +1,21 @@
+[package]
+name = "reel-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "reel"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+reel = { path = "../reel" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yml = "0.0.12"

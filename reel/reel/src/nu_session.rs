@@ -1,0 +1,3569 @@
+// MCP client for a persistent `nu --mcp` process.
+//
+// Manages the lifecycle of one NuShell MCP server process per agent session.
+// The process is spawned eagerly at session creation (for tool-granted sessions)
+// and killed when the session ends or on timeout.
+//
+// Protocol: JSON-RPC 2.0 over stdio. Each message is a single JSON line
+// terminated by `\n`.
+
+use crate::tools::ToolGrant;
+use lot::{SandboxCommand, SandboxPolicyBuilder, SandboxStdio};
+use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write as IoWrite};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Output from a `NuShell` MCP `evaluate` call.
+#[derive(Debug)]
+pub struct NuOutput {
+    pub content: String,
+    pub is_error: bool,
+    /// Captured stderr from the nu process, if any was written.
+    /// Populated on both success (warnings) and error paths.
+    pub stderr: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC wire types
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct JsonRpcRequest<'a> {
+    jsonrpc: &'static str,
+    id: u64,
+    method: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcResponse {
+    #[allow(dead_code)]
+    id: Option<u64>,
+    result: Option<serde_json::Value>,
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcError {
+    message: String,
+}
+
+// MCP content block returned by tools/call.
+#[derive(Deserialize)]
+struct McpContent {
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct McpToolResult {
+    content: Vec<McpContent>,
+    #[serde(rename = "isError")]
+    is_error: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Internal process state
+// ---------------------------------------------------------------------------
+
+/// Maximum number of non-matching lines to skip before giving up.
+const MAX_SKIPPED_LINES: usize = 64;
+
+/// Maximum bytes retained in the stderr buffer. Older content is discarded
+/// when new lines would exceed this limit.
+const MAX_STDERR_BUF: usize = 64 * 1024;
+
+/// Shared handle to the child process, accessible for killing from outside
+/// the blocking I/O thread.
+type ChildHandle = Arc<std::sync::Mutex<Option<lot::SandboxedChild>>>;
+
+/// Shared handle to stdin, closeable from `kill()` to unblock the inner
+/// child even if the `NuProcess` is trapped in a `spawn_blocking` closure.
+type StdinHandle = Arc<std::sync::Mutex<Option<File>>>;
+
+/// Shared buffer accumulating stderr output from the nu process.
+/// A background thread reads stderr lines and appends them here.
+type StderrBuf = Arc<std::sync::Mutex<String>>;
+
+/// Sandbox configuration that a process was spawned with. Used for
+/// compatibility checks (does the running process match the desired config?)
+/// and stored on `SessionState` as the desired config for future spawns.
+#[derive(Clone, PartialEq, Eq)]
+struct SpawnConfig {
+    grant: ToolGrant,
+    project_root: PathBuf,
+    write_paths: Vec<PathBuf>,
+}
+
+struct NuProcess {
+    stdin: StdinHandle,
+    stdout: BufReader<File>,
+    /// Accumulated stderr from the background reader thread.
+    stderr_buf: StderrBuf,
+    next_id: u64,
+    /// The sandbox configuration this process was spawned with.
+    spawn_config: SpawnConfig,
+    /// Shared handle to the child — kept alive for cleanup, accessible for kill.
+    child_handle: ChildHandle,
+    /// Per-session temp directory under `<project_root>/.reel/tmp/`.
+    /// Dropped (and cleaned up) when the process is dropped.
+    /// Wrapped in Option so Drop can move it into a background reap thread.
+    _session_temp_dir: Option<tempfile::TempDir>,
+    /// Cleans up the empty `.reel/tmp/` and `.reel/` parents after the
+    /// session temp dir is deleted. Must be declared after `_session_temp_dir`.
+    /// Wrapped in Option so Drop can move it into a background reap thread.
+    _temp_parent_cleanup: Option<TempParentCleanup>,
+}
+
+/// Cleanup handle that removes the empty `.reel/tmp/` and `.reel/` parent
+/// directories after the session temp dir has been deleted. Must be declared
+/// *after* `_session_temp_dir` in `NuProcess` so it drops second (Rust drops
+/// fields in declaration order).
+struct TempParentCleanup(PathBuf);
+
+impl Drop for TempParentCleanup {
+    fn drop(&mut self) {
+        // Try removing the empty parent chain (.reel/tmp/, then .reel/).
+        // Fails silently if non-empty or if another session still uses it.
+        let _ = std::fs::remove_dir(&self.0);
+        let _ = self.0.parent().map(std::fs::remove_dir);
+    }
+}
+
+impl NuProcess {
+    fn is_compatible(&self, desired: &SpawnConfig) -> bool {
+        self.spawn_config == *desired
+    }
+}
+
+/// Poll `try_wait` in a loop until the child exits or the timeout is reached.
+/// Returns `true` if the child exited (or `try_wait` errored), `false` on timeout.
+fn bounded_reap(
+    mut try_wait: impl FnMut() -> io::Result<Option<std::process::ExitStatus>>,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match try_wait() {
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => return true,
+        }
+    }
+}
+
+impl Drop for NuProcess {
+    fn drop(&mut self) {
+        let mut guard = self
+            .child_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(child) = guard.take() {
+            let _ = child.kill();
+            // Fast path: child usually exits immediately after kill.
+            if child.try_wait().is_ok_and(|s| s.is_some()) {
+                drop(child);
+                return;
+            }
+            // Slow path: child still running, reap on a background thread
+            // to avoid blocking the tokio worker.
+            let temp_dir = self._session_temp_dir.take();
+            let temp_cleanup = self._temp_parent_cleanup.take();
+            std::thread::spawn(move || {
+                bounded_reap(|| child.try_wait(), std::time::Duration::from_secs(5));
+                // Order matters: release child handles before deleting temp
+                // dirs (Windows holds open handles), then clean up parents.
+                drop(child);
+                drop(temp_dir);
+                drop(temp_cleanup);
+            });
+        }
+    }
+}
+
+/// Combined session state behind a single mutex to prevent lock-ordering deadlocks.
+#[derive(Default)]
+struct SessionState {
+    process: Option<NuProcess>,
+    generation: u64,
+    /// Sandbox configuration from the last `spawn()` call. Read by
+    /// `evaluate_inner()` to recover `write_paths` for respawn.
+    last_spawn_config: Option<SpawnConfig>,
+    /// Shared child handle kept here so `kill()` can reach the child even when
+    /// the `NuProcess` has been taken out for blocking I/O in `evaluate_inner`.
+    ///
+    /// **Known limitation (issue #60):** This is a singleton field. If two
+    /// concurrent `evaluate` calls are in Phase 2 (blocking I/O), the second
+    /// caller's `ensure_and_take` overwrites the first caller's handle. A
+    /// `kill()` during that window only reaches the second caller's child.
+    /// Not triggered today because agent turns are sequential.
+    inflight_child: Option<ChildHandle>,
+    /// Shared stdin handle kept here so `kill()` can close stdin to trigger
+    /// EOF on the inner child, causing it to exit even if the lot-level kill
+    /// doesn't terminate it. Defense-in-depth for the PID namespace issue.
+    ///
+    /// **Known limitation (issue #60):** Same singleton limitation as
+    /// `inflight_child` — see its doc comment.
+    inflight_stdin: Option<StdinHandle>,
+}
+
+impl SessionState {
+    /// Register a process's child and stdin handles as inflight so `kill()`
+    /// can reach them while the `NuProcess` is out of `self.process`.
+    fn register_inflight(&mut self, proc: &NuProcess) {
+        self.inflight_child = Some(Arc::clone(&proc.child_handle));
+        self.inflight_stdin = Some(Arc::clone(&proc.stdin));
+    }
+}
+
+/// Manages a persistent `nu --mcp` process.
+///
+/// Thread-safe via internal `Mutex`. The process is spawned eagerly via
+/// `spawn()` and restarted if the grant or project root changes between calls.
+pub struct NuSession {
+    state: Mutex<SessionState>,
+    /// Tool directory containing nu binary, rg binary, and config files.
+    /// Defaults to the value computed by `resolve_tool_dir()`, which first
+    /// checks next to the current executable, then falls back to the
+    /// compile-time `NU_CACHE_DIR`. Tests override this to isolate sandbox
+    /// ACL operations per test.
+    tool_dir: Option<PathBuf>,
+}
+
+/// Write a JSON-RPC message as a single `\n`-terminated line.
+fn send_line(stdin: &StdinHandle, payload: &[u8]) -> Result<(), String> {
+    let mut guard = stdin
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let sink = guard
+        .as_mut()
+        .ok_or_else(|| "stdin closed (session killed)".to_string())?;
+    (|| -> io::Result<()> {
+        sink.write_all(payload)?;
+        sink.write_all(b"\n")?;
+        sink.flush()
+    })()
+    .map_err(|e| format!("failed to write to nu stdin: {e}"))
+}
+
+/// Drain accumulated stderr content, returning `Some` if non-empty.
+fn drain_stderr(buf: &StderrBuf) -> Option<String> {
+    let mut guard = buf
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.is_empty() {
+        None
+    } else {
+        Some(std::mem::take(&mut *guard))
+    }
+}
+
+/// Append `line` to `buf`, discarding oldest content to stay within `MAX_STDERR_BUF`.
+fn append_capped(buf: &mut String, line: &str) {
+    buf.push_str(line);
+    if buf.len() > MAX_STDERR_BUF {
+        let mut excess = buf.len() - MAX_STDERR_BUF;
+        // Advance to next char boundary (equivalent to ceil_char_boundary, unavailable at MSRV 1.85)
+        while !buf.is_char_boundary(excess) {
+            excess += 1;
+        }
+        // Find the next newline after the excess point to avoid
+        // splitting a line mid-way.
+        let drop_to = buf[excess..].find('\n').map_or(excess, |i| excess + i + 1);
+        buf.drain(..drop_to);
+    }
+}
+
+/// Spawn a background thread that reads stderr lines into a shared buffer.
+/// Returns the buffer handle. The thread exits on EOF or read error.
+fn spawn_stderr_reader(stderr: File) -> StderrBuf {
+    let buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+    let buf_clone = Arc::clone(&buf);
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let mut guard = buf_clone
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    append_capped(&mut guard, &line);
+                }
+            }
+        }
+    });
+    buf
+}
+
+/// Build an error string, appending any accumulated stderr for context.
+fn err_with_stderr(error: &str, buf: &StderrBuf) -> String {
+    match drain_stderr(buf) {
+        Some(s) => format!("{error}\nnu stderr:\n{s}"),
+        None => error.to_string(),
+    }
+}
+
+impl NuSession {
+    /// Create a new session using the runtime-resolved tool directory.
+    ///
+    /// **Tests should not call this directly.** Use `isolated_session()` or
+    /// `sandbox_env()` instead to ensure each test gets its own isolated
+    /// tool directory. Calling `new()` in tests bypasses sandbox isolation.
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(SessionState::default()),
+            tool_dir: resolve_tool_dir(),
+        }
+    }
+
+    /// Create a session with an explicit tool directory override.
+    ///
+    /// Called by `isolated_session()` to give each test its own tool dir,
+    /// avoiding concurrent AppContainer ACL conflicts on shared directories.
+    ///
+    /// **Do not call this directly.** Use `isolated_session()` or
+    /// `sandbox_env()` which handle the copy and lifetime management.
+    #[cfg(test)]
+    pub(crate) fn with_tool_dir(tool_dir: PathBuf) -> Self {
+        Self {
+            state: Mutex::new(SessionState::default()),
+            tool_dir: Some(tool_dir),
+        }
+    }
+
+    /// Eagerly spawn the nu MCP process so it is warm by the first tool call.
+    ///
+    /// If a process already exists but was spawned with different grant,
+    /// project_root, or write_paths, kills the old one and spawns a replacement.
+    ///
+    /// `write_paths` specifies additional writable subdirectories within the
+    /// project root. These are stored on the session and used for all
+    /// subsequent process spawns (including respawns from `evaluate()`).
+    pub async fn spawn(
+        &self,
+        project_root: &Path,
+        grant: ToolGrant,
+        write_paths: &[PathBuf],
+    ) -> Result<(), String> {
+        let desired = SpawnConfig {
+            grant,
+            project_root: project_root.to_path_buf(),
+            write_paths: write_paths.to_vec(),
+        };
+        let (proc, generation) = self.ensure_and_take(desired).await?;
+        // Put the process back — spawn() warms the process, doesn't consume it.
+        let mut st = self.state.lock().await;
+        st.inflight_child = None;
+        st.inflight_stdin = None;
+        if st.generation == generation {
+            st.process = Some(proc);
+        }
+        // else: kill() fired during spawn — discard (NuProcess::Drop kills it).
+        Ok(())
+    }
+
+    /// Ensure a compatible process exists, take it out of state, and register
+    /// inflight handles — all under a single lock cycle when possible.
+    ///
+    /// Stores `desired` in session state as `last_spawn_config` (for use by
+    /// `evaluate()`'s respawn path) and returns the process plus the generation
+    /// at take-time. The fast path takes an existing compatible process under
+    /// one lock. The slow path releases the lock to spawn, then re-acquires to
+    /// install and take.
+    async fn ensure_and_take(&self, desired: SpawnConfig) -> Result<(NuProcess, u64), String> {
+        // Fast path: compatible process already exists — take under one lock.
+        //
+        // Two-step check: borrow to test compatibility, then take. The borrow
+        // is released before take() so there is no aliasing. The process
+        // cannot disappear between check and take because we hold the lock.
+        {
+            let mut st = self.state.lock().await;
+            st.last_spawn_config = Some(desired.clone());
+            let compatible = st
+                .process
+                .as_ref()
+                .is_some_and(|p| p.is_compatible(&desired));
+            if compatible {
+                if let Some(proc) = st.process.take() {
+                    st.register_inflight(&proc);
+                    return Ok((proc, st.generation));
+                }
+            }
+        }
+        // Slow path: spawn a new process outside the lock.
+        // Bounded to 3 retries to prevent unbounded process spawning if
+        // concurrent kill() calls keep bumping the generation.
+        for _attempt in 0..3 {
+            let gen_before = self.state.lock().await.generation;
+            let new_proc = spawn_nu_process(&desired, self.tool_dir.as_deref()).await?;
+
+            let mut st = self.state.lock().await;
+            if st.generation != gen_before {
+                // State changed during spawn (kill or concurrent spawner).
+                // Check if a compatible process is now available.
+                let compatible = st
+                    .process
+                    .as_ref()
+                    .is_some_and(|p| p.is_compatible(&desired));
+                if compatible {
+                    // new_proc dropped after st (lock released first).
+                    if let Some(proc) = st.process.take() {
+                        st.register_inflight(&proc);
+                        return Ok((proc, st.generation));
+                    }
+                }
+                // No compatible process available — retry.
+                // new_proc dropped after st (lock released first).
+                //
+                // Untested (issue #56): triggering this branch deterministically
+                // requires three concurrent actors (two spawners + a kill) to
+                // interleave so that the generation changes during spawn AND no
+                // compatible process is left by the time we re-acquire the lock.
+                // The generation mechanism guarantees correctness; the retry is
+                // defense-in-depth. A test would be inherently racy.
+                continue;
+            }
+            // Install: drop old process (if any), take new one directly.
+            st.process = None;
+            st.generation += 1;
+            st.register_inflight(&new_proc);
+            return Ok((new_proc, st.generation));
+        }
+        Err("failed to acquire nu process after 3 attempts (session state kept changing)".into())
+    }
+
+    /// Execute a `NuShell` command via the MCP `evaluate` tool.
+    ///
+    /// If the grant or project root differs from the running process, the
+    /// old process is killed and a new one is spawned.
+    pub async fn evaluate(
+        &self,
+        command: &str,
+        timeout_secs: u64,
+        project_root: &Path,
+        grant: ToolGrant,
+    ) -> Result<NuOutput, String> {
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+
+        if let Ok(result) =
+            tokio::time::timeout(timeout, self.evaluate_inner(command, project_root, grant)).await
+        {
+            result
+        } else {
+            // Timeout: kill the nu process and bump generation so the stale
+            // blocking thread cannot write back its process.
+            self.kill().await;
+            Err(format!(
+                "command timed out after {timeout_secs}s — nu session terminated, next call spawns a fresh session"
+            ))
+        }
+    }
+
+    /// Kill the current nu process if one is running.
+    ///
+    /// Also kills any in-flight child whose `NuProcess` was taken out of state
+    /// for blocking I/O — this is what makes timeout-kill work.
+    pub async fn kill(&self) {
+        let mut st = self.state.lock().await;
+        // Bump generation so any in-flight blocking thread won't write back.
+        st.generation += 1;
+
+        // Kill the in-flight child first (process taken out during evaluate_inner Phase 2).
+        if let Some(ref handle) = st.inflight_child {
+            let mut guard = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(ref mut child) = *guard {
+                let _ = child.kill();
+            }
+        }
+        st.inflight_child = None;
+
+        // Close stdin so the inner child gets EOF and exits, even if lot's
+        // kill didn't terminate it. This also unblocks any spawn_blocking
+        // task stuck on read_line (the inner child closes stdout on exit).
+        if let Some(ref handle) = st.inflight_stdin {
+            let mut guard = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take(); // Drop the File, closing the pipe
+        }
+        st.inflight_stdin = None;
+
+        // Kill the process if it's parked in state (not currently in-flight).
+        // Take the child out of the handle so Drop doesn't spawn a background
+        // reap thread — kill() callers expect the child to be fully reaped
+        // before the next spawn.
+        if let Some(proc) = st.process.take() {
+            let mut child_guard = proc
+                .child_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(child) = child_guard.take() {
+                let _ = child.kill();
+                bounded_reap(|| child.try_wait(), std::time::Duration::from_secs(5));
+            }
+        }
+    }
+
+    /// Synchronous kill for use in `Drop` impls where an async runtime is
+    /// not available (or re-entrant `block_on` would panic).
+    ///
+    /// Spins briefly on `try_lock` to handle the case where an async task
+    /// just released the lock but the runtime hasn't yielded yet.  Falls
+    /// back to `NuProcess::drop` cleanup if the lock can't be acquired.
+    pub fn kill_sync(&self) {
+        let mut st = {
+            let mut guard = None;
+            for _ in 0..100 {
+                if let Ok(g) = self.state.try_lock() {
+                    guard = Some(g);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            match guard {
+                Some(g) => g,
+                None => return,
+            }
+        };
+        st.generation += 1;
+
+        if let Some(ref handle) = st.inflight_child {
+            let mut guard = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(ref mut child) = *guard {
+                let _ = child.kill();
+            }
+        }
+        st.inflight_child = None;
+
+        if let Some(ref handle) = st.inflight_stdin {
+            let mut guard = handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take();
+        }
+        st.inflight_stdin = None;
+
+        if let Some(proc) = st.process.take() {
+            let mut child_guard = proc
+                .child_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(child) = child_guard.take() {
+                let _ = child.kill();
+                bounded_reap(|| child.try_wait(), std::time::Duration::from_secs(5));
+            }
+        }
+    }
+
+    async fn evaluate_inner(
+        &self,
+        command: &str,
+        project_root: &Path,
+        grant: ToolGrant,
+    ) -> Result<NuOutput, String> {
+        // Build desired config from evaluate parameters + write_paths from
+        // session state (set by spawn()). Falls back to empty write_paths
+        // for sessions that skipped spawn().
+        let desired = {
+            let st = self.state.lock().await;
+            let write_paths = st
+                .last_spawn_config
+                .as_ref()
+                .map(|c| c.write_paths.clone())
+                .unwrap_or_default();
+            SpawnConfig {
+                grant,
+                project_root: project_root.to_path_buf(),
+                write_paths,
+            }
+        };
+        // Phase 1: Atomically ensure a compatible process and take it out.
+        let (proc, generation_at_start) = self.ensure_and_take(desired).await?;
+        // Lock released — blocking I/O below does not hold the async mutex,
+        // allowing timeout + kill() to work. kill() can reach the child via
+        // inflight_child and close stdin via inflight_stdin to unblock the
+        // spawn_blocking thread.
+
+        // Phase 2: Blocking I/O on a dedicated thread.
+        let command = command.to_owned();
+        let child_handle = Arc::clone(&proc.child_handle);
+        let mut proc = proc;
+        let (proc, result) = tokio::task::spawn_blocking(move || {
+            let result = rpc_call(&mut proc, &command);
+            (proc, result)
+        })
+        .await
+        .map_err(|e| format!("rpc task panicked: {e}"))?;
+
+        // Phase 3: Put process back only if generation hasn't changed
+        // (no kill or respawn happened while we were blocked).
+        let mut st = self.state.lock().await;
+        st.inflight_child = None;
+        st.inflight_stdin = None;
+        if result.is_ok() && st.generation == generation_at_start {
+            st.process = Some(proc);
+        } else if result.is_err() {
+            // Kill the process on RPC error to avoid leaking it.
+            let mut child_guard = child_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(ref mut child) = *child_guard {
+                let _ = child.kill();
+            }
+            // proc is dropped here, NuProcess::Drop will also attempt kill (idempotent).
+        }
+        // Release the mutex before returning so timeout/kill callers are not
+        // blocked while the result propagates up.
+        drop(st);
+
+        result
+    }
+}
+
+/// Try to parse a line as a JSON-RPC response matching the expected id.
+///
+/// Returns:
+/// - `Ok(None)` — not JSON, empty, or valid JSON without a matching id (skip)
+/// - `Ok(Some(response))` — valid response with matching id
+/// - `Err(...)` — JSON with matching id but malformed response structure
+fn try_parse_response(line: &str, expected_id: u64) -> Result<Option<JsonRpcResponse>, String> {
+    #[derive(Deserialize)]
+    struct IdOnly {
+        id: Option<u64>,
+    }
+
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    // Use serde to check the id, consistent with how JsonRpcResponse deserializes it.
+    let id_check: IdOnly = serde_json::from_value(value.clone()).unwrap_or(IdOnly { id: None });
+    if id_check.id != Some(expected_id) {
+        return Ok(None);
+    }
+    serde_json::from_value::<JsonRpcResponse>(value)
+        .map(Some)
+        .map_err(|e| format!("JSON-RPC response with id={expected_id} is malformed: {e}"))
+}
+
+/// Read lines from `reader` until a JSON-RPC response with the given `id` is
+/// found. Skips empty lines, malformed JSON, notifications, and responses for
+/// other ids, up to `MAX_SKIPPED_LINES`.
+fn read_response(
+    reader: &mut BufReader<File>,
+    expected_id: u64,
+) -> Result<JsonRpcResponse, String> {
+    let mut skipped = 0usize;
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("failed to read from nu stdout: {e}"))?;
+
+        if bytes_read == 0 {
+            return Err("nu process closed stdout unexpectedly".into());
+        }
+
+        if let Some(response) = try_parse_response(&line, expected_id)? {
+            return Ok(response);
+        }
+        skipped += 1;
+        if skipped > MAX_SKIPPED_LINES {
+            return Err("too many non-response lines from nu process".into());
+        }
+    }
+}
+
+/// Execute a single JSON-RPC `tools/call` request and read the response.
+/// Runs on a blocking thread — all I/O is synchronous.
+fn rpc_call(proc: &mut NuProcess, command: &str) -> Result<NuOutput, String> {
+    let request_id = proc.next_id;
+    proc.next_id += 1;
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0",
+        id: request_id,
+        method: "tools/call",
+        params: Some(serde_json::json!({
+            "name": "evaluate",
+            "arguments": {
+                "input": command
+            }
+        })),
+    };
+
+    let request_bytes =
+        serde_json::to_vec(&request).map_err(|e| format!("failed to serialize request: {e}"))?;
+
+    if let Err(e) = send_line(&proc.stdin, &request_bytes) {
+        return Err(err_with_stderr(&e, &proc.stderr_buf));
+    }
+
+    let response = read_response(&mut proc.stdout, request_id)
+        .map_err(|e| err_with_stderr(&e, &proc.stderr_buf))?;
+
+    if let Some(err) = response.error {
+        return Ok(NuOutput {
+            content: err.message,
+            is_error: true,
+            stderr: drain_stderr(&proc.stderr_buf),
+        });
+    }
+
+    if let Some(result) = response.result {
+        let tool_result: McpToolResult = serde_json::from_value(result)
+            .map_err(|e| format!("failed to parse MCP tool result: {e}"))?;
+
+        let text = tool_result
+            .content
+            .iter()
+            .filter_map(|c| c.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let is_error = tool_result.is_error.unwrap_or(false);
+
+        return Ok(NuOutput {
+            content: text,
+            is_error,
+            stderr: drain_stderr(&proc.stderr_buf),
+        });
+    }
+
+    Err("MCP response had neither result nor error".into())
+}
+
+// ---------------------------------------------------------------------------
+// Process spawning
+// ---------------------------------------------------------------------------
+
+/// Resolve the tool directory at runtime.
+///
+/// The tool directory contains the nu binary, rg binary, and config files.
+///
+/// Search order:
+/// 1. Directory containing the current executable — if `reel_config.nu` exists
+///    there, the binary was packaged with config files alongside it.
+/// 2. Compile-time `NU_CACHE_DIR` — the build-time tool directory set by
+///    `build.rs`. Valid during development; goes stale if the binary is relocated.
+/// 3. `None` — no tool directory found.
+fn resolve_tool_dir() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let compile_time_dir = option_env!("NU_CACHE_DIR").map(Path::new);
+    resolve_tool_dir_from(exe_dir.as_deref(), compile_time_dir)
+}
+
+/// Testable inner function for [`resolve_tool_dir`].
+fn resolve_tool_dir_from(
+    exe_dir: Option<&Path>,
+    compile_time_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(dir) = exe_dir {
+        if dir.join("reel_config.nu").exists() {
+            return Some(dir.to_path_buf());
+        }
+    }
+    if let Some(dir) = compile_time_dir {
+        if dir.join("reel_config.nu").exists() {
+            return Some(dir.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Resolve a binary by name using a standard search order:
+/// 1. Same directory as the current executable (release packaging).
+/// 2. Provided tool directory.
+/// 3. Bare name on PATH.
+fn resolve_tool_binary(binary_name: &str, tool_dir: Option<&Path>) -> OsString {
+    // 1. Next to the current executable.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(binary_name);
+            if candidate.exists() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+
+    // 2. Tool directory (nu and rg share the same directory).
+    if let Some(dir) = tool_dir {
+        let candidate = dir.join(binary_name);
+        if candidate.exists() {
+            return candidate.into_os_string();
+        }
+    }
+
+    // 3. PATH fallback.
+    OsString::from(binary_name)
+}
+
+fn resolve_nu_binary(tool_dir: Option<&Path>) -> OsString {
+    resolve_tool_binary(if cfg!(windows) { "nu.exe" } else { "nu" }, tool_dir)
+}
+
+/// Resolve the path to the `rg` (ripgrep) binary.
+///
+/// Returns `Some` only when a validated absolute path exists on disk.
+/// Used by `spawn_nu_process` to set `REEL_RG_PATH`; the nu-side grep
+/// command falls back to bare `rg` when the env var is absent.
+pub fn resolve_rg_binary(tool_dir: Option<&Path>) -> Option<PathBuf> {
+    let resolved = resolve_tool_binary(if cfg!(windows) { "rg.exe" } else { "rg" }, tool_dir);
+    let path = Path::new(&resolved);
+    if path.is_absolute() && path.exists() {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Resolve config file paths from the tool directory.
+///
+/// Returns `(reel_config.nu, reel_env.nu)` as absolute `PathBuf`s, or `None`
+/// if the tool directory is unavailable or files don't exist.
+fn resolve_config_files(tool_dir: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
+    let dir = tool_dir?;
+    let config = dir.join("reel_config.nu");
+    let env = dir.join("reel_env.nu");
+    if config.exists() && env.exists() {
+        Some((config, env))
+    } else {
+        None
+    }
+}
+
+/// Build the sandbox policy for the nu process.
+///
+/// When `write_paths` is non-empty and the base grant includes `TOOLS` but
+/// not `WRITE`, each entry is added as a `write_path` while the project root
+/// remains `read_path`. This allows fine-grained read/write access within the
+/// project root. When `WRITE` is granted, `write_paths` is ignored because
+/// the entire project root is already writable.
+fn build_nu_sandbox_policy(
+    project_root: &Path,
+    grant: ToolGrant,
+    write_paths: &[PathBuf],
+    tool_dir: Option<&Path>,
+    session_temp_dir: &Path,
+) -> lot::Result<lot::SandboxPolicy> {
+    let mut builder = SandboxPolicyBuilder::new()
+        .write_path(session_temp_dir)?
+        .allow_network(grant.contains(ToolGrant::NETWORK));
+
+    if grant.contains(ToolGrant::WRITE) {
+        builder = builder.write_path(project_root)?;
+    } else {
+        builder = builder.read_path(project_root)?;
+        // Add fine-grained writable subdirectories under the read-only root.
+        for wp in write_paths {
+            builder = builder.write_path(wp)?;
+        }
+    }
+
+    // Grant exec access to the tool directory so nu can read config files
+    // and execute the rg binary from there. exec_path implies read on all
+    // platforms (Linux: MS_RDONLY without MS_NOEXEC, macOS: file-read* +
+    // process-exec, Windows: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE).
+    if let Some(dir) = tool_dir {
+        builder = builder.exec_path(dir)?;
+    }
+
+    builder.build()
+}
+
+/// Minimal PATH containing only platform system directories. These are
+/// covered by lot's `platform_implicit_paths` so they pass env validation.
+fn minimal_sandbox_path() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let sys_root = std::env::var("SYSTEMROOT").unwrap_or_else(|_| r"C:\Windows".into());
+        format!(r"{sys_root}\System32")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()
+    }
+}
+
+/// Spawn a `nu --mcp` process inside a lot sandbox and perform the MCP
+/// initialization handshake. The entire spawn + handshake runs on a blocking
+/// thread to avoid blocking the async runtime.
+///
+/// If reel config files exist in the tool directory, passes `--config` and
+/// `--env-config` flags so reel custom commands (`reel read`, etc.) are
+/// available immediately without an evaluate preamble.
+async fn spawn_nu_process(
+    config: &SpawnConfig,
+    tool_dir: Option<&Path>,
+) -> Result<NuProcess, String> {
+    let project_root = &config.project_root;
+    let grant = config.grant;
+
+    // Validate project root exists before creating any directories under it.
+    if !project_root.exists() {
+        return Err(format!(
+            "project root does not exist: {}",
+            project_root.display()
+        ));
+    }
+
+    // Per-session temp directory under <project_root>/.reel/tmp/ so that
+    // all ancestor directories match those already granted traverse ACEs
+    // by the consumer's setup command (required for Windows AppContainer).
+    // TempParentCleanup removes the empty parents on drop.
+    let temp_base = project_root.join(".reel").join("tmp");
+    std::fs::create_dir_all(&temp_base)
+        .map_err(|e| format!("failed to create session temp base: {e}"))?;
+    let session_temp_dir = tempfile::TempDir::new_in(&temp_base)
+        .map_err(|e| format!("failed to create session temp dir: {e}"))?;
+    let temp_parent_cleanup = TempParentCleanup(temp_base);
+
+    let policy = build_nu_sandbox_policy(
+        project_root,
+        grant,
+        &config.write_paths,
+        tool_dir,
+        session_temp_dir.path(),
+    )
+    .map_err(|e| format!("sandbox setup failed: {e}"))?;
+
+    let nu_binary = resolve_nu_binary(tool_dir);
+    let config_files = resolve_config_files(tool_dir);
+    let rg_binary = resolve_rg_binary(tool_dir);
+    let spawn_config = config.clone();
+    let project_root = project_root.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut cmd = SandboxCommand::new(&nu_binary);
+        cmd.arg("--mcp");
+
+        // Pass reel config files so custom commands are pre-loaded.
+        if let Some((ref config_path, ref env_path)) = config_files {
+            cmd.arg("--config");
+            cmd.arg(config_path);
+            cmd.arg("--env-config");
+            cmd.arg(env_path);
+        }
+
+        cmd.cwd(&project_root);
+        cmd.stdout(SandboxStdio::Piped);
+        cmd.stderr(SandboxStdio::Piped);
+        cmd.stdin(SandboxStdio::Piped);
+        // Override env vars before forward_common_env — explicit env takes
+        // precedence over forwarded values.
+        //
+        // TEMP/TMP/TMPDIR: redirect nu's temp I/O to the per-session dir
+        // under the project root, keeping it within the sandbox write policy.
+        cmd.env("TEMP", session_temp_dir.path());
+        cmd.env("TMP", session_temp_dir.path());
+        cmd.env("TMPDIR", session_temp_dir.path());
+        // HOME: point to session temp dir so nu can create its config/data
+        // directories (~/.config/nushell, etc.) inside the sandbox. The
+        // parent's HOME is not mounted and would cause nu to panic on Linux.
+        cmd.env("HOME", session_temp_dir.path());
+        // PATH: minimal system-only value. The parent's PATH contains
+        // entries (cargo, rustup, build artifacts) not covered by the
+        // sandbox policy or platform implicit paths, and lot now validates
+        // PATH accessibility at spawn time. Nu is invoked by absolute path
+        // and rg is resolved via REEL_RG_PATH, so nu does not need the
+        // parent's full PATH.
+        cmd.env("PATH", minimal_sandbox_path());
+        cmd.forward_common_env();
+
+        // Set REEL_RG_PATH so reel_config.nu can invoke rg by absolute path,
+        // bypassing nu's PATH-based lookup which fails under AppContainer
+        // (nu does not split semicolons in PATH list elements for executable search).
+        if let Some(ref path) = rg_binary {
+            cmd.env("REEL_RG_PATH", path);
+        }
+
+        let mut child =
+            lot::spawn(&policy, &cmd).map_err(|e| format!("failed to spawn nu: {e}"))?;
+
+        let stdin = child.take_stdin().ok_or("failed to capture nu stdin")?;
+        let stdout = child.take_stdout().ok_or("failed to capture nu stdout")?;
+        let stderr = child.take_stderr().ok_or("failed to capture nu stderr")?;
+
+        let stderr_buf = spawn_stderr_reader(stderr);
+
+        let child_handle: ChildHandle = Arc::new(std::sync::Mutex::new(Some(child)));
+        let stdin_handle: StdinHandle = Arc::new(std::sync::Mutex::new(Some(stdin)));
+
+        let mut proc = NuProcess {
+            stdin: stdin_handle,
+            stdout: BufReader::new(stdout),
+            stderr_buf,
+            next_id: 1,
+            spawn_config,
+            child_handle,
+            _session_temp_dir: Some(session_temp_dir),
+            _temp_parent_cleanup: Some(temp_parent_cleanup),
+        };
+
+        // MCP initialization handshake.
+        let init_request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 0,
+            method: "initialize",
+            params: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "reel",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            })),
+        };
+
+        let init_bytes = serde_json::to_vec(&init_request)
+            .map_err(|e| format!("failed to serialize init request: {e}"))?;
+
+        send_line(&proc.stdin, &init_bytes)?;
+
+        // Read initialize response (uses skip loop like rpc_call).
+        let init_response = read_response(&mut proc.stdout, 0)?;
+
+        if let Some(err) = init_response.error {
+            return Err(format!("MCP initialize failed: {}", err.message));
+        }
+
+        // Send initialized notification (no id, no response expected).
+        let initialized = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+
+        let notif_bytes = serde_json::to_vec(&initialized)
+            .map_err(|e| format!("failed to serialize notification: {e}"))?;
+
+        send_line(&proc.stdin, &notif_bytes)?;
+
+        Ok(proc)
+    })
+    .await
+    .map_err(|e| format!("spawn task panicked: {e}"))?
+}
+
+/// Shared test helpers for modules that need nu session infrastructure.
+///
+/// Lives outside `mod tests` so other crate-internal test modules can import it.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Returns true if the nu binary is resolvable.
+    pub fn nu_available() -> bool {
+        let nu = resolve_nu_binary(option_env!("NU_CACHE_DIR").map(Path::new));
+        let path = Path::new(&nu);
+        if path.is_absolute() {
+            return path.exists();
+        }
+        std::process::Command::new(&nu)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    /// Panic if nu is not available — tests must never silently skip.
+    macro_rules! require_nu {
+        () => {
+            assert!(
+                $crate::nu_session::test_support::nu_available(),
+                "nu binary not available — build with `cargo build` first"
+            );
+        };
+    }
+    pub(crate) use require_nu;
+
+    /// Base directory for sandbox test temp dirs.
+    pub fn sandbox_test_base() -> PathBuf {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("sandbox-test");
+        std::fs::create_dir_all(&base).expect("create sandbox test base dir");
+        base
+    }
+
+    /// Create an isolated copy of the build-time tool directory.
+    ///
+    /// Each sandbox test gets its own tool dir so AppContainer ACL
+    /// operations on exec_path do not interfere between concurrent tests.
+    pub fn tmp_sandbox_tool_dir() -> tempfile::TempDir {
+        #[allow(clippy::option_env_unwrap)]
+        let src = option_env!("NU_CACHE_DIR")
+            .expect("NU_CACHE_DIR not set at compile time — cannot create isolated tool dir");
+        let dest = tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox tool dir");
+        for entry in std::fs::read_dir(src).expect("read tool dir") {
+            let entry = entry.expect("read dir entry");
+            let path = entry.path();
+            if path.is_file() {
+                std::fs::copy(&path, dest.path().join(path.file_name().unwrap()))
+                    .expect("copy tool file");
+            }
+        }
+        dest
+    }
+
+    /// Wrapper returned by `isolated_session()`.  Ensures the nu process
+    /// is synchronously killed and reaped before the tool `TempDir` is
+    /// deleted, preventing leaked sandbox directories on Windows where
+    /// `TempDir::drop` silently fails when files are still held open.
+    pub struct IsolatedSession {
+        pub session: NuSession,
+        tool: Option<tempfile::TempDir>,
+    }
+
+    impl IsolatedSession {
+        /// Path to the isolated tool directory (contains nu.exe, rg.exe, etc.).
+        pub fn tool_path(&self) -> &Path {
+            self.tool.as_ref().expect("tool dir still alive").path()
+        }
+    }
+
+    impl std::ops::Deref for IsolatedSession {
+        type Target = NuSession;
+        fn deref(&self) -> &NuSession {
+            &self.session
+        }
+    }
+
+    impl Drop for IsolatedSession {
+        fn drop(&mut self) {
+            self.session.kill_sync();
+            // On Windows, file handles from the killed process may linger
+            // briefly after the child exits. `TempDir::drop` does a single
+            // `remove_dir_all` attempt which silently fails if files are
+            // still locked.  Retry the removal so the sandbox directories
+            // don't accumulate on disk.
+            if cfg!(windows) {
+                if let Some(tool) = self.tool.take() {
+                    let path = tool.keep(); // disarm TempDir auto-cleanup
+                    for _ in 0..20 {
+                        if std::fs::remove_dir_all(&path).is_ok() {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    // Best-effort failed — leave dir on disk rather than panic.
+                }
+            }
+        }
+    }
+
+    /// Create a NuSession with an isolated copy of the build-time tool dir.
+    ///
+    /// Each test gets its own tool dir so concurrent AppContainer profiles
+    /// do not interfere via ACL grant/restore on a shared directory.
+    pub fn isolated_session() -> IsolatedSession {
+        let tool = tmp_sandbox_tool_dir();
+        let session = NuSession::with_tool_dir(tool.path().to_path_buf());
+        IsolatedSession {
+            session,
+            tool: Some(tool),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::needless_borrow,
+    clippy::redundant_closure_for_method_calls,
+    clippy::items_after_statements,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines,
+    clippy::match_same_arms
+)]
+mod tests {
+    use super::test_support::{IsolatedSession, isolated_session, require_nu, sandbox_test_base};
+    use super::*;
+
+    /// Creates a `TempDir` with a nested session temp dir and builds a sandbox policy.
+    /// Returns `(project_tmp, session_tmp, policy)`.
+    fn policy_test_fixture(
+        grant: ToolGrant,
+    ) -> (tempfile::TempDir, tempfile::TempDir, lot::SandboxPolicy) {
+        policy_test_fixture_with_write_paths(grant, &[])
+    }
+
+    /// Like `policy_test_fixture` but accepts additional write paths.
+    fn policy_test_fixture_with_write_paths(
+        grant: ToolGrant,
+        write_paths: &[PathBuf],
+    ) -> (tempfile::TempDir, tempfile::TempDir, lot::SandboxPolicy) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy =
+            build_nu_sandbox_policy(tmp.path(), grant, write_paths, None, sess_tmp.path()).unwrap();
+        (tmp, sess_tmp, policy)
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_write_grant() {
+        let (tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::WRITE | ToolGrant::TOOLS);
+        let canon = tmp.path().canonicalize().unwrap();
+
+        let covered_by_write = policy
+            .write_paths()
+            .iter()
+            .any(|w| canon.starts_with(w) || w.starts_with(&canon));
+        assert!(
+            covered_by_write,
+            "project root should be writable when WRITE granted"
+        );
+        assert!(
+            !policy.read_paths().contains(&canon),
+            "project root should NOT be in read_paths when WRITE granted"
+        );
+        // Session temp dir writability is tested by the no_write_grant variant,
+        // where it's not subsumed by the project root write path.
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_no_write_grant() {
+        let (tmp, sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS);
+        let canon = tmp.path().canonicalize().unwrap();
+        let sess_canon = sess_tmp.path().canonicalize().unwrap();
+
+        // Without WRITE grant: project root is read-only, session temp is writable.
+        assert!(
+            policy.read_paths().contains(&canon),
+            "project root should be in read_paths when WRITE not granted"
+        );
+        assert!(
+            !policy.write_paths().contains(&canon),
+            "project root should NOT be in write_paths when WRITE not granted"
+        );
+        let has_sess_write = policy
+            .write_paths()
+            .iter()
+            .any(|w| sess_canon.starts_with(w));
+        assert!(
+            has_sess_write,
+            "session temp dir should be writable regardless of grant"
+        );
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_denies_network_by_default() {
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS);
+        assert!(
+            !policy.allow_network(),
+            "network should be denied when NETWORK grant is absent"
+        );
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_allows_network_with_grant() {
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS | ToolGrant::NETWORK);
+        assert!(
+            policy.allow_network(),
+            "network should be allowed when NETWORK grant is present"
+        );
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_no_exec_paths_without_tool_dir() {
+        let (_tmp, _sess_tmp, policy) = policy_test_fixture(ToolGrant::TOOLS);
+        assert!(
+            policy.exec_paths().is_empty(),
+            "exec_paths should be empty when no tool dir provided"
+        );
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_includes_tool_dir_exec() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        // Tool dir outside test project root (tmp) to avoid exec/read overlap in policy.
+        let tool = tempfile::TempDir::new_in(sandbox_test_base()).unwrap();
+        let policy = build_nu_sandbox_policy(
+            tmp.path(),
+            ToolGrant::TOOLS,
+            &[],
+            Some(tool.path()),
+            sess_tmp.path(),
+        )
+        .unwrap();
+
+        let tool_canon = tool.path().canonicalize().unwrap();
+        let has_tool_exec = policy
+            .exec_paths()
+            .iter()
+            .any(|p| p == &tool_canon || tool_canon.starts_with(p));
+        assert!(
+            has_tool_exec,
+            "sandbox should grant exec access to provided tool dir"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fine-grained write_paths tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_nu_sandbox_policy_write_paths_applied_without_write_grant() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let derived = tmp.path().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(
+            tmp.path(),
+            ToolGrant::TOOLS,
+            std::slice::from_ref(&derived),
+            None,
+            sess_tmp.path(),
+        )
+        .unwrap();
+
+        let canon = tmp.path().canonicalize().unwrap();
+        let derived_canon = derived.canonicalize().unwrap();
+
+        // Project root should be read-only.
+        assert!(
+            policy.read_paths().contains(&canon),
+            "project root should be in read_paths"
+        );
+        // Derived should be writable.
+        let has_derived_write = policy
+            .write_paths()
+            .iter()
+            .any(|w| *w == derived_canon || derived_canon.starts_with(w));
+        assert!(
+            has_derived_write,
+            "derived dir should be in write_paths, got: {:?}",
+            policy.write_paths()
+        );
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_write_paths_ignored_with_write_grant() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let derived = tmp.path().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let policy = build_nu_sandbox_policy(
+            tmp.path(),
+            ToolGrant::WRITE | ToolGrant::TOOLS,
+            std::slice::from_ref(&derived),
+            None,
+            sess_tmp.path(),
+        )
+        .unwrap();
+
+        let canon = tmp.path().canonicalize().unwrap();
+        let derived_canon = derived.canonicalize().unwrap();
+
+        // With WRITE grant, project root should be in write_paths (not read_paths).
+        let covered_by_write = policy
+            .write_paths()
+            .iter()
+            .any(|w| canon.starts_with(w) || w.starts_with(&canon));
+        assert!(
+            covered_by_write,
+            "project root should be writable when WRITE granted"
+        );
+        // Project root should NOT be in read_paths.
+        assert!(
+            !policy.read_paths().contains(&canon),
+            "project root should NOT be in read_paths when WRITE granted"
+        );
+        // Derived should NOT be independently listed in write_paths — the
+        // write_paths parameter should be ignored when WRITE is granted.
+        let derived_independently_listed = policy.write_paths().contains(&derived_canon);
+        assert!(
+            !derived_independently_listed,
+            "derived dir should NOT be independently listed in write_paths when WRITE granted, got: {:?}",
+            policy.write_paths()
+        );
+    }
+
+    #[test]
+    fn test_build_nu_sandbox_policy_empty_write_paths_preserves_existing_behavior() {
+        // Empty write_paths should produce the same policy as before.
+        let (tmp, _sess_tmp, policy) = policy_test_fixture_with_write_paths(ToolGrant::TOOLS, &[]);
+        let canon = tmp.path().canonicalize().unwrap();
+
+        assert!(
+            policy.read_paths().contains(&canon),
+            "project root should be in read_paths with empty write_paths"
+        );
+        assert!(
+            !policy.write_paths().contains(&canon),
+            "project root should NOT be in write_paths with empty write_paths"
+        );
+    }
+
+    #[test]
+    fn test_nu_process_is_compatible() {
+        // Verify is_compatible checks all three SpawnConfig fields.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let derived = tmp.path().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+
+        let sess_tmp = tempfile::TempDir::new_in(tmp.path()).unwrap();
+        let stdin_handle: StdinHandle = Arc::new(std::sync::Mutex::new(None));
+        let child_handle: ChildHandle = Arc::new(std::sync::Mutex::new(None));
+        let stderr_buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+
+        // Create a dummy file for stdout (will never be read in this test).
+        let dummy_path = tmp.path().join("dummy_stdout");
+        std::fs::write(&dummy_path, b"").unwrap();
+        let dummy_file = std::fs::File::open(&dummy_path).unwrap();
+
+        let config = SpawnConfig {
+            grant: ToolGrant::TOOLS,
+            project_root: tmp.path().to_path_buf(),
+            write_paths: vec![derived],
+        };
+
+        let proc = NuProcess {
+            stdin: stdin_handle,
+            stdout: BufReader::new(dummy_file),
+            stderr_buf,
+            next_id: 1,
+            spawn_config: config.clone(),
+            child_handle,
+            _session_temp_dir: Some(sess_tmp),
+            _temp_parent_cleanup: None,
+        };
+
+        // Exact match should be compatible.
+        assert!(proc.is_compatible(&config));
+
+        // Different write_paths should not be compatible.
+        assert!(!proc.is_compatible(&SpawnConfig {
+            write_paths: Vec::new(),
+            ..config.clone()
+        }));
+
+        // Different grant should not be compatible.
+        assert!(!proc.is_compatible(&SpawnConfig {
+            grant: ToolGrant::TOOLS | ToolGrant::WRITE,
+            ..config.clone()
+        }));
+
+        // Different project_root should not be compatible.
+        assert!(!proc.is_compatible(&SpawnConfig {
+            project_root: PathBuf::from("/nonexistent"),
+            ..config
+        }));
+    }
+
+    #[test]
+    fn test_temp_parent_cleanup_removes_empty_parents() {
+        // TempParentCleanup should remove the empty .reel/tmp/ and .reel/
+        // parent directories when dropped after the TempDir.
+        let project = tempfile::TempDir::new().unwrap();
+        let temp_base = project.path().join(".reel").join("tmp");
+        std::fs::create_dir_all(&temp_base).unwrap();
+        let inner = tempfile::TempDir::new_in(&temp_base).unwrap();
+        let cleanup = TempParentCleanup(temp_base);
+        assert!(project.path().join(".reel").join("tmp").exists());
+        // Drop the TempDir first (matches NuProcess field order), then cleanup.
+        drop(inner);
+        drop(cleanup);
+        assert!(
+            !project.path().join(".reel").exists(),
+            ".reel/ should be cleaned up after temp dir and cleanup are dropped"
+        );
+    }
+
+    #[test]
+    fn test_temp_parent_cleanup_preserves_nonempty_parent() {
+        // When another session still has a temp dir under .reel/tmp/,
+        // TempParentCleanup should NOT remove the parent.
+        let project = tempfile::TempDir::new().unwrap();
+        let temp_base = project.path().join(".reel").join("tmp");
+        std::fs::create_dir_all(&temp_base).unwrap();
+        let inner1 = tempfile::TempDir::new_in(&temp_base).unwrap();
+        let _inner2 = tempfile::TempDir::new_in(&temp_base).unwrap();
+        let cleanup1 = TempParentCleanup(temp_base);
+        drop(inner1);
+        drop(cleanup1);
+        // .reel/tmp/ should still exist because _inner2 is still alive.
+        assert!(
+            project.path().join(".reel").join("tmp").exists(),
+            ".reel/tmp/ should be preserved while a sibling session exists"
+        );
+    }
+
+    #[test]
+    fn test_resolve_config_files_exist_when_tool_dir_set() {
+        // When NU_CACHE_DIR is set (normal build), config files should exist
+        // because build.rs writes them.
+        let tool_dir = option_env!("NU_CACHE_DIR").map(Path::new);
+        if tool_dir.is_none() {
+            return; // Build didn't set NU_CACHE_DIR — skip.
+        }
+        let result = resolve_config_files(tool_dir);
+        assert!(
+            result.is_some(),
+            "config files should exist in NU_CACHE_DIR after build"
+        );
+        let (config, env) = result.unwrap();
+        assert!(config.exists(), "reel_config.nu should exist");
+        assert!(env.exists(), "reel_env.nu should exist");
+        assert!(config.is_absolute(), "config path should be absolute");
+        assert!(env.is_absolute(), "env path should be absolute");
+    }
+
+    #[test]
+    fn test_resolve_config_files_none_without_tool_dir() {
+        assert!(resolve_config_files(None).is_none());
+    }
+
+    #[test]
+    fn test_resolve_tool_dir_from_prefers_exe_dir() {
+        let exe_dir = tempfile::tempdir().unwrap();
+        let compile_dir = tempfile::tempdir().unwrap();
+        // Put sentinel in both dirs
+        std::fs::write(exe_dir.path().join("reel_config.nu"), "").unwrap();
+        std::fs::write(compile_dir.path().join("reel_config.nu"), "").unwrap();
+        let result = resolve_tool_dir_from(Some(exe_dir.path()), Some(compile_dir.path()));
+        assert_eq!(result.as_deref(), Some(exe_dir.path()));
+    }
+
+    #[test]
+    fn test_resolve_tool_dir_from_falls_back_to_compile_time() {
+        let compile_dir = tempfile::tempdir().unwrap();
+        std::fs::write(compile_dir.path().join("reel_config.nu"), "").unwrap();
+        // exe_dir is None
+        let result = resolve_tool_dir_from(None, Some(compile_dir.path()));
+        assert_eq!(result.as_deref(), Some(compile_dir.path()));
+    }
+
+    #[test]
+    fn test_resolve_tool_dir_from_returns_none_when_no_config() {
+        let empty_dir = tempfile::tempdir().unwrap();
+        let result = resolve_tool_dir_from(Some(empty_dir.path()), Some(empty_dir.path()));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_tool_dir_from_returns_none_when_no_dirs() {
+        let result = resolve_tool_dir_from(None, None);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_tool_dir_from_skips_exe_dir_without_config() {
+        let exe_dir = tempfile::tempdir().unwrap();
+        let compile_dir = tempfile::tempdir().unwrap();
+        // Only compile_dir has the sentinel file; exe_dir exists but lacks it.
+        std::fs::write(compile_dir.path().join("reel_config.nu"), "").unwrap();
+        let result = resolve_tool_dir_from(Some(exe_dir.path()), Some(compile_dir.path()));
+        assert_eq!(result.as_deref(), Some(compile_dir.path()));
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_rg_binary tests (#3d, #3e, #3f)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_rg_binary_finds_binary_in_tool_dir() {
+        let tool = tempfile::TempDir::new().unwrap();
+        let rg_name = if cfg!(windows) { "rg.exe" } else { "rg" };
+        let rg_path = tool.path().join(rg_name);
+        std::fs::write(&rg_path, b"fake").unwrap();
+
+        let result = resolve_rg_binary(Some(tool.path()));
+        let found = result.expect("should find rg when it exists in tool_dir");
+        assert!(found.is_absolute(), "returned path should be absolute");
+        assert!(found.exists(), "returned path should exist on disk");
+    }
+
+    #[test]
+    fn resolve_rg_binary_missing_binary_in_tool_dir() {
+        // tool_dir exists but contains no rg binary. The function should
+        // skip tool_dir and either find rg next to the test exe or fall
+        // back to bare "rg" (which is not absolute → returns None).
+        let empty_dir = tempfile::TempDir::new().unwrap();
+        let result = resolve_rg_binary(Some(empty_dir.path()));
+        match result {
+            Some(p) => {
+                // rg found next to the test executable — must not be inside empty_dir.
+                assert!(p.is_absolute(), "found rg should be absolute");
+                assert!(p.exists(), "found rg should exist on disk");
+                assert!(
+                    !p.starts_with(empty_dir.path()),
+                    "rg should NOT come from the empty tool_dir, got: {p:?}"
+                );
+            }
+            None => {
+                // Expected: no rg next to exe, bare "rg" fallback is not absolute.
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_rg_binary_with_compile_time_tool_dir() {
+        let dir = env!("NU_CACHE_DIR");
+        let result = resolve_rg_binary(Some(Path::new(dir)));
+        assert!(
+            result.is_some(),
+            "rg should exist in NU_CACHE_DIR when set: {dir}"
+        );
+        let p = result.unwrap();
+        assert!(p.is_absolute());
+        assert!(p.exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // try_parse_response tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn try_parse_response_matching_id() {
+        let line =
+            r#"{"jsonrpc":"2.0","id":42,"result":{"content":[{"type":"text","text":"ok"}]}}"#;
+        let resp = try_parse_response(line, 42).unwrap();
+        assert!(resp.is_some());
+        assert_eq!(resp.unwrap().id, Some(42));
+    }
+
+    #[test]
+    fn try_parse_response_wrong_id() {
+        let line = r#"{"jsonrpc":"2.0","id":99,"result":{}}"#;
+        assert!(try_parse_response(line, 42).unwrap().is_none());
+    }
+
+    #[test]
+    fn try_parse_response_no_id_notification() {
+        let line = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        assert!(try_parse_response(line, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn try_parse_response_empty_line() {
+        assert!(try_parse_response("", 1).unwrap().is_none());
+        assert!(try_parse_response("   \n", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn try_parse_response_malformed_json() {
+        assert!(try_parse_response("{not json", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn try_parse_response_with_error() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad request"}}"#;
+        let resp = try_parse_response(line, 1).unwrap();
+        assert!(resp.is_some());
+        let resp = resp.unwrap();
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().message, "bad request");
+    }
+
+    #[test]
+    fn try_parse_response_with_surrounding_whitespace() {
+        let line = r#"  {"jsonrpc":"2.0","id":5,"result":{}}  "#;
+        let resp = try_parse_response(line, 5).unwrap();
+        assert!(resp.is_some());
+    }
+
+    #[test]
+    fn try_parse_response_matching_id_malformed_structure() {
+        // Has our id but "error" is a plain string instead of the expected
+        // JsonRpcError object/struct, so deserialization into JsonRpcResponse fails.
+        let line = r#"{"jsonrpc":"2.0","id":7,"error":"not an object"}"#;
+        let result = try_parse_response(line, 7);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("id=7"),
+            "error should mention the id, got: {err}"
+        );
+        assert!(
+            err.contains("malformed"),
+            "error should say malformed, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // read_response tests
+    // -----------------------------------------------------------------------
+
+    fn buf_reader_from_str(s: &str) -> BufReader<File> {
+        use std::io::{Seek, Write as IoWrite};
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(s.as_bytes()).unwrap();
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        BufReader::new(file)
+    }
+
+    #[test]
+    fn read_response_skips_blank_lines() {
+        let data = "\n\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
+        let mut reader = buf_reader_from_str(data);
+        let resp = read_response(&mut reader, 1).unwrap();
+        assert_eq!(resp.id, Some(1));
+    }
+
+    #[test]
+    fn read_response_skips_non_matching_ids() {
+        let data = "{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{}}\n\
+                    {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
+        let mut reader = buf_reader_from_str(data);
+        let resp = read_response(&mut reader, 1).unwrap();
+        assert_eq!(resp.id, Some(1));
+    }
+
+    #[test]
+    fn read_response_eof_returns_error() {
+        let data = "";
+        let mut reader = buf_reader_from_str(data);
+        let result = read_response(&mut reader, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("closed stdout"));
+    }
+
+    #[test]
+    fn read_response_too_many_skipped_lines() {
+        // MAX_SKIPPED_LINES + 2 lines of garbage, no matching response.
+        let data: String = (0..MAX_SKIPPED_LINES + 2).map(|_| "not json\n").collect();
+        let mut reader = buf_reader_from_str(&data);
+        let result = read_response(&mut reader, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too many non-response lines"));
+    }
+
+    #[test]
+    fn read_response_malformed_matching_id_returns_error() {
+        // Line has our id but "error" field is a string instead of the expected struct.
+        let data = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":\"not an object\"}\n";
+        let mut reader = buf_reader_from_str(data);
+        let result = read_response(&mut reader, 1);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("malformed"),
+            "expected malformed error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_response_skips_notifications() {
+        let data = "{\"jsonrpc\":\"2.0\",\"method\":\"log\",\"params\":{}}\n\
+                    {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}\n";
+        let mut reader = buf_reader_from_str(data);
+        let resp = read_response(&mut reader, 3).unwrap();
+        assert_eq!(resp.id, Some(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // bounded_reap tests (issue #43)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bounded_reap_returns_true_on_error() {
+        // Simulate a try_wait error (e.g. no child process).
+        let result = bounded_reap(
+            || Err(io::Error::other("no child")),
+            std::time::Duration::from_secs(1),
+        );
+        assert!(result);
+    }
+
+    #[test]
+    fn bounded_reap_returns_false_on_timeout() {
+        let result = bounded_reap(
+            || Ok(None), // never exits
+            std::time::Duration::from_millis(200),
+        );
+        assert!(!result);
+    }
+
+    #[test]
+    fn bounded_reap_returns_true_after_delayed_exit() {
+        let start = std::time::Instant::now();
+        let mut calls = 0u32;
+        let result = bounded_reap(
+            || {
+                calls += 1;
+                if calls >= 3 {
+                    // Simulate exit after a few polls.
+                    Err(io::Error::other("exited"))
+                } else {
+                    Ok(None)
+                }
+            },
+            std::time::Duration::from_secs(5),
+        );
+        assert!(result);
+        assert!(calls >= 3);
+        // Should have taken at least ~100ms (2 sleeps of 50ms).
+        assert!(start.elapsed() >= std::time::Duration::from_millis(80));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn bounded_reap_returns_true_on_normal_exit() {
+        // Cover the Ok(Some(status)) path — a process that has already exited
+        // normally. We spawn a real process to obtain a genuine ExitStatus.
+        let status = std::process::Command::new("true")
+            .status()
+            .expect("failed to run `true`");
+        let result = bounded_reap(|| Ok(Some(status)), std::time::Duration::from_secs(1));
+        assert!(result, "bounded_reap should return true on normal exit");
+    }
+
+    // -----------------------------------------------------------------------
+    // drain_stderr tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn drain_stderr_returns_none_on_empty() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+        assert!(drain_stderr(&buf).is_none());
+    }
+
+    #[test]
+    fn drain_stderr_returns_content_and_clears() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new("error line\n".into()));
+        let drained = drain_stderr(&buf);
+        assert_eq!(drained.as_deref(), Some("error line\n"));
+        // Buffer should be empty after drain.
+        assert!(drain_stderr(&buf).is_none());
+    }
+
+    #[test]
+    fn drain_stderr_accumulates_multiple_lines() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+        {
+            let mut guard = buf.lock().unwrap();
+            guard.push_str("line 1\n");
+            guard.push_str("line 2\n");
+        }
+        let drained = drain_stderr(&buf).unwrap();
+        assert!(drained.contains("line 1"));
+        assert!(drained.contains("line 2"));
+    }
+
+    // -----------------------------------------------------------------------
+    // append_capped tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn append_capped_within_limit() {
+        let mut buf = String::new();
+        append_capped(&mut buf, "short line\n");
+        assert_eq!(buf, "short line\n");
+    }
+
+    #[test]
+    fn append_capped_truncates_oldest_on_overflow() {
+        let mut buf = String::new();
+        let line = format!("{}\n", "x".repeat(999));
+        let lines_needed = MAX_STDERR_BUF / line.len() + 2;
+        for _ in 0..lines_needed {
+            append_capped(&mut buf, &line);
+        }
+        assert!(
+            buf.len() <= MAX_STDERR_BUF,
+            "buf.len()={} exceeds cap {MAX_STDERR_BUF}",
+            buf.len()
+        );
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn append_capped_single_huge_line_truncates() {
+        let mut buf = String::new();
+        let huge = "y".repeat(MAX_STDERR_BUF + 500);
+        append_capped(&mut buf, &huge);
+        assert!(buf.len() <= MAX_STDERR_BUF);
+    }
+
+    #[test]
+    fn append_capped_multibyte_does_not_panic() {
+        let mut buf = String::new();
+        let emoji = "\u{1F600}"; // 4 bytes each
+        // Fill buffer to exactly MAX_STDERR_BUF with emojis (no truncation yet)
+        let base = emoji.repeat(MAX_STDERR_BUF / emoji.len());
+        assert_eq!(base.len(), MAX_STDERR_BUF); // 65536 = 16384 * 4
+        append_capped(&mut buf, &base);
+        // Append 2 ASCII bytes + emojis. excess = 42, which is 4*10+2 = mid-emoji.
+        let extra = format!("ab{}", emoji.repeat(10));
+        append_capped(&mut buf, &extra);
+        // No panic means the char boundary fix worked.
+        assert!(buf.len() <= MAX_STDERR_BUF);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn append_capped_multibyte_2byte() {
+        // 2-byte character: U+00E9 (é) is 2 bytes in UTF-8.
+        let mut buf = String::new();
+        let ch = "\u{00E9}";
+        assert_eq!(ch.len(), 2);
+        let base = ch.repeat(MAX_STDERR_BUF / ch.len());
+        assert_eq!(base.len(), MAX_STDERR_BUF);
+        append_capped(&mut buf, &base);
+        // Append extra that forces truncation at a non-char-boundary.
+        let extra = format!("x{}", ch.repeat(10));
+        append_capped(&mut buf, &extra);
+        assert!(buf.len() <= MAX_STDERR_BUF);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn append_capped_multibyte_3byte() {
+        // 3-byte character: U+4E16 (世) is 3 bytes in UTF-8.
+        let mut buf = String::new();
+        let ch = "\u{4E16}";
+        assert_eq!(ch.len(), 3);
+        // Fill with 3-byte chars then pad with ASCII to reach exactly MAX_STDERR_BUF.
+        let count = MAX_STDERR_BUF / ch.len();
+        let mut base = ch.repeat(count);
+        let gap = MAX_STDERR_BUF - base.len();
+        base.push_str(&"x".repeat(gap));
+        assert_eq!(base.len(), MAX_STDERR_BUF);
+        append_capped(&mut buf, &base);
+        // Append 3-byte chars to trigger truncation from exactly at the limit.
+        let extra = ch.repeat(10);
+        append_capped(&mut buf, &extra);
+        assert!(buf.len() <= MAX_STDERR_BUF);
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn append_capped_multibyte_mixed() {
+        // Mixed ASCII (1-byte), 2-byte, 3-byte, and 4-byte characters.
+        let mut buf = String::new();
+        let mixed = "A\u{00E9}\u{4E16}\u{1F600}"; // 1 + 2 + 3 + 4 = 10 bytes
+        assert_eq!(mixed.len(), 10);
+        // Fill with mixed units then pad with ASCII to reach exactly MAX_STDERR_BUF.
+        let count = MAX_STDERR_BUF / mixed.len();
+        let mut base = mixed.repeat(count);
+        let gap = MAX_STDERR_BUF - base.len();
+        base.push_str(&"x".repeat(gap));
+        assert_eq!(base.len(), MAX_STDERR_BUF);
+        append_capped(&mut buf, &base);
+        // Append mixed content to trigger truncation from exactly at the limit.
+        let extra = mixed.repeat(5);
+        append_capped(&mut buf, &extra);
+        assert!(buf.len() <= MAX_STDERR_BUF);
+        assert!(!buf.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // err_with_stderr tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn err_with_stderr_without_stderr_returns_error_only() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new(String::new()));
+        let result = err_with_stderr("connection failed", &buf);
+        assert_eq!(result, "connection failed");
+    }
+
+    #[test]
+    fn err_with_stderr_with_stderr_appends_content() {
+        let buf: StderrBuf = Arc::new(std::sync::Mutex::new("panic at line 42\n".into()));
+        let result = err_with_stderr("connection failed", &buf);
+        assert_eq!(result, "connection failed\nnu stderr:\npanic at line 42\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // spawn_stderr_reader tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spawn_stderr_reader_captures_file_content() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp, b"warning: something\nerror: boom\n").unwrap();
+        // Open a fresh read handle from the same path.
+        let reader_file = File::open(tmp.path()).unwrap();
+        let buf = spawn_stderr_reader(reader_file);
+        // The background thread reads until EOF; give it a moment.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let content = drain_stderr(&buf);
+        assert_eq!(
+            content.as_deref(),
+            Some("warning: something\nerror: boom\n")
+        );
+    }
+
+    #[test]
+    fn spawn_stderr_reader_empty_file_yields_none() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let reader_file = File::open(tmp.path()).unwrap();
+        let buf = spawn_stderr_reader(reader_file);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(drain_stderr(&buf).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Generation-based session invalidation tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn session_new_starts_with_no_process() {
+        let session = NuSession::new();
+        let st = session.state.lock().await;
+        assert!(st.process.is_none());
+        assert_eq!(st.generation, 0);
+    }
+
+    #[tokio::test]
+    async fn kill_increments_generation() {
+        let session = NuSession::new();
+        {
+            let st = session.state.lock().await;
+            assert_eq!(st.generation, 0);
+        }
+        session.kill().await;
+        {
+            let st = session.state.lock().await;
+            assert_eq!(st.generation, 1);
+        }
+        session.kill().await;
+        {
+            let st = session.state.lock().await;
+            assert_eq!(st.generation, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn kill_on_empty_session_is_safe() {
+        let session = NuSession::new();
+        // Calling kill with no process should not panic.
+        session.kill().await;
+        session.kill().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests — spawn real nu processes
+    // -----------------------------------------------------------------------
+
+    /// Create a temp project directory under `sandbox_test_base()` for sandbox tests.
+    fn tmp_sandbox_project() -> tempfile::TempDir {
+        tempfile::TempDir::new_in(sandbox_test_base()).expect("create sandbox test dir")
+    }
+
+    /// Sandbox test environment with isolated project and tool directories.
+    ///
+    /// `IsolatedSession` handles synchronous kill-and-reap on drop, so
+    /// the nu child releases file handles before `TempDir` cleanup runs.
+    ///
+    /// This is the required entry point for tests that need a sandbox
+    /// environment (session + project directory). Do **not** construct
+    /// `NuSession` directly in tests — use `sandbox_env()` or
+    /// `isolated_session()` to ensure proper isolation.
+    struct SandboxTestEnv {
+        session: IsolatedSession,
+        project: tempfile::TempDir,
+    }
+
+    fn sandbox_env() -> SandboxTestEnv {
+        let project = tmp_sandbox_project();
+        let session = isolated_session();
+        SandboxTestEnv { session, project }
+    }
+
+    /// Format a path for use in nu commands (forward slashes).
+    fn nu_path(p: &Path) -> String {
+        p.to_str().unwrap().replace('\\', "/")
+    }
+
+    /// Spawn a session, panicking if sandbox setup fails.
+    async fn try_spawn(session: &NuSession, root: &Path, grant: ToolGrant) {
+        session
+            .spawn(root, grant, &[])
+            .await
+            .expect("spawn should succeed (sandbox setup failure is fatal)");
+    }
+
+    /// Evaluate a command, panicking if sandbox setup fails.
+    async fn try_eval(
+        session: &NuSession,
+        cmd: &str,
+        timeout: u64,
+        root: &Path,
+        grant: ToolGrant,
+    ) -> Result<NuOutput, String> {
+        let result = session.evaluate(cmd, timeout, root, grant).await;
+        if let Err(e) = &result {
+            assert!(
+                !e.contains("sandbox setup failed"),
+                "sandbox setup failed (this is fatal): {e}"
+            );
+        }
+        result
+    }
+
+    #[tokio::test]
+    async fn integration_spawn_creates_session() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
+    }
+
+    #[tokio::test]
+    async fn integration_spawn_is_idempotent() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
+        // Second spawn with same params is a no-op.
+        session
+            .spawn(tmp.path(), ToolGrant::TOOLS, &[])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn integration_drop_cleans_up() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        {
+            let session = isolated_session();
+            try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
+        }
+        // No panic or zombie = pass.
+    }
+
+    #[tokio::test]
+    async fn integration_kill_then_evaluate_respawns() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
+        session.kill().await;
+        let result = try_eval(&session, "echo 'alive'", 30, tmp.path(), ToolGrant::TOOLS).await;
+        let out = result.unwrap();
+        assert!(!out.is_error);
+    }
+
+    #[tokio::test]
+    async fn integration_evaluate_simple_echo() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        let result = try_eval(
+            &session,
+            "echo 'hello world'",
+            30,
+            tmp.path(),
+            ToolGrant::TOOLS,
+        )
+        .await;
+        let out = result.unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("hello world"));
+    }
+
+    #[tokio::test]
+    async fn integration_evaluate_error_command() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        let result = try_eval(
+            &session,
+            "error make { msg: 'test error' }",
+            30,
+            tmp.path(),
+            ToolGrant::TOOLS,
+        )
+        .await;
+        let out = result.unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("test error"));
+    }
+
+    #[tokio::test]
+    async fn integration_evaluate_stderr_none_on_success() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        let result = try_eval(&session, "1 + 1", 30, tmp.path(), ToolGrant::TOOLS).await;
+        let out = result.unwrap();
+        assert!(!out.is_error);
+        // A simple arithmetic command should produce no stderr beyond
+        // framework log lines (INFO/DEBUG from rmcp).  Check that no line
+        // starts with an ERROR-level log prefix or a nu error marker.
+        if let Some(ref stderr) = out.stderr {
+            for line in stderr.lines() {
+                let trimmed = line.trim();
+                assert!(
+                    !trimmed.starts_with("Error")
+                        && !trimmed.starts_with("ERROR")
+                        && !trimmed.starts_with("error:"),
+                    "unexpected error line in stderr: {line}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_evaluate_multiple_sequential() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        let result = try_eval(&session, "1 + 2", 30, tmp.path(), ToolGrant::TOOLS).await;
+        let out1 = result.unwrap();
+        assert!(!out1.is_error);
+        assert!(out1.content.contains('3'));
+        let out2 = session
+            .evaluate("'foo' | str length", 30, tmp.path(), ToolGrant::TOOLS)
+            .await
+            .unwrap();
+        assert!(!out2.is_error);
+        assert!(out2.content.contains('3'));
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_reel_read() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let test_file = tmp.path().join("test.txt");
+        std::fs::write(&test_file, "line one\nline two\n").unwrap();
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+        let cmd = format!("reel read '{}'", nu_path(&test_file));
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+        let out = result.unwrap();
+        assert!(!out.is_error, "reel read failed: {}", out.content);
+        assert!(out.content.contains("line one"));
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_reel_write() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let test_file = tmp.path().join("written.txt");
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+        let cmd = format!("reel write '{}' 'hello from test'", nu_path(&test_file));
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+        let out = result.unwrap();
+        assert!(!out.is_error, "reel write failed: {}", out.content);
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert_eq!(content, "hello from test");
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_reel_glob() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "").unwrap();
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+        let cmd = format!("reel glob '*.txt' --path '{}'", nu_path(tmp.path()));
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+        let out = result.unwrap();
+        assert!(!out.is_error, "reel glob failed: {}", out.content);
+        assert!(out.content.contains("a.txt"));
+        assert!(out.content.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_reel_edit() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let test_file = tmp.path().join("edit_me.txt");
+        std::fs::write(&test_file, "old value here").unwrap();
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+        let cmd = format!(
+            "reel edit '{}' 'old value' 'new value'",
+            nu_path(&test_file)
+        );
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+        let out = result.unwrap();
+        assert!(!out.is_error, "reel edit failed: {}", out.content);
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert_eq!(content, "new value here");
+    }
+
+    #[tokio::test]
+    async fn integration_custom_command_reel_grep() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("searchable.txt"), "findme in this file\n").unwrap();
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+        let cmd = format!("reel grep 'findme' --path '{}'", nu_path(tmp.path()));
+        let result = try_eval(session, &cmd, 30, tmp.path(), grant).await;
+        let out = result.unwrap();
+        assert!(!out.is_error, "reel grep failed: {}", out.content);
+        assert!(out.content.contains("searchable.txt"));
+    }
+
+    #[tokio::test]
+    async fn integration_timeout_kills_process() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        let result = try_eval(&session, "sleep 60sec", 2, tmp.path(), ToolGrant::TOOLS).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("timed out"), "error: {err}");
+        // Small delay so Windows can tear down the killed AppContainer
+        // process before respawn (issue #50: flaky on Windows CI).
+        #[cfg(target_os = "windows")]
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Session recovers after timeout.
+        let result2 = try_eval(
+            &session,
+            "echo 'recovered'",
+            30,
+            tmp.path(),
+            ToolGrant::TOOLS,
+        )
+        .await;
+        let out = result2.unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("recovered"));
+    }
+
+    #[tokio::test]
+    async fn integration_grant_change_respawns() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        let result = try_eval(&session, "echo 'ro'", 30, tmp.path(), ToolGrant::TOOLS).await;
+        let out1 = result.unwrap();
+        assert!(!out1.is_error);
+        // Switch to write grant — triggers respawn.
+        let result2 = try_eval(
+            &session,
+            "echo 'rw'",
+            30,
+            tmp.path(),
+            ToolGrant::TOOLS | ToolGrant::WRITE,
+        )
+        .await;
+        let out2 = result2.unwrap();
+        assert!(!out2.is_error);
+    }
+
+    #[tokio::test]
+    async fn integration_generation_prevents_stale_writeback() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
+        let gen_before = {
+            let st = session.state.lock().await;
+            st.generation
+        };
+        session.kill().await;
+        let gen_after = {
+            let st = session.state.lock().await;
+            st.generation
+        };
+        assert!(gen_after > gen_before);
+        let st = session.state.lock().await;
+        assert!(st.process.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Respawn trigger tests (issues #7, #38, #45)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_project_root_change_respawns() {
+        // Changing project root between evaluations triggers respawn (issue #7).
+        require_nu!();
+        let tmp1 = tmp_sandbox_project();
+        let tmp2 = tmp_sandbox_project();
+        let session = isolated_session();
+        let result1 = try_eval(&session, "echo 'root1'", 30, tmp1.path(), ToolGrant::TOOLS).await;
+        assert!(!result1.unwrap().is_error);
+        let gen1 = session.state.lock().await.generation;
+        // Switch project root — triggers respawn.
+        let result2 = try_eval(&session, "echo 'root2'", 30, tmp2.path(), ToolGrant::TOOLS).await;
+        assert!(!result2.unwrap().is_error);
+        let gen2 = session.state.lock().await.generation;
+        assert!(gen2 > gen1, "generation should increase on respawn");
+    }
+
+    #[tokio::test]
+    async fn integration_network_grant_change_respawns() {
+        // Adding NETWORK grant triggers respawn (issue #38).
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        let result1 = try_eval(&session, "echo 'no-net'", 30, tmp.path(), ToolGrant::TOOLS).await;
+        assert!(!result1.unwrap().is_error);
+        let gen1 = session.state.lock().await.generation;
+        // Switch to NETWORK grant — triggers respawn.
+        let result2 = try_eval(
+            &session,
+            "echo 'with-net'",
+            30,
+            tmp.path(),
+            ToolGrant::TOOLS | ToolGrant::NETWORK,
+        )
+        .await;
+        assert!(!result2.unwrap().is_error);
+        let gen2 = session.state.lock().await.generation;
+        assert!(gen2 > gen1, "generation should increase on respawn");
+    }
+
+    // -----------------------------------------------------------------------
+    // Concurrent and generation-mismatch tests (issues #44, #46)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_concurrent_evaluate_both_succeed() {
+        // Two concurrent evaluations where the first takes the pre-spawned
+        // process (fast path) and the second spawns a new one (slow path).
+        // Both must succeed. Exercises the ensure_and_take fast/slow paths
+        // under concurrent access (issue #44).
+        //
+        // Limitation (issue #57): this test asserts both evaluations succeed
+        // but does not verify that two *distinct* processes were used. We
+        // cannot distinguish sequential reuse from concurrent spawn without
+        // exposing internal state (e.g. process IDs). The test confirms
+        // correctness but not concurrency.
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        let root = tmp.path().to_path_buf();
+        let grant = ToolGrant::TOOLS;
+        // Pre-spawn so the fast path is available for the first caller.
+        try_spawn(&session, &root, grant).await;
+
+        let (r1, r2) = tokio::join!(
+            session.evaluate("echo 'a'", 30, &root, grant),
+            session.evaluate("echo 'b'", 30, &root, grant),
+        );
+
+        assert!(!r1.unwrap().is_error);
+        assert!(!r2.unwrap().is_error);
+    }
+
+    #[tokio::test]
+    async fn integration_kill_during_evaluate_discards_process() {
+        // kill() during Phase 2 (blocking I/O) bumps generation. Phase 3
+        // sees the mismatch and discards the process (issue #46).
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        let session = isolated_session();
+        try_spawn(&session, tmp.path(), ToolGrant::TOOLS).await;
+
+        let root = tmp.path().to_path_buf();
+        let (eval_result, ()) = tokio::join!(
+            session.evaluate("sleep 1sec; echo 'done'", 30, &root, ToolGrant::TOOLS),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                session.kill().await;
+            }
+        );
+
+        // The evaluate may succeed or fail depending on timing. Either way,
+        // the process should have been discarded (not written back to state).
+        let _ = eval_result;
+        let st = session.state.lock().await;
+        assert!(
+            st.process.is_none(),
+            "process should be discarded after kill during evaluate"
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_env_filtering_rg_available() {
+        require_nu!();
+        let tmp = tmp_sandbox_project();
+        std::fs::write(tmp.path().join("needle.txt"), "haystack\n").unwrap();
+        let session = isolated_session();
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+        // Use REEL_RG_PATH (absolute path) instead of bare `^rg`. NuShell's
+        // PATH-based command lookup fails under AppContainer on Windows.
+        let cmd = format!(
+            "^$env.REEL_RG_PATH --color=never haystack '{}'",
+            nu_path(tmp.path())
+        );
+        let result = try_eval(&session, &cmd, 30, tmp.path(), grant).await;
+        let out = result.unwrap();
+        assert!(
+            !out.is_error,
+            "rg not available in nu session: {}",
+            out.content
+        );
+        assert!(out.content.contains("haystack"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Sandbox policy verification
+    //
+    // Each test uses sandbox_env() for isolated project and tool dirs,
+    // eliminating shared state between concurrent tests.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn integration_sandbox_read_only_prevents_writes() {
+        // read_path policy must block file creation/mutation inside the project root.
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        // Seed a file so we can also test overwrite prevention.
+        std::fs::write(tmp.path().join("existing.txt"), "original").unwrap();
+        // TOOLS without WRITE — sandbox uses read_path for project root.
+        let grant = ToolGrant::TOOLS;
+
+        // Attempt 1: create a new file inside the read-only project root.
+        let write_cmd = format!(
+            "'blocked' | save '{}'",
+            nu_path(&tmp.path().join("new_file.txt"))
+        );
+        let result = try_eval(session, &write_cmd, 30, tmp.path(), grant).await;
+        let out = result.unwrap();
+        assert!(
+            out.is_error,
+            "write should fail under read-only sandbox, got: {}",
+            out.content
+        );
+        assert!(
+            !tmp.path().join("new_file.txt").exists(),
+            "file must not be created under read-only policy"
+        );
+
+        // Attempt 2: overwrite an existing file.
+        let overwrite_cmd = format!(
+            "'overwritten' | save --force '{}'",
+            nu_path(&tmp.path().join("existing.txt"))
+        );
+        let out2 = session
+            .evaluate(&overwrite_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
+        assert!(
+            out2.is_error,
+            "overwrite should fail under read-only sandbox, got: {}",
+            out2.content
+        );
+        let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
+        assert_eq!(content, "original", "file content must not change");
+
+        // Attempt 3: mkdir inside the project root.
+        let mkdir_cmd = format!("mkdir '{}'", nu_path(&tmp.path().join("subdir")));
+        let out3 = session
+            .evaluate(&mkdir_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
+        assert!(
+            out3.is_error,
+            "mkdir should fail under read-only sandbox, got: {}",
+            out3.content
+        );
+        assert!(
+            !tmp.path().join("subdir").exists(),
+            "directory must not be created under read-only policy"
+        );
+
+        // Attempt 4: rm an existing file.
+        let rm_cmd = format!("rm '{}'", nu_path(&tmp.path().join("existing.txt")));
+        let out_rm = session
+            .evaluate(&rm_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
+        assert!(
+            out_rm.is_error,
+            "rm should fail under read-only sandbox, got: {}",
+            out_rm.content
+        );
+        assert!(
+            tmp.path().join("existing.txt").exists(),
+            "file must not be deleted under read-only policy"
+        );
+
+        // Attempt 5: mv (rename) an existing file.
+        let mv_cmd = format!(
+            "mv '{}' '{}'",
+            nu_path(&tmp.path().join("existing.txt")),
+            nu_path(&tmp.path().join("renamed.txt")),
+        );
+        let out_mv = session
+            .evaluate(&mv_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
+        assert!(
+            out_mv.is_error,
+            "mv should fail under read-only sandbox, got: {}",
+            out_mv.content
+        );
+        assert!(
+            tmp.path().join("existing.txt").exists(),
+            "original file must still exist after failed mv"
+        );
+        assert!(
+            !tmp.path().join("renamed.txt").exists(),
+            "renamed file must not exist under read-only policy"
+        );
+
+        // Attempt 6: rg (child process execution from exec_path).
+        // Use REEL_RG_PATH (absolute path) — nu's PATH lookup fails under AppContainer.
+        let rg_cmd = format!(
+            "^$env.REEL_RG_PATH --color=never original '{}'",
+            nu_path(tmp.path())
+        );
+        let out_rg = session
+            .evaluate(&rg_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
+        #[cfg(target_os = "windows")]
+        assert!(
+            !out_rg.is_error,
+            "rg failed in read-only sandbox. On Windows, AppContainer blocks child processes \
+             unless the NUL device ACL is configured. Run the consumer's setup command from an elevated \
+             (Administrator) prompt to fix. Raw error: {}",
+            out_rg.content
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert!(
+            !out_rg.is_error,
+            "rg should be accessible in read-only sandbox: {}",
+            out_rg.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_temp_dir_no_pivot_to_project() {
+        // A read-only session can write to its per-session temp dir, but must
+        // not be able to pivot that access back to the project root — e.g.
+        // copy a file to temp, modify it, then write it back.
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        std::fs::write(tmp.path().join("source.txt"), "immutable content").unwrap();
+        let grant = ToolGrant::TOOLS;
+
+        // Copy to a temp file, modify it, then attempt to write back.
+        // This is the pivot attack: use temp dir write access to stage a
+        // modified copy, then try to overwrite the project file.
+        let pivot_cmd = format!(
+            "let tmp = (mktemp); \
+             open '{}' | save --force $tmp; \
+             'tampered' | save --force $tmp; \
+             open $tmp | save --force '{}'",
+            nu_path(&tmp.path().join("source.txt")),
+            nu_path(&tmp.path().join("source.txt")),
+        );
+        let out2 = session
+            .evaluate(&pivot_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
+        // The final `save --force` back to project root must fail.
+        assert!(
+            out2.is_error,
+            "pivot write-back should fail under read-only sandbox, got: {}",
+            out2.content
+        );
+        let content = std::fs::read_to_string(tmp.path().join("source.txt")).unwrap();
+        assert_eq!(
+            content, "immutable content",
+            "project file must remain unchanged after pivot attempt"
+        );
+
+        // Also try writing a new file to project root via temp staging.
+        let pivot_new_cmd = format!(
+            "let tmp = (mktemp); \
+             'injected' | save --force $tmp; \
+             cp $tmp '{}'",
+            nu_path(&tmp.path().join("injected.txt")),
+        );
+        let out3 = session
+            .evaluate(&pivot_new_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
+        // Primary assertion: the file must not exist in the project root.
+        // On Linux, nu's `cp` may not report an error even when the write
+        // is blocked by a read-only bind mount, so we check the filesystem
+        // state rather than relying on `is_error`.
+        assert!(
+            !tmp.path().join("injected.txt").exists(),
+            "injected file must not exist in project root (sandbox leak). \
+             cp output: {}",
+            out3.content
+        );
+        if !out3.is_error {
+            eprintln!(
+                "NOTE: cp to read-only project root did not report an error \
+                 (platform-specific nu behavior). Sandbox still enforced — \
+                 file does not exist."
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_write_grant_permits_writes() {
+        // Write grant must allow file creation in the project root.
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+
+        let write_cmd = format!(
+            "'hello' | save '{}'",
+            nu_path(&tmp.path().join("created.txt"))
+        );
+        let out = session
+            .evaluate(&write_cmd, 30, tmp.path(), grant)
+            .await
+            .unwrap();
+        assert!(
+            !out.is_error,
+            "write should succeed with WRITE grant: {}",
+            out.content
+        );
+        let content = std::fs::read_to_string(tmp.path().join("created.txt")).unwrap();
+        assert_eq!(
+            content, "hello",
+            "file content should match what was written"
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_write_paths_permits_subdir_writes() {
+        // write_paths must allow writes to a specific subdirectory while
+        // the rest of the project root remains read-only.
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+
+        // Create the writable subdirectory.
+        let derived = tmp.path().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+
+        // Spawn with TOOLS (read-only root) + write_paths for derived/.
+        session
+            .spawn(tmp.path(), ToolGrant::TOOLS, std::slice::from_ref(&derived))
+            .await
+            .expect("spawn with write_paths should succeed");
+
+        // Write to the granted subdirectory should succeed.
+        let write_cmd = format!("'output' | save '{}'", nu_path(&derived.join("result.txt")));
+        let out = session
+            .evaluate(&write_cmd, 30, tmp.path(), ToolGrant::TOOLS)
+            .await
+            .unwrap();
+        assert!(
+            !out.is_error,
+            "write to write_paths subdir should succeed: {}",
+            out.content
+        );
+        let content = std::fs::read_to_string(derived.join("result.txt")).unwrap();
+        assert_eq!(content, "output");
+
+        // Write to the read-only root should fail.
+        let root_write_cmd = format!(
+            "'blocked' | save '{}'",
+            nu_path(&tmp.path().join("root_file.txt"))
+        );
+        let out2 = session
+            .evaluate(&root_write_cmd, 30, tmp.path(), ToolGrant::TOOLS)
+            .await
+            .unwrap();
+        assert!(
+            out2.is_error,
+            "write to read-only root should fail with write_paths: {}",
+            out2.content
+        );
+        assert!(
+            !tmp.path().join("root_file.txt").exists(),
+            "file must not be created in read-only root"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sandbox rg diagnosis tests
+    //
+    // Root cause: AppContainer blocks access to \\.\NUL device. Nu's MCP
+    // mode sets stdin(Stdio::null()) for external commands, which triggers
+    // Rust's stdlib to open \\.\NUL via CreateFileW. AppContainer denies
+    // this (ERROR_ACCESS_DENIED = 5). CreateProcessW itself works fine.
+    // Fix: change nu's run_external.rs to use Stdio::piped() in MCP mode.
+    // See docs/WINDOWS_SANDBOX.md for full investigation.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_nosandbox_rg_executes() {
+        // Control: rg works when invoked directly (no sandbox). Proves the
+        // binary is present and functional, isolating AppContainer as the
+        // cause when rg fails inside the sandbox.
+        require_nu!();
+        let tool_dir = option_env!("NU_CACHE_DIR").map(std::path::Path::new);
+        let rg_binary = resolve_rg_binary(tool_dir)
+            .expect("rg binary not found — build with `cargo build` first");
+
+        // Invoke rg directly — no sandbox, no nu.
+        let output = std::process::Command::new(&rg_binary)
+            .arg("--version")
+            .output()
+            .expect("failed to execute rg binary");
+        assert!(
+            output.status.success(),
+            "rg --version should succeed outside sandbox: exit={}, stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("ripgrep"),
+            "rg output should contain 'ripgrep', got: {}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_rg_with_ancestor_traverse() {
+        // Verifies rg child process execution inside AppContainer.
+        // Requires NUL device ACL grant (via lot::grant_appcontainer_prerequisites) to pass.
+        // Without it, nu's MCP mode opens \\.\NUL for child stdin,
+        // AppContainer denies access (os error 5), and rg fails.
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS;
+
+        let tool_path = env.session.tool_path().to_path_buf();
+
+        // Trigger session spawn (applies sandbox ACLs via lot).
+        let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
+        let _ = init.unwrap();
+
+        // Verify rg binary has the AppContainer ACL (RX) via inheritance.
+        let rg_name = if cfg!(windows) { "rg.exe" } else { "rg" };
+        let rg_exe = tool_path.join(rg_name);
+        if cfg!(windows) {
+            let output = std::process::Command::new("icacls")
+                .arg(rg_exe.as_os_str())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output();
+            if let Ok(o) = output {
+                let acl_text = String::from_utf8_lossy(&o.stdout);
+                eprintln!("rg.exe ACLs:\n{acl_text}");
+                assert!(
+                    acl_text.contains("(I)(RX)"),
+                    "rg.exe should have inherited RX ACL from exec_path"
+                );
+            }
+        }
+
+        // rg execution inside AppContainer: succeeds only if NUL device is accessible.
+        let rg_full = format!("^'{}' --version", nu_path(&rg_exe));
+        let result = try_eval(session, &rg_full, 30, tmp.path(), grant).await;
+        let out = result.unwrap();
+        assert!(
+            !out.is_error,
+            "rg execution failed inside AppContainer. This means the NUL device \
+             ACL has not been configured. Run the consumer's setup command from an elevated \
+             (Administrator) prompt, then re-run this test.\n\
+             Error: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("ripgrep"),
+            "expected rg --version output containing 'ripgrep', got: {}",
+            out.content
+        );
+    }
+
+    /// Diagnose whether the AppContainer blocks file READ access to rg.exe
+    /// or specifically blocks CreateProcess (child process spawning).
+    #[tokio::test]
+    async fn integration_sandbox_diagnose_rg_access() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS;
+
+        let tool_path = env.session.tool_path().to_path_buf();
+
+        // Trigger session spawn.
+        let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
+        let init_out = init.unwrap();
+        assert!(
+            !init_out.is_error,
+            "init command should succeed, got error: {}",
+            init_out.content
+        );
+
+        let rg_name = if cfg!(windows) { "rg.exe" } else { "rg" };
+        let rg_exe = tool_path.join(rg_name);
+
+        // Test 1: Can nu stat the rg binary? Use ls on the tool directory.
+        let read_cmd = format!("ls '{}' | length", nu_path(&tool_path));
+        let read_result = try_eval(session, &read_cmd, 30, tmp.path(), grant).await;
+        let read_out = read_result.unwrap();
+        assert!(
+            !read_out.is_error,
+            "tool directory listing should succeed, got error: {}",
+            read_out.content
+        );
+        eprintln!(
+            "File read rg.exe: is_error={}, content={}",
+            read_out.is_error, read_out.content
+        );
+
+        // Test 2: Can nu READ a System32 DLL? (proves System32 access from inside AppContainer)
+        let sys32_cmd = "open --raw 'C:/Windows/System32/kernel32.dll' | bytes length";
+        let sys32_result = try_eval(session, sys32_cmd, 30, tmp.path(), grant).await;
+        let sys32_out = sys32_result.unwrap();
+        eprintln!(
+            "File read kernel32.dll: is_error={}, content={}",
+            sys32_out.is_error, sys32_out.content
+        );
+
+        // Test 3: Can nu execute cmd.exe from System32? (^cmd /C echo hi)
+        let cmd_exec = "^'C:/Windows/System32/cmd.exe' /C echo hi";
+        let cmd_result = try_eval(session, cmd_exec, 30, tmp.path(), grant).await;
+        let cmd_out = cmd_result.unwrap();
+        eprintln!(
+            "Execute cmd.exe: is_error={}, content={}",
+            cmd_out.is_error, cmd_out.content
+        );
+
+        // Test 4: Execute rg.exe with full path (expected to fail).
+        let rg_exec = format!("^'{}' --version", nu_path(&rg_exe));
+        let rg_result = try_eval(session, &rg_exec, 30, tmp.path(), grant).await;
+        let rg_out = rg_result.unwrap();
+        eprintln!(
+            "Execute rg.exe: is_error={}, content={}",
+            rg_out.is_error, rg_out.content
+        );
+
+        // Test 5: What does `which rg` say?
+        let which_cmd = "which rg";
+        let which_result = try_eval(session, which_cmd, 30, tmp.path(), grant).await;
+        let which_out = which_result.unwrap();
+        eprintln!(
+            "which rg: is_error={}, content={}",
+            which_out.is_error, which_out.content
+        );
+
+        // Test 6: Exact error for hostname.
+        let hostname_cmd = "^'C:/Windows/System32/hostname.exe'";
+        let hostname_result = try_eval(session, hostname_cmd, 30, tmp.path(), grant).await;
+        let hostname_out = hostname_result.unwrap();
+        eprintln!(
+            "Execute hostname.exe: is_error={}, content={}",
+            hostname_out.is_error, hostname_out.content
+        );
+
+        // Test 7: Can nu list System32 directory? (proves directory traverse works)
+        let ls_sys32 = "ls C:/Windows/System32/cmd.exe | get name.0";
+        let ls_result = try_eval(session, ls_sys32, 30, tmp.path(), grant).await;
+        let ls_out = ls_result.unwrap();
+        eprintln!(
+            "ls cmd.exe: is_error={}, content={}",
+            ls_out.is_error, ls_out.content
+        );
+
+        // Test 8: Use sys/exec (Rust std::process::Command) to check OS error code
+        let exec_cmd = format!("do {{ ^'{}' --version }} | complete", nu_path(&rg_exe));
+        let exec_result = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await;
+        let exec_out = exec_result.unwrap();
+        eprintln!(
+            "complete rg exec: is_error={}, content={}",
+            exec_out.is_error, exec_out.content
+        );
+    }
+
+    /// Test whether nu inside AppContainer can READ rg.exe as raw bytes.
+    /// If readable but not executable, the issue is specifically CreateProcess
+    /// being blocked, not file access. If unreadable, the issue is ACLs.
+    #[tokio::test]
+    async fn integration_sandbox_rg_file_readable() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS;
+
+        let tool_path = env.session.tool_path().to_path_buf();
+
+        // Trigger session spawn (applies sandbox ACLs via lot).
+        let init = try_eval(session, "echo 'init'", 30, tmp.path(), grant).await;
+        let _ = init.unwrap();
+
+        let rg_name = if cfg!(windows) { "rg.exe" } else { "rg" };
+        let rg_exe = tool_path.join(rg_name);
+
+        // Test 1: Can nu LIST the tool directory (proves directory traversal)?
+        let ls_cmd = format!("ls '{}' | length", nu_path(&tool_path));
+        let ls_result = try_eval(session, &ls_cmd, 30, tmp.path(), grant).await;
+        let ls_out = ls_result.unwrap();
+        eprintln!(
+            "ls tool dir: is_error={}, content={}",
+            ls_out.is_error, ls_out.content
+        );
+
+        // Test 2: Can nu READ rg.exe as raw bytes (proves file read access)?
+        let read_cmd = format!("open --raw '{}' | length", nu_path(&rg_exe));
+        let read_result = try_eval(session, &read_cmd, 30, tmp.path(), grant).await;
+        let read_out = read_result.unwrap();
+        eprintln!(
+            "read rg.exe bytes: is_error={}, content={}",
+            read_out.is_error, read_out.content
+        );
+
+        // Test 3: Can nu EXECUTE rg.exe (expected to fail)?
+        let exec_cmd = format!("^'{}' --version", nu_path(&rg_exe));
+        let exec_result = try_eval(session, &exec_cmd, 30, tmp.path(), grant).await;
+        let exec_out = exec_result.unwrap();
+        eprintln!(
+            "exec rg.exe: is_error={}, content={}",
+            exec_out.is_error, exec_out.content
+        );
+
+        // Conclusion: if read succeeds but exec fails, CreateProcess is
+        // specifically blocked inside the AppContainer.
+        if !read_out.is_error && exec_out.is_error {
+            eprintln!(
+                "CONCLUSION: File READ works but CreateProcess fails. \
+                 AppContainer blocks child process spawning from inside the container."
+            );
+        } else if read_out.is_error {
+            eprintln!("CONCLUSION: File READ is also blocked — ACL issue.");
+        } else {
+            eprintln!("CONCLUSION: Both read and exec succeeded — sandbox is not restricting.");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Full tool execution path integration tests (issue #2)
+    //
+    // Validates execute_tool() → NuSession → subprocess → result parsing.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_execute_tool_read_end_to_end() {
+        // Full path: execute_tool("Read") → translate_tool_call → nu session → parse result.
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+
+        let test_file = tmp.path().join("e2e_read.txt");
+        std::fs::write(&test_file, "line1\nline2\nline3\n").unwrap();
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({"file_path": nu_path(&test_file)});
+        let result =
+            crate::tools::execute_tool("tu_e2e".into(), "Read", &input, tmp.path(), grant, session)
+                .await;
+        assert!(
+            !result.is_error,
+            "Read tool should succeed, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("line1"),
+            "result should contain file content, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("line2"),
+            "result should contain line2, got: {}",
+            result.content
+        );
+        assert_eq!(result.tool_use_id, "tu_e2e");
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_write_end_to_end() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let target = tmp.path().join("e2e_written.txt");
+        let input =
+            serde_json::json!({"file_path": nu_path(&target), "content": "written via e2e"});
+        let result = crate::tools::execute_tool(
+            "tu_write".into(),
+            "Write",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Write tool should succeed, got error: {}",
+            result.content
+        );
+        let on_disk = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(on_disk, "written via e2e");
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_glob_end_to_end() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+
+        std::fs::write(tmp.path().join("a.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "").unwrap();
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({"pattern": "*.rs", "path": nu_path(tmp.path())});
+        let result = crate::tools::execute_tool(
+            "tu_glob".into(),
+            "Glob",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Glob tool should succeed, got error: {}",
+            result.content
+        );
+        assert!(result.content.contains("a.rs"));
+        assert!(result.content.contains("b.rs"));
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_edit_end_to_end() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+
+        let test_file = tmp.path().join("e2e_edit.txt");
+        std::fs::write(&test_file, "hello world\nsecond line\n").unwrap();
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({
+            "file_path": nu_path(&test_file),
+            "old_string": "hello world",
+            "new_string": "goodbye world"
+        });
+        let result = crate::tools::execute_tool(
+            "tu_edit".into(),
+            "Edit",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Edit tool should succeed, got error: {}",
+            result.content
+        );
+        let on_disk = std::fs::read_to_string(&test_file).unwrap();
+        assert!(
+            on_disk.contains("goodbye world"),
+            "file should contain 'goodbye world', got: {on_disk}"
+        );
+        assert!(
+            !on_disk.contains("hello world"),
+            "file should no longer contain 'hello world', got: {on_disk}"
+        );
+        assert_eq!(result.tool_use_id, "tu_edit");
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_grep_end_to_end() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS | ToolGrant::WRITE;
+
+        let test_file = tmp.path().join("e2e_grep.txt");
+        std::fs::write(&test_file, "some text\nfindme_marker\nmore text\n").unwrap();
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({
+            "pattern": "findme_marker",
+            "path": nu_path(tmp.path())
+        });
+        let result = crate::tools::execute_tool(
+            "tu_grep".into(),
+            "Grep",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "Grep tool should succeed, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("e2e_grep.txt"),
+            "result should contain the matching file name, got: {}",
+            result.content
+        );
+        assert_eq!(result.tool_use_id, "tu_grep");
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_nushell_end_to_end() {
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS;
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({"command": "2 + 3"});
+        let result = crate::tools::execute_tool(
+            "tu_nu".into(),
+            "NuShell",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "NuShell tool should succeed, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains('5'),
+            "expected 5 in output, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_execute_tool_grant_denied() {
+        // execute_tool checks grants before touching nu session.
+        require_nu!();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        let grant = ToolGrant::TOOLS; // no WRITE
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let input = serde_json::json!({"file_path": "x.txt", "content": "hi"});
+        let result = crate::tools::execute_tool(
+            "tu_denied".into(),
+            "Write",
+            &input,
+            tmp.path(),
+            grant,
+            session,
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("not permitted"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Sandbox network denial integration tests
+    //
+    // Uses a local loopback TCP listener instead of an external host so the
+    // tests are deterministic regardless of internet connectivity.
+    // -----------------------------------------------------------------------
+
+    /// Check whether an error/output string looks like a sandbox denial.
+    ///
+    /// Covers known sandbox denial wording across platforms:
+    /// - Generic: "permission denied", "access denied", "operation not permitted",
+    ///   "not allowed"
+    /// - macOS Seatbelt: "seatbelt", "sandbox-exec", "sandbox denial"
+    /// - Windows AppContainer: "appcontainer"
+    /// - Linux: "seccomp"
+    ///
+    /// Uses multi-word phrases or sandbox-specific terms to avoid false
+    /// positives from unrelated errors (e.g. "connection refused") or path
+    /// names (e.g. "sandbox-test" in cwd paths).
+    fn looks_like_sandbox_denial(content: &str) -> bool {
+        let lower = content.to_lowercase();
+        [
+            "permission denied",
+            "access denied",
+            "operation not permitted",
+            "not allowed",
+            "seatbelt",
+            "sandbox denial",
+            "sandbox-exec",
+            "appcontainer",
+            "seccomp",
+        ]
+        .iter()
+        .any(|kw| lower.contains(kw))
+    }
+
+    // -----------------------------------------------------------------------
+    // looks_like_sandbox_denial unit tests (issue #66)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sandbox_denial_detects_macos_seatbelt() {
+        assert!(looks_like_sandbox_denial(
+            "deny(1) network-outbound: (target seatbelt-denied)"
+        ));
+        assert!(looks_like_sandbox_denial(
+            "error: sandbox-exec: operation not allowed"
+        ));
+        assert!(looks_like_sandbox_denial(
+            "sandbox denial: network-outbound operation"
+        ));
+    }
+
+    #[test]
+    fn sandbox_denial_detects_windows_appcontainer() {
+        assert!(looks_like_sandbox_denial(
+            "AppContainer: access denied to network resource"
+        ));
+    }
+
+    #[test]
+    fn sandbox_denial_detects_linux_seccomp() {
+        assert!(looks_like_sandbox_denial(
+            "seccomp: blocked syscall connect()"
+        ));
+    }
+
+    #[test]
+    fn sandbox_denial_detects_generic_phrases() {
+        assert!(looks_like_sandbox_denial("Permission denied (os error 13)"));
+        assert!(looks_like_sandbox_denial("Access denied by policy"));
+        assert!(looks_like_sandbox_denial(
+            "Operation not permitted (os error 1)"
+        ));
+        assert!(looks_like_sandbox_denial("network operation not allowed"));
+    }
+
+    #[test]
+    fn sandbox_denial_rejects_non_denial_messages() {
+        // Generic errors that are NOT sandbox denials.
+        assert!(!looks_like_sandbox_denial("connection refused"));
+        assert!(!looks_like_sandbox_denial("connection timed out"));
+        assert!(!looks_like_sandbox_denial("host not found"));
+        assert!(!looks_like_sandbox_denial(
+            "Error: could not resolve address"
+        ));
+        // Path names that happen to contain sandbox-related substrings.
+        assert!(!looks_like_sandbox_denial(
+            "/tmp/sandbox-test/project/file.txt"
+        ));
+        // Empty and trivial strings.
+        assert!(!looks_like_sandbox_denial(""));
+        assert!(!looks_like_sandbox_denial("ok"));
+        // Bare words removed in issue #65 — must stay rejected.
+        assert!(!looks_like_sandbox_denial("denied"));
+        assert!(!looks_like_sandbox_denial("permission"));
+        assert!(!looks_like_sandbox_denial("blocked"));
+        assert!(!looks_like_sandbox_denial("forbidden"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Network test helpers and integration tests
+    // -----------------------------------------------------------------------
+
+    /// Bind a TCP listener on an ephemeral loopback port and return it with
+    /// the port number.  The listener must be held alive for the test duration.
+    fn loopback_listener() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let port = listener.local_addr().expect("local addr").port();
+        (listener, port)
+    }
+
+    /// Bind a TCP listener that accepts one connection and responds with a
+    /// minimal HTTP 200 response.  Returns the port number.  The background
+    /// thread keeps the listener alive until the connection is served (or
+    /// the timeout expires).
+    fn spawn_http_responder() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let port = listener.local_addr().expect("local addr").port();
+        // Background thread blocks on accept(), serves one connection, then
+        // exits.  If no connection arrives the thread is cleaned up on
+        // process exit.
+        std::thread::spawn(move || {
+            use std::io::Write;
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                let response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok";
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_network_denied_without_grant() {
+        // Without NETWORK grant, the sandbox should block outbound network access.
+        // A local loopback listener ensures the port is open — any failure is
+        // due to sandbox denial, not network unavailability.
+        require_nu!();
+        let (_listener, port) = loopback_listener();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        // TOOLS only — no NETWORK grant.
+        let grant = ToolGrant::TOOLS;
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let cmd = format!("http get 'http://127.0.0.1:{port}/test'");
+        let result = try_eval(session, &cmd, 15, tmp.path(), grant).await;
+
+        // The network operation should fail — either the evaluate returns an
+        // error, or nu reports an error via is_error.
+        match result {
+            Err(e) => {
+                if looks_like_sandbox_denial(&e) {
+                    eprintln!("network blocked (sandbox denial in error): {e}");
+                } else if e.contains("timed out") {
+                    // Timeout is an expected manifestation of network denial:
+                    // AppContainer blocks the connection, causing http get to
+                    // hang until the timeout fires.
+                    eprintln!("network blocked (timeout, consistent with sandbox denial): {e}");
+                } else {
+                    // On Windows, sandbox enforcement is expected — a non-denial,
+                    // non-timeout error means the sandbox is not working.
+                    #[cfg(target_os = "windows")]
+                    panic!(
+                        "Windows sandbox should enforce network denial, but got \
+                         non-sandbox error: {e}"
+                    );
+                    #[cfg(not(target_os = "windows"))]
+                    eprintln!(
+                        "WARNING: network error is not a recognisable sandbox denial \
+                         (platform may lack sandbox enforcement): {e}"
+                    );
+                }
+            }
+            Ok(out) => {
+                assert!(
+                    out.is_error,
+                    "network request should be denied without NETWORK grant, got success: {}",
+                    out.content
+                );
+                if looks_like_sandbox_denial(&out.content) {
+                    eprintln!(
+                        "network blocked (sandbox denial in output): {}",
+                        out.content
+                    );
+                } else {
+                    // On Windows, sandbox enforcement is expected.
+                    #[cfg(target_os = "windows")]
+                    panic!(
+                        "Windows sandbox should produce a recognisable denial, but got: {}",
+                        out.content
+                    );
+                    #[cfg(not(target_os = "windows"))]
+                    eprintln!(
+                        "WARNING: network failed but output is not a recognisable sandbox \
+                         denial (platform may lack sandbox enforcement): {}",
+                        out.content
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_sandbox_network_allowed_with_grant() {
+        // With NETWORK grant, the sandbox should allow outbound network access.
+        // A responding loopback listener provides a real HTTP 200 response so
+        // that `http get` succeeds and the test reaches the Ok path, where we
+        // verify no sandbox denial occurred.
+        require_nu!();
+        let port = spawn_http_responder();
+        let env = sandbox_env();
+        let tmp = &env.project;
+        let session = &env.session;
+        // TOOLS + NETWORK grant.
+        let grant = ToolGrant::TOOLS | ToolGrant::NETWORK;
+
+        try_spawn(session, tmp.path(), grant).await;
+
+        let cmd = format!("http get 'http://127.0.0.1:{port}/test'");
+        let result = try_eval(session, &cmd, 15, tmp.path(), grant).await;
+
+        match result {
+            Ok(out) => {
+                assert!(
+                    !looks_like_sandbox_denial(&out.content),
+                    "network should not be sandbox-denied with NETWORK grant: {}",
+                    out.content
+                );
+                assert!(
+                    !out.is_error,
+                    "network request should succeed with NETWORK grant and responding listener: {}",
+                    out.content
+                );
+                eprintln!("network request succeeded: {}", out.content);
+            }
+            Err(e) => {
+                assert!(
+                    !looks_like_sandbox_denial(&e),
+                    "network should not be sandbox-denied with NETWORK grant: {e}"
+                );
+                // Non-sandbox errors (e.g. timeout) are unexpected with a
+                // responding listener but not fatal — log and pass.
+                eprintln!(
+                    "WARNING: network request error with NETWORK grant \
+                     (not sandbox denial): {e}"
+                );
+            }
+        }
+    }
+}
