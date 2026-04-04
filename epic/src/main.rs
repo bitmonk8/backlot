@@ -1,0 +1,357 @@
+mod agent;
+mod cli;
+mod config;
+mod events;
+mod init;
+pub(crate) mod knowledge;
+mod orchestrator;
+mod sandbox;
+mod state;
+mod task;
+mod tui;
+
+#[cfg(test)]
+pub(crate) mod test_support;
+
+use agent::reel_adapter::ReelAgent;
+use cli::{Cli, Command};
+use config::project::EpicConfig;
+use events::event_channel;
+use orchestrator::Orchestrator;
+use state::EpicState;
+use task::Task;
+use tui::TuiApp;
+
+use anyhow::bail;
+use clap::Parser;
+use std::sync::Arc;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("Error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn run() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let project_root = std::env::current_dir()?;
+    let work_dir = project_root.join(".epic");
+    let state_path = work_dir.join("state.json");
+
+    if matches!(&cli.command, Command::Status) {
+        return print_status(&state_path);
+    }
+
+    if matches!(&cli.command, Command::Setup) {
+        return run_setup(&project_root);
+    }
+
+    #[cfg(target_os = "windows")]
+    if matches!(&cli.command, Command::Run { .. } | Command::Resume)
+        && !lot::appcontainer_prerequisites_met(&[project_root.as_path()])
+    {
+        bail!(
+            "AppContainer prerequisites not met. Nu built-in commands will fail under sandbox.\n\
+             Run \"epic setup\" from an elevated (Administrator) command prompt to fix this.\n\
+             This is a one-time operation."
+        );
+    }
+
+    if matches!(&cli.command, Command::Run { .. } | Command::Resume)
+        && !cli.no_sandbox_warn
+        && !sandbox::detect_virtualization()
+    {
+        eprintln!(
+            "Warning: No container or VM detected. Running epic outside an isolated environment \
+             is not recommended — agents execute arbitrary shell commands. See epic documentation \
+             for container setup guidance."
+        );
+    }
+
+    // Handle Init before general agent construction — init needs only default
+    // config and should work on a fresh project without epic.toml.
+    if matches!(&cli.command, Command::Init) {
+        let defaults = EpicConfig::default();
+        let timeout = Duration::from_secs(300);
+        let agent = ReelAgent::new(
+            project_root.clone(),
+            &cli.credential,
+            timeout,
+            &defaults.models,
+            defaults.verification_steps.clone(),
+        )?;
+        return init::run_init(&agent, &project_root).await;
+    }
+
+    std::fs::create_dir_all(&work_dir)?;
+
+    let config_path = project_root.join("epic.toml");
+    let epic_config = EpicConfig::load(&config_path)?;
+
+    let timeout = Duration::from_secs(300);
+
+    let mut agent = ReelAgent::new(
+        project_root.clone(),
+        &cli.credential,
+        timeout,
+        &epic_config.models,
+        epic_config.verification_steps.clone(),
+    )?;
+
+    // Construct vault if enabled.
+    let vault_handle: Option<Arc<vault::Vault>> = if epic_config.vault.enabled {
+        let storage_root = project_root.join(&epic_config.vault.storage);
+        std::fs::create_dir_all(&storage_root)?;
+        let model_registry =
+            agent::reel_adapter::build_model_registry(&epic_config.models, &cli.credential)?;
+        let provider_registry = reel::ProviderRegistry::load_default()
+            .map_err(|e| anyhow::anyhow!("failed to load provider registry for vault: {e}"))?;
+        let env = vault::VaultEnvironment {
+            storage_root,
+            model_registry,
+            provider_registry,
+            models: vault::VaultModels {
+                bootstrap: epic_config.vault.bootstrap_model.clone(),
+                query: epic_config.vault.query_model.clone(),
+                record: epic_config.vault.record_model.clone(),
+                reorganize: epic_config.vault.reorganize_model.clone(),
+            },
+        };
+        Some(Arc::new(vault::Vault::new(env)?))
+    } else {
+        None
+    };
+
+    if let Some(ref v) = vault_handle {
+        agent = agent.with_vault(v.clone());
+    }
+
+    let (mut state, root_id, goal_text) = match &cli.command {
+        Command::Run { goal } => {
+            if state_path.exists() {
+                let (existing, rid, persisted_goal) = load_and_validate_state(&state_path)?;
+                if *goal != persisted_goal {
+                    bail!(
+                        "State file exists with different goal: \"{persisted_goal}\". \
+                         Use `epic resume` to continue, or delete .epic/state.json to start fresh."
+                    );
+                }
+                eprintln!("Resuming from {}", state_path.display());
+                (existing, rid, persisted_goal)
+            } else {
+                let mut state = EpicState::new();
+                let root_id = state.next_task_id();
+                let root = Task::new(
+                    root_id,
+                    None,
+                    goal.clone(),
+                    vec!["Task completed successfully".into()],
+                    0,
+                );
+                state.insert(root);
+                state.set_root_id(root_id);
+                (state, root_id, goal.clone())
+            }
+        }
+        Command::Resume => {
+            if !state_path.exists() {
+                bail!(
+                    "No state file found at {}. Nothing to resume.",
+                    state_path.display()
+                );
+            }
+            let (state, root_id, goal_text) = load_and_validate_state(&state_path)?;
+            eprintln!("Resuming from {}", state_path.display());
+            (state, root_id, goal_text)
+        }
+        Command::Init | Command::Status | Command::Setup => unreachable!(),
+    };
+
+    let (tx, rx) = event_channel();
+
+    // Bootstrap vault on new runs (not resume).
+    if let Some(ref v) = vault_handle {
+        let storage_root = project_root.join(&epic_config.vault.storage);
+        if !storage_root.join("CHANGELOG.md").exists() {
+            eprintln!("Bootstrapping vault knowledge base...");
+            match v.bootstrap(&goal_text).await {
+                Ok((_warnings, meta)) => {
+                    let _ = tx.send(events::Event::VaultBootstrapCompleted {
+                        cost_usd: meta.cost_usd,
+                    });
+                    eprintln!("Vault bootstrap complete (${:.4})", meta.cost_usd);
+                }
+                Err(e) => {
+                    eprintln!("Warning: vault bootstrap failed: {e}");
+                }
+            }
+        }
+    }
+
+    let mut orchestrator = Orchestrator::new(agent, tx)
+        .with_limits(epic_config.limits)
+        .with_state_path(state_path.clone())
+        .with_project_root(project_root.clone());
+
+    if let Some(v) = vault_handle {
+        orchestrator = orchestrator.with_vault(v);
+    }
+
+    if cli.no_tui {
+        drop(rx);
+        let outcome = orchestrator.run(&mut state, root_id).await?;
+        state.save(&state_path)?;
+        let usage = state.total_usage();
+        println!("Epic completed: {outcome:?}");
+        println!(
+            "Usage: {} API calls, {} input tokens, {} output tokens, ${:.4}",
+            usage.api_calls, usage.input_tokens, usage.output_tokens, usage.cost_usd
+        );
+    } else {
+        let mut tui_app = TuiApp::new(goal_text);
+
+        let orch_handle = tokio::spawn(async move {
+            let result = orchestrator.run(&mut state, root_id).await;
+            (result, state)
+        });
+
+        let tui_result = tokio::task::spawn_blocking(move || tui_app.run(rx)).await?;
+
+        let abort_handle = orch_handle.abort_handle();
+        let mut saved = false;
+        match tokio::time::timeout(Duration::from_secs(2), orch_handle).await {
+            Ok(Ok((result, state))) => {
+                state.save(&state_path)?;
+                saved = true;
+                if let Ok(outcome) = result {
+                    println!("Epic completed: {outcome:?}");
+                } else if let Err(e) = result {
+                    eprintln!("Orchestrator error: {e}");
+                }
+            }
+            Ok(Err(e)) => {
+                eprintln!("Orchestrator task panicked: {e}");
+            }
+            Err(_) => {
+                abort_handle.abort();
+                eprintln!("Orchestrator still running after timeout, aborted.");
+            }
+        }
+        if !saved {
+            eprintln!("State was preserved up to the last checkpoint.");
+            eprintln!("Resume with: epic resume");
+        }
+
+        tui_result?;
+    }
+
+    Ok(())
+}
+
+fn load_and_validate_state(
+    state_path: &std::path::Path,
+) -> anyhow::Result<(EpicState, task::TaskId, String)> {
+    let state = EpicState::load(state_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to load state from {}: {e}. Delete the file to start fresh or fix the JSON.",
+            state_path.display()
+        )
+    })?;
+    let Some(root_id) = state.root_id() else {
+        bail!(
+            "State file at {} is corrupt (no root task). Delete it to start fresh.",
+            state_path.display()
+        );
+    };
+    let Some(root_task) = state.get(root_id) else {
+        bail!(
+            "State file at {} is corrupt (root task missing). Delete it to start fresh.",
+            state_path.display()
+        );
+    };
+    let goal = root_task.goal.clone();
+    Ok((state, root_id, goal))
+}
+
+#[allow(clippy::unnecessary_wraps, clippy::needless_return)]
+fn run_setup(project_root: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = project_root;
+        println!("Not applicable on this platform.");
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if lot::appcontainer_prerequisites_met(&[project_root]) {
+            println!("AppContainer prerequisites already configured.");
+            return Ok(());
+        }
+        if !lot::is_elevated() {
+            bail!("This command must be run from an elevated (Administrator) prompt.");
+        }
+        lot::grant_appcontainer_prerequisites(&[project_root])?;
+        println!(
+            "AppContainer prerequisites configured: NUL device access and ancestor traverse ACEs granted."
+        );
+        Ok(())
+    }
+}
+
+fn print_status(state_path: &std::path::Path) -> anyhow::Result<()> {
+    if !state_path.exists() {
+        println!("No active run (no state file at {}).", state_path.display());
+        return Ok(());
+    }
+    let (state, root_id, _) = load_and_validate_state(state_path)?;
+    let root = state
+        .get(root_id)
+        .expect("validated by load_and_validate_state");
+
+    println!("Goal: {}", root.goal);
+    println!("Root status: {:?}", root.phase);
+    println!();
+
+    let ids = state.dfs_order(root_id);
+    let mut completed = 0u32;
+    let mut failed = 0u32;
+    let mut in_progress = 0u32;
+    let mut pending = 0u32;
+    for &id in &ids {
+        if let Some(t) = state.get(id) {
+            match t.phase {
+                task::TaskPhase::Completed => completed += 1,
+                task::TaskPhase::Failed => failed += 1,
+                task::TaskPhase::Pending => pending += 1,
+                _ => in_progress += 1,
+            }
+        }
+    }
+
+    let total = ids.len();
+    println!(
+        "Tasks: {total} total, {completed} completed, {in_progress} in-progress, {pending} pending, {failed} failed"
+    );
+
+    let usage = state.total_usage();
+    if usage.api_calls > 0 {
+        println!(
+            "Usage: {} API calls, {} input tokens, {} output tokens, ${:.4}",
+            usage.api_calls, usage.input_tokens, usage.output_tokens, usage.cost_usd
+        );
+        if usage.input_tokens > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let cache_ratio =
+                usage.cache_read_input_tokens as f64 / usage.input_tokens as f64 * 100.0;
+            println!("Cache hit ratio: {cache_ratio:.1}%");
+        }
+    }
+
+    Ok(())
+}
