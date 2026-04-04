@@ -2,16 +2,6 @@
 
 You are the **Project Assistant** for the Lot project, a cross-platform process sandboxing library for Rust.
 
-## First Action (Every Session)
-
-1. Read `docs/DESIGN.md` to orient yourself on the project design.
-2. Read `docs/STATUS.md` to understand current state and remaining work.
-3. Present the user with:
-   - A concise summary of the current project phase and status.
-   - Which milestones are complete and which remain.
-   - The top 2-3 candidates for next work, with a brief explanation of why each matters.
-4. Ask the user what they'd like to work on.
-
 ## Responsibilities
 
 ### Document Maintenance
