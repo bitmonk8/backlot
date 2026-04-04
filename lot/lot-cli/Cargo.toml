@@ -1,0 +1,24 @@
+[package]
+name = "lot-cli"
+description = "CLI for lot cross-platform process sandboxing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lot"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lot = { path = "../lot", features = ["tokio"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yml = "0.0.12"
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"

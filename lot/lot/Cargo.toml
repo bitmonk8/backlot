@@ -1,0 +1,52 @@
+[package]
+name = "lot"
+description = "Cross-platform process sandboxing: seccomp, AppContainer, Seatbelt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository = "https://github.com/nicholasgasior/lot"
+documentation = "https://docs.rs/lot"
+readme = "../README.md"
+keywords = ["sandbox", "seccomp", "appcontainer", "seatbelt", "isolation"]
+categories = ["os", "api-bindings"]
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+seccompiler = "0.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[features]
+tokio = ["dep:tokio"]
+
+[dependencies.tokio]
+version = "1"
+optional = true
+features = ["rt", "time", "macros"]
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
