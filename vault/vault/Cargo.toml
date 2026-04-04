@@ -1,0 +1,20 @@
+[package]
+name = "vault"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+reel = { git = "https://github.com/bitmonk8/reel", rev = "93f35ef" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
