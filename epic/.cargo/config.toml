@@ -1,3 +1,0 @@
-# Cargo aliases matching CI commands
-[alias]
-ci-clippy = "clippy --all-targets -- -D warnings"

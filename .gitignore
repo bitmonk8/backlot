@@ -1,5 +1,5 @@
 # Rust build artifacts
-/target
+**/target
 
 # IDE
 .idea/
@@ -14,3 +14,9 @@ Thumbs.db
 # Claude Code
 .claude/
 ._*
+
+# Local scratch
+/local/
+
+# Test temp directories (AppContainer-safe, project-local)
+/test_tmp/

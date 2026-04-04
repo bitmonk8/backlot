@@ -15,10 +15,10 @@ workspace = true
 
 [dependencies]
 lot = { path = "../lot", features = ["tokio"] }
-clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_yml = "0.0.12"
-tokio = { version = "1", features = ["rt", "time", "macros"] }
+clap.workspace = true
+serde.workspace = true
+serde_yml.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

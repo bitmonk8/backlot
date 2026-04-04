@@ -15,7 +15,7 @@ categories = ["os", "api-bindings"]
 workspace = true
 
 [dependencies]
-thiserror = "2"
+thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
@@ -43,10 +43,10 @@ windows-sys = { version = "0.59", features = [
 tokio = ["dep:tokio"]
 
 [dependencies.tokio]
-version = "1"
+workspace = true
 optional = true
 features = ["rt", "time", "macros"]
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

@@ -314,6 +314,12 @@ fn err_with_stderr(error: &str, buf: &StderrBuf) -> String {
     }
 }
 
+impl Default for NuSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NuSession {
     /// Create a new session using the runtime-resolved tool directory.
     ///

@@ -20,10 +20,11 @@ jobs:
 
   clippy:
     name: Clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - run: rustup show
@@ -35,11 +36,12 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --workspace --all-targets --features tokio -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test-linux:
     name: Test (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - run: rustup show
@@ -53,18 +55,32 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-test-
       - name: Enable unprivileged user namespaces
         run: |
-          # AppArmor restriction may not exist on all kernels -- failure is acceptable.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
-          # Sysctl may not exist on kernels that always allow user namespaces.
           sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-      - name: Run tests
-        run: cargo test -p lot --features tokio -- --nocapture
-      - name: Run lot-cli tests
-        run: cargo test -p lot-cli
+      - name: Setup delegated cgroup (for reel sandbox tests)
+        run: |
+          current_cg="/sys/fs/cgroup$(cat /proc/self/cgroup | grep '^0::' | cut -d: -f3)"
+          parent_cg="$(dirname "$current_cg")"
+          p="/sys/fs/cgroup"
+          while [ "$p" != "$parent_cg" ] && [ "$p" != "/" ]; do
+            [ -f "$p/cgroup.subtree_control" ] && \
+              echo '+memory +pids' | sudo tee "$p/cgroup.subtree_control" 2>/dev/null || true
+            next="$(echo "$parent_cg" | sed "s|^$p/||" | cut -d/ -f1)"
+            p="$p/$next"
+          done
+          [ -f "$parent_cg/cgroup.subtree_control" ] && \
+            echo '+memory +pids' | sudo tee "$parent_cg/cgroup.subtree_control" 2>/dev/null || true
+          cg="$parent_cg/lot-test"
+          sudo mkdir -p "$cg/runner"
+          sudo chown -R "$(id -u):$(id -g)" "$cg"
+          echo '+memory +pids' > "$cg/cgroup.subtree_control"
+          echo $$ | sudo tee "$cg/runner/cgroup.procs"
+      - run: cargo test --workspace
 
   test-macos:
     name: Test (macOS)
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - run: rustup show
@@ -76,13 +92,12 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - run: cargo test -p lot --features tokio -- --nocapture
-      - name: Run lot-cli tests
-        run: cargo test -p lot-cli
+      - run: cargo test --workspace
 
   test-windows:
     name: Test (Windows)
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - run: rustup show
@@ -94,15 +109,22 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
+      - name: Exclude workspace from Windows Defender
+        shell: powershell
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
       - name: Setup AppContainer prerequisites
-        run: cargo run -p lot-cli -- setup --verbose
-      - run: cargo test -p lot --features tokio -- --nocapture
-      - name: Run lot-cli tests
-        run: cargo test -p lot-cli
+        run: |
+          cargo run -p lot-cli -- setup --verbose
+          cargo run -p reel-cli -- setup --verbose
+      - run: cargo test --workspace
 
   build:
-    name: Build
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
       - run: rustup show

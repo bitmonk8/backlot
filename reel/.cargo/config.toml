@@ -1,4 +1,0 @@
-[env]
-# Workaround for rustc stack overflow when compiling reqwest on Windows.
-# Default stack is 8MB; 160 MiB gives 20x headroom.
-RUST_MIN_STACK = "167772160"

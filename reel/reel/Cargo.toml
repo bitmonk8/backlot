@@ -12,14 +12,14 @@ workspace = true
 testing = ["flick/testing"]
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "fs", "signal", "io-util"] }
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-flick = { git = "https://github.com/bitmonk8/flick", rev = "8b11845" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "process", "fs", "signal", "io-util"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+flick.workspace = true
 bitflags = "2"
-lot = { git = "https://github.com/bitmonk8/lot", rev = "30bd25f", features = ["tokio"] }
-tempfile = "3"
+lot = { workspace = true, features = ["tokio"] }
+tempfile.workspace = true
 
 [build-dependencies]
 ureq = "3"
@@ -29,4 +29,4 @@ tar = "0.4"
 zip = "2"
 
 [dev-dependencies]
-flick = { git = "https://github.com/bitmonk8/flick", rev = "8b11845", features = ["testing"] }
+flick = { workspace = true, features = ["testing"] }
