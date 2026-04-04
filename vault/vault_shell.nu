@@ -11,4 +11,6 @@ if "VAULT_SHELL" not-in $env {
 
 cd $script_dir
 
+source ~/claude-pilot-env.nu
+
 print "Ready."
