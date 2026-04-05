@@ -1,4 +1,4 @@
-# Orchestrator Extraction Spec
+# Epic Orchestrator Extraction Spec
 
 ## Goal
 
@@ -234,7 +234,7 @@ pub struct Orchestrator<S: TaskStore> {
 
 ### What Moves to the New Crate
 
-| Current location | Content |
+| Current location in epic | Content |
 |---|---|
 | `orchestrator/mod.rs` | Coordinator logic (now generic over `S: TaskStore`) |
 | `orchestrator/context.rs` | `TreeContext` struct (build logic moves to `TaskStore`) |

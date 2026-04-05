@@ -1,4 +1,4 @@
-# Event System Reconsiderations
+# Epic Event System Reconsiderations
 
 Research and analysis of epic's event system design, alternatives, and recommendations for future extensibility.
 
@@ -8,11 +8,11 @@ Research and analysis of epic's event system design, alternatives, and recommend
 
 ### Implementation
 
-`src/events.rs`: 24 `Event` enum variants, `tokio::sync::mpsc::unbounded_channel`, fire-and-forget. One producer side (`EventSender`), one consumer side (`EventReceiver`).
+Epic's `src/events.rs`: 24 `Event` enum variants, `tokio::sync::mpsc::unbounded_channel`, fire-and-forget. One producer side (`EventSender`), one consumer side (`EventReceiver`).
 
-Producers: `orchestrator/mod.rs`, `task/leaf.rs`, `task/branch.rs` — emit via `EventSender` held in `Services<A>` (or directly by the orchestrator).
+Producers: epic's `orchestrator/mod.rs`, `task/leaf.rs`, `task/branch.rs` — emit via `EventSender` held in `Services<A>` (or directly by the orchestrator).
 
-Consumer: either the TUI (`tui/mod.rs`) or a headless logger in `main.rs`. Never both simultaneously.
+Consumer: either epic's TUI (`tui/mod.rs`) or a headless logger in `main.rs`. Never both simultaneously.
 
 ### Characteristics
 
@@ -230,7 +230,7 @@ Map epic's events to OTel spans and events. Use OTel exporters for different bac
 
 ## Interaction with Orchestrator Extraction
 
-The extraction spec (ORCHESTRATOR_EXTRACTION.md) plans to move `Event`, `EventSender`, `EventReceiver`, and `event_channel()` into the cue crate. The orchestrator holds an `EventSender` directly.
+The extraction spec ([ORCHESTRATOR_EXTRACTION.md](ORCHESTRATOR_EXTRACTION.md)) plans to move `Event`, `EventSender`, `EventReceiver`, and `event_channel()` into the cue crate. The orchestrator holds an `EventSender` directly.
 
 **Options B and C are compatible** with this plan — the channel/log type moves to cue, consumers live in epic. The interface boundary (`EventSender` or `EventLog` handle) stays clean.
 

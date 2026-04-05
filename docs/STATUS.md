@@ -99,7 +99,7 @@
 - User-level config fallback (`~/.config/epic/config.toml`)
 
 **Next Work:**
-1. **Orchestrator extraction** — Extract orchestrator, task, state, events, agent trait, and config types into a standalone sibling crate. See [epic/ORCHESTRATOR_EXTRACTION.md](epic/ORCHESTRATOR_EXTRACTION.md).
+1. **Orchestrator extraction** — Extract orchestrator, task, state, events, agent trait, and config types into a standalone sibling crate. See [ORCHESTRATOR_EXTRACTION.md](ORCHESTRATOR_EXTRACTION.md).
 2. **Branch verification separation** — Split single-call branch verification into correctness + completeness + aggregate simplification reviews.
 3. **Web search scope for Research Service** — Add WEB scope to gap-filling pipeline (vault + codebase + web search).
 4. **User-level config fallback** — `~/.config/epic/config.toml` resolution for user defaults.
