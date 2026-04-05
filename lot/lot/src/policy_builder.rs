@@ -780,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_parent_with_write_child_rejected_by_validate() {
+    fn exec_parent_with_write_child_builds_ok() {
         let tmp = make_temp_dir();
         let parent = tmp.path().join("data");
         let child = parent.join("sub");
@@ -794,8 +794,8 @@ mod tests {
             .build();
 
         assert!(
-            result.is_err(),
-            "exec parent + write child is an unresolvable conflict"
+            result.is_ok(),
+            "write child under exec parent should be valid"
         );
     }
 

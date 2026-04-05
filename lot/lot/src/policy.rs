@@ -87,14 +87,20 @@ fn canonicalize_for_validation(
     })
 }
 
-/// Controls whether `check_cross_overlap` rejects both nesting directions.
+/// Controls which nesting directions `check_cross_overlap` rejects.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OverlapMode {
     /// Reject nesting in both directions (a-under-b and b-under-a).
     Symmetric,
     /// Allow b-children under a-parents (elevated subdirectory under
     /// lower-privilege parent, e.g. write child under read parent).
+    /// Reject a-children under b-parents (redundant lower-priv child).
     AllowChildUnderParent,
+    /// Allow nesting in both directions. Used when the two permission
+    /// types are orthogonal and neither implies the other (e.g. write
+    /// and exec: a writable parent can have an executable subdir and
+    /// vice versa).
+    AllowBothDirections,
 }
 
 /// Check for parent/child overlaps between two named sets of canonicalized paths.
@@ -113,17 +119,17 @@ fn check_cross_overlap(
                     a.display()
                 )));
             }
-            // b parent of a: always rejected (a is redundant or lower-priv
-            // child under higher-priv parent).
-            if crate::path_util::is_strict_parent_of(b, a) {
+            // b parent of a: rejected unless both directions are allowed.
+            if mode != OverlapMode::AllowBothDirections
+                && crate::path_util::is_strict_parent_of(b, a)
+            {
                 return Err(SandboxError::InvalidPolicy(format!(
                     "parent/child overlap between {b_name} and {a_name}: {} contains {}",
                     b.display(),
                     a.display()
                 )));
             }
-            // a parent of b: rejected unless directional mode allows it
-            // (elevated subdirectory under lower-privilege parent).
+            // a parent of b: rejected only in Symmetric mode.
             if mode == OverlapMode::Symmetric && crate::path_util::is_strict_parent_of(a, b) {
                 return Err(SandboxError::InvalidPolicy(format!(
                     "parent/child overlap between {a_name} and {b_name}: {} contains {}",
@@ -320,13 +326,15 @@ impl SandboxPolicy {
             ),
             &mut errors,
         );
+        // Write and exec are orthogonal permissions — neither implies the
+        // other — so nesting in either direction is valid.
         collect_validation_error(
             check_cross_overlap(
                 &write_canon,
                 "write_paths",
                 &exec_canon,
                 "exec_paths",
-                OverlapMode::Symmetric,
+                OverlapMode::AllowBothDirections,
             ),
             &mut errors,
         );
@@ -602,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_parent_write_child_overlap_rejected() {
+    fn exec_parent_write_child_allowed() {
         let tmp = make_temp_dir();
         let parent = tmp.path().to_path_buf();
         let child = tmp.path().join("data");
@@ -616,11 +624,30 @@ mod tests {
             allow_network: false,
             sentinel_dir: None,
         };
-        let err = policy.validate().unwrap_err();
-        let msg = err.to_string();
         assert!(
-            msg.contains("overlap"),
-            "error should mention overlap: {msg}"
+            policy.validate().is_ok(),
+            "write child under exec parent should be valid"
+        );
+    }
+
+    #[test]
+    fn write_parent_exec_child_allowed() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let child = tmp.path().join("bin");
+        std::fs::create_dir(&child).expect("create subdir");
+
+        let policy = SandboxPolicy {
+            read_paths: Vec::new(),
+            write_paths: vec![parent],
+            exec_paths: vec![child],
+            deny_paths: Vec::new(),
+            allow_network: false,
+            sentinel_dir: None,
+        };
+        assert!(
+            policy.validate().is_ok(),
+            "exec child under write parent should be valid"
         );
     }
 
