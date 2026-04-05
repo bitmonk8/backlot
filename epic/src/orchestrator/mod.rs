@@ -323,13 +323,13 @@ impl<A: AgentService> Orchestrator<A> {
         &self,
         state: &mut EpicState,
         parent_id: TaskId,
-        specs: Vec<SubtaskSpec>,
+        specs: &[SubtaskSpec],
         mark_fix: bool,
         append: bool,
         inherit_recovery_rounds: Option<u32>,
     ) -> Result<Vec<TaskId>, OrchestratorError> {
         let mut child_ids = Vec::new();
-        for spec in &specs {
+        for spec in specs {
             let child_id = state
                 .create_subtask(parent_id, spec, mark_fix, inherit_recovery_rounds)
                 .ok_or(OrchestratorError::TaskNotFound(parent_id))?;
@@ -570,7 +570,8 @@ impl<A: AgentService> Orchestrator<A> {
             }
 
             // Cross-task: create subtasks (stays in orchestrator).
-            let fix_child_ids = self.create_subtasks(state, id, subtask_specs, true, true, None)?;
+            let fix_child_ids =
+                self.create_subtasks(state, id, &subtask_specs, true, true, None)?;
             self.emit(Event::FixSubtasksCreated {
                 task_id: id,
                 count: fix_child_ids.len(),
@@ -643,7 +644,7 @@ impl<A: AgentService> Orchestrator<A> {
             }
 
             let new_child_ids =
-                self.create_subtasks(state, id, decomposition.subtasks, false, false, None)?;
+                self.create_subtasks(state, id, &decomposition.subtasks, false, false, None)?;
             self.emit(Event::SubtasksCreated {
                 parent_id: id,
                 child_ids: new_child_ids,
@@ -735,7 +736,7 @@ impl<A: AgentService> Orchestrator<A> {
                             self.create_subtasks(
                                 state,
                                 id,
-                                specs,
+                                &specs,
                                 false,
                                 true,
                                 Some(parent_rounds),
@@ -869,7 +870,7 @@ impl<A: AgentService> Orchestrator<A> {
                     .get(parent_id)
                     .ok_or(OrchestratorError::TaskNotFound(parent_id))?
                     .recovery_rounds;
-                self.create_subtasks(state, parent_id, specs, false, true, Some(parent_rounds))?;
+                self.create_subtasks(state, parent_id, &specs, false, true, Some(parent_rounds))?;
 
                 self.emit(Event::RecoverySubtasksCreated {
                     task_id: parent_id,

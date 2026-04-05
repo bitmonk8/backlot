@@ -27,7 +27,7 @@ pub struct EpicTask<A: AgentService> {
 }
 
 impl<A: AgentService> EpicTask<A> {
-    pub fn new(task: Task, runtime: Option<Arc<TaskRuntime<A>>>) -> Self {
+    pub const fn new(task: Task, runtime: Option<Arc<TaskRuntime<A>>>) -> Self {
         Self { task, runtime }
     }
 

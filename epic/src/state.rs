@@ -24,7 +24,11 @@ impl EpicState {
     }
 
     /// Reconstruct from raw parts (inverse of `into_parts`).
-    pub fn from_parts(tasks: HashMap<TaskId, Task>, next_id: u64, root_id: Option<TaskId>) -> Self {
+    pub const fn from_parts(
+        tasks: HashMap<TaskId, Task>,
+        next_id: u64,
+        root_id: Option<TaskId>,
+    ) -> Self {
         Self {
             tasks,
             next_id,

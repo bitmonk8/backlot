@@ -168,7 +168,7 @@ impl Task {
         count
     }
 
-    /// Build a TaskContext from this task and a TreeContext snapshot.
+    /// Build a `TaskContext` from this task and a `TreeContext` snapshot.
     #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub fn to_task_context(
         &self,
@@ -177,7 +177,7 @@ impl Task {
         crate::orchestrator::context::tree_to_task_context(tree, self)
     }
 
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         matches!(self.phase, TaskPhase::Completed | TaskPhase::Failed)
     }
 

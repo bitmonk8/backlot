@@ -72,10 +72,102 @@ impl<A: AgentService + 'static> EpicStore<A> {
         EpicState::from_parts(tasks, self.next_id, self.root_id)
     }
 
-    fn next_task_id(&mut self) -> TaskId {
+    const fn next_task_id(&mut self) -> TaskId {
         let id = TaskId(self.next_id);
         self.next_id += 1;
         id
+    }
+
+    fn collect_ancestor_goals(&self, mut cursor: Option<TaskId>) -> Vec<String> {
+        let mut goals = Vec::new();
+        while let Some(pid) = cursor {
+            if let Some(p) = self.tasks.get(&pid) {
+                goals.push(p.task.goal.clone());
+                cursor = p.task.parent_id;
+            } else {
+                break;
+            }
+        }
+        goals
+    }
+
+    fn collect_siblings(
+        &self,
+        parent: Option<&EpicTask<A>>,
+        self_id: TaskId,
+    ) -> (Vec<cue::SiblingSummary>, Vec<String>) {
+        let Some(parent_task) = parent else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut completed = Vec::new();
+        let mut pending = Vec::new();
+        for &sib_id in &parent_task.task.subtask_ids {
+            if sib_id == self_id {
+                continue;
+            }
+            let Some(sib) = self.tasks.get(&sib_id) else {
+                continue;
+            };
+            match sib.task.phase {
+                cue::TaskPhase::Completed => {
+                    completed.push(cue::SiblingSummary {
+                        id: sib_id,
+                        goal: sib.task.goal.clone(),
+                        outcome: cue::TaskOutcome::Success,
+                        discoveries: sib.task.discoveries.clone(),
+                    });
+                }
+                cue::TaskPhase::Failed => {
+                    let reason = sib
+                        .task
+                        .attempts
+                        .iter()
+                        .rev()
+                        .find_map(|a| a.error.clone())
+                        .unwrap_or_else(|| "unknown".into());
+                    completed.push(cue::SiblingSummary {
+                        id: sib_id,
+                        goal: sib.task.goal.clone(),
+                        outcome: cue::TaskOutcome::Failed { reason },
+                        discoveries: sib.task.discoveries.clone(),
+                    });
+                }
+                _ => {
+                    pending.push(sib.task.goal.clone());
+                }
+            }
+        }
+        (completed, pending)
+    }
+
+    fn collect_children(&self, task: &EpicTask<A>) -> Vec<cue::ChildSummary> {
+        task.task
+            .subtask_ids
+            .iter()
+            .filter_map(|&cid| {
+                let child = self.tasks.get(&cid)?;
+                let status = match child.task.phase {
+                    cue::TaskPhase::Completed => cue::ChildStatus::Completed,
+                    cue::TaskPhase::Failed => {
+                        let reason = child
+                            .task
+                            .attempts
+                            .iter()
+                            .rev()
+                            .find_map(|a| a.error.clone())
+                            .unwrap_or_else(|| "unknown".into());
+                        cue::ChildStatus::Failed { reason }
+                    }
+                    cue::TaskPhase::Pending => cue::ChildStatus::Pending,
+                    _ => cue::ChildStatus::InProgress,
+                };
+                Some(cue::ChildSummary {
+                    goal: child.task.goal.clone(),
+                    status,
+                    discoveries: child.task.discoveries.clone(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -124,7 +216,7 @@ impl<A: AgentService + 'static> cue::TaskStore for EpicStore<A> {
     fn bind_runtime(&mut self) {
         let runtime = self.runtime.clone();
         for task in self.tasks.values_mut() {
-            task.runtime = runtime.clone();
+            task.runtime.clone_from(&runtime);
         }
     }
 
@@ -135,11 +227,7 @@ impl<A: AgentService + 'static> cue::TaskStore for EpicStore<A> {
         mark_fix: bool,
         inherit_recovery_rounds: Option<u32>,
     ) -> TaskId {
-        let parent_depth = self
-            .tasks
-            .get(&parent_id)
-            .map(|t| t.task.depth)
-            .unwrap_or(0);
+        let parent_depth = self.tasks.get(&parent_id).map_or(0, |t| t.task.depth);
         let child_id = self.next_task_id();
         let mut child = Task::new(
             child_id,
@@ -170,103 +258,18 @@ impl<A: AgentService + 'static> cue::TaskStore for EpicStore<A> {
     }
 
     fn build_tree_context(&self, id: TaskId) -> Result<TreeContext, OrchestratorError> {
-        // Build TreeContext from the underlying task data.
         let task = self
             .tasks
             .get(&id)
             .ok_or(OrchestratorError::TaskNotFound(id))?;
-
         let parent = task.task.parent_id.and_then(|pid| self.tasks.get(&pid));
-
         let parent_goal = parent.map(|p| p.task.goal.clone());
 
-        let mut ancestor_goals = Vec::new();
-        let mut cursor = task.task.parent_id;
-        while let Some(pid) = cursor {
-            if let Some(p) = self.tasks.get(&pid) {
-                ancestor_goals.push(p.task.goal.clone());
-                cursor = p.task.parent_id;
-            } else {
-                break;
-            }
-        }
-
-        let (completed_siblings, pending_sibling_goals) = parent.map_or_else(
-            || (Vec::new(), Vec::new()),
-            |parent_task| {
-                let mut completed = Vec::new();
-                let mut pending = Vec::new();
-                for &sib_id in &parent_task.task.subtask_ids {
-                    if sib_id == id {
-                        continue;
-                    }
-                    let Some(sib) = self.tasks.get(&sib_id) else {
-                        continue;
-                    };
-                    match sib.task.phase {
-                        cue::TaskPhase::Completed => {
-                            completed.push(cue::SiblingSummary {
-                                id: sib_id,
-                                goal: sib.task.goal.clone(),
-                                outcome: cue::TaskOutcome::Success,
-                                discoveries: sib.task.discoveries.clone(),
-                            });
-                        }
-                        cue::TaskPhase::Failed => {
-                            let reason = sib
-                                .task
-                                .attempts
-                                .iter()
-                                .rev()
-                                .find_map(|a| a.error.clone())
-                                .unwrap_or_else(|| "unknown".into());
-                            completed.push(cue::SiblingSummary {
-                                id: sib_id,
-                                goal: sib.task.goal.clone(),
-                                outcome: cue::TaskOutcome::Failed { reason },
-                                discoveries: sib.task.discoveries.clone(),
-                            });
-                        }
-                        _ => {
-                            pending.push(sib.task.goal.clone());
-                        }
-                    }
-                }
-                (completed, pending)
-            },
-        );
+        let ancestor_goals = self.collect_ancestor_goals(task.task.parent_id);
+        let (completed_siblings, pending_sibling_goals) = self.collect_siblings(parent, id);
+        let children = self.collect_children(task);
 
         let checkpoint_guidance = parent.and_then(|p| p.task.checkpoint_guidance.clone());
-
-        let children = task
-            .task
-            .subtask_ids
-            .iter()
-            .filter_map(|&cid| {
-                let child = self.tasks.get(&cid)?;
-                let status = match child.task.phase {
-                    cue::TaskPhase::Completed => cue::ChildStatus::Completed,
-                    cue::TaskPhase::Failed => {
-                        let reason = child
-                            .task
-                            .attempts
-                            .iter()
-                            .rev()
-                            .find_map(|a| a.error.clone())
-                            .unwrap_or_else(|| "unknown".into());
-                        cue::ChildStatus::Failed { reason }
-                    }
-                    cue::TaskPhase::Pending => cue::ChildStatus::Pending,
-                    _ => cue::ChildStatus::InProgress,
-                };
-                Some(cue::ChildSummary {
-                    goal: child.task.goal.clone(),
-                    status,
-                    discoveries: child.task.discoveries.clone(),
-                })
-            })
-            .collect();
-
         let parent_discoveries = parent.map_or_else(Vec::new, |p| p.task.discoveries.clone());
         let parent_decomposition_rationale =
             parent.and_then(|p| p.task.decomposition_rationale.clone());
