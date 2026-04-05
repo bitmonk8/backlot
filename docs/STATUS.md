@@ -17,7 +17,7 @@
 - CLI input hardening (stdin cap, key validation, whitespace rejection)
 
 **Next Work:**
-- reqwest 0.13 upgrade (blocked by rustc ICE on `windows-sys` 0.61.2)
+- reqwest 0.13 upgrade (intermittent rustc crashes on this machine are CPU-related — Intel i9-14900K instability — not a windows-sys or rustc bug)
 
 ---
 
