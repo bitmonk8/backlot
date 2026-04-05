@@ -115,13 +115,25 @@ fn cmd_run(args: &RunArgs) -> ExitCode {
 
     // User's explicit vars first so forward_common_env() skips duplicates.
     for (key, val) in &config.environment.vars {
-        cmd.env(key, val);
+        match crate::config::expand_vars(val) {
+            Ok(expanded_val) => { cmd.env(key, expanded_val); }
+            Err(e) => {
+                eprintln!("error: env var expansion failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
     if config.environment.forward_common {
         cmd.forward_common_env();
     }
     if let Some(ref cwd) = config.process.cwd {
-        cmd.cwd(cwd);
+        match crate::config::expand_path(cwd) {
+            Ok(expanded_cwd) => { cmd.cwd(expanded_cwd); }
+            Err(e) => {
+                eprintln!("error: cwd expansion failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     let child = match lot::spawn(&policy, &cmd) {

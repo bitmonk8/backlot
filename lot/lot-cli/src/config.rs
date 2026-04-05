@@ -52,20 +52,50 @@ pub struct ProcessConfig {
     pub cwd: Option<PathBuf>,
 }
 
+/// Expand `${VAR}` references in `s` using the process environment.
+/// Returns `Err` if any referenced variable is not set or the value is not valid UTF-8.
+pub fn expand_vars(s: &str) -> Result<String, String> {
+    let mut result = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        result.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+        let end = after_open
+            .find('}')
+            .ok_or_else(|| format!("unclosed '${{' in: {s}"))?;
+        let name = &after_open[..end];
+        let value = std::env::var(name)
+            .map_err(|_| format!("undefined env var: {name}"))?;
+        result.push_str(&value);
+        rest = &after_open[end + 1..];
+    }
+    result.push_str(rest);
+    Ok(result)
+}
+
+pub fn expand_path(p: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let s = p.to_str().ok_or_else(|| "path is not UTF-8".to_string())?;
+    expand_vars(s).map(std::path::PathBuf::from)
+}
+
 pub fn build_policy(config: &SandboxConfig) -> lot::Result<lot::SandboxPolicy> {
     let mut builder = lot::SandboxPolicyBuilder::new();
 
     for path in &config.filesystem.read {
-        builder = builder.read_path(path)?;
+        let expanded = expand_path(path).map_err(lot::SandboxError::Setup)?;
+        builder = builder.read_path(&expanded)?;
     }
     for path in &config.filesystem.write {
-        builder = builder.write_path(path)?;
+        let expanded = expand_path(path).map_err(lot::SandboxError::Setup)?;
+        builder = builder.write_path(&expanded)?;
     }
     for path in &config.filesystem.exec {
-        builder = builder.exec_path(path)?;
+        let expanded = expand_path(path).map_err(lot::SandboxError::Setup)?;
+        builder = builder.exec_path(&expanded)?;
     }
     for path in &config.filesystem.deny {
-        builder = builder.deny_path(path)?;
+        let expanded = expand_path(path).map_err(lot::SandboxError::Setup)?;
+        builder = builder.deny_path(&expanded)?;
     }
     if config.filesystem.include_platform_exec {
         builder = builder.include_platform_exec_paths()?;
@@ -86,6 +116,63 @@ pub fn build_policy(config: &SandboxConfig) -> lot::Result<lot::SandboxPolicy> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    // --- expand_vars tests ---
+
+    #[test]
+    fn expand_vars_basic() {
+        // Use PATH which is always present in the test environment.
+        let path_val = std::env::var("PATH").expect("PATH must be set");
+        let result = expand_vars("${PATH}/bin").unwrap();
+        assert_eq!(result, format!("{path_val}/bin"));
+    }
+
+    #[test]
+    fn expand_vars_undefined_errors() {
+        // LOT_GUARANTEED_ABSENT is never set by this test suite.
+        let err = expand_vars("${LOT_GUARANTEED_ABSENT}").unwrap_err();
+        assert!(err.contains("LOT_GUARANTEED_ABSENT"), "error should name the variable");
+    }
+
+    #[test]
+    fn expand_vars_no_placeholders() {
+        let result = expand_vars("/plain/path").unwrap();
+        assert_eq!(result, "/plain/path");
+    }
+
+    #[test]
+    fn expand_vars_multiple() {
+        // Use two vars that are always present.
+        let home = std::env::var("HOME").expect("HOME must be set");
+        let path = std::env::var("PATH").expect("PATH must be set");
+        let result = expand_vars("${HOME}:${PATH}").unwrap();
+        assert_eq!(result, format!("{home}:{path}"));
+    }
+
+    #[test]
+    fn expand_vars_malformed_no_close_brace() {
+        let err = expand_vars("${UNCLOSED").unwrap_err();
+        assert!(err.contains("unclosed"), "error should mention unclosed");
+    }
+
+    #[test]
+    fn build_policy_path_with_env_var() {
+        // Use CARGO_MANIFEST_DIR which cargo sets for all tests.
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set");
+        let config = SandboxConfig {
+            filesystem: FilesystemConfig {
+                read: vec![std::path::PathBuf::from("${CARGO_MANIFEST_DIR}")],
+                ..FilesystemConfig::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let policy = build_policy(&config).expect("build_policy should succeed");
+        let canon = std::fs::canonicalize(&manifest_dir).expect("canonicalize");
+        assert!(
+            policy.read_paths().contains(&canon),
+            "policy read_paths should contain the expanded path"
+        );
+    }
 
     fn make_temp_dir() -> tempfile::TempDir {
         let test_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
