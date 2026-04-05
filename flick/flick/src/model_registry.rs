@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelInfo {
+    /// Key into the `ProviderRegistry` — identifies which provider serves this model.
     pub provider: String,
+    /// Model ID as known by the provider API (e.g. `claude-sonnet-4-6`, `gpt-4o`).
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -184,6 +186,8 @@ fn validate_model_entry(key: &str, info: &ModelInfo) -> Result<(), ConfigError> 
 }
 
 /// Check that every `ModelInfo.provider` references an existing key in the `ProviderRegistry`.
+///
+/// Call once after both registries are loaded, before any `FlickClient` construction.
 pub async fn validate_registries(
     models: &ModelRegistry,
     providers: &crate::provider_registry::ProviderRegistry,

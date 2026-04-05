@@ -31,6 +31,9 @@ pub enum ConfigFormat {
 ///
 /// The `model` field is a string key into the `ModelRegistry`. Provider and
 /// model identity are resolved at `FlickClient` construction time, not here.
+///
+/// `temperature` and `reasoning` live here (not in `ModelInfo`) because the
+/// same model may be called with different settings depending on the task.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestConfig {

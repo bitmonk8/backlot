@@ -62,6 +62,37 @@ Two provider implementations:
 
 Provider quirks are handled by `CompatFlags` (boolean fields in `ProviderInfo`), not by subclassing.
 
+## Design Rationale
+
+- `model` in RequestConfig is always a string key into ModelRegistry — no inline model definitions.
+- TOML for both registries.
+- No builtin models — ModelRegistry is purely user-defined.
+- No CLI override flags — the RequestConfig file is the sole source of request parameters.
+- Builder pattern for programmatic RequestConfig construction (library consumers vary configs per call).
+- `validate_registries()` checks cross-registry reference integrity after both registries are loaded. `FlickClient::new()` assumes it already ran.
+- `flick init` generates a RequestConfig file only. Directs user to `flick model add` / `flick provider add` if registries are empty.
+
+## Validation
+
+Three layers, each with a distinct scope:
+
+**ModelRegistry** (on load):
+- Non-empty `name` and `provider`
+- `max_tokens` > 0 if present
+- Pricing fields non-negative and finite
+
+**Cross-registry** (`validate_registries`, called once after both registries are loaded):
+- Every `ModelInfo.provider` must reference an existing key in the ProviderRegistry
+
+**RequestConfig** (at `FlickClient::new()`):
+- `model` references a key in ModelRegistry
+- `temperature` non-negative, finite, and within API-specific ceiling (1.0 Messages, 2.0 ChatCompletions)
+- `reasoning` + `output_schema` mutual exclusion (Messages API)
+- `budget_tokens` < `max_tokens` (Messages API with reasoning)
+- Tool names non-empty and unique
+- Tool descriptions non-empty
+- Tool parameters are JSON objects if present
+
 ## Library / CLI Boundary
 
 The `flick` library crate and `flick-cli` binary crate have a strict separation:

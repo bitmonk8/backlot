@@ -7,6 +7,8 @@ use crate::crypto::{decrypt, encrypt};
 use crate::error::CredentialError;
 
 /// Per-provider quirk flags. All default to false.
+///
+/// These are properties of the provider endpoint, not the request.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompatFlags {
