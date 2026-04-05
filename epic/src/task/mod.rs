@@ -169,6 +169,7 @@ impl Task {
     }
 
     /// Build a TaskContext from this task and a TreeContext snapshot.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub fn to_task_context(
         &self,
         tree: &crate::orchestrator::context::TreeContext,

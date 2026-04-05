@@ -6,6 +6,7 @@ use crate::events::EventSender;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[allow(dead_code)] // Used by legacy orchestrator retained for test migration
 pub struct Services<A: AgentService> {
     pub agent: A,
     pub events: EventSender,

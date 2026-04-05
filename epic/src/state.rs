@@ -42,6 +42,7 @@ impl EpicState {
         self.tasks.insert(task.id, task);
     }
 
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub fn task_count(&self) -> usize {
         self.tasks.len()
     }
@@ -50,6 +51,7 @@ impl EpicState {
         self.tasks.get(&id)
     }
 
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub fn get_mut(&mut self, id: TaskId) -> Option<&mut Task> {
         self.tasks.get_mut(&id)
     }
@@ -84,6 +86,7 @@ impl EpicState {
     }
 
     /// Create a single subtask under the given parent, returning the new task ID.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub fn create_subtask(
         &mut self,
         parent_id: TaskId,
@@ -110,6 +113,7 @@ impl EpicState {
     }
 
     /// Build a tree-context snapshot for the given task, used by lifecycle methods.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub fn build_tree_context(
         &self,
         id: TaskId,
@@ -119,6 +123,7 @@ impl EpicState {
     }
 
     /// Check if any non-fix child of the given parent completed successfully.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub fn any_non_fix_child_succeeded(&self, parent_id: TaskId) -> bool {
         let Some(parent) = self.tasks.get(&parent_id) else {
             return false;

@@ -21,6 +21,7 @@ pub use cue::{
 impl Task {
     /// Verify a branch task. Calls `svc.agent.verify()` with context,
     /// accumulates usage, returns structured outcome.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub async fn verify_branch<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -65,6 +66,7 @@ impl Task {
     }
 
     /// Design fix subtasks to address branch verification issues.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub async fn design_fix<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -101,6 +103,7 @@ impl Task {
     }
 
     /// Assess whether recovery is possible and design recovery subtasks.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub async fn assess_and_design_recovery<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -186,6 +189,7 @@ impl Task {
     }
 
     /// Handle checkpoint after a child reports discoveries.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub async fn handle_checkpoint<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -256,6 +260,7 @@ impl Task {
     }
 
     /// Branch-specific scope circuit breaker check.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub async fn check_branch_scope<A: AgentService>(&self, svc: &Services<A>) -> ScopeCheck {
         let magnitude = match &self.magnitude {
             Some(m) => m.clone(),

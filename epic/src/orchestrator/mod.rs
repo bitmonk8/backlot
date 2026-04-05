@@ -10,6 +10,7 @@ use crate::state::EpicState;
 use crate::task::branch::SubtaskSpec;
 use crate::task::scope::ScopeCheck;
 use crate::task::verify::{VerificationOutcome, VerifyOutcome};
+#[allow(unused_imports)] // Task re-exported for test module via `use super::*`
 use crate::task::{Model, ResumePoint, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
 pub use cue::OrchestratorError;
 use services::Services;
@@ -17,10 +18,12 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+#[allow(dead_code)] // Legacy orchestrator retained for test migration
 pub struct Orchestrator<A: AgentService> {
     services: Services<A>,
 }
 
+#[allow(dead_code)] // Legacy orchestrator retained for test migration
 impl<A: AgentService> Orchestrator<A> {
     pub fn new(agent: A, events: EventSender) -> Self {
         Self {
@@ -616,7 +619,7 @@ impl<A: AgentService> Orchestrator<A> {
         let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
         let should_decompose = task.needs_decomposition();
         let decompose_model = task.decompose_model();
-        drop(task);
+        let _ = task;
 
         if should_decompose {
             let ctx = self.build_context(state, id)?;

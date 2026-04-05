@@ -25,6 +25,7 @@ pub fn tree_to_task_context(tree: &TreeContext, task: &Task) -> TaskContext {
 
 /// Build a [`TreeContext`] (tree snapshot without the task itself).
 #[allow(clippy::too_many_lines)]
+#[allow(dead_code)] // Used by legacy orchestrator retained for test migration
 pub fn build_tree_context(state: &EpicState, id: TaskId) -> Result<TreeContext, OrchestratorError> {
     let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
 
@@ -132,6 +133,7 @@ pub fn build_tree_context(state: &EpicState, id: TaskId) -> Result<TreeContext, 
 }
 
 /// Build a full [`TaskContext`] (tree snapshot + task clone).
+#[allow(dead_code)] // Used by legacy orchestrator retained for test migration
 pub fn build_context(state: &EpicState, id: TaskId) -> Result<TaskContext, OrchestratorError> {
     let tree = build_tree_context(state, id)?;
     let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;

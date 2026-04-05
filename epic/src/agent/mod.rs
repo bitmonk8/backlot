@@ -7,7 +7,7 @@ pub mod wire;
 use crate::task::assess::AssessmentResult;
 use crate::task::branch::{CheckpointDecision, DecompositionResult};
 use crate::task::verify::VerificationResult;
-use crate::task::{LeafResult, Model, RecoveryPlan, Task, TaskId, TaskOutcome};
+use crate::task::{LeafResult, Model, RecoveryPlan, Task};
 
 // Re-export context types from cue.
 pub use cue::{AgentResult, ChildStatus, ChildSummary, SessionMeta, SiblingSummary};

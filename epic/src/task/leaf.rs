@@ -2,7 +2,7 @@
 // Handles retry/escalation (Haiku->Sonnet->Opus), scope circuit breaker,
 // file-level review, verification gates.
 
-use crate::agent::{AgentService, SessionMeta};
+use crate::agent::AgentService;
 use crate::events::Event;
 use crate::orchestrator::context::TreeContext;
 use crate::orchestrator::services::Services;
@@ -11,6 +11,7 @@ use crate::task::verify::{VerificationOutcome, VerifyOutcome};
 use crate::task::{Attempt, Model, Task, TaskOutcome, TaskPath};
 
 /// Distinguishes first-execution from fix-loop retry behavior.
+#[allow(dead_code)] // Used by legacy orchestrator retained for test migration
 enum RetryMode {
     Execute,
     Fix { initial_failure: String },
@@ -19,6 +20,7 @@ enum RetryMode {
 impl Task {
     /// Full leaf lifecycle: execute -> verify -> fix loop -> return outcome.
     /// Handles resume from mid-execution or mid-verification.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub async fn execute_leaf<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -47,6 +49,7 @@ impl Task {
 
     /// Post-execution verification + file-level review + fix loop entry.
     /// Returns `Err` for agent-level failures (propagated to caller as infrastructure error).
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     async fn leaf_finalize<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -94,6 +97,7 @@ impl Task {
     }
 
     /// Fix loop after initial verification failure.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     async fn leaf_fix_loop<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -119,6 +123,7 @@ impl Task {
 
     /// Shared retry-with-escalation loop for both first execution and fix loops.
     #[allow(clippy::too_many_lines)]
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     async fn leaf_retry_loop<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -267,6 +272,7 @@ impl Task {
     }
 
     /// Verify and file-level review (used in fix loop after successful fix).
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     async fn try_verify<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -298,6 +304,7 @@ impl Task {
     }
 
     /// File-level review for leaf tasks after verification passes.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     async fn try_file_level_review<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -336,6 +343,7 @@ impl Task {
         }
     }
 
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     async fn check_scope<A: AgentService>(&self, svc: &Services<A>) -> ScopeCheck {
         let magnitude = match &self.magnitude {
             Some(m) => m.clone(),
@@ -353,6 +361,7 @@ impl Task {
     }
 
     /// Record content to vault (best-effort).
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub(crate) async fn record_to_vault<A: AgentService>(
         &mut self,
         svc: &Services<A>,
@@ -385,6 +394,7 @@ impl Task {
     }
 
     /// Emit usage updated event based on current accumulated cost.
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     pub(crate) fn emit_usage_event<A: AgentService>(&self, svc: &Services<A>) {
         let _ = svc.events.send(Event::UsageUpdated {
             task_id: self.id,
@@ -393,6 +403,7 @@ impl Task {
         });
     }
 
+    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
     fn emit_escalation<A: AgentService>(
         svc: &Services<A>,
         id: crate::task::TaskId,

@@ -8,7 +8,7 @@ use crate::agent::wire::{
     self, AssessmentWire, CheckpointWire, DecompositionWire, RecoveryPlanWire, RecoveryWire,
     TaskOutcomeWire, VerificationWire,
 };
-use crate::agent::{AgentResult, AgentService, SessionMeta, TaskContext};
+use crate::agent::{AgentResult, AgentService, TaskContext};
 use crate::config::project::{ModelConfig, VerificationStep};
 use crate::knowledge;
 use crate::task::assess::AssessmentResult;
