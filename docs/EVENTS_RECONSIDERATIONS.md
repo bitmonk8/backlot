@@ -49,7 +49,7 @@ State persistence is a separate mechanism: periodic JSON snapshots of the full t
 
 ### L2: No persistence or replay
 
-Events vanish after consumption. No audit trail, no post-run analysis from the event stream itself. JSONL logging (mentioned in DESIGN.md) is not implemented — events are not serializable.
+Events vanish after consumption. No audit trail, no post-run analysis from the event stream itself. JSONL logging (mentioned in EPIC_DESIGN.md) is not implemented — events are not serializable.
 
 ### L3: No late-join capability
 

@@ -226,7 +226,7 @@ Epic delegates agent execution to reel. No direct Flick calls — reel owns the 
 
 ## Document Store
 
-> **Implementation**: The vault sibling crate (`../vault/vault`) implements the document store. See vault's own [`DESIGN.md`](../vault/DESIGN.md) for detailed internals.
+> **Implementation**: The vault sibling crate (`../vault/vault`) implements the document store. See vault's own [`VAULT_DESIGN.md`](VAULT_DESIGN.md) for detailed internals.
 
 ### Storage
 

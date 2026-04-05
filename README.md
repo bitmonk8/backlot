@@ -24,11 +24,13 @@ epic   → reel, vault   Recursive problem-solver orchestrator
 
 Per-crate design documents, status tracking, and issue lists live under [`docs/`](docs/):
 
-- [`docs/flick/`](docs/flick/) — Architecture, named models, status, issues
-- [`docs/lot/`](docs/lot/) — Design, status, issues
-- [`docs/reel/`](docs/reel/) — Design, status, issues
-- [`docs/vault/`](docs/vault/) — Design, status, issues
-- [`docs/epic/`](docs/epic/) — Design, orchestrator extraction spec, events, status, issues
+- [`FLICK_DESIGN.md`](docs/FLICK_DESIGN.md) — LLM provider abstraction design
+- [`LOT_DESIGN.md`](docs/LOT_DESIGN.md) — Process sandboxing design
+- [`REEL_DESIGN.md`](docs/REEL_DESIGN.md) — Agent runtime design
+- [`VAULT_DESIGN.md`](docs/VAULT_DESIGN.md) — Document store design
+- [`EPIC_DESIGN.md`](docs/EPIC_DESIGN.md) — Orchestrator design
+- [`STATUS.md`](docs/STATUS.md) — Cross-crate status and next work
+- [`ISSUES.md`](docs/ISSUES.md) — Tracked issues
 
 ## Build
 

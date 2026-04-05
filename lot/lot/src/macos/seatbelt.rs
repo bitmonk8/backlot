@@ -162,7 +162,7 @@ pub fn generate_profile(
     // Process needs to inspect its own info during startup (dyld, libSystem).
     profile.push_str("(allow process-info* (target self))\n");
 
-    // Unrestricted mach-lookup is an accepted risk (see docs/DESIGN.md):
+    // Unrestricted mach-lookup is an accepted risk (see docs/LOT_DESIGN.md):
     // narrowing to specific Mach service names would break most programs
     // because the required services vary by macOS version and application.
     // This is consistent with Chrome and Firefox sandbox profiles.

@@ -164,7 +164,7 @@ Missing tests: (a) Chat Completions negative test asserting no `cache_control` i
 
 | # | File | Line(s) | Description |
 |---|------|---------|-------------|
-| 32 | docs/lot/DESIGN.md | 250-262 | Graceful Degradation table missing `Unsupported` error variant. |
+| 32 | docs/LOT_DESIGN.md | 250-262 | Graceful Degradation table missing `Unsupported` error variant. |
 | 33 | lot/src/policy_builder.rs | 13-19, 83-84 | `read_path()` doc says "same-or-lower privilege sets" (plural), but read is the lowest. |
 
 ### Group 12 — Separation of concerns
@@ -280,7 +280,7 @@ Issues grouped by severity, then by co-fixability.
 
 ### Group 10: Documentation Accuracy [NIT]
 
-**10.1** DESIGN.md round count off-by-one — docs/reel/DESIGN.md line 100. Says "rounds < 50" but loop uses `for _round in 1..=50`.
+**10.1** REEL_DESIGN.md round count off-by-one — docs/REEL_DESIGN.md line 100. Says "rounds < 50" but loop uses `for _round in 1..=50`.
 
 **10.3** Root CLAUDE.md inapplicable C++ rules — CLAUDE.md (root) line 50. C++ exception handling rules are inapplicable — reel is Rust-only.
 
@@ -360,7 +360,7 @@ Issues grouped by severity, then by co-fixability.
 
 #### Group N1: Documentation accuracy (3 issues)
 
-**N1a.** DESIGN.md public API listing incomplete — docs/vault/DESIGN.md line 13. Omits domain and observability types.
+**N1a.** VAULT_DESIGN.md public API listing incomplete — docs/VAULT_DESIGN.md line 13. Omits domain and observability types.
 
 **N1b.** README record output description misleading — README.md line 57. Says "Outputs modified documents as JSON" but actually outputs `Vec<DocumentRef>`.
 
@@ -636,7 +636,7 @@ src/knowledge.rs — Per CLAUDE.md, AppContainer sandboxing requires project-loc
 src/agent/reel_adapter.rs — `execute_grant_includes_write_and_nu`, `readonly_grant_includes_nu_not_write`. **Cruft.**
 
 ### 36. Stale NU references in README/DESIGN
-README.md and docs/epic/DESIGN.md — References old `NU` grant name. **Cruft.**
+README.md and docs/EPIC_DESIGN.md — References old `NU` grant name. **Cruft.**
 
 ### 37. `file_level_review` in `ReelAgent` is verbatim copy of `verify`
 src/agent/reel_adapter.rs — Identical except for prompt builder call. Extract shared helper. **Simplification.**
@@ -670,8 +670,8 @@ src/task/leaf.rs and src/orchestrator/mod.rs — Stringly-typed error channel. *
 ### 47. `emit_usage_event` sends `phase_cost_usd: 0.0`
 src/task/leaf.rs — Task-level sends 0.0 while orchestrator sends actual value. **Correctness.**
 
-### 48. DESIGN.md describes unimplemented features as current
-docs/epic/DESIGN.md — Simplification review, aggregate simplification, user-level config described as current but not implemented. **Documentation.**
+### 48. EPIC_DESIGN.md describes unimplemented features as current
+docs/EPIC_DESIGN.md — Simplification review, aggregate simplification, user-level config described as current but not implemented. **Documentation.**
 
 ### 49. Testing gaps from orchestrator refactor
 src/task/leaf.rs ~450 lines with zero unit tests. Mutation methods lack unit tests. **Testing.**

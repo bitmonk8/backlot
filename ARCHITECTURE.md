@@ -61,7 +61,7 @@ fail at construction, not at call time.
 **Provider abstraction:** `DynProvider` is the object-safe wrapper. Provider
 quirks are handled by `CompatFlags` (boolean fields), not subclassing.
 
-See [docs/flick/DESIGN.md](docs/flick/DESIGN.md) for data flow
+See [docs/FLICK_DESIGN.md](docs/FLICK_DESIGN.md) for data flow
 diagrams and library/CLI boundary rules.
 
 ---
@@ -101,7 +101,7 @@ platform backends, one API surface.
 **No graceful degradation.** If a platform mechanism is unavailable, `spawn()`
 returns `SandboxError::Setup`. No silent fallback to unsandboxed execution.
 
-See [docs/lot/DESIGN.md](docs/lot/DESIGN.md) for full platform mechanism
+See [docs/LOT_DESIGN.md](docs/LOT_DESIGN.md) for full platform mechanism
 details, deny path semantics, and Windows-specific concerns.
 
 ---
@@ -144,7 +144,7 @@ access without full `WRITE`.
 compile time with SHA-256 verification. Generates nu config files. Emits
 `NU_CACHE_DIR` for runtime path resolution.
 
-See [docs/reel/DESIGN.md](docs/reel/DESIGN.md) for nu session internals,
+See [docs/REEL_DESIGN.md](docs/REEL_DESIGN.md) for nu session internals,
 sandbox policy construction, and tool translation details.
 
 ---
@@ -175,7 +175,7 @@ Derived documents can be reconstructed from raw + changelog if corrupted.
 derived. Two traits (`DerivedProducer`, `QueryResponder`) enable mock-based
 testing without LLM calls.
 
-See [docs/vault/DESIGN.md](docs/vault/DESIGN.md) for document model, operation
+See [docs/VAULT_DESIGN.md](docs/VAULT_DESIGN.md) for document model, operation
 sequences, and the integration contract with epic.
 
 ---
@@ -236,7 +236,7 @@ retry budget exhaustion / model escalation (Haiku &rarr; Sonnet &rarr; Opus)
 &rarr; terminal leaf failure / rollback &rarr; parent Opus recovery assessment
 &rarr; branch failure / escalate to grandparent &rarr; global task count cap.
 
-See [docs/epic/DESIGN.md](docs/epic/DESIGN.md) for task model, context
+See [docs/EPIC_DESIGN.md](docs/EPIC_DESIGN.md) for task model, context
 propagation, verification/fix loops, document store integration, and TUI design.
 
 ## Entry Points
@@ -353,8 +353,8 @@ For implementation details beyond this architectural overview:
 
 | Crate | Document |
 |-------|----------|
-| flick | [docs/flick/DESIGN.md](docs/flick/DESIGN.md) |
-| lot | [docs/lot/DESIGN.md](docs/lot/DESIGN.md) |
-| reel | [docs/reel/DESIGN.md](docs/reel/DESIGN.md) |
-| vault | [docs/vault/DESIGN.md](docs/vault/DESIGN.md) |
-| epic | [docs/epic/DESIGN.md](docs/epic/DESIGN.md) |
+| flick | [docs/FLICK_DESIGN.md](docs/FLICK_DESIGN.md) |
+| lot | [docs/LOT_DESIGN.md](docs/LOT_DESIGN.md) |
+| reel | [docs/REEL_DESIGN.md](docs/REEL_DESIGN.md) |
+| vault | [docs/VAULT_DESIGN.md](docs/VAULT_DESIGN.md) |
+| epic | [docs/EPIC_DESIGN.md](docs/EPIC_DESIGN.md) |
