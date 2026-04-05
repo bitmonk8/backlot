@@ -166,7 +166,7 @@ impl ReelAgent {
             write_paths: Vec::new(),
         };
         let result: reel::RunResult<T> = self.agent.run(&request, query).await?;
-        let mut meta = SessionMeta::from_run_result(&result);
+        let mut meta = crate::agent::session_meta_from_run_result(&result);
 
         // Fold research pipeline costs into session metadata.
         if let Some(sink) = research_sink {

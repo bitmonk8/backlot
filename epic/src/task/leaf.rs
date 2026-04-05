@@ -53,7 +53,7 @@ impl Task {
         svc: &Services<A>,
     ) -> TaskOutcome {
         let verify_model = self.verification_model();
-        let ctx = tree.to_task_context(self);
+        let ctx = self.to_task_context(tree);
         // Propagate agent errors as Failed with special prefix so the
         // orchestrator can distinguish infrastructure errors.
         let agent_result = match svc.agent.verify(&ctx, verify_model).await {
@@ -175,7 +175,7 @@ impl Task {
             }
 
             // Agent call.
-            let ctx = tree.to_task_context(self);
+            let ctx = self.to_task_context(tree);
             let agent_result = if is_fix {
                 let reason = failure_reason.as_deref().unwrap_or("unknown failure");
                 #[allow(clippy::cast_possible_truncation)]
@@ -273,7 +273,7 @@ impl Task {
         svc: &Services<A>,
     ) -> VerifyOutcome {
         let verify_model = self.verification_model();
-        let ctx = tree.to_task_context(self);
+        let ctx = self.to_task_context(tree);
         match svc.agent.verify(&ctx, verify_model).await {
             Ok(agent_result) => {
                 self.accumulate_usage(&agent_result.meta);
@@ -304,7 +304,7 @@ impl Task {
         svc: &Services<A>,
     ) -> Option<String> {
         let review_model = self.verification_model();
-        let ctx = tree.to_task_context(self);
+        let ctx = self.to_task_context(tree);
         let review_result = match svc.agent.file_level_review(&ctx, review_model).await {
             Ok(r) => r,
             Err(e) => {
@@ -370,7 +370,7 @@ impl Task {
         };
         match result {
             Ok((_refs, _warnings, meta)) => {
-                let session_meta = SessionMeta::from_vault(&meta);
+                let session_meta = crate::agent::session_meta_from_vault(&meta);
                 self.accumulate_usage(&session_meta);
                 self.emit_usage_event(svc);
                 let _ = svc.events.send(Event::VaultRecorded {

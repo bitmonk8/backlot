@@ -15,6 +15,7 @@ toml.workspace = true
 clap = { workspace = true, features = ["env"] }
 ratatui = "0.29"
 crossterm = "0.28"
+cue.workspace = true
 lot = { workspace = true, features = ["tokio"] }
 tempfile.workspace = true
 reel.workspace = true

@@ -1,19 +1,10 @@
 // Scope circuit breaker: git diff analysis against magnitude estimates.
 
 use super::Magnitude;
+pub use cue::ScopeCheck;
 use std::path::Path;
 
 const GIT_DIFF_TIMEOUT_SECS: u64 = 30;
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ScopeCheck {
-    WithinBounds,
-    Exceeded {
-        metric: String,
-        actual: u64,
-        limit: u64,
-    },
-}
 
 pub async fn git_diff_numstat(project_root: &Path) -> Option<String> {
     let git_future = tokio::process::Command::new("git")
@@ -46,7 +37,6 @@ pub fn evaluate_scope(numstat_output: &str, magnitude: &Magnitude) -> ScopeCheck
         if parts.len() < 3 {
             continue;
         }
-        // Binary files show "-" for counts; skip them.
         let Ok(added) = parts[0].parse::<u64>() else {
             continue;
         };
@@ -60,8 +50,6 @@ pub fn evaluate_scope(numstat_output: &str, magnitude: &Magnitude) -> ScopeCheck
     }
 
     let multiplier = 3;
-    // Skip dimensions where the estimate is zero — zero means "unconstrained"
-    // (the LLM omitted this dimension). Checking 3x0 = 0 would trip on any change.
     if magnitude.max_lines_added > 0 && total_added > magnitude.max_lines_added * multiplier {
         return ScopeCheck::Exceeded {
             metric: "lines_added".into(),
@@ -161,7 +149,6 @@ mod tests {
 
     #[test]
     fn evaluate_scope_lines_modified_exceeded() {
-        // 50 added, 50 deleted → min(50,50) = 50 modified
         let output = "50\t50\tfile.rs";
         let magnitude = Magnitude {
             max_lines_added: 100,
@@ -188,8 +175,6 @@ mod tests {
         }
     }
 
-    // --- Integration tests for Task::check_branch_scope (moved from orchestrator) ---
-
     use super::{super::Task, super::TaskId};
     use crate::config::project::LimitsConfig;
     use crate::events;
@@ -197,7 +182,6 @@ mod tests {
     use crate::test_support::MockAgentService;
     use std::path::PathBuf;
 
-    /// Task with magnitude set but no git repo → `WithinBounds` (best-effort).
     #[tokio::test]
     async fn check_branch_scope_within_bounds() {
         let mock = MockAgentService::new();
@@ -218,12 +202,10 @@ mod tests {
             max_lines_deleted: 3,
         });
 
-        // git will fail on a nonexistent path → best-effort WithinBounds.
         let result = task.check_branch_scope(&services).await;
         assert!(matches!(result, ScopeCheck::WithinBounds));
     }
 
-    /// Task with no magnitude → `WithinBounds` (skip check).
     #[tokio::test]
     async fn check_branch_scope_skipped_no_magnitude() {
         let mock = MockAgentService::new();

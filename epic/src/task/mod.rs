@@ -3,167 +3,32 @@
 pub mod assess;
 pub mod branch;
 pub mod leaf;
+pub mod node_impl;
 pub mod scope;
 pub mod verify;
 
+// Re-export orchestration-protocol types from cue.
+pub use cue::{
+    Attempt, LeafResult, Magnitude, MagnitudeEstimate, Model, RecoveryEligibility, RecoveryPlan,
+    RegistrationInfo, ResumePoint, SessionMeta, TaskId, TaskOutcome, TaskPath, TaskPhase,
+    TaskUsage,
+};
+
+use crate::agent::AgentService;
+use crate::config::project::LimitsConfig;
+use crate::events::EventSender;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TaskId(pub u64);
-
-impl std::fmt::Display for TaskId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "T{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskPath {
-    Leaf,
-    Branch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskPhase {
-    Pending,
-    Assessing,
-    Executing,
-    Verifying,
-    Completed,
-    Failed,
-}
-
-impl TaskPhase {
-    #[allow(dead_code)]
-    pub fn try_transition(self, new: Self) -> Result<Self, String> {
-        if new == Self::Failed {
-            return Ok(new);
-        }
-        let valid = matches!(
-            (self, new),
-            (Self::Pending, Self::Assessing)
-                | (Self::Assessing | Self::Verifying, Self::Executing)
-                | (Self::Executing, Self::Executing | Self::Verifying)
-                | (Self::Verifying, Self::Completed)
-        );
-        if valid {
-            Ok(new)
-        } else {
-            Err(format!("{self:?} -> {new:?} is not a valid transition"))
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Model {
-    Haiku,
-    Sonnet,
-    Opus,
-}
-
-impl Model {
-    /// Returns the next tier up, or `None` if already at the highest tier.
-    pub const fn escalate(self) -> Option<Self> {
-        match self {
-            Self::Haiku => Some(Self::Sonnet),
-            Self::Sonnet => Some(Self::Opus),
-            Self::Opus => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Attempt {
-    pub model: Model,
-    pub succeeded: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MagnitudeEstimate {
-    Small,
-    Medium,
-    Large,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(clippy::struct_field_names)]
-pub struct Magnitude {
-    pub max_lines_added: u64,
-    pub max_lines_modified: u64,
-    pub max_lines_deleted: u64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct TaskUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_creation_input_tokens: u64,
-    pub cache_read_input_tokens: u64,
-    pub cost_usd: f64,
-    pub api_calls: u32,
-    pub total_tool_calls: u32,
-    pub total_latency_ms: u64,
-}
-
-impl TaskUsage {
-    pub const fn zero() -> Self {
-        Self {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            cost_usd: 0.0,
-            api_calls: 0,
-            total_tool_calls: 0,
-            total_latency_ms: 0,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn accumulate(
-        &mut self,
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_creation_input_tokens: u64,
-        cache_read_input_tokens: u64,
-        cost_usd: f64,
-        tool_calls: u32,
-        latency_ms: u64,
-    ) {
-        self.input_tokens += input_tokens;
-        self.output_tokens += output_tokens;
-        self.cache_creation_input_tokens += cache_creation_input_tokens;
-        self.cache_read_input_tokens += cache_read_input_tokens;
-        self.cost_usd += cost_usd;
-        self.api_calls += 1;
-        self.total_tool_calls += tool_calls;
-        self.total_latency_ms += latency_ms;
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskOutcome {
-    Success,
-    Failed { reason: String },
-}
-
-/// Result of a leaf execution: outcome plus any discoveries the agent reported.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LeafResult {
-    pub outcome: TaskOutcome,
-    pub discoveries: Vec<String>,
-}
-
-/// Recovery plan produced by the Opus recovery agent after a child failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // `rationale` field used in wire format output and tests.
-pub struct RecoveryPlan {
-    /// If true, remaining pending children are superseded; only recovery subtasks run.
-    pub full_redecomposition: bool,
-    pub subtasks: Vec<branch::SubtaskSpec>,
-    pub rationale: String,
+/// Non-serializable runtime dependencies injected into tasks at construction
+/// or after deserialization via `bind_runtime()`.
+pub struct TaskRuntime<A: AgentService> {
+    pub agent: Arc<A>,
+    pub events: EventSender,
+    pub vault: Option<Arc<vault::Vault>>,
+    pub limits: LimitsConfig,
+    pub project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,7 +144,7 @@ impl Task {
         self.recovery_rounds
     }
 
-    pub fn accumulate_usage(&mut self, meta: &crate::agent::SessionMeta) {
+    pub fn accumulate_usage(&mut self, meta: &cue::SessionMeta) {
         self.usage.accumulate(
             meta.input_tokens,
             meta.output_tokens,
@@ -302,68 +167,98 @@ impl Task {
         let count = list.iter().rev().take_while(|a| a.model == model).count() as u32;
         count
     }
+
+    /// Build a TaskContext from this task and a TreeContext snapshot.
+    pub fn to_task_context(
+        &self,
+        tree: &crate::orchestrator::context::TreeContext,
+    ) -> crate::agent::TaskContext {
+        crate::orchestrator::context::tree_to_task_context(tree, self)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.phase, TaskPhase::Completed | TaskPhase::Failed)
+    }
+
+    pub fn resume_point(&self) -> ResumePoint {
+        match self.phase {
+            TaskPhase::Completed => return ResumePoint::Terminal(TaskOutcome::Success),
+            TaskPhase::Failed => {
+                return ResumePoint::Terminal(TaskOutcome::Failed {
+                    reason: "previously failed".into(),
+                });
+            }
+            _ => {}
+        }
+        match (&self.path, self.phase) {
+            (Some(TaskPath::Leaf), TaskPhase::Verifying) => ResumePoint::LeafVerifying,
+            (Some(TaskPath::Branch), TaskPhase::Verifying) => ResumePoint::BranchVerifying,
+            (Some(TaskPath::Leaf), TaskPhase::Executing) => ResumePoint::LeafExecuting,
+            (Some(TaskPath::Branch), TaskPhase::Executing) => ResumePoint::BranchExecuting,
+            _ => ResumePoint::NeedAssessment,
+        }
+    }
+
+    pub fn forced_assessment(&self, max_depth: u32) -> Option<assess::AssessmentResult> {
+        if self.parent_id.is_none() {
+            return Some(assess::AssessmentResult {
+                path: TaskPath::Branch,
+                model: Model::Sonnet,
+                rationale: "Root task always branches".into(),
+                magnitude: None,
+            });
+        }
+        if self.depth >= max_depth {
+            return Some(assess::AssessmentResult {
+                path: TaskPath::Leaf,
+                model: Model::Sonnet,
+                rationale: "Depth cap reached, forced to leaf".into(),
+                magnitude: None,
+            });
+        }
+        None
+    }
+
+    pub fn needs_decomposition(&self) -> bool {
+        self.subtask_ids.is_empty()
+    }
+
+    pub fn decompose_model(&self) -> Model {
+        self.current_model.unwrap_or(Model::Sonnet)
+    }
+
+    pub fn registration_info(&self) -> RegistrationInfo {
+        RegistrationInfo {
+            parent_id: self.parent_id,
+            goal: self.goal.clone(),
+            depth: self.depth,
+            phase: self.phase,
+        }
+    }
+
+    pub fn can_attempt_recovery(
+        &self,
+        limits: &crate::config::project::LimitsConfig,
+    ) -> RecoveryEligibility {
+        if self.is_fix_task {
+            return RecoveryEligibility::NotEligible {
+                reason: "fix tasks cannot recover".into(),
+            };
+        }
+        if self.recovery_rounds >= limits.max_recovery_rounds {
+            return RecoveryEligibility::NotEligible {
+                reason: format!("recovery rounds exhausted ({})", limits.max_recovery_rounds),
+            };
+        }
+        RecoveryEligibility::Eligible {
+            round: self.recovery_rounds + 1,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn model_ordering_haiku_lt_sonnet_lt_opus() {
-        assert!(Model::Haiku < Model::Sonnet);
-        assert!(Model::Sonnet < Model::Opus);
-        assert!(Model::Haiku < Model::Opus);
-    }
-
-    #[test]
-    fn task_phase_valid_transitions() {
-        let cases = [
-            (TaskPhase::Pending, TaskPhase::Assessing),
-            (TaskPhase::Assessing, TaskPhase::Executing),
-            (TaskPhase::Executing, TaskPhase::Executing),
-            (TaskPhase::Executing, TaskPhase::Verifying),
-            (TaskPhase::Verifying, TaskPhase::Completed),
-            (TaskPhase::Verifying, TaskPhase::Executing),
-        ];
-        for (from, to) in cases {
-            assert_eq!(from.try_transition(to), Ok(to), "{from:?} -> {to:?}");
-        }
-    }
-
-    #[test]
-    fn task_phase_any_to_failed() {
-        let all = [
-            TaskPhase::Pending,
-            TaskPhase::Assessing,
-            TaskPhase::Executing,
-            TaskPhase::Verifying,
-            TaskPhase::Completed,
-            TaskPhase::Failed,
-        ];
-        for phase in all {
-            assert_eq!(
-                phase.try_transition(TaskPhase::Failed),
-                Ok(TaskPhase::Failed)
-            );
-        }
-    }
-
-    #[test]
-    fn task_phase_invalid_transitions() {
-        let cases = [
-            (TaskPhase::Pending, TaskPhase::Executing),
-            (TaskPhase::Pending, TaskPhase::Completed),
-            (TaskPhase::Assessing, TaskPhase::Verifying),
-            (TaskPhase::Executing, TaskPhase::Completed),
-            (TaskPhase::Completed, TaskPhase::Pending),
-        ];
-        for (from, to) in cases {
-            assert!(
-                from.try_transition(to).is_err(),
-                "{from:?} -> {to:?} should fail"
-            );
-        }
-    }
 
     #[test]
     fn task_new_defaults() {
@@ -380,41 +275,5 @@ mod tests {
         assert_eq!(t.verification_fix_rounds, 0);
         assert!(!t.is_fix_task);
         assert_eq!(t.recovery_rounds, 0);
-    }
-
-    #[test]
-    fn model_escalate_chain() {
-        assert_eq!(Model::Haiku.escalate(), Some(Model::Sonnet));
-        assert_eq!(Model::Sonnet.escalate(), Some(Model::Opus));
-        assert_eq!(Model::Opus.escalate(), None);
-    }
-
-    #[test]
-    fn recovery_plan_equality() {
-        let spec = branch::SubtaskSpec {
-            goal: "fix it".into(),
-            verification_criteria: vec!["works".into()],
-            magnitude_estimate: MagnitudeEstimate::Small,
-        };
-        let a = RecoveryPlan {
-            full_redecomposition: false,
-            subtasks: vec![spec],
-            rationale: "reason".into(),
-        };
-        let b = a.clone();
-        assert_eq!(a, b);
-
-        let c = RecoveryPlan {
-            full_redecomposition: true,
-            subtasks: Vec::new(),
-            rationale: "other".into(),
-        };
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn task_id_display() {
-        assert_eq!(TaskId(0).to_string(), "T0");
-        assert_eq!(TaskId(42).to_string(), "T42");
     }
 }

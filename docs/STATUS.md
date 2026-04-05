@@ -73,12 +73,31 @@
 
 ---
 
+## Cue
+
+**Phase:** Complete. 7 tests passing, zero clippy errors.
+
+**Implemented:**
+- Generic recursive task orchestration framework
+- `TaskNode` trait (28 methods: 8 read accessors, 6 decision methods, 6 mutations, 8 lifecycle)
+- `TaskStore` trait (task creation, storage, lookup, cross-task queries, tree context building)
+- `Orchestrator<S: TaskStore>` coordination loop (DFS traversal, resume, retry, escalation, fix loops, recovery)
+- All orchestration protocol types (`TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`, etc.)
+- Event system (23 event variants, `EventSender`/`EventReceiver`, `event_channel()`)
+- `LimitsConfig` (depth, retry budget, fix rounds, recovery rounds, task cap)
+- No AI, vault, reel, flick, or lot dependencies
+
+---
+
 ## Epic
 
-**Phase:** Core orchestration, knowledge layer, and file-level review implemented. 246 tests passing.
+**Phase:** Core orchestration, knowledge layer, file-level review, and cue integration implemented. 239 tests passing.
 
 **Implemented:**
 - Recursive problem-solver with DFS execution, retry/escalation, fix loops, recovery re-decomposition
+- `EpicTask<A>` implementing `cue::TaskNode` (bridges Task + AgentService to cue's trait contract)
+- `EpicStore<A>` implementing `cue::TaskStore` (wraps EpicState + runtime deps)
+- `TaskRuntime<A>` (agent, vault, events, limits, project_root) injected into tasks at construction
 - `ReelAgent` adapter (10 AgentService methods)
 - State persistence (`.epic/state.json`), resume, cycle-safe DFS
 - TUI (ratatui + crossterm), CLI (init, run, resume, status, setup)
@@ -90,8 +109,6 @@
 - File-level review (leaf tasks, post-verification semantic review)
 - Vault integration (document store, ResearchQuery tool, discovery recording, reorganize)
 - Research Service gap-filling (vault query -> gap identification -> codebase exploration -> synthesis)
-- Branch logic extraction (`task/branch.rs`), leaf extraction (`task/leaf.rs`)
-- 28 files, 12,740 lines (6,373 core, 6,367 test)
 
 **Not Implemented:**
 - Simplification review (local leaf + aggregate branch)
@@ -99,7 +116,7 @@
 - User-level config fallback (`~/.config/epic/config.toml`)
 
 **Next Work:**
-1. **Orchestrator extraction** — Extract orchestrator, task, state, events, agent trait, and config types into a standalone sibling crate. See [ORCHESTRATOR_EXTRACTION.md](ORCHESTRATOR_EXTRACTION.md).
+1. **Legacy orchestrator removal** — Remove the old `Orchestrator<A>` in `orchestrator/mod.rs` once all tests are migrated to use `cue::Orchestrator<EpicStore<A>>`.
 2. **Branch verification separation** — Split single-call branch verification into correctness + completeness + aggregate simplification reviews.
 3. **Web search scope for Research Service** — Add WEB scope to gap-filling pipeline (vault + codebase + web search).
 4. **User-level config fallback** — `~/.config/epic/config.toml` resolution for user defaults.

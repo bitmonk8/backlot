@@ -5,36 +5,21 @@ use crate::orchestrator::OrchestratorError;
 use crate::state::EpicState;
 use crate::task::{Task, TaskId, TaskOutcome, TaskPhase};
 
-/// Read-only snapshot of tree state around a task. Built by the orchestrator
-/// before calling a task method. Owned data, not references into state —
-/// avoids borrow conflicts with `&mut Task`.
-#[derive(Debug, Clone)]
-pub struct TreeContext {
-    pub parent_goal: Option<String>,
-    pub parent_decomposition_rationale: Option<String>,
-    pub parent_discoveries: Vec<String>,
-    pub ancestor_goals: Vec<String>,
-    pub completed_siblings: Vec<SiblingSummary>,
-    pub pending_sibling_goals: Vec<String>,
-    pub children: Vec<ChildSummary>,
-    pub checkpoint_guidance: Option<String>,
-}
+pub use cue::TreeContext;
 
-impl TreeContext {
-    /// Combine this tree snapshot with a task to produce a full `TaskContext`
-    /// for agent calls.
-    pub fn to_task_context(&self, task: &Task) -> TaskContext {
-        TaskContext {
-            task: task.clone(),
-            parent_goal: self.parent_goal.clone(),
-            ancestor_goals: self.ancestor_goals.clone(),
-            completed_siblings: self.completed_siblings.clone(),
-            pending_sibling_goals: self.pending_sibling_goals.clone(),
-            checkpoint_guidance: self.checkpoint_guidance.clone(),
-            children: self.children.clone(),
-            parent_discoveries: self.parent_discoveries.clone(),
-            parent_decomposition_rationale: self.parent_decomposition_rationale.clone(),
-        }
+/// Combine a tree snapshot with a task to produce a full `TaskContext`
+/// for agent calls.
+pub fn tree_to_task_context(tree: &TreeContext, task: &Task) -> TaskContext {
+    TaskContext {
+        task: task.clone(),
+        parent_goal: tree.parent_goal.clone(),
+        ancestor_goals: tree.ancestor_goals.clone(),
+        completed_siblings: tree.completed_siblings.clone(),
+        pending_sibling_goals: tree.pending_sibling_goals.clone(),
+        checkpoint_guidance: tree.checkpoint_guidance.clone(),
+        children: tree.children.clone(),
+        parent_discoveries: tree.parent_discoveries.clone(),
+        parent_decomposition_rationale: tree.parent_decomposition_rationale.clone(),
     }
 }
 
@@ -150,7 +135,7 @@ pub fn build_tree_context(state: &EpicState, id: TaskId) -> Result<TreeContext, 
 pub fn build_context(state: &EpicState, id: TaskId) -> Result<TaskContext, OrchestratorError> {
     let tree = build_tree_context(state, id)?;
     let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
-    Ok(tree.to_task_context(task))
+    Ok(tree_to_task_context(&tree, task))
 }
 
 #[cfg(test)]
@@ -158,12 +143,11 @@ mod tests {
     use super::*;
     use crate::task::{Attempt, Model};
 
-    /// `build_context` populates `parent_decomposition_rationale`, `parent_discoveries`, and `children`.
     #[test]
     fn populates_parent_fields_and_children() {
         let mut state = EpicState::new();
-        let parent_id = state.next_task_id(); // T0
-        let child_id = state.next_task_id(); // T1
+        let parent_id = state.next_task_id();
+        let child_id = state.next_task_id();
 
         let mut parent = Task::new(
             parent_id,
@@ -189,7 +173,6 @@ mod tests {
         state.insert(parent);
         state.insert(child);
 
-        // Build context for the child — should pull parent fields.
         let ctx = build_context(&state, child_id).unwrap();
         assert_eq!(
             ctx.parent_decomposition_rationale.as_deref(),
@@ -197,7 +180,6 @@ mod tests {
         );
         assert_eq!(ctx.parent_discoveries, vec!["API uses v2", "config moved"]);
 
-        // Build context for the parent — should have children populated.
         let parent_ctx = build_context(&state, parent_id).unwrap();
         assert_eq!(parent_ctx.children.len(), 1);
         assert_eq!(parent_ctx.children[0].goal, "child goal");
@@ -207,18 +189,17 @@ mod tests {
         ));
     }
 
-    /// `build_context` maps all `TaskPhase` variants to correct `ChildStatus`.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn child_status_mapping_all_phases() {
         let mut state = EpicState::new();
-        let parent_id = state.next_task_id(); // T0
-        let completed_id = state.next_task_id(); // T1
-        let failed_id = state.next_task_id(); // T2
-        let pending_id = state.next_task_id(); // T3
-        let executing_id = state.next_task_id(); // T4
-        let assessing_id = state.next_task_id(); // T5
-        let verifying_id = state.next_task_id(); // T6
+        let parent_id = state.next_task_id();
+        let completed_id = state.next_task_id();
+        let failed_id = state.next_task_id();
+        let pending_id = state.next_task_id();
+        let executing_id = state.next_task_id();
+        let assessing_id = state.next_task_id();
+        let verifying_id = state.next_task_id();
 
         let mut parent = Task::new(parent_id, None, "parent".into(), vec!["passes".into()], 0);
         parent.subtask_ids = vec![
@@ -327,13 +308,12 @@ mod tests {
         );
     }
 
-    /// `build_context` silently skips subtask IDs that don't exist in state.
     #[test]
     fn skips_dangling_subtask_id() {
         let mut state = EpicState::new();
-        let parent_id = state.next_task_id(); // T0
-        let real_child_id = state.next_task_id(); // T1
-        let dangling_id = state.next_task_id(); // T2 — never inserted
+        let parent_id = state.next_task_id();
+        let real_child_id = state.next_task_id();
+        let dangling_id = state.next_task_id();
 
         let mut parent = Task::new(parent_id, None, "parent".into(), vec!["passes".into()], 0);
         parent.subtask_ids = vec![real_child_id, dangling_id];
@@ -348,7 +328,6 @@ mod tests {
 
         state.insert(parent);
         state.insert(real_child);
-        // dangling_id is NOT inserted
 
         let ctx = build_context(&state, parent_id).unwrap();
         assert_eq!(ctx.children.len(), 1, "should skip dangling subtask ID");

@@ -741,3 +741,51 @@ src/task/leaf.rs and src/task/scope.rs — Should consolidate in `test_support.r
 
 ### 71. Missing leaf-level test coverage for additional `execute_leaf` paths
 src/task/leaf.rs — Four code paths lack direct tests. **Testing.**
+
+### 72. Duplicated `build_tree_context` in EpicStore vs orchestrator/context.rs
+epic/src/store.rs lines 172-284 vs epic/src/orchestrator/context.rs — ~110 lines of identical tree-context-building logic. EpicStore should delegate to the shared implementation like EpicState does. **Simplification.**
+
+### 73. Duplicated `record_to_vault`, `emit_usage_event`, `emit_escalation` between node_impl.rs and leaf.rs
+epic/src/task/node_impl.rs vs epic/src/task/leaf.rs — Near-identical implementations differing only in runtime dep source (`self.rt_arc()` vs `svc`). Tied to legacy orchestrator retention. **Simplification.**
+
+### 74. Legacy orchestrator retained in parallel with cue::Orchestrator
+epic/src/orchestrator/mod.rs — Full orchestration implementation (~900 lines) kept alongside cue::Orchestrator. Documented as next removal step in STATUS.md. **Simplification.**
+
+### 75. AI-specific types in generic cue crate
+cue/src/types.rs — `Model::Haiku/Sonnet/Opus`, `SessionMeta` (LLM tokens/cost), `AgentResult<T>`, `LeafResult`, `RecoveryPlan`, `TaskUsage`. cue/src/events.rs — `VaultBootstrapCompleted`, `VaultRecorded`, `VaultReorganizeCompleted`, `FileLevelReviewCompleted`, `UsageUpdated`. These embed AI/vault domain vocabulary into the generic orchestration framework. **Separation.**
+
+### 76. No tests for cue::Orchestrator coordination logic
+cue/src/orchestrator.rs — 722 lines, zero tests. Should have mock TaskNode/TaskStore tests. **Testing.**
+
+### 77. No tests for EpicStore (TaskStore impl)
+epic/src/store.rs — 285 lines, zero tests. DFS traversal, subtask creation, cross-task queries untested. **Testing.**
+
+### 78. No tests for EpicTask (TaskNode impl)
+epic/src/task/node_impl.rs — 796 lines, zero tests. Full leaf lifecycle, branch verification, recovery reimplemented and untested in this new form. **Testing.**
+
+### 79. No tests for new Task decision methods
+epic/src/task/mod.rs — `is_terminal()`, `resume_point()`, `forced_assessment()`, `needs_decomposition()`, `decompose_model()`, `registration_info()`, `can_attempt_recovery()` have zero unit tests. **Testing.**
+
+### 80. No tests for new EpicState methods
+epic/src/state.rs — `create_subtask`, `any_non_fix_child_succeeded`, `into_parts`/`from_parts` have zero tests. **Testing.**
+
+### 81. EpicStore::as_state clones entire task map on every save
+epic/src/store.rs lines 66-73 — Full deep-clone of all tasks on every checkpoint. Could serialize directly from internal HashMap. Also violates Rust naming convention: `as_` prefix implies cheap borrow, should be `to_state()`. **Performance/Naming.**
+
+### 82. EpicStore::create_subtask silently defaults parent_depth to 0
+epic/src/store.rs lines 138-142 — Uses `unwrap_or(0)` when parent not found instead of returning error. Masks store-corruption scenarios. **Correctness.**
+
+### 83. branch_fix_loop passes without calling complete_task_verified
+cue/src/orchestrator.rs line 453 — Task phase never transitions to Completed, no TaskCompleted event emitted. Pre-existing bug faithfully reproduced in extraction. **Correctness.**
+
+### 84. VerifyOutcome vs VerificationOutcome confusion
+cue/src/types.rs — Two near-identical enums for the same concept. `VerifyOutcome` only used by epic leaf retry logic, should stay in epic. **Naming.**
+
+### 85. Stale module comments not mentioning legacy status
+epic/src/orchestrator/mod.rs, epic/src/task/leaf.rs, epic/src/task/branch.rs — Comments describe full orchestrator/lifecycle responsibility without noting these are legacy paths superseded by cue+node_impl.rs. **Documentation.**
+
+---
+
+## Cue
+
+No standalone issues. All cue-related findings tracked under Epic (issues 72-85) as they concern the extraction boundary.

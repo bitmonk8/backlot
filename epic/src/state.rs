@@ -1,6 +1,6 @@
 // EpicState: task tree persistence and session resume.
 
-use crate::task::{Task, TaskId, TaskUsage};
+use crate::task::{Task, TaskId, TaskPhase, TaskUsage};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -16,6 +16,20 @@ pub struct EpicState {
 impl EpicState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Decompose into raw parts for wrapping in `EpicStore`.
+    pub fn into_parts(self) -> (HashMap<TaskId, Task>, u64, Option<TaskId>) {
+        (self.tasks, self.next_id, self.root_id)
+    }
+
+    /// Reconstruct from raw parts (inverse of `into_parts`).
+    pub fn from_parts(tasks: HashMap<TaskId, Task>, next_id: u64, root_id: Option<TaskId>) -> Self {
+        Self {
+            tasks,
+            next_id,
+            root_id,
+        }
     }
 
     pub const fn next_task_id(&mut self) -> TaskId {
@@ -67,6 +81,53 @@ impl EpicState {
 
     pub const fn root_id(&self) -> Option<TaskId> {
         self.root_id
+    }
+
+    /// Create a single subtask under the given parent, returning the new task ID.
+    pub fn create_subtask(
+        &mut self,
+        parent_id: TaskId,
+        spec: &crate::task::branch::SubtaskSpec,
+        mark_fix: bool,
+        inherit_recovery_rounds: Option<u32>,
+    ) -> Option<TaskId> {
+        let parent_depth = self.tasks.get(&parent_id)?.depth;
+        let child_id = self.next_task_id();
+        let mut child = Task::new(
+            child_id,
+            Some(parent_id),
+            spec.goal.clone(),
+            spec.verification_criteria.clone(),
+            parent_depth + 1,
+        );
+        child.magnitude_estimate = Some(spec.magnitude_estimate);
+        child.is_fix_task = mark_fix;
+        if let Some(rounds) = inherit_recovery_rounds {
+            child.recovery_rounds = rounds;
+        }
+        self.tasks.insert(child_id, child);
+        Some(child_id)
+    }
+
+    /// Build a tree-context snapshot for the given task, used by lifecycle methods.
+    pub fn build_tree_context(
+        &self,
+        id: TaskId,
+    ) -> Result<crate::orchestrator::context::TreeContext, crate::orchestrator::OrchestratorError>
+    {
+        crate::orchestrator::context::build_tree_context(self, id)
+    }
+
+    /// Check if any non-fix child of the given parent completed successfully.
+    pub fn any_non_fix_child_succeeded(&self, parent_id: TaskId) -> bool {
+        let Some(parent) = self.tasks.get(&parent_id) else {
+            return false;
+        };
+        parent.subtask_ids.iter().any(|&cid| {
+            self.tasks
+                .get(&cid)
+                .is_some_and(|c| !c.is_fix_task && c.phase == TaskPhase::Completed)
+        })
     }
 
     pub fn total_usage(&self) -> TaskUsage {

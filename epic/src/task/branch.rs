@@ -10,66 +10,13 @@ use crate::orchestrator::context::TreeContext;
 use crate::orchestrator::services::Services;
 use crate::task::scope::{self, ScopeCheck};
 use crate::task::verify::VerificationOutcome;
-use crate::task::{MagnitudeEstimate, Model, Task};
-use serde::{Deserialize, Serialize};
+use crate::task::{Model, Task};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubtaskSpec {
-    pub goal: String,
-    pub verification_criteria: Vec<String>,
-    pub magnitude_estimate: MagnitudeEstimate,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DecompositionResult {
-    pub subtasks: Vec<SubtaskSpec>,
-    pub rationale: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CheckpointDecision {
-    Proceed,
-    Adjust { guidance: String },
-    Escalate,
-}
-
-/// Response from a branch after a child completes.
-pub enum ChildResponse {
-    /// Proceed to next child.
-    Continue,
-    /// Child failed; branch designed recovery subtasks.
-    NeedRecoverySubtasks {
-        specs: Vec<SubtaskSpec>,
-        /// If true, pending siblings are superseded (full redecomposition).
-        supersede_pending: bool,
-    },
-    /// Unrecoverable failure.
-    Failed(String),
-}
-
-/// Outcome of branch verification.
-pub enum BranchVerifyOutcome {
-    Passed,
-    Failed { reason: String },
-}
-
-/// Result of checking the fix round budget.
-#[derive(Debug)]
-pub enum FixBudgetCheck {
-    WithinBudget { model: Model },
-    Exhausted,
-}
-
-/// Decision from recovery assessment + design.
-pub enum RecoveryDecision {
-    Unrecoverable {
-        reason: String,
-    },
-    Plan {
-        specs: Vec<SubtaskSpec>,
-        supersede_pending: bool,
-    },
-}
+// Re-export orchestration-protocol types from cue.
+pub use cue::{
+    BranchVerifyOutcome, CheckpointDecision, ChildResponse, DecompositionResult, FixBudgetCheck,
+    RecoveryDecision, SubtaskSpec,
+};
 
 impl Task {
     /// Verify a branch task. Calls `svc.agent.verify()` with context,
@@ -80,25 +27,26 @@ impl Task {
         svc: &Services<A>,
     ) -> Result<BranchVerifyOutcome, OrchestratorError> {
         let verify_model = self.verification_model();
-        let ctx = tree.to_task_context(self);
+        let ctx = self.to_task_context(tree);
         let agent_result = svc.agent.verify(&ctx, verify_model).await?;
         self.accumulate_usage(&agent_result.meta);
         self.emit_usage_event(svc);
 
         match agent_result.value.outcome {
             VerificationOutcome::Pass => Ok(BranchVerifyOutcome::Passed),
-            VerificationOutcome::Fail { reason } => Ok(BranchVerifyOutcome::Failed { reason }),
+            VerificationOutcome::Fail { reason } => {
+                if self.is_fix_task {
+                    Ok(BranchVerifyOutcome::FailedNoFixLoop { reason })
+                } else {
+                    Ok(BranchVerifyOutcome::Failed { reason })
+                }
+            }
         }
     }
 
     /// Check whether the fix round budget is exhausted.
-    /// Returns model selection (Sonnet for rounds 1-3, Opus for round 4+)
-    /// or Exhausted if rounds >= max.
-    pub const fn fix_round_budget_check(
-        &self,
-        is_root: bool,
-        limits: &LimitsConfig,
-    ) -> FixBudgetCheck {
+    pub const fn fix_round_budget_check(&self, limits: &LimitsConfig) -> FixBudgetCheck {
+        let is_root = self.parent_id.is_none();
         let max_rounds = if is_root {
             limits.root_fix_rounds
         } else {
@@ -107,9 +55,6 @@ impl Task {
         if self.verification_fix_rounds >= max_rounds {
             return FixBudgetCheck::Exhausted;
         }
-        // Sonnet for rounds 1-3, Opus for round 4+.
-        // Note: verification_fix_rounds is checked before increment,
-        // so the round number is verification_fix_rounds + 1.
         let next_round = self.verification_fix_rounds + 1;
         let model = if next_round <= 3 {
             Model::Sonnet
@@ -120,9 +65,6 @@ impl Task {
     }
 
     /// Design fix subtasks to address branch verification issues.
-    /// Calls `svc.agent.design_fix_subtasks()`, accumulates usage.
-    /// Returns `Ok(specs)` on success, `Err(reason)` if agent errors or
-    /// produces no subtasks.
     pub async fn design_fix<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -131,7 +73,7 @@ impl Task {
         round: u32,
         model: Model,
     ) -> Result<Result<Vec<SubtaskSpec>, String>, OrchestratorError> {
-        let ctx = tree.to_task_context(self);
+        let ctx = self.to_task_context(tree);
         match svc
             .agent
             .design_fix_subtasks(&ctx, model, failure, round)
@@ -154,15 +96,11 @@ impl Task {
         }
     }
 
-    /// Check whether recovery rounds are within budget.
     pub const fn recovery_budget_check(&self, limits: &LimitsConfig) -> bool {
         self.recovery_rounds < limits.max_recovery_rounds
     }
 
     /// Assess whether recovery is possible and design recovery subtasks.
-    /// Returns `Unrecoverable` if the agent says no or errors, or `Plan`
-    /// with specs and supersede flag if recovery is designed.
-    /// Increments `recovery_rounds` internally after assess succeeds (before design).
     pub async fn assess_and_design_recovery<A: AgentService>(
         &mut self,
         tree: &TreeContext,
@@ -170,8 +108,7 @@ impl Task {
         failure: &str,
         round: u32,
     ) -> Result<RecoveryDecision, OrchestratorError> {
-        // Step 1: assess whether recovery is possible.
-        let ctx = tree.to_task_context(self);
+        let ctx = self.to_task_context(tree);
         let strategy = match svc.agent.assess_recovery(&ctx, failure).await {
             Ok(agent_result) => {
                 self.accumulate_usage(&agent_result.meta);
@@ -193,8 +130,6 @@ impl Task {
             }
         };
 
-        // Increment recovery rounds after assessment succeeds but before design,
-        // so a crash does not grant an extra recovery round on resume.
         self.increment_recovery_rounds();
 
         self.record_to_vault(
@@ -209,9 +144,7 @@ impl Task {
             round,
         });
 
-        // Step 2: design recovery subtasks.
-        // Rebuild context since vault recording may have changed state.
-        let ctx = tree.to_task_context(self);
+        let ctx = self.to_task_context(tree);
         let plan = match svc
             .agent
             .design_recovery_subtasks(&ctx, failure, &strategy, round)
@@ -253,15 +186,13 @@ impl Task {
     }
 
     /// Handle checkpoint after a child reports discoveries.
-    /// Classifies discoveries, handles adjust/escalate logic.
     pub async fn handle_checkpoint<A: AgentService>(
         &mut self,
         tree: &TreeContext,
         svc: &Services<A>,
         child_discoveries: &[String],
     ) -> Result<ChildResponse, OrchestratorError> {
-        let ctx = tree.to_task_context(self);
-        // Agent errors treated as Proceed (best-effort).
+        let ctx = self.to_task_context(tree);
         let decision = match svc.agent.checkpoint(&ctx, child_discoveries).await {
             Ok(agent_result) => {
                 self.accumulate_usage(&agent_result.meta);
@@ -297,7 +228,6 @@ impl Task {
                     "checkpoint escalation: discoveries invalidate current plan. Discoveries: {}",
                     child_discoveries.join("; ")
                 );
-                // Delegate to recovery assessment.
                 if self.is_fix_task {
                     return Ok(ChildResponse::Failed(escalation_reason));
                 }
@@ -308,7 +238,6 @@ impl Task {
                     )));
                 }
                 let round = self.recovery_rounds + 1;
-                // Note: assess_and_design_recovery increments recovery_rounds internally.
                 match self
                     .assess_and_design_recovery(tree, svc, &escalation_reason, round)
                     .await?
@@ -350,22 +279,20 @@ mod tests {
     use crate::config::project::LimitsConfig;
     use crate::task::TaskId;
 
-    // --- fix_round_budget_check ---
-
     #[test]
     fn fix_budget_check_cases() {
-        // (rounds, is_root, expected model or None for Exhausted)
-        let cases: &[(u32, bool, Option<Model>)] = &[
-            (0, false, Some(Model::Sonnet)), // within budget, Sonnet
-            (3, true, Some(Model::Opus)),    // root Opus round
-            (3, false, None),                // non-root exhausted
-            (4, true, None),                 // root exhausted
+        let cases: &[(u32, Option<TaskId>, Option<Model>)] = &[
+            (0, Some(TaskId(99)), Some(Model::Sonnet)),
+            (3, None, Some(Model::Opus)),
+            (3, Some(TaskId(99)), None),
+            (4, None, None),
         ];
-        let limits = LimitsConfig::default(); // branch=3, root=4
-        for &(rounds, is_root, expected) in cases {
-            let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
+        let limits = LimitsConfig::default();
+        for &(rounds, ref parent_id, expected) in cases {
+            let mut t = Task::new(TaskId(0), *parent_id, "t".into(), vec![], 0);
             t.verification_fix_rounds = rounds;
-            match (t.fix_round_budget_check(is_root, &limits), expected) {
+            let is_root = parent_id.is_none();
+            match (t.fix_round_budget_check(&limits), expected) {
                 (FixBudgetCheck::WithinBudget { model }, Some(exp)) => {
                     assert_eq!(model, exp, "rounds={rounds} is_root={is_root}");
                 }
@@ -375,13 +302,11 @@ mod tests {
         }
     }
 
-    // --- recovery_budget_check ---
-
     #[test]
     fn recovery_budget_within() {
         let mut t = Task::new(TaskId(0), None, "t".into(), vec![], 0);
         t.recovery_rounds = 1;
-        let limits = LimitsConfig::default(); // max_recovery_rounds=2
+        let limits = LimitsConfig::default();
         assert!(t.recovery_budget_check(&limits));
     }
 

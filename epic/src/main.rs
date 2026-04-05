@@ -7,6 +7,7 @@ pub(crate) mod knowledge;
 mod orchestrator;
 mod sandbox;
 mod state;
+pub(crate) mod store;
 mod task;
 mod tui;
 
@@ -17,8 +18,8 @@ use agent::reel_adapter::ReelAgent;
 use cli::{Cli, Command};
 use config::project::EpicConfig;
 use events::event_channel;
-use orchestrator::Orchestrator;
 use state::EpicState;
+use store::EpicStore;
 use task::Task;
 use tui::TuiApp;
 
@@ -131,7 +132,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         agent = agent.with_vault(v.clone());
     }
 
-    let (mut state, root_id, goal_text) = match &cli.command {
+    let (state, root_id, goal_text) = match &cli.command {
         Command::Run { goal } => {
             if state_path.exists() {
                 let (existing, rid, persisted_goal) = load_and_validate_state(&state_path)?;
@@ -193,20 +194,26 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         }
     }
 
-    let mut orchestrator = Orchestrator::new(agent, tx)
-        .with_limits(epic_config.limits)
-        .with_state_path(state_path.clone())
-        .with_project_root(project_root.clone());
+    // Build the EpicStore (TaskStore impl) wrapping state + runtime deps.
+    let epic_store = EpicStore::from_state(
+        state,
+        Arc::new(agent),
+        tx.clone(),
+        vault_handle,
+        epic_config.limits.clone(),
+        Some(project_root.clone()),
+    );
 
-    if let Some(v) = vault_handle {
-        orchestrator = orchestrator.with_vault(v);
-    }
+    let mut orchestrator = cue::Orchestrator::new(epic_store, tx)
+        .with_limits(epic_config.limits)
+        .with_state_path(state_path.clone());
 
     if cli.no_tui {
         drop(rx);
-        let outcome = orchestrator.run(&mut state, root_id).await?;
-        state.save(&state_path)?;
-        let usage = state.total_usage();
+        let outcome = orchestrator.run(root_id).await?;
+        let final_state = orchestrator.store().as_state();
+        final_state.save(&state_path)?;
+        let usage = final_state.total_usage();
         println!("Epic completed: {outcome:?}");
         println!(
             "Usage: {} API calls, {} input tokens, {} output tokens, ${:.4}",
@@ -216,8 +223,9 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         let mut tui_app = TuiApp::new(goal_text);
 
         let orch_handle = tokio::spawn(async move {
-            let result = orchestrator.run(&mut state, root_id).await;
-            (result, state)
+            let result = orchestrator.run(root_id).await;
+            let final_state = orchestrator.into_store().into_state();
+            (result, final_state)
         });
 
         let tui_result = tokio::task::spawn_blocking(move || tui_app.run(rx)).await?;

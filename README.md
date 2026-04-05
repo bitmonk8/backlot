@@ -9,7 +9,8 @@ flick  (leaf)          LLM provider abstraction
 lot    (leaf)          Cross-platform process sandboxing
 reel   → flick, lot    Agent session runtime + tool loop
 vault  → reel          File-based knowledge store
-epic   → reel, vault   Recursive problem-solver orchestrator
+cue    (leaf)          Generic recursive task orchestration framework
+epic   → cue, reel, vault   Recursive problem-solver orchestrator
 ```
 
 | Crate | Description | README |
@@ -18,7 +19,8 @@ epic   → reel, vault   Recursive problem-solver orchestrator
 | [lot](lot/) | Cross-platform process sandboxing. Launches child processes with restricted filesystem and network access using namespaces+seccomp (Linux), Seatbelt (macOS), or AppContainer (Windows). Library + CLI. | [lot/README.md](lot/README.md) |
 | [reel](reel/) | Agent session runtime. Owns the tool loop (50 rounds / 200 tool calls), a sandboxed NuShell MCP session via lot, and 6 built-in tools (Read, Write, Edit, Glob, Grep, NuShell). Library + CLI. | [reel/README.md](reel/README.md) |
 | [vault](vault/) | Persistent file-based knowledge store. Accumulates project knowledge through four operations (bootstrap, record, query, reorganize) backed by a reel agent. Library + CLI. | [vault/README.md](vault/README.md) |
-| [epic](epic/) | Recursive problem-solver. Decomposes large tasks into subtasks, delegates to AI agents, verifies results, and recovers from failures. Uses vault for knowledge persistence and reel for agent sessions. | [epic/README.md](epic/README.md) |
+| [cue](cue/) | Generic recursive task orchestration framework. Defines the `TaskNode` and `TaskStore` traits, coordination algorithm (DFS traversal, retry, escalation, fix loops, recovery), event system, and shared orchestration types. No AI dependencies -- application crates provide concrete implementations through the traits. | |
+| [epic](epic/) | Recursive problem-solver. Implements cue's `TaskNode` and `TaskStore` traits with AI agent calls (via reel), vault knowledge persistence, prompts, wire formats, and TUI. | [epic/README.md](epic/README.md) |
 
 ## Documentation
 

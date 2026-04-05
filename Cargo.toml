@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "cue",
     "flick/flick",
     "flick/flick-cli",
     "lot/lot",
@@ -20,6 +21,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # Internal crates
+cue = { path = "cue" }
 flick = { path = "flick/flick" }
 lot = { path = "lot/lot" }
 reel = { path = "reel/reel" }

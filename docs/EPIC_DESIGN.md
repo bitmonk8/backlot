@@ -108,46 +108,61 @@ Cheapest to most expensive:
 
 ## Orchestrator Architecture
 
+### Cue Extraction
+
+The orchestrator coordination engine is extracted into the `cue` sibling crate. Cue defines the generic recursive task execution algorithm, trait contracts (`TaskNode`, `TaskStore`), orchestration protocol types, events, and configuration. Epic provides the concrete implementations through these traits.
+
+**Cue defines**: `TaskNode` trait (28 methods: 8 read accessors, 6 decision methods, 6 mutations, 8 lifecycle), `TaskStore` trait (task storage, creation, cross-task queries), `Orchestrator<S: TaskStore>` (coordination loop), all orchestration protocol types (`TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`, etc.), event system, `LimitsConfig`.
+
+**Epic defines**: `Task` struct (serializable task data), `EpicTask<A>` (wraps `Task` + runtime deps, implements `TaskNode`), `EpicStore<A>` (implements `TaskStore`), `TaskRuntime<A>` (agent, vault, events, limits, project_root), `AgentService` trait, `ReelAgent`, prompts, wire formats, TUI, CLI.
+
 ### Coordinator / Task Split
 
-The orchestrator is a pure coordinator. Tasks own their behavior.
+The orchestrator (in cue) is a pure coordinator. Tasks own their behavior via the `TaskNode` trait.
 
-- **Leaf tasks** execute their full lifecycle internally via `Task::execute_leaf()`: agent calls, retry/escalation (Haiku -> Sonnet -> Opus), verification gates, file-level review, fix loop, scope circuit breaker. The orchestrator calls `run_leaf()` which builds a `TreeContext`, gets `&mut Task`, calls `execute_leaf`, and handles completion/failure.
+- **Leaf tasks** execute their full lifecycle internally via `TaskNode::execute_leaf()`: agent calls, retry/escalation (Haiku -> Sonnet -> Opus), verification gates, file-level review, fix loop, scope circuit breaker. The cue orchestrator calls `execute_leaf()` on the task, and handles completion/failure.
 
-- **Branch tasks** own decision logic via Task methods in `task/branch.rs`: `verify_branch()`, `fix_round_budget_check()`, `design_fix()`, `recovery_budget_check()`, `assess_and_design_recovery()`, `handle_checkpoint()`, `check_branch_scope()`. Each method receives `TreeContext` + `Services`, makes agent calls, mutates only `self`, and returns a structured decision enum (`BranchVerifyOutcome`, `FixBudgetCheck`, `RecoveryDecision`, `ChildResponse`). The orchestrator acts on these decisions by performing cross-task operations: creating subtasks, executing children, failing pending siblings.
+- **Branch tasks** own decision logic via `TaskNode` methods: `verify_branch()`, `fix_round_budget_check()`, `design_fix()`, `handle_checkpoint()`, `check_branch_scope()`, `can_attempt_recovery()`, `assess_and_design_recovery()`. Each method returns a structured decision enum. The orchestrator acts on these decisions by performing cross-task operations via `TaskStore`: creating subtasks, executing children, failing pending siblings.
 
-- **`Services<A>`** bundles shared infrastructure (agent, events, vault, limits, paths) passed to task methods during execution.
+- **`TaskRuntime<A>`** bundles shared infrastructure (agent, events, vault, limits, paths) injected into tasks at construction time. Replaces the former `Services<A>` parameter. Tasks access runtime deps internally via `self.runtime`.
 
-- **`TreeContext`** is a read-only owned snapshot of tree state (parent goal, siblings, children, checkpoint guidance) built by the orchestrator before calling task methods. Resolves `&state` / `&mut task` borrow conflicts. Rebuilt before each Task method call when task state may have changed.
+- **`TreeContext`** is a read-only owned snapshot of tree state (parent goal, siblings, children, checkpoint guidance) built by the `TaskStore` before calling task methods. Resolves borrow conflicts. Rebuilt before each TaskNode method call when task state may have changed.
 
-### Task Self-Contained Mutations
+### Runtime Dependency Injection
 
-`Task` has mutation methods for operations that only touch the task itself: `set_assessment`, `record_attempt`, `record_discoveries`, `set_model`, `set_decomposition_rationale`, `set_checkpoint_guidance`, `append_checkpoint_guidance`, `increment_fix_rounds`, `increment_recovery_rounds`, `accumulate_usage`, `trailing_attempts_at_tier`. The orchestrator calls these instead of directly mutating task fields.
+Tasks need runtime deps (agent, vault, event sender) for lifecycle methods. These are injected at construction time, not passed by the orchestrator.
+
+**Construction path**: `TaskStore::create_subtask()` is implemented by `EpicStore<A>`, which holds shared runtime deps (`Arc<TaskRuntime<A>>`). When creating a task, EpicStore injects these into the `EpicTask`.
+
+**Resume path**: After deserializing state, `EpicStore::from_state()` injects runtime deps into all existing tasks via `bind_runtime()`.
 
 ### File Structure
 
 ```
-orchestrator/
-  mod.rs          Thin coordinator: run(), execute_task(), run_leaf(),
-                  execute_branch() (decomposition + child loop),
-                  finalize_branch() (delegates to Task::verify_branch),
-                  branch_fix_loop() (delegates to Task fix/design methods),
-                  attempt_recovery() (delegates to Task recovery methods),
-                  create_subtasks(), fail_pending_children()
-  context.rs      TreeContext struct, build_tree_context(), build_context()
-  services.rs     Services<A> struct
-task/
-  mod.rs          Task struct, types, self-contained mutation methods
-  leaf.rs         Task::execute_leaf(): full lifecycle (execute -> verify -> fix loop)
-  branch.rs       Branch decision types (SubtaskSpec, DecompositionResult,
-                  CheckpointDecision, BranchVerifyOutcome, FixBudgetCheck,
-                  RecoveryDecision, ChildResponse) and
-                  Task methods (verify_branch, fix_round_budget_check,
-                  design_fix, recovery_budget_check, assess_and_design_recovery,
-                  handle_checkpoint, check_branch_scope)
-  scope.rs        Scope circuit breaker: git_diff_numstat, evaluate_scope, ScopeCheck
-  assess.rs       AssessmentResult
-  verify.rs       VerificationOutcome, VerificationResult, VerifyOutcome
+cue/                        # Generic orchestration framework (sibling crate)
+  src/
+    lib.rs                  Public API re-exports
+    traits.rs               TaskNode, TaskStore
+    types.rs                TaskId, TaskPhase, TaskPath, Model, Attempt, etc.
+    context.rs              TreeContext
+    events.rs               Event, EventSender, EventReceiver
+    config.rs               LimitsConfig, VerificationStep
+    orchestrator.rs         Orchestrator<S: TaskStore>
+
+epic/src/
+  store.rs                  EpicStore<A> implements cue::TaskStore
+  task/
+    mod.rs                  Task struct, TaskRuntime<A>, types, mutation methods
+    node_impl.rs            EpicTask<A> implements cue::TaskNode (lifecycle methods)
+    leaf.rs                 Leaf execution helpers (used by old orchestrator path)
+    branch.rs               Branch decision types and helpers
+    scope.rs                Scope circuit breaker: git_diff_numstat, evaluate_scope
+    assess.rs               AssessmentResult (re-export from cue)
+    verify.rs               VerificationOutcome, VerificationResult (re-exports)
+  orchestrator/
+    mod.rs                  Legacy orchestrator (parallel path for existing tests)
+    context.rs              TreeContext building, TaskContext assembly
+    services.rs             Services<A> struct (legacy)
 ```
 
 ---
@@ -300,7 +315,7 @@ All vault operations are best-effort. Failures are logged but never abort the or
 
 ### Usage Tracking
 
-Vault returns `SessionMetadata` from every operation. Converted to epic's `SessionMeta` via `SessionMeta::from_vault()` and accumulated on the task that triggered the operation. Vault query costs from the `ResearchQuery` tool are captured via an `Arc<Mutex<Vec<SessionMeta>>>` sink drained after each agent run, then folded into the calling task's usage.
+Vault returns `SessionMetadata` from every operation. Converted to epic's `SessionMeta` via `session_meta_from_vault()` and accumulated on the task that triggered the operation. Vault query costs from the `ResearchQuery` tool are captured via an `Arc<Mutex<Vec<SessionMeta>>>` sink drained after each agent run, then folded into the calling task's usage.
 
 ### Configuration
 
@@ -417,10 +432,7 @@ Before each fix attempt (leaf or branch), measure actual change magnitude:
 
 ```rust
 // Task method — leaf uses check_scope(), branch uses check_branch_scope()
-async fn check_branch_scope<A: AgentService>(
-    &self,
-    svc: &Services<A>,
-) -> ScopeCheck;
+async fn check_branch_scope(&self) -> ScopeCheck;
 
 enum ScopeCheck {
     WithinBounds,
@@ -802,6 +814,6 @@ All major components receive dependencies explicitly. No globals, statics, or si
 
 Key dependency types:
 - `TaskContext` and `ReelAgent` — bundle reel config, document store, verification config. Each agent call builds a `reel::AgentRequestConfig` and calls `reel::Agent::run()`
-- `EventEmitter` — trait object for logging/TUI events
+- `EventSender` — type alias (`mpsc::UnboundedSender<Event>`) for logging/TUI events
 - `ProjectConfig` — verification steps, paths, model preferences (loaded from TOML)
 - `EpicState` — task tree and session state (owned by orchestrator)

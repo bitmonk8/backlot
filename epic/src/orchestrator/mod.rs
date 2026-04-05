@@ -7,24 +7,15 @@ use crate::agent::{AgentService, SessionMeta, TaskContext};
 use crate::config::project::LimitsConfig;
 use crate::events::{Event, EventSender};
 use crate::state::EpicState;
-use crate::task::assess::AssessmentResult;
 use crate::task::branch::SubtaskSpec;
 use crate::task::scope::ScopeCheck;
 use crate::task::verify::{VerificationOutcome, VerifyOutcome};
-use crate::task::{Model, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
+use crate::task::{Model, ResumePoint, Task, TaskId, TaskOutcome, TaskPath, TaskPhase};
+pub use cue::OrchestratorError;
 use services::Services;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum OrchestratorError {
-    #[error("task not found: {0}")]
-    TaskNotFound(TaskId),
-    #[error("agent error: {0}")]
-    Agent(#[from] anyhow::Error),
-}
 
 pub struct Orchestrator<A: AgentService> {
     services: Services<A>,
@@ -104,7 +95,7 @@ impl<A: AgentService> Orchestrator<A> {
         };
         match result {
             Ok((_refs, _warnings, meta)) => {
-                let session_meta = SessionMeta::from_vault(&meta);
+                let session_meta = crate::agent::session_meta_from_vault(&meta);
                 self.accumulate_usage(state, task_id, &session_meta);
                 self.emit(Event::VaultRecorded {
                     task_id,
@@ -124,7 +115,7 @@ impl<A: AgentService> Orchestrator<A> {
         };
         match vault.reorganize().await {
             Ok((report, _warnings, meta)) => {
-                let session_meta = SessionMeta::from_vault(&meta);
+                let session_meta = crate::agent::session_meta_from_vault(&meta);
                 self.accumulate_usage(state, task_id, &session_meta);
                 self.emit(Event::VaultReorganizeCompleted {
                     merged: report.merged.len(),
@@ -147,16 +138,17 @@ impl<A: AgentService> Orchestrator<A> {
         // Register all tasks for TUI (root + any pre-existing subtasks on resume).
         for id in state.dfs_order(root_id) {
             if let Some(t) = state.get(id) {
+                let info = t.registration_info();
                 self.emit(Event::TaskRegistered {
                     task_id: id,
-                    parent_id: t.parent_id,
-                    goal: t.goal.clone(),
-                    depth: t.depth,
+                    parent_id: info.parent_id,
+                    goal: info.goal,
+                    depth: info.depth,
                 });
-                if t.phase != TaskPhase::Pending {
+                if info.phase != TaskPhase::Pending {
                     self.emit(Event::PhaseTransition {
                         task_id: id,
-                        phase: t.phase,
+                        phase: info.phase,
                     });
                 }
             }
@@ -333,28 +325,12 @@ impl<A: AgentService> Orchestrator<A> {
         append: bool,
         inherit_recovery_rounds: Option<u32>,
     ) -> Result<Vec<TaskId>, OrchestratorError> {
-        let parent_depth = state
-            .get(parent_id)
-            .ok_or(OrchestratorError::TaskNotFound(parent_id))?
-            .depth;
-
         let mut child_ids = Vec::new();
-        for spec in specs {
-            let child_id = state.next_task_id();
-            let mut child = Task::new(
-                child_id,
-                Some(parent_id),
-                spec.goal,
-                spec.verification_criteria,
-                parent_depth + 1,
-            );
-            child.magnitude_estimate = Some(spec.magnitude_estimate);
-            child.is_fix_task = mark_fix;
-            if let Some(rounds) = inherit_recovery_rounds {
-                child.recovery_rounds = rounds;
-            }
+        for spec in &specs {
+            let child_id = state
+                .create_subtask(parent_id, spec, mark_fix, inherit_recovery_rounds)
+                .ok_or(OrchestratorError::TaskNotFound(parent_id))?;
             child_ids.push(child_id);
-            state.insert(child);
         }
 
         {
@@ -370,11 +346,12 @@ impl<A: AgentService> Orchestrator<A> {
 
         for &child_id in &child_ids {
             if let Some(child) = state.get(child_id) {
+                let info = child.registration_info();
                 self.emit(Event::TaskRegistered {
                     task_id: child_id,
-                    parent_id: child.parent_id,
-                    goal: child.goal.clone(),
-                    depth: child.depth,
+                    parent_id: info.parent_id,
+                    goal: info.goal,
+                    depth: info.depth,
                 });
             }
         }
@@ -399,74 +376,40 @@ impl<A: AgentService> Orchestrator<A> {
         id: TaskId,
     ) -> Pin<Box<dyn Future<Output = Result<TaskOutcome, OrchestratorError>> + Send + 'a>> {
         Box::pin(async move {
-            // Resume: skip already-terminal tasks.
+            // Resume: check where this task should re-enter.
             {
                 let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
-                match task.phase {
-                    TaskPhase::Completed => return Ok(TaskOutcome::Success),
-                    TaskPhase::Failed => {
-                        return Ok(TaskOutcome::Failed {
-                            reason: "previously failed".into(),
-                        });
+                match task.resume_point() {
+                    ResumePoint::Terminal(outcome) => return Ok(outcome),
+                    ResumePoint::LeafVerifying => return self.run_leaf(state, id).await,
+                    ResumePoint::BranchVerifying => {
+                        return self.finalize_branch(state, id, TaskOutcome::Success).await;
                     }
-                    _ => {}
-                }
-            }
-
-            // Resume: task was mid-verification or mid-execution with path set.
-            {
-                let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
-                let path = task.path.clone();
-                let phase = task.phase;
-
-                if let (Some(p), TaskPhase::Verifying) = (&path, phase) {
-                    return match p {
-                        TaskPath::Leaf => self.run_leaf(state, id).await,
-                        TaskPath::Branch => {
-                            self.finalize_branch(state, id, TaskOutcome::Success).await
-                        }
-                    };
-                }
-
-                if let (Some(p), TaskPhase::Executing) = (&path, phase) {
-                    let p = p.clone();
-                    self.transition(state, id, TaskPhase::Executing)?;
-                    return match p {
-                        TaskPath::Leaf => self.run_leaf(state, id).await,
-                        TaskPath::Branch => {
-                            let outcome = self.execute_branch(state, id).await?;
-                            self.finalize_branch(state, id, outcome).await
-                        }
-                    };
+                    ResumePoint::LeafExecuting => {
+                        self.transition(state, id, TaskPhase::Executing)?;
+                        return self.run_leaf(state, id).await;
+                    }
+                    ResumePoint::BranchExecuting => {
+                        self.transition(state, id, TaskPhase::Executing)?;
+                        let outcome = self.execute_branch(state, id).await?;
+                        return self.finalize_branch(state, id, outcome).await;
+                    }
+                    ResumePoint::NeedAssessment => {}
                 }
             }
 
             self.transition(state, id, TaskPhase::Assessing)?;
 
             let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
-            let is_root = task.parent_id.is_none();
-            let depth = task.depth;
-
-            let assessment = if is_root {
-                AssessmentResult {
-                    path: TaskPath::Branch,
-                    model: Model::Sonnet,
-                    rationale: "Root task always branches".into(),
-                    magnitude: None,
-                }
-            } else if depth >= self.services.limits.max_depth {
-                AssessmentResult {
-                    path: TaskPath::Leaf,
-                    model: Model::Sonnet,
-                    rationale: "Depth cap reached, forced to leaf".into(),
-                    magnitude: None,
-                }
-            } else {
-                let ctx = self.build_context(state, id)?;
-                let agent_result = self.services.agent.assess(&ctx).await?;
-                self.accumulate_usage(state, id, &agent_result.meta);
-                agent_result.value
-            };
+            let assessment =
+                if let Some(forced) = task.forced_assessment(self.services.limits.max_depth) {
+                    forced
+                } else {
+                    let ctx = self.build_context(state, id)?;
+                    let agent_result = self.services.agent.assess(&ctx).await?;
+                    self.accumulate_usage(state, id, &agent_result.meta);
+                    agent_result.value
+                };
 
             // Apply assessment to task.
             {
@@ -522,23 +465,21 @@ impl<A: AgentService> Orchestrator<A> {
         if outcome == TaskOutcome::Success {
             self.transition(state, id, TaskPhase::Verifying)?;
 
-            let tree = context::build_tree_context(state, id)?;
+            let tree = state.build_tree_context(id)?;
             let task = state
                 .get_mut(id)
                 .ok_or(OrchestratorError::TaskNotFound(id))?;
             let verify_outcome = task.verify_branch(&tree, &self.services).await?;
-            let is_fix_task = task.is_fix_task;
 
             match verify_outcome {
                 crate::task::branch::BranchVerifyOutcome::Passed => {
                     self.complete_task_verified(state, id)
                 }
+                crate::task::branch::BranchVerifyOutcome::FailedNoFixLoop { reason } => {
+                    self.fail_task(state, id, reason)
+                }
                 crate::task::branch::BranchVerifyOutcome::Failed { reason } => {
-                    if is_fix_task {
-                        self.fail_task(state, id, reason)
-                    } else {
-                        self.branch_fix_loop(state, id, &reason).await
-                    }
+                    self.branch_fix_loop(state, id, &reason).await
                 }
             }
         } else {
@@ -556,19 +497,13 @@ impl<A: AgentService> Orchestrator<A> {
         id: TaskId,
         initial_failure: &str,
     ) -> Result<TaskOutcome, OrchestratorError> {
-        let is_root = state
-            .get(id)
-            .ok_or(OrchestratorError::TaskNotFound(id))?
-            .parent_id
-            .is_none();
-
         let mut failure_reason = initial_failure.to_owned();
 
         loop {
             // Check round budget via Task method.
             let model = {
                 let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
-                match task.fix_round_budget_check(is_root, &self.services.limits) {
+                match task.fix_round_budget_check(&self.services.limits) {
                     crate::task::branch::FixBudgetCheck::Exhausted => {
                         return self.fail_task(state, id, failure_reason);
                     }
@@ -609,7 +544,7 @@ impl<A: AgentService> Orchestrator<A> {
             });
 
             // Design fix subtasks via Task method.
-            let tree = context::build_tree_context(state, id)?;
+            let tree = state.build_tree_context(id)?;
             let specs = {
                 let task = state
                     .get_mut(id)
@@ -657,7 +592,7 @@ impl<A: AgentService> Orchestrator<A> {
         state: &mut EpicState,
         id: TaskId,
     ) -> Result<TaskOutcome, OrchestratorError> {
-        let tree = context::build_tree_context(state, id)?;
+        let tree = state.build_tree_context(id)?;
         let task = state
             .get_mut(id)
             .ok_or(OrchestratorError::TaskNotFound(id))?;
@@ -678,15 +613,12 @@ impl<A: AgentService> Orchestrator<A> {
         id: TaskId,
     ) -> Result<TaskOutcome, OrchestratorError> {
         // Resume: reuse existing subtasks if already decomposed.
-        let existing_subtasks = state
-            .get(id)
-            .ok_or(OrchestratorError::TaskNotFound(id))?
-            .subtask_ids
-            .clone();
+        let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
+        let should_decompose = task.needs_decomposition();
+        let decompose_model = task.decompose_model();
+        drop(task);
 
-        if existing_subtasks.is_empty() {
-            let task = state.get(id).ok_or(OrchestratorError::TaskNotFound(id))?;
-            let decompose_model = task.current_model.unwrap_or(Model::Sonnet);
+        if should_decompose {
             let ctx = self.build_context(state, id)?;
             let agent_result = self
                 .services
@@ -726,14 +658,12 @@ impl<A: AgentService> Orchestrator<A> {
             let mut all_done = true;
 
             for &child_id in &child_ids {
-                let child_phase = state
+                let child = state
                     .get(child_id)
-                    .ok_or(OrchestratorError::TaskNotFound(child_id))?
-                    .phase;
+                    .ok_or(OrchestratorError::TaskNotFound(child_id))?;
 
-                match child_phase {
-                    TaskPhase::Completed | TaskPhase::Failed => continue,
-                    _ => {}
+                if child.is_terminal() {
+                    continue;
                 }
 
                 all_done = false;
@@ -749,7 +679,7 @@ impl<A: AgentService> Orchestrator<A> {
                 if !child_discoveries.is_empty() {
                     use crate::task::branch::ChildResponse;
 
-                    let tree = context::build_tree_context(state, id)?;
+                    let tree = state.build_tree_context(id)?;
                     let response = {
                         let task = state
                             .get_mut(id)
@@ -842,17 +772,7 @@ impl<A: AgentService> Orchestrator<A> {
 
         // Guard: if every non-fix child failed (recovery exhausted or skipped),
         // the branch itself must report failure rather than vacuous success.
-        let child_ids = state
-            .get(id)
-            .ok_or(OrchestratorError::TaskNotFound(id))?
-            .subtask_ids
-            .clone();
-        let any_non_fix_succeeded = child_ids.iter().any(|&cid| {
-            state
-                .get(cid)
-                .is_some_and(|c| !c.is_fix_task && c.phase == TaskPhase::Completed)
-        });
-        if !any_non_fix_succeeded {
+        if !state.any_non_fix_child_succeeded(id) {
             return Ok(TaskOutcome::Failed {
                 reason: "all non-fix children failed".into(),
             });
@@ -870,35 +790,28 @@ impl<A: AgentService> Orchestrator<A> {
         parent_id: TaskId,
         failure_reason: &str,
     ) -> Result<Option<TaskOutcome>, OrchestratorError> {
+        use crate::task::RecoveryEligibility;
         use crate::task::branch::RecoveryDecision;
 
         let task = state
             .get(parent_id)
             .ok_or(OrchestratorError::TaskNotFound(parent_id))?;
 
-        // No recovery for fix tasks (prevents recursive recovery chains).
-        if task.is_fix_task {
-            return Ok(Some(TaskOutcome::Failed {
-                reason: failure_reason.to_string(),
-            }));
-        }
-
-        // Check recovery round budget via Task method.
-        if !task.recovery_budget_check(&self.services.limits) {
-            let max_recovery = self.services.limits.max_recovery_rounds;
-            return Ok(Some(TaskOutcome::Failed {
-                reason: format!("recovery rounds exhausted ({max_recovery}): {failure_reason}"),
-            }));
-        }
-
-        let round = task.recovery_rounds + 1;
+        let round = match task.can_attempt_recovery(&self.services.limits) {
+            RecoveryEligibility::NotEligible { reason } => {
+                return Ok(Some(TaskOutcome::Failed {
+                    reason: format!("{reason}: {failure_reason}"),
+                }));
+            }
+            RecoveryEligibility::Eligible { round } => round,
+        };
 
         // assess_and_design_recovery increments recovery_rounds internally
         // after assessment succeeds but before design.
         // Checkpoint after the call since the task may have been mutated.
 
         // Assess and design recovery via Task method.
-        let tree = context::build_tree_context(state, parent_id)?;
+        let tree = state.build_tree_context(parent_id)?;
         let decision = {
             let task = state
                 .get_mut(parent_id)

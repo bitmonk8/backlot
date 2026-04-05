@@ -17,25 +17,6 @@ use std::sync::{Arc, Mutex};
 const MAX_GAPS: usize = 5;
 
 // ---------------------------------------------------------------------------
-// SessionMeta conversion from vault metadata
-// ---------------------------------------------------------------------------
-
-impl SessionMeta {
-    /// Convert vault `SessionMetadata` to epic's `SessionMeta`.
-    pub fn from_vault(m: &vault::SessionMetadata) -> Self {
-        Self {
-            input_tokens: m.input_tokens,
-            output_tokens: m.output_tokens,
-            cache_creation_input_tokens: m.cache_creation_input_tokens,
-            cache_read_input_tokens: m.cache_read_input_tokens,
-            cost_usd: m.cost_usd,
-            tool_calls: m.tool_calls,
-            total_latency_ms: m.api_latency_ms(),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // ResearchScope — controls where the research service looks
 // ---------------------------------------------------------------------------
 
@@ -238,7 +219,7 @@ impl ResearchTool {
         };
 
         let result: reel::RunResult<T> = self.agent.run(&request, query).await?;
-        self.sink_usage(SessionMeta::from_run_result(&result));
+        self.sink_usage(crate::agent::session_meta_from_run_result(&result));
         Ok(result.output)
     }
 
@@ -349,7 +330,7 @@ impl ResearchTool {
         };
         match result {
             Ok((_refs, _warnings, meta)) => {
-                self.sink_usage(SessionMeta::from_vault(&meta));
+                self.sink_usage(crate::agent::session_meta_from_vault(&meta));
             }
             Err(e) => {
                 eprintln!("Research: failed to record findings: {e}");
@@ -495,7 +476,7 @@ impl ResearchTool {
     ) -> anyhow::Result<ResearchResult> {
         // Step 1: Query vault
         let (query_result, meta) = self.vault.query(question).await?;
-        self.sink_usage(SessionMeta::from_vault(&meta));
+        self.sink_usage(crate::agent::session_meta_from_vault(&meta));
 
         // Short-circuit: full coverage or vault-only scope
         if query_result.coverage == vault::Coverage::Full || scope == ResearchScope::Vault {
@@ -637,7 +618,7 @@ mod tests {
             ],
         };
 
-        let session = SessionMeta::from_vault(&meta);
+        let session = crate::agent::session_meta_from_vault(&meta);
         assert_eq!(session.input_tokens, 100);
         assert_eq!(session.output_tokens, 50);
         assert_eq!(session.cache_creation_input_tokens, 10);
