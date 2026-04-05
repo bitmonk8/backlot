@@ -760,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn read_parent_after_exec_child_rejected_by_validate() {
+    fn read_parent_exec_child_builds_ok() {
         let tmp = make_temp_dir();
         let parent = tmp.path().join("lib");
         let child = parent.join("bin");
@@ -774,8 +774,8 @@ mod tests {
             .build();
 
         assert!(
-            result.is_err(),
-            "read parent + exec child is an unresolvable conflict"
+            result.is_ok(),
+            "exec child under read parent should be valid"
         );
     }
 

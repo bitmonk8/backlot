@@ -137,11 +137,11 @@ pub fn validate_env_accessibility(policy: &SandboxPolicy, command: &SandboxComma
             .collect();
         if !uncovered.is_empty() {
             errors.push(format!(
-                "{} PATH entries are not accessible to the sandbox (first: {}). \
+                "{} PATH entries are not accessible to the sandbox: {}. \
                  Either add them as read_path/write_path/exec_path or override PATH with \
                  SandboxCommand::env(\"PATH\", <accessible paths only>)",
                 uncovered.len(),
-                uncovered[0]
+                uncovered.join(", ")
             ));
         }
     }

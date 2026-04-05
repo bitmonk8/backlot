@@ -306,13 +306,17 @@ impl SandboxPolicy {
             ),
             &mut errors,
         );
+        // An exec child under a read parent is allowed: it grants execute
+        // permission to a specific subdirectory while the parent remains
+        // read-only (e.g. read the whole app bundle, exec only Contents/MacOS).
+        // The reverse (read child under exec parent) is redundant and rejected.
         collect_validation_error(
             check_cross_overlap(
                 &read_canon,
                 "read_paths",
                 &exec_canon,
                 "exec_paths",
-                OverlapMode::Symmetric,
+                OverlapMode::AllowChildUnderParent,
             ),
             &mut errors,
         );
@@ -550,6 +554,27 @@ mod tests {
         assert!(
             msg.contains("duplicate"),
             "error should mention duplicate: {msg}"
+        );
+    }
+
+    #[test]
+    fn read_parent_exec_child_allowed() {
+        let tmp = make_temp_dir();
+        let parent = tmp.path().to_path_buf();
+        let child = tmp.path().join("bin");
+        std::fs::create_dir(&child).expect("create subdir");
+
+        let policy = SandboxPolicy {
+            read_paths: vec![parent],
+            write_paths: Vec::new(),
+            exec_paths: vec![child],
+            deny_paths: Vec::new(),
+            allow_network: false,
+            sentinel_dir: None,
+        };
+        assert!(
+            policy.validate().is_ok(),
+            "exec child under read parent should be valid"
         );
     }
 
