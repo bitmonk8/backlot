@@ -52,13 +52,20 @@ fn make_orchestrator(
 /// the store's runtime and the orchestrator.
 fn make_orchestrator_with_limits(
     mock: MockAgentService,
-    limits: LimitsConfig,
+    mut limits: LimitsConfig,
 ) -> (
     TestOrchestrator,
     Arc<MockAgentService>,
     TaskId,
     EventReceiver,
 ) {
+    // Apply the same clamping that Orchestrator::with_limits does, so the
+    // store's runtime and the orchestrator see identical values.
+    limits.retry_budget = limits.retry_budget.max(1);
+    limits.branch_fix_rounds = limits.branch_fix_rounds.max(1);
+    limits.root_fix_rounds = limits.root_fix_rounds.max(1);
+    limits.max_total_tasks = limits.max_total_tasks.max(1);
+
     let mut state = EpicState::new();
     let root_id = state.next_task_id();
     let root = Task::new(
