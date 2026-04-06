@@ -154,15 +154,15 @@ epic/src/
   task/
     mod.rs                  Task struct, TaskRuntime<A>, types, mutation methods
     node_impl.rs            EpicTask<A> implements cue::TaskNode (lifecycle methods)
-    leaf.rs                 Leaf execution helpers (used by old orchestrator path)
-    branch.rs               Branch decision types and helpers
+    leaf.rs                 Leaf helpers (verification_model)
+    branch.rs               Branch budget checks, re-exports from cue
     scope.rs                Scope circuit breaker: git_diff_numstat, evaluate_scope
     assess.rs               AssessmentResult (re-export from cue)
     verify.rs               VerificationOutcome, VerificationResult (re-exports)
   orchestrator/
-    mod.rs                  Legacy orchestrator (parallel path for existing tests)
-    context.rs              TreeContext building, TaskContext assembly
-    services.rs             Services<A> struct (legacy)
+    mod.rs                  Re-exports OrchestratorError from cue
+    context.rs              tree_to_task_context helper, TreeContext re-export
+    tests.rs                Orchestrator integration tests (cue::Orchestrator<EpicStore<MockAgentService>>)
 ```
 
 ---

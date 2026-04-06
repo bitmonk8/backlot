@@ -91,7 +91,7 @@
 
 ## Epic
 
-**Phase:** Core orchestration, knowledge layer, file-level review, and cue integration implemented. 239 tests passing.
+**Phase:** Core orchestration, knowledge layer, file-level review, and cue integration complete. All orchestrator tests exercise `cue::Orchestrator<EpicStore<A>>`.
 
 **Implemented:**
 - Recursive problem-solver with DFS execution, retry/escalation, fix loops, recovery re-decomposition
@@ -116,7 +116,6 @@
 - User-level config fallback (`~/.config/epic/config.toml`)
 
 **Next Work:**
-1. **Legacy orchestrator removal** — Remove the old `Orchestrator<A>` in `orchestrator/mod.rs` once all tests are migrated to use `cue::Orchestrator<EpicStore<A>>`.
-2. **Branch verification separation** — Split single-call branch verification into correctness + completeness + aggregate simplification reviews.
-3. **Web search scope for Research Service** — Add WEB scope to gap-filling pipeline (vault + codebase + web search).
-4. **User-level config fallback** — `~/.config/epic/config.toml` resolution for user defaults.
+1. **Branch verification separation** — Split single-call branch verification into correctness + completeness + aggregate simplification reviews.
+2. **Web search scope for Research Service** — Add WEB scope to gap-filling pipeline (vault + codebase + web search).
+3. **User-level config fallback** — `~/.config/epic/config.toml` resolution for user defaults.

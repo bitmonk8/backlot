@@ -1,15 +1,8 @@
-// Branch execution path: design + decompose -> execute children -> verify aggregate.
-// Decision logic and self-contained operations live here; cross-task coordination
-// (child execution, subtask creation, sibling state mutation) stays in the orchestrator.
+// Branch execution: budget checks, recovery budget checks.
+// Decision logic lives here; cross-task coordination stays in the orchestrator.
+// Lifecycle methods that need an agent are on EpicTask in node_impl.rs.
 
-use crate::agent::AgentService;
 use crate::config::project::LimitsConfig;
-use crate::events::Event;
-use crate::orchestrator::OrchestratorError;
-use crate::orchestrator::context::TreeContext;
-use crate::orchestrator::services::Services;
-use crate::task::scope::{self, ScopeCheck};
-use crate::task::verify::VerificationOutcome;
 use crate::task::{Model, Task};
 
 // Re-export orchestration-protocol types from cue.
@@ -19,32 +12,6 @@ pub use cue::{
 };
 
 impl Task {
-    /// Verify a branch task. Calls `svc.agent.verify()` with context,
-    /// accumulates usage, returns structured outcome.
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    pub async fn verify_branch<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-    ) -> Result<BranchVerifyOutcome, OrchestratorError> {
-        let verify_model = self.verification_model();
-        let ctx = self.to_task_context(tree);
-        let agent_result = svc.agent.verify(&ctx, verify_model).await?;
-        self.accumulate_usage(&agent_result.meta);
-        self.emit_usage_event(svc);
-
-        match agent_result.value.outcome {
-            VerificationOutcome::Pass => Ok(BranchVerifyOutcome::Passed),
-            VerificationOutcome::Fail { reason } => {
-                if self.is_fix_task {
-                    Ok(BranchVerifyOutcome::FailedNoFixLoop { reason })
-                } else {
-                    Ok(BranchVerifyOutcome::Failed { reason })
-                }
-            }
-        }
-    }
-
     /// Check whether the fix round budget is exhausted.
     pub const fn fix_round_budget_check(&self, limits: &LimitsConfig) -> FixBudgetCheck {
         let is_root = self.parent_id.is_none();
@@ -65,223 +32,14 @@ impl Task {
         FixBudgetCheck::WithinBudget { model }
     }
 
-    /// Design fix subtasks to address branch verification issues.
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    pub async fn design_fix<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-        failure: &str,
-        round: u32,
-        model: Model,
-    ) -> Result<Result<Vec<SubtaskSpec>, String>, OrchestratorError> {
-        let ctx = self.to_task_context(tree);
-        match svc
-            .agent
-            .design_fix_subtasks(&ctx, model, failure, round)
-            .await
-        {
-            Ok(agent_result) => {
-                self.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event(svc);
-                let decomposition = agent_result.value;
-                if decomposition.subtasks.is_empty() {
-                    Ok(Err("fix agent produced no subtasks".into()))
-                } else {
-                    Ok(Ok(decomposition.subtasks))
-                }
-            }
-            Err(e) => {
-                eprintln!("warning: fix subtask design failed: {e}");
-                Ok(Err(format!("fix design failed: {e}")))
-            }
-        }
-    }
-
     pub const fn recovery_budget_check(&self, limits: &LimitsConfig) -> bool {
         self.recovery_rounds < limits.max_recovery_rounds
-    }
-
-    /// Assess whether recovery is possible and design recovery subtasks.
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    pub async fn assess_and_design_recovery<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-        failure: &str,
-        round: u32,
-    ) -> Result<RecoveryDecision, OrchestratorError> {
-        let ctx = self.to_task_context(tree);
-        let strategy = match svc.agent.assess_recovery(&ctx, failure).await {
-            Ok(agent_result) => {
-                self.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event(svc);
-                match agent_result.value {
-                    Some(s) => s,
-                    None => {
-                        return Ok(RecoveryDecision::Unrecoverable {
-                            reason: failure.to_string(),
-                        });
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("warning: recovery assessment failed: {e}");
-                return Ok(RecoveryDecision::Unrecoverable {
-                    reason: failure.to_string(),
-                });
-            }
-        };
-
-        self.increment_recovery_rounds();
-
-        self.record_to_vault(
-            svc,
-            "FINDINGS",
-            &format!("Recovery round {round}.\nFailure: {failure}\nStrategy: {strategy}"),
-        )
-        .await;
-
-        let _ = svc.events.send(Event::RecoveryStarted {
-            task_id: self.id,
-            round,
-        });
-
-        let ctx = self.to_task_context(tree);
-        let plan = match svc
-            .agent
-            .design_recovery_subtasks(&ctx, failure, &strategy, round)
-            .await
-        {
-            Ok(agent_result) => {
-                self.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event(svc);
-                agent_result.value
-            }
-            Err(e) => {
-                eprintln!("warning: recovery plan design failed: {e}");
-                return Ok(RecoveryDecision::Unrecoverable {
-                    reason: format!("recovery design failed: {failure}"),
-                });
-            }
-        };
-
-        if plan.subtasks.is_empty() {
-            return Ok(RecoveryDecision::Unrecoverable {
-                reason: format!("recovery produced no subtasks: {failure}"),
-            });
-        }
-
-        let approach = if plan.full_redecomposition {
-            "full"
-        } else {
-            "incremental"
-        };
-        let _ = svc.events.send(Event::RecoveryPlanSelected {
-            task_id: self.id,
-            approach: approach.into(),
-        });
-
-        Ok(RecoveryDecision::Plan {
-            specs: plan.subtasks,
-            supersede_pending: plan.full_redecomposition,
-        })
-    }
-
-    /// Handle checkpoint after a child reports discoveries.
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    pub async fn handle_checkpoint<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-        child_discoveries: &[String],
-    ) -> Result<ChildResponse, OrchestratorError> {
-        let ctx = self.to_task_context(tree);
-        let decision = match svc.agent.checkpoint(&ctx, child_discoveries).await {
-            Ok(agent_result) => {
-                self.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event(svc);
-                agent_result.value
-            }
-            Err(e) => {
-                eprintln!("warning: checkpoint classification failed: {e}");
-                CheckpointDecision::Proceed
-            }
-        };
-
-        match decision {
-            CheckpointDecision::Proceed => Ok(ChildResponse::Continue),
-            CheckpointDecision::Adjust { guidance } => {
-                let _ = svc
-                    .events
-                    .send(Event::CheckpointAdjust { task_id: self.id });
-                let vault_content = format!(
-                    "Checkpoint adjust.\nDiscoveries: {}\nGuidance: {guidance}",
-                    child_discoveries.join("; ")
-                );
-                self.append_checkpoint_guidance(&guidance);
-                self.record_to_vault(svc, "FINDINGS", &vault_content).await;
-                Ok(ChildResponse::Continue)
-            }
-            CheckpointDecision::Escalate => {
-                let _ = svc
-                    .events
-                    .send(Event::CheckpointEscalate { task_id: self.id });
-                self.set_checkpoint_guidance(None);
-                let escalation_reason = format!(
-                    "checkpoint escalation: discoveries invalidate current plan. Discoveries: {}",
-                    child_discoveries.join("; ")
-                );
-                if self.is_fix_task {
-                    return Ok(ChildResponse::Failed(escalation_reason));
-                }
-                if !self.recovery_budget_check(&svc.limits) {
-                    let max_recovery = svc.limits.max_recovery_rounds;
-                    return Ok(ChildResponse::Failed(format!(
-                        "recovery rounds exhausted ({max_recovery}): {escalation_reason}"
-                    )));
-                }
-                let round = self.recovery_rounds + 1;
-                match self
-                    .assess_and_design_recovery(tree, svc, &escalation_reason, round)
-                    .await?
-                {
-                    RecoveryDecision::Unrecoverable { reason } => Ok(ChildResponse::Failed(reason)),
-                    RecoveryDecision::Plan {
-                        specs,
-                        supersede_pending,
-                    } => Ok(ChildResponse::NeedRecoverySubtasks {
-                        specs,
-                        supersede_pending,
-                    }),
-                }
-            }
-        }
-    }
-
-    /// Branch-specific scope circuit breaker check.
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    pub async fn check_branch_scope<A: AgentService>(&self, svc: &Services<A>) -> ScopeCheck {
-        let magnitude = match &self.magnitude {
-            Some(m) => m.clone(),
-            None => return ScopeCheck::WithinBounds,
-        };
-        let project_root = match &svc.project_root {
-            Some(p) => p.clone(),
-            None => return ScopeCheck::WithinBounds,
-        };
-        scope::git_diff_numstat(&project_root)
-            .await
-            .map_or(ScopeCheck::WithinBounds, |stdout| {
-                scope::evaluate_scope(&stdout, &magnitude)
-            })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::project::LimitsConfig;
     use crate::task::TaskId;
 
     #[test]

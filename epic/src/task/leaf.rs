@@ -1,338 +1,8 @@
-// Leaf execution: implement -> verify -> fix loop -> return outcome.
-// Handles retry/escalation (Haiku->Sonnet->Opus), scope circuit breaker,
-// file-level review, verification gates.
+// Leaf helpers: verification model, clamp logic.
 
-use crate::agent::AgentService;
-use crate::events::Event;
-use crate::orchestrator::context::TreeContext;
-use crate::orchestrator::services::Services;
-use crate::task::scope::{self, ScopeCheck};
-use crate::task::verify::{VerificationOutcome, VerifyOutcome};
-use crate::task::{Attempt, Model, Task, TaskOutcome, TaskPath};
-
-/// Distinguishes first-execution from fix-loop retry behavior.
-#[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-enum RetryMode {
-    Execute,
-    Fix { initial_failure: String },
-}
+use crate::task::{Model, Task, TaskPath};
 
 impl Task {
-    /// Full leaf lifecycle: execute -> verify -> fix loop -> return outcome.
-    /// Handles resume from mid-execution or mid-verification.
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    pub async fn execute_leaf<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-    ) -> TaskOutcome {
-        // Resume: if task was mid-verification, go straight to verify+fix.
-        // The orchestrator sets phase to Verifying before calling into verify;
-        // if we crashed there, skip re-execution.
-        if self.phase == crate::task::TaskPhase::Verifying {
-            return self.leaf_finalize(tree, svc).await;
-        }
-
-        match self.leaf_retry_loop(tree, svc, RetryMode::Execute).await {
-            Ok(exec_outcome) => {
-                if exec_outcome == TaskOutcome::Success {
-                    self.leaf_finalize(tree, svc).await
-                } else {
-                    exec_outcome
-                }
-            }
-            Err(e) => TaskOutcome::Failed {
-                reason: format!("agent error: {e}"),
-            },
-        }
-    }
-
-    /// Post-execution verification + file-level review + fix loop entry.
-    /// Returns `Err` for agent-level failures (propagated to caller as infrastructure error).
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    async fn leaf_finalize<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-    ) -> TaskOutcome {
-        let verify_model = self.verification_model();
-        let ctx = self.to_task_context(tree);
-        // Propagate agent errors as Failed with special prefix so the
-        // orchestrator can distinguish infrastructure errors.
-        let agent_result = match svc.agent.verify(&ctx, verify_model).await {
-            Ok(r) => r,
-            Err(e) => {
-                return TaskOutcome::Failed {
-                    reason: format!("__agent_error__: {e}"),
-                };
-            }
-        };
-        self.accumulate_usage(&agent_result.meta);
-        self.emit_usage_event(svc);
-
-        match agent_result.value.outcome {
-            VerificationOutcome::Pass => {
-                if let Some(fail_reason) = self.try_file_level_review(tree, svc).await {
-                    if self.is_fix_task {
-                        TaskOutcome::Failed {
-                            reason: fail_reason,
-                        }
-                    } else {
-                        self.leaf_fix_loop(tree, svc, &fail_reason).await
-                    }
-                } else {
-                    TaskOutcome::Success
-                }
-            }
-            VerificationOutcome::Fail { reason } => {
-                self.record_to_vault(svc, "VERIFICATION_FAILURE", &reason)
-                    .await;
-                if self.is_fix_task {
-                    TaskOutcome::Failed { reason }
-                } else {
-                    self.leaf_fix_loop(tree, svc, &reason).await
-                }
-            }
-        }
-    }
-
-    /// Fix loop after initial verification failure.
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    async fn leaf_fix_loop<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-        initial_failure: &str,
-    ) -> TaskOutcome {
-        match self
-            .leaf_retry_loop(
-                tree,
-                svc,
-                RetryMode::Fix {
-                    initial_failure: initial_failure.to_owned(),
-                },
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(e) => TaskOutcome::Failed {
-                reason: format!("agent error: {e}"),
-            },
-        }
-    }
-
-    /// Shared retry-with-escalation loop for both first execution and fix loops.
-    #[allow(clippy::too_many_lines)]
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    async fn leaf_retry_loop<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-        mode: RetryMode,
-    ) -> anyhow::Result<TaskOutcome> {
-        let is_fix = matches!(mode, RetryMode::Fix { .. });
-        let mut failure_reason = match &mode {
-            RetryMode::Fix { initial_failure } => Some(initial_failure.clone()),
-            RetryMode::Execute => None,
-        };
-
-        let mut current_model = self.current_model.unwrap_or(Model::Haiku);
-        let mut retries_at_tier: u32 = self.trailing_attempts_at_tier(current_model, is_fix);
-
-        // Drain any stale tier exhaustion from a crash before escalation.
-        while retries_at_tier >= svc.limits.retry_budget {
-            if let Some(next_model) = current_model.escalate() {
-                Self::emit_escalation(svc, self.id, current_model, next_model, is_fix);
-                self.set_model(next_model);
-                current_model = next_model;
-                retries_at_tier = 0;
-            } else if is_fix {
-                return Ok(TaskOutcome::Failed {
-                    reason: failure_reason.unwrap_or_else(|| "all tiers exhausted".into()),
-                });
-            } else {
-                let last_error = self
-                    .attempts
-                    .last()
-                    .and_then(|a| a.error.clone())
-                    .unwrap_or_else(|| "all tiers exhausted".into());
-                return Ok(TaskOutcome::Failed { reason: last_error });
-            }
-        }
-
-        loop {
-            // Scope circuit breaker (fix mode only).
-            if is_fix {
-                match self.check_scope(svc).await {
-                    ScopeCheck::WithinBounds => {}
-                    ScopeCheck::Exceeded {
-                        metric,
-                        actual,
-                        limit,
-                    } => {
-                        return Ok(TaskOutcome::Failed {
-                            reason: format!(
-                                "SCOPE_EXCEEDED: {metric} actual={actual} limit={limit}"
-                            ),
-                        });
-                    }
-                }
-            }
-
-            // Agent call.
-            let ctx = self.to_task_context(tree);
-            let agent_result = if is_fix {
-                let reason = failure_reason.as_deref().unwrap_or("unknown failure");
-                #[allow(clippy::cast_possible_truncation)]
-                let attempt_number = self.fix_attempts.len() as u32 + 1;
-                let _ = svc.events.send(Event::FixAttempt {
-                    task_id: self.id,
-                    attempt: attempt_number,
-                    model: current_model,
-                });
-                svc.agent
-                    .fix_leaf(&ctx, current_model, reason, attempt_number)
-                    .await?
-            } else {
-                svc.agent.execute_leaf(&ctx, current_model).await?
-            };
-            self.accumulate_usage(&agent_result.meta);
-            self.emit_usage_event(svc);
-
-            let crate::task::LeafResult {
-                outcome,
-                discoveries,
-            } = agent_result.value;
-
-            // Record attempt and discoveries.
-            let attempt = Attempt {
-                model: current_model,
-                succeeded: outcome == TaskOutcome::Success,
-                error: match &outcome {
-                    TaskOutcome::Success => None,
-                    TaskOutcome::Failed { reason } => Some(reason.clone()),
-                },
-            };
-            self.record_attempt(attempt, is_fix);
-            if !discoveries.is_empty() {
-                let content = discoveries.join("\n");
-                let count = self.record_discoveries(discoveries);
-                let _ = svc.events.send(Event::DiscoveriesRecorded {
-                    task_id: self.id,
-                    count,
-                });
-                self.record_to_vault(svc, "FINDINGS", &content).await;
-            }
-
-            // Handle success.
-            if outcome == TaskOutcome::Success {
-                if is_fix {
-                    match self.try_verify(tree, svc).await {
-                        VerifyOutcome::Passed => return Ok(TaskOutcome::Success),
-                        VerifyOutcome::Failed(reason) => failure_reason = Some(reason),
-                    }
-                } else {
-                    return Ok(outcome);
-                }
-            } else if is_fix {
-                if let TaskOutcome::Failed { reason } = &outcome {
-                    failure_reason = Some(reason.clone());
-                }
-            }
-
-            retries_at_tier += 1;
-
-            if retries_at_tier < svc.limits.retry_budget {
-                if !is_fix {
-                    let _ = svc.events.send(Event::RetryAttempt {
-                        task_id: self.id,
-                        attempt: retries_at_tier,
-                        model: current_model,
-                    });
-                }
-                continue;
-            }
-
-            if let Some(next_model) = current_model.escalate() {
-                Self::emit_escalation(svc, self.id, current_model, next_model, is_fix);
-                self.set_model(next_model);
-                current_model = next_model;
-                retries_at_tier = 0;
-                continue;
-            }
-
-            // All tiers exhausted.
-            if is_fix {
-                return Ok(TaskOutcome::Failed {
-                    reason: failure_reason.unwrap_or_else(|| "all tiers exhausted".into()),
-                });
-            }
-            return Ok(outcome);
-        }
-    }
-
-    /// Verify and file-level review (used in fix loop after successful fix).
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    async fn try_verify<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-    ) -> VerifyOutcome {
-        let verify_model = self.verification_model();
-        let ctx = self.to_task_context(tree);
-        match svc.agent.verify(&ctx, verify_model).await {
-            Ok(agent_result) => {
-                self.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event(svc);
-                match agent_result.value.outcome {
-                    VerificationOutcome::Pass => self
-                        .try_file_level_review(tree, svc)
-                        .await
-                        .map_or(VerifyOutcome::Passed, VerifyOutcome::Failed),
-                    VerificationOutcome::Fail { reason } => {
-                        self.record_to_vault(svc, "VERIFICATION_FAILURE", &reason)
-                            .await;
-                        VerifyOutcome::Failed(reason)
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("warning: verify failed: {e}");
-                VerifyOutcome::Failed(format!("verification error: {e}"))
-            }
-        }
-    }
-
-    /// File-level review for leaf tasks after verification passes.
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    async fn try_file_level_review<A: AgentService>(
-        &mut self,
-        tree: &TreeContext,
-        svc: &Services<A>,
-    ) -> Option<String> {
-        let review_model = self.verification_model();
-        let ctx = self.to_task_context(tree);
-        let review_result = match svc.agent.file_level_review(&ctx, review_model).await {
-            Ok(r) => r,
-            Err(e) => {
-                return Some(format!("file-level review error: {e}"));
-            }
-        };
-        self.accumulate_usage(&review_result.meta);
-        self.emit_usage_event(svc);
-
-        let passed = review_result.value.outcome == VerificationOutcome::Pass;
-        let _ = svc.events.send(Event::FileLevelReviewCompleted {
-            task_id: self.id,
-            passed,
-        });
-
-        match review_result.value.outcome {
-            VerificationOutcome::Pass => None,
-            VerificationOutcome::Fail { reason } => Some(reason),
-        }
-    }
-
     pub(crate) fn verification_model(&self) -> Model {
         match self.path {
             Some(TaskPath::Leaf) => {
@@ -340,89 +10,6 @@ impl Task {
                 impl_model.clamp(Model::Haiku, Model::Sonnet)
             }
             _ => Model::Sonnet,
-        }
-    }
-
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    async fn check_scope<A: AgentService>(&self, svc: &Services<A>) -> ScopeCheck {
-        let magnitude = match &self.magnitude {
-            Some(m) => m.clone(),
-            None => return ScopeCheck::WithinBounds,
-        };
-        let project_root = match &svc.project_root {
-            Some(p) => p.clone(),
-            None => return ScopeCheck::WithinBounds,
-        };
-        scope::git_diff_numstat(&project_root)
-            .await
-            .map_or(ScopeCheck::WithinBounds, |stdout| {
-                scope::evaluate_scope(&stdout, &magnitude)
-            })
-    }
-
-    /// Record content to vault (best-effort).
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    pub(crate) async fn record_to_vault<A: AgentService>(
-        &mut self,
-        svc: &Services<A>,
-        name: &str,
-        content: &str,
-    ) {
-        let Some(ref vault) = svc.vault else {
-            return;
-        };
-        let result = match vault.record(name, content, vault::RecordMode::New).await {
-            Err(vault::RecordError::VersionConflict(_)) => {
-                vault.record(name, content, vault::RecordMode::Append).await
-            }
-            other => other,
-        };
-        match result {
-            Ok((_refs, _warnings, meta)) => {
-                let session_meta = crate::agent::session_meta_from_vault(&meta);
-                self.accumulate_usage(&session_meta);
-                self.emit_usage_event(svc);
-                let _ = svc.events.send(Event::VaultRecorded {
-                    task_id: self.id,
-                    document: name.to_string(),
-                });
-            }
-            Err(e) => {
-                eprintln!("warning: vault record failed for {name}: {e}");
-            }
-        }
-    }
-
-    /// Emit usage updated event based on current accumulated cost.
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    pub(crate) fn emit_usage_event<A: AgentService>(&self, svc: &Services<A>) {
-        let _ = svc.events.send(Event::UsageUpdated {
-            task_id: self.id,
-            phase_cost_usd: 0.0, // individual phase cost not tracked at task level
-            total_cost_usd: self.usage.cost_usd,
-        });
-    }
-
-    #[allow(dead_code)] // Used by legacy orchestrator retained for test migration
-    fn emit_escalation<A: AgentService>(
-        svc: &Services<A>,
-        id: crate::task::TaskId,
-        from: Model,
-        to: Model,
-        is_fix: bool,
-    ) {
-        if is_fix {
-            let _ = svc.events.send(Event::FixModelEscalated {
-                task_id: id,
-                from,
-                to,
-            });
-        } else {
-            let _ = svc.events.send(Event::ModelEscalated {
-                task_id: id,
-                from,
-                to,
-            });
         }
     }
 }
@@ -433,31 +20,34 @@ mod tests {
     use crate::config::project::LimitsConfig;
     use crate::events::{self, Event, EventReceiver};
     use crate::orchestrator::context::TreeContext;
-    use crate::orchestrator::services::Services;
-    use crate::task::{Model, TaskId, TaskOutcome, TaskPath, TaskPhase};
+    use crate::task::node_impl::EpicTask;
+    use crate::task::{Model, TaskId, TaskOutcome, TaskPath, TaskPhase, TaskRuntime};
     use crate::test_support::{MockAgentService, MockBuilder};
+    use std::sync::Arc;
 
-    fn make_services(mock: MockAgentService) -> (Services<MockAgentService>, EventReceiver) {
-        make_services_with_limits(mock, LimitsConfig::default())
+    fn make_runtime(
+        mock: MockAgentService,
+    ) -> (Arc<TaskRuntime<MockAgentService>>, Arc<MockAgentService>, EventReceiver) {
+        make_runtime_with_limits(mock, LimitsConfig::default())
     }
 
-    fn make_services_with_limits(
+    fn make_runtime_with_limits(
         mock: MockAgentService,
         limits: LimitsConfig,
-    ) -> (Services<MockAgentService>, EventReceiver) {
+    ) -> (Arc<TaskRuntime<MockAgentService>>, Arc<MockAgentService>, EventReceiver) {
         let (tx, rx) = events::event_channel();
-        let svc = Services {
-            agent: mock,
+        let mock_arc = Arc::new(mock);
+        let rt = Arc::new(TaskRuntime {
+            agent: Arc::clone(&mock_arc),
             events: tx,
             vault: None,
             limits,
             project_root: None,
-            state_path: None,
-        };
-        (svc, rx)
+        });
+        (rt, mock_arc, rx)
     }
 
-    fn make_leaf_task() -> Task {
+    fn make_leaf_task(rt: &Arc<TaskRuntime<MockAgentService>>) -> EpicTask<MockAgentService> {
         let mut task = Task::new(
             TaskId(1),
             Some(TaskId(0)),
@@ -468,7 +58,7 @@ mod tests {
         task.path = Some(TaskPath::Leaf);
         task.current_model = Some(Model::Haiku);
         task.phase = TaskPhase::Executing;
-        task
+        EpicTask::new(task, Some(Arc::clone(rt)))
     }
 
     fn empty_tree() -> TreeContext {
@@ -514,12 +104,13 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (svc, _rx) = make_services(mock);
-        let mut task = make_leaf_task();
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let mut task = make_leaf_task(&rt);
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert_eq!(result, TaskOutcome::Success);
-        assert_eq!(task.attempts.len(), 4);
-        assert_eq!(task.current_model, Some(Model::Sonnet));
+        assert_eq!(task.task.attempts.len(), 4);
+        assert_eq!(task.task.current_model, Some(Model::Sonnet));
     }
 
     /// All tiers exhausted (9 failures: 3 Haiku + 3 Sonnet + 3 Opus) -> Failed.
@@ -528,11 +119,12 @@ mod tests {
         let mock = MockBuilder::new()
             .leaf_failures(9, "persistent failure")
             .build();
-        let (svc, _rx) = make_services(mock);
-        let mut task = make_leaf_task();
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let mut task = make_leaf_task(&rt);
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert!(matches!(result, TaskOutcome::Failed { .. }));
-        assert_eq!(task.attempts.len(), 9);
+        assert_eq!(task.task.attempts.len(), 9);
     }
 
     /// Custom `retry_budget`=1: Haiku fails once -> immediately escalates to Sonnet.
@@ -548,12 +140,13 @@ mod tests {
             retry_budget: 1,
             ..LimitsConfig::default()
         };
-        let (svc, _rx) = make_services_with_limits(mock, limits);
-        let mut task = make_leaf_task();
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, _rx) = make_runtime_with_limits(mock, limits);
+        let mut task = make_leaf_task(&rt);
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert_eq!(result, TaskOutcome::Success);
-        assert_eq!(task.attempts.len(), 2);
-        assert_eq!(task.current_model, Some(Model::Sonnet));
+        assert_eq!(task.task.attempts.len(), 2);
+        assert_eq!(task.task.current_model, Some(Model::Sonnet));
     }
 
     // -----------------------------------------------------------------------
@@ -570,12 +163,13 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (svc, _rx) = make_services(mock);
-        let mut task = make_leaf_task();
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let mut task = make_leaf_task(&rt);
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert_eq!(result, TaskOutcome::Success);
-        assert_eq!(task.fix_attempts.len(), 1);
-        assert!(task.fix_attempts[0].succeeded);
+        assert_eq!(task.task.fix_attempts.len(), 1);
+        assert!(task.task.fix_attempts[0].succeeded);
     }
 
     /// Fix loop: 3 failures at starting tier -> escalate -> fix succeeds -> verify passes.
@@ -589,13 +183,14 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (svc, mut rx) = make_services(mock);
-        let mut task = make_leaf_task();
-        let task_id = task.id;
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, mut rx) = make_runtime(mock);
+        let mut task = make_leaf_task(&rt);
+        let task_id = task.task.id;
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert_eq!(result, TaskOutcome::Success);
-        assert_eq!(task.fix_attempts.len(), 4);
-        assert_eq!(task.current_model, Some(Model::Sonnet));
+        assert_eq!(task.task.fix_attempts.len(), 4);
+        assert_eq!(task.task.current_model, Some(Model::Sonnet));
 
         let mut found_escalation = false;
         while let Ok(event) = rx.try_recv() {
@@ -615,11 +210,12 @@ mod tests {
             .verify_fail("tests fail")
             .fix_leaf_failures(9, "still broken")
             .build();
-        let (svc, _rx) = make_services(mock);
-        let mut task = make_leaf_task();
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let mut task = make_leaf_task(&rt);
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert!(matches!(result, TaskOutcome::Failed { .. }));
-        assert_eq!(task.fix_attempts.len(), 9);
+        assert_eq!(task.task.fix_attempts.len(), 9);
     }
 
     /// Fix loop: `verify()` returns Err on first attempt, succeeds on second.
@@ -631,11 +227,12 @@ mod tests {
         mb.verify_errors_sequence(TaskId(1), vec![None, Some("transient API error".into())]);
         mb.fix_leaf_success();
         mb.verify_pass().file_review_pass();
-        let (svc, _rx) = make_services(mb.build());
-        let mut task = make_leaf_task();
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, _rx) = make_runtime(mb.build());
+        let mut task = make_leaf_task(&rt);
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert_eq!(result, TaskOutcome::Success);
-        assert_eq!(task.fix_attempts.len(), 2);
+        assert_eq!(task.task.fix_attempts.len(), 2);
     }
 
     /// All leaf fix retries across all tiers fail verification -> Failed.
@@ -652,11 +249,12 @@ mod tests {
         for _ in 0..9 {
             mb.fix_leaf_success();
         }
-        let (svc, _rx) = make_services(mb.build());
-        let mut task = make_leaf_task();
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, _rx) = make_runtime(mb.build());
+        let mut task = make_leaf_task(&rt);
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert!(matches!(result, TaskOutcome::Failed { .. }));
-        assert_eq!(task.fix_attempts.len(), 9);
+        assert_eq!(task.task.fix_attempts.len(), 9);
     }
 
     // -----------------------------------------------------------------------
@@ -671,10 +269,11 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (svc, mut rx) = make_services(mock);
-        let mut task = make_leaf_task();
-        let task_id = task.id;
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, mut rx) = make_runtime(mock);
+        let mut task = make_leaf_task(&rt);
+        let task_id = task.task.id;
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert_eq!(result, TaskOutcome::Success);
 
         let mut saw_review_passed = false;
@@ -701,12 +300,13 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (svc, mut rx) = make_services(mock);
-        let mut task = make_leaf_task();
-        let task_id = task.id;
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, mut rx) = make_runtime(mock);
+        let mut task = make_leaf_task(&rt);
+        let task_id = task.task.id;
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert_eq!(result, TaskOutcome::Success);
-        assert_eq!(task.fix_attempts.len(), 1);
+        assert_eq!(task.task.fix_attempts.len(), 1);
 
         let mut review_events: Vec<bool> = Vec::new();
         while let Ok(event) = rx.try_recv() {
@@ -735,13 +335,24 @@ mod tests {
             .verify_pass()
             .file_review_fail("fix incomplete")
             .build();
-        let (svc, _rx) = make_services(mock);
-        let mut task = make_leaf_task();
-        task.is_fix_task = true;
-        let result = task.execute_leaf(&empty_tree(), &svc).await;
+        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let mut task_inner = Task::new(
+            TaskId(1),
+            Some(TaskId(0)),
+            "child task".into(),
+            vec!["child passes".into()],
+            1,
+        );
+        task_inner.path = Some(TaskPath::Leaf);
+        task_inner.current_model = Some(Model::Haiku);
+        task_inner.phase = TaskPhase::Executing;
+        task_inner.is_fix_task = true;
+        let mut task = EpicTask::new(task_inner, Some(Arc::clone(&rt)));
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
         assert!(matches!(result, TaskOutcome::Failed { .. }));
         assert_eq!(
-            task.fix_attempts.len(),
+            task.task.fix_attempts.len(),
             0,
             "fix task should not enter fix loop on file-level review failure"
         );
