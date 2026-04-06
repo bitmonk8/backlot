@@ -13,7 +13,7 @@ type TestOrchestrator = cue::Orchestrator<EpicStore<MockAgentService>>;
 
 /// Build a `cue::Orchestrator<EpicStore<MockAgentService>>` with a single root task.
 /// Returns the orchestrator, a cloned Arc to the mock (for post-run inspection),
-/// the root TaskId, and the event receiver.
+/// the root `TaskId`, and the event receiver.
 ///
 /// Root gets TaskId(0); subtasks get sequential IDs (TaskId(1), TaskId(2), ...) in creation order.
 fn make_orchestrator(
@@ -1337,14 +1337,7 @@ fn checkpoint_guidance_flows_to_child_context() {
     let mock = MockAgentService::new();
     let (tx, _rx) = events::event_channel();
     let mock_arc = Arc::new(mock);
-    let store = EpicStore::from_state(
-        state,
-        mock_arc,
-        tx.clone(),
-        None,
-        LimitsConfig::default(),
-        None,
-    );
+    let store = EpicStore::from_state(state, mock_arc, tx, None, LimitsConfig::default(), None);
 
     let tree_ctx = cue::TaskStore::build_tree_context(&store, second_child_id).unwrap();
     assert_eq!(
