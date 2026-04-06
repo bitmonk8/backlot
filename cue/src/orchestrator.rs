@@ -439,9 +439,17 @@ impl<S: TaskStore> Orchestrator<S> {
                 .store
                 .get_mut(id)
                 .ok_or(OrchestratorError::TaskNotFound(id))?;
-            let verify_result = task.verify_branch(&tree).await?;
+            let verify_result = match task.verify_branch(&tree).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("warning: verify failed: {e}");
+                    BranchVerifyOutcome::Failed {
+                        reason: format!("verification error: {e}"),
+                    }
+                }
+            };
             match verify_result {
-                BranchVerifyOutcome::Passed => return Ok(TaskOutcome::Success),
+                BranchVerifyOutcome::Passed => return self.complete_task_verified(id),
                 BranchVerifyOutcome::Failed { reason }
                 | BranchVerifyOutcome::FailedNoFixLoop { reason } => {
                     failure_reason = reason;

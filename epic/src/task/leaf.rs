@@ -27,14 +27,22 @@ mod tests {
 
     fn make_runtime(
         mock: MockAgentService,
-    ) -> (Arc<TaskRuntime<MockAgentService>>, Arc<MockAgentService>, EventReceiver) {
+    ) -> (
+        Arc<TaskRuntime<MockAgentService>>,
+        Arc<MockAgentService>,
+        EventReceiver,
+    ) {
         make_runtime_with_limits(mock, LimitsConfig::default())
     }
 
     fn make_runtime_with_limits(
         mock: MockAgentService,
         limits: LimitsConfig,
-    ) -> (Arc<TaskRuntime<MockAgentService>>, Arc<MockAgentService>, EventReceiver) {
+    ) -> (
+        Arc<TaskRuntime<MockAgentService>>,
+        Arc<MockAgentService>,
+        EventReceiver,
+    ) {
         let (tx, rx) = events::event_channel();
         let mock_arc = Arc::new(mock);
         let rt = Arc::new(TaskRuntime {

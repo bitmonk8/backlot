@@ -4,8 +4,7 @@ use crate::state::EpicState;
 use crate::store::EpicStore;
 use crate::task::branch::{DecompositionResult, SubtaskSpec};
 use crate::task::{
-    Attempt, MagnitudeEstimate, Model, RecoveryPlan, Task, TaskId, TaskOutcome, TaskPath,
-    TaskPhase,
+    Attempt, MagnitudeEstimate, Model, RecoveryPlan, Task, TaskId, TaskOutcome, TaskPath, TaskPhase,
 };
 use crate::test_support::{MockAgentService, MockBuilder};
 use std::sync::Arc;
@@ -19,7 +18,12 @@ type TestOrchestrator = cue::Orchestrator<EpicStore<MockAgentService>>;
 /// Root gets TaskId(0); subtasks get sequential IDs (TaskId(1), TaskId(2), ...) in creation order.
 fn make_orchestrator(
     mock: MockAgentService,
-) -> (TestOrchestrator, Arc<MockAgentService>, TaskId, EventReceiver) {
+) -> (
+    TestOrchestrator,
+    Arc<MockAgentService>,
+    TaskId,
+    EventReceiver,
+) {
     let mut state = EpicState::new();
     let root_id = state.next_task_id();
     let root = Task::new(
@@ -41,6 +45,41 @@ fn make_orchestrator(
         None,
     );
     let orchestrator = cue::Orchestrator::new(store, tx);
+    (orchestrator, mock_arc, root_id, rx)
+}
+
+/// Build a `cue::Orchestrator` with a single root task and custom limits on both
+/// the store's runtime and the orchestrator.
+fn make_orchestrator_with_limits(
+    mock: MockAgentService,
+    limits: LimitsConfig,
+) -> (
+    TestOrchestrator,
+    Arc<MockAgentService>,
+    TaskId,
+    EventReceiver,
+) {
+    let mut state = EpicState::new();
+    let root_id = state.next_task_id();
+    let root = Task::new(
+        root_id,
+        None,
+        "root goal".into(),
+        vec!["root passes".into()],
+        0,
+    );
+    state.insert(root);
+    let (tx, rx) = events::event_channel();
+    let mock_arc = Arc::new(mock);
+    let store = EpicStore::from_state(
+        state,
+        Arc::clone(&mock_arc),
+        tx.clone(),
+        None,
+        limits.clone(),
+        None,
+    );
+    let orchestrator = cue::Orchestrator::new(store, tx).with_limits(limits);
     (orchestrator, mock_arc, root_id, rx)
 }
 
@@ -71,14 +110,7 @@ fn make_orchestrator_from_state_with_limits(
 ) -> (TestOrchestrator, Arc<MockAgentService>, EventReceiver) {
     let (tx, rx) = events::event_channel();
     let mock_arc = Arc::new(mock);
-    let store = EpicStore::from_state(
-        state,
-        Arc::clone(&mock_arc),
-        tx.clone(),
-        None,
-        limits,
-        None,
-    );
+    let store = EpicStore::from_state(state, Arc::clone(&mock_arc), tx.clone(), None, limits, None);
     let orchestrator = cue::Orchestrator::new(store, tx);
     (orchestrator, mock_arc, rx)
 }
@@ -1824,8 +1856,7 @@ async fn zero_retry_budget_clamped_to_one() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mock);
-    let mut orch = orch.with_limits(limits);
+    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator_with_limits(mock, limits);
 
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
