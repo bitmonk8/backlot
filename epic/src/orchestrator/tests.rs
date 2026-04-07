@@ -2461,7 +2461,7 @@ async fn fix_task_file_review_fail_no_fix_loop() {
 // Three-phase branch verification tests
 // -----------------------------------------------------------------------
 
-/// All three branch review phases pass -> BranchVerifyOutcome::Passed.
+/// All three branch review phases pass -> `BranchVerifyOutcome::Passed`.
 #[tokio::test]
 async fn branch_verify_all_three_phases_pass() {
     let mock = MockBuilder::new()
@@ -2534,7 +2534,7 @@ async fn branch_verify_completeness_fails_no_simplification() {
     assert_eq!(root.verification_fix_rounds, 1);
 }
 
-/// Simplification fails -> BranchVerifyOutcome::Failed (triggers fix round).
+/// Simplification fails -> `BranchVerifyOutcome::Failed` (triggers fix round).
 #[tokio::test]
 async fn branch_verify_simplification_fails() {
     let mut mb = MockBuilder::new();
@@ -2562,7 +2562,7 @@ async fn branch_verify_simplification_fails() {
     assert_eq!(root.verification_fix_rounds, 1);
 }
 
-/// Fix task: any branch verification failure -> FailedNoFixLoop.
+/// Fix task: any branch verification failure -> `FailedNoFixLoop`.
 #[tokio::test]
 async fn branch_verify_fix_task_fails_no_fix_loop() {
     let mut mb = MockBuilder::new();
