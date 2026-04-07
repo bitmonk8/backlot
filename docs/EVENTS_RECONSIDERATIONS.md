@@ -94,7 +94,7 @@ EventLog
 | Backpressure | N/A — Vec grows, consumers read at their own pace |
 | Consumer API | `Option<Event>` (simpler than channel `Result` types) |
 
-**Notification mechanism:** `tokio::sync::watch<usize>` carries the current event count. Consumers compare their offset to the watched value. When they've caught up, they wait on `watch::changed()`. No polling.
+**Notification mechanism:** `tokio::sync::watch<()>` notifies consumers that new events are available. When a consumer has caught up to the Vec length, it waits on `watch::changed()`. No polling. The watch value is `()` — the Vec itself is the source of truth for event count.
 
 ---
 
@@ -126,21 +126,21 @@ use tokio::sync::watch;
 #[derive(Clone)]
 pub struct EventLog {
     events: Arc<RwLock<Vec<Event>>>,
-    len_tx: Arc<watch::Sender<usize>>,
+    notify_tx: Arc<watch::Sender<()>>,
 }
 
 pub struct EventSubscription {
     events: Arc<RwLock<Vec<Event>>>,
     offset: usize,
-    len_rx: watch::Receiver<usize>,
+    notify_rx: watch::Receiver<()>,
 }
 
 impl EventLog {
     pub fn new() -> Self {
-        let (len_tx, _) = watch::channel(0usize);
+        let (notify_tx, _) = watch::channel(());
         Self {
             events: Arc::new(RwLock::new(Vec::new())),
-            len_tx: Arc::new(len_tx),
+            notify_tx: Arc::new(notify_tx),
         }
     }
 
@@ -150,7 +150,7 @@ impl EventLog {
         let offset = events.len();
         events.push(event);
         drop(events);
-        let _ = self.len_tx.send(offset + 1);
+        let _ = self.notify_tx.send(());
         offset
     }
 
@@ -164,7 +164,7 @@ impl EventLog {
         EventSubscription {
             events: Arc::clone(&self.events),
             offset: from,
-            len_rx: self.len_tx.subscribe(),
+            notify_rx: self.notify_tx.subscribe(),
         }
     }
 
@@ -191,7 +191,7 @@ impl EventSubscription {
                     return Some(event);
                 }
             }
-            if self.len_rx.changed().await.is_err() {
+            if self.notify_rx.changed().await.is_err() {
                 return None; // All senders dropped.
             }
         }
@@ -212,7 +212,7 @@ impl EventSubscription {
 ```
 
 Key design notes:
-- **`std::sync::RwLock`**, not `tokio::sync::RwLock`. The write lock is held for ~1us (Vec push). No async needed for producers. This keeps `emit()` synchronous, matching the current `let _ = sender.send(event)` pattern.
+- **`std::sync::RwLock`** exists for `Send + Sync` compliance, not cross-thread synchronization. Backlot runs on a single-threaded tokio runtime — tasks interleave at `.await` points, never in parallel — so the lock is never contended. But `tokio::spawn` requires `Send`, and `Arc<Vec<Event>>` is not `Sync`, so `RwLock` provides the necessary `Sync` impl. `std::sync` (not `tokio::sync`) because the lock is never held across an `.await` — `emit()` is synchronous, matching the current `let _ = sender.send(event)` pattern.
 - **`emit()` takes ownership** of the event. No clone needed on the producer side.
 - **`Event` needs `Clone`** only for the subscription side (`recv`/`try_recv` clone from the Vec). This is already derived on `Event`.
 - **`try_recv` uses `read().ok()?`** — returns `None` if the lock is poisoned or contended, which is the correct non-blocking behavior.
@@ -301,61 +301,85 @@ epic (application)
 
 Events propagate **upward**: lower crates emit, higher crates consume. No crate should depend on a sibling's event types. No globals.
 
-### Injected EventLog
+### Architecture: `traits` Crate + `EventEmitter<E>`
 
-Every crate that emits events receives an `EventLog` handle at construction time. The `EventLog` is `Clone` (all fields are `Arc`-wrapped). Cloning gives another handle to the same log.
+A shared `traits` crate defines the minimal emit contract. All crates that need to emit events depend on `traits` — nothing else. `EventLog` stays in epic, which is the only crate that needs subscriptions, replay, and snapshot.
+
+```rust
+// traits crate — depended on by cue, epic, and any future emitters
+pub trait EventEmitter<E> {
+    fn emit(&self, event: E);
+}
+```
+
+**Why a trait?** The orchestrator (cue) only needs to *emit* events, never subscribe. Giving cue a concrete `EventLog` would pull subscription/replay infrastructure into a crate that doesn't use it. A trait keeps cue decoupled — it calls `emit()` without knowing what's behind it.
+
+**Why in a separate crate?** Cue shouldn't own the trait (reel/flick would then depend on cue). Epic shouldn't own it (lower crates would depend on epic). A leaf `traits` crate has no dependencies and can be depended on by everything.
+
+### Dependency Graph
+
+```
+traits (no dependencies)
+  ▲
+  ├── cue (Orchestrator takes impl EventEmitter<E>)
+  ├── epic (EventLog implements EventEmitter<epic::Event>)
+  ├── reel (future: takes impl EventEmitter<reel::AgentEvent>)
+  └── flick (future: takes impl EventEmitter<flick::ModelEvent>)
+```
+
+### Wiring in Epic
+
+Epic owns the `EventLog` and all subscription/consumer logic. It passes `EventLog` (or adapters) to lower crates at construction time.
 
 ```
 epic (creates EventLog, distributes subscriptions to consumers)
   │
   ├── let log = EventLog::new();
   │
-  ├── cue::Orchestrator receives log.clone() ──── (via constructor)
-  │     └── passes log.clone() to TaskRuntime ──── (via create_subtask / bind_runtime)
-  │           └── Task methods call log.emit()
+  ├── cue::Orchestrator receives log.clone() as impl EventEmitter<epic::Event>
+  │     └── passes to TaskRuntime → Task methods call transmitter.emit()
   │
   ├── tui_sub = log.subscribe();        ◄──── TUI replays from 0
   ├── logger_sub = log.subscribe();     ◄──── JSONL logger replays from 0
   └── web_sub = log.subscribe_from(n);  ◄──── Late-joining dashboard replays from offset n
 ```
 
-### Why Not a Trait for the Sink?
+### Cue's Orchestrator
 
-A trait (`trait EventSink { fn emit(&self, event: Event); }`) adds indirection for no practical benefit. The event log is always the same concrete type. Using the concrete type:
-- Enables cheap `Clone` (Arc refcount)
-- Avoids `dyn` / boxing overhead
-- Keeps the API to one type and one method
-
-### After Extraction to Cue
-
-`EventLog`, `EventSubscription`, and the `Event` enum move to cue. Epic creates the log, passes it to the orchestrator, and distributes subscriptions to consumers.
+Cue takes a generic transmitter, not a concrete EventLog:
 
 ```rust
 // In cue crate
-pub struct Orchestrator<S: TaskStore> {
+pub struct Orchestrator<S: TaskStore, T: EventEmitter<S::Event>> {
     store: S,
-    events: EventLog,
+    transmitter: T,
     limits: LimitsConfig,
     state_path: Option<PathBuf>,
 }
 ```
 
+Cue never sees `EventLog`, `EventSubscription`, or epic's `Event` enum.
+
 ### Future Crate Event Propagation
 
-Reel and vault emit no events today. If they grow to need mid-execution notifications:
+Reel and vault emit no events today. If they grow to need mid-execution notifications, each crate defines its own event enum and takes an `impl EventEmitter<LocalEvent>`. Epic bridges via an adapter:
 
-**Preferred: crate-local event enum + mapping.** The lower crate defines its own event enum (e.g., `reel::AgentEvent`) and accepts a callback or channel. Epic maps these into `cue::Event` and emits into the main EventLog. No dependency from reel to cue.
+```rust
+// In epic — adapter that maps reel events into epic's EventLog
+struct ReelEmitter(EventLog);
 
+impl EventEmitter<reel::AgentEvent> for ReelEmitter {
+    fn emit(&self, event: reel::AgentEvent) {
+        self.0.emit(epic::Event::from(event));  // From impl does the mapping
+    }
+}
 ```
-epic
-  ├── main EventLog (cue::Event)
-  │     ▲
-  │     │ mapping: reel::AgentEvent → cue::Event → log.emit()
-  │     │
-  └── reel emits its own AgentEvent type
-```
 
-This preserves crate independence. Reel should not depend on cue.
+This keeps each crate independent:
+- Reel depends on `traits`, not epic or cue
+- Epic owns the mapping logic (it's the only crate that knows all event types)
+- EventLog implements only `EventEmitter<epic::Event>` — one type, one impl
+- Adapters handle cross-type bridging at the boundary
 
 ---
 
@@ -363,20 +387,22 @@ This preserves crate independence. Reel should not depend on cue.
 
 | Step | What changes | Lines changed (est.) | Risk |
 |---|---|---|---|
-| 1 | Add `Serialize`/`Deserialize` derives | ~10 | None |
-| 2 | Add EventLog + EventSubscription | ~70 new | Low |
-| 3 | Change send sites (`send` → `emit`) | ~40 (rename) | Low |
-| 4 | Change consumer receive calls | ~20 | Low |
-| 5 | Enable second consumer (JSONL logger) | ~30 new | Low |
-| 6 | Update test event assertions | ~30 | Low |
-| 7 | Post-run snapshot usage | ~10 new | Low |
-| **Total** | | **~210** | **Low** |
+| 1 | Create `traits` crate with `EventEmitter<E>` trait | ~15 new | None |
+| 2 | Add `Serialize`/`Deserialize` derives to Event | ~10 | None |
+| 3 | Add EventLog + EventSubscription in epic | ~70 new | Low |
+| 4 | Change send sites (`send` → `emit`) | ~40 (rename) | Low |
+| 5 | Change consumer receive calls | ~20 | Low |
+| 6 | Enable second consumer (JSONL logger) | ~30 new | Low |
+| 7 | Update test event assertions | ~30 | Low |
+| 8 | Post-run snapshot usage | ~10 new | Low |
+| 9 | Document `traits` crate and `EventEmitter<E>` pattern in `ARCHITECTURE.md` | ~50 new | None |
+| **Total** | | **~275** | **Low** |
 
 ### Ordering Relative to Orchestrator Extraction
 
-The EventLog belongs in cue. Building it in epic first then moving it during extraction is viable but creates unnecessary churn. **Recommended: implement as part of or after extraction**, so EventLog lands in cue from the start.
+EventLog stays in epic. The `EventEmitter<E>` trait goes in the `traits` crate. Cue's orchestrator takes a generic `impl EventEmitter<E>` — it never depends on EventLog directly.
 
-The extraction's preparatory phases (decision collapsing, cross-task queries, type decoupling, trait definitions, boundary verification) do not touch the event channel type. No conflict.
+This can be implemented independently of the orchestrator extraction. The extraction's preparatory phases (decision collapsing, cross-task queries, type decoupling, trait definitions, boundary verification) do not touch the event channel type. No conflict.
 
 ---
 
