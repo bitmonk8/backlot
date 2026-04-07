@@ -108,47 +108,29 @@ Cheapest to most expensive:
 
 ## Orchestrator Architecture
 
-### Cue Extraction
+The generic orchestration engine lives in the `cue` sibling crate. See [`CUE_DESIGN.md`](CUE_DESIGN.md) for the full coordination algorithm, trait contracts (`TaskNode`, `TaskStore`), protocol types, event system, and configuration.
 
-The orchestrator coordination engine is extracted into the `cue` sibling crate. Cue defines the generic recursive task execution algorithm, trait contracts (`TaskNode`, `TaskStore`), orchestration protocol types, events, and configuration. Epic provides the concrete implementations through these traits.
+### Epic's Cue Implementations
 
-**Cue defines**: `TaskNode` trait (28 methods: 8 read accessors, 6 decision methods, 6 mutations, 8 lifecycle), `TaskStore` trait (task storage, creation, cross-task queries), `Orchestrator<S: TaskStore>` (coordination loop), all orchestration protocol types (`TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`, etc.), event system, `LimitsConfig`.
+Epic provides concrete implementations of cue's traits:
 
-**Epic defines**: `Task` struct (serializable task data), `EpicTask<A>` (wraps `Task` + runtime deps, implements `TaskNode`), `EpicStore<A>` (implements `TaskStore`), `TaskRuntime<A>` (agent, vault, events, limits, project_root), `AgentService` trait, `ReelAgent`, prompts, wire formats, TUI, CLI.
-
-### Coordinator / Task Split
-
-The orchestrator (in cue) is a pure coordinator. Tasks own their behavior via the `TaskNode` trait.
-
-- **Leaf tasks** execute their full lifecycle internally via `TaskNode::execute_leaf()`: agent calls, retry/escalation (Haiku -> Sonnet -> Opus), verification gates, file-level review, fix loop, scope circuit breaker. The cue orchestrator calls `execute_leaf()` on the task, and handles completion/failure.
-
-- **Branch tasks** own decision logic via `TaskNode` methods: `verify_branch()`, `fix_round_budget_check()`, `design_fix()`, `handle_checkpoint()`, `check_branch_scope()`, `can_attempt_recovery()`, `assess_and_design_recovery()`. Each method returns a structured decision enum. The orchestrator acts on these decisions by performing cross-task operations via `TaskStore`: creating subtasks, executing children, failing pending siblings.
-
-- **`TaskRuntime<A>`** bundles shared infrastructure (agent, events, vault, limits, paths) injected into tasks at construction time. Replaces the former `Services<A>` parameter. Tasks access runtime deps internally via `self.runtime`.
-
-- **`TreeContext`** is a read-only owned snapshot of tree state (parent goal, siblings, children, checkpoint guidance) built by the `TaskStore` before calling task methods. Resolves borrow conflicts. Rebuilt before each TaskNode method call when task state may have changed.
+- **`Task`** — Serializable task data struct (goal, criteria, attempts, discoveries, usage, etc.)
+- **`EpicTask<A>`** — Wraps `Task` + `Arc<TaskRuntime<A>>`, implements `cue::TaskNode`. Lifecycle methods (assess, execute, verify, fix, recover) delegate to reel agent calls with assembled prompts.
+- **`EpicStore<A>`** — Implements `cue::TaskStore`. Wraps `EpicState` + shared runtime deps. Creates tasks with injected runtime, builds `TreeContext` from task tree.
+- **`TaskRuntime<A>`** — Bundles shared infrastructure (agent, events, vault, limits, project_root) injected into tasks at construction time.
+- **`AgentService`** trait — 10-method abstraction over reel agent calls. `ReelAgent` is the production implementation.
 
 ### Runtime Dependency Injection
 
-Tasks need runtime deps (agent, vault, event sender) for lifecycle methods. These are injected at construction time, not passed by the orchestrator.
+Tasks need runtime deps (agent, vault, event sender) for lifecycle methods. Injected at construction time, not passed by the orchestrator.
 
-**Construction path**: `TaskStore::create_subtask()` is implemented by `EpicStore<A>`, which holds shared runtime deps (`Arc<TaskRuntime<A>>`). When creating a task, EpicStore injects these into the `EpicTask`.
+**Construction path**: `EpicStore::create_subtask()` holds shared `Arc<TaskRuntime<A>>` and injects it into each new `EpicTask`.
 
-**Resume path**: After deserializing state, `EpicStore::from_state()` injects runtime deps into all existing tasks via `bind_runtime()`.
+**Resume path**: `EpicStore::from_state()` injects runtime deps into all deserialized tasks via `bind_runtime()`.
 
 ### File Structure
 
 ```
-cue/                        # Generic orchestration framework (sibling crate)
-  src/
-    lib.rs                  Public API re-exports
-    traits.rs               TaskNode, TaskStore
-    types.rs                TaskId, TaskPhase, TaskPath, Model, Attempt, etc.
-    context.rs              TreeContext
-    events.rs               Event, EventSender, EventReceiver
-    config.rs               LimitsConfig, VerificationStep
-    orchestrator.rs         Orchestrator<S: TaskStore>
-
 epic/src/
   store.rs                  EpicStore<A> implements cue::TaskStore
   task/

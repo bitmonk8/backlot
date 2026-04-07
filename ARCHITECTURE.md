@@ -7,8 +7,8 @@ decomposition. The stack is layered: low-level LLM calls and process sandboxing
 at the bottom, an agent runtime with tools in the middle, a knowledge store, and
 a recursive task orchestrator at the top.
 
-The codebase is ~30k lines across five crates, each with a library and (except
-epic) a thin CLI binary. All crates follow the same pattern: the library owns
+The codebase is ~30k lines across six crates, each with a library and (except
+epic and cue) a thin CLI binary. All crates follow the same pattern: the library owns
 all logic; the CLI parses config, calls the library, and formats output.
 
 ## Crate Dependency Graph
@@ -398,4 +398,5 @@ For implementation details beyond this architectural overview:
 | lot | [docs/LOT_DESIGN.md](docs/LOT_DESIGN.md) |
 | reel | [docs/REEL_DESIGN.md](docs/REEL_DESIGN.md) |
 | vault | [docs/VAULT_DESIGN.md](docs/VAULT_DESIGN.md) |
+| cue | [docs/CUE_DESIGN.md](docs/CUE_DESIGN.md) |
 | epic | [docs/EPIC_DESIGN.md](docs/EPIC_DESIGN.md) |
