@@ -88,9 +88,7 @@ Every consumer receives every event. A metrics aggregator that only cares about 
 
 2. **Event log + notify** — `Arc<RwLock<Vec<Event>>>` with `tokio::sync::Notify`. Append-only in-memory log. Consumers track their own offset. Supports late-join replay. Optional JSONL persistence via append-mode file writes.
 
-3. **Event sourcing** — append-only durable log as the single source of truth. State reconstructed by replaying events. Full audit trail, time-travel debugging. Higher complexity: requires event versioning, reducers, snapshot checkpoints for startup performance.
-
-4. **Event bus with typed subscriptions** — consumers register handlers for specific event types. Reduces noise. More boilerplate.
+3. **Event bus with typed subscriptions** — consumers register handlers for specific event types. Reduces noise. More boilerplate.
 
 ### What Production Orchestrators Use
 
@@ -105,23 +103,7 @@ However, these are distributed systems with databases. Epic is a single-process 
 
 ## Alternatives Analysis
 
-### Option A: Status Quo (mpsc, single consumer)
-
-Keep the current design unchanged.
-
-**Pros**:
-- Zero implementation cost
-- Simple, well-understood
-- Sufficient for current TUI + headless modes
-
-**Cons**:
-- Cannot add a second consumer without a fan-out wrapper
-- No persistence, no replay, no late-join
-- Increasingly inadequate as UI backend requirements grow
-
-**Verdict**: Acceptable short-term. Blocks multi-consumer scenarios.
-
-### Option B: Upgrade to `broadcast` Channel
+### Option A: Upgrade to `broadcast` Channel
 
 Replace `mpsc::unbounded_channel` with `tokio::sync::broadcast::channel(capacity)`.
 
@@ -140,9 +122,9 @@ Replace `mpsc::unbounded_channel` with `tokio::sync::broadcast::channel(capacity
 
 **Verdict**: Good incremental step. Unblocks multi-consumer. Does not address persistence or replay.
 
-### Option C: In-Memory Event Log with Subscribers
+### Option B: In-Memory Event Log with Subscribers
 
-Custom `EventLog` struct: `Arc<RwLock<Vec<Event>>>` + notification mechanism. Consumers subscribe with an offset and receive all events from that point forward.
+Custom `EventLog` struct: `Arc<RwLock<Vec<Event>>>` + `watch<usize>` notification. Consumers subscribe with an offset and receive all events from that point forward.
 
 ```
 EventLog
@@ -160,71 +142,41 @@ EventLog
 - Low complexity — no external dependencies, simple Vec-based storage
 
 **Cons**:
-- More code than broadcast (~100-200 lines for the EventLog)
+- More code than broadcast (~70 lines for the EventLog)
 - Memory grows linearly (acceptable at epic's volume: 24 event types, ~hundreds of events per run)
 - Need to handle serialization (add `Serialize`/`Deserialize` to `Event`)
 - Consumers must manage their own cursors
 
 **Implementation cost**: Moderate. New struct, serialization derives, consumer cursor management.
 
-**Verdict**: Strong option. Addresses multi-consumer, replay, late-join, and persistence in one mechanism. Proportionate complexity for the value delivered.
+**Verdict**: Addresses multi-consumer, replay, late-join, and persistence in one mechanism. Proportionate complexity for the value delivered.
 
-### Option D: Full Event Sourcing (Events as Source of Truth)
+### Is Option B Overkill?
 
-Replace `state.json` snapshots with an append-only event log. State is reconstructed by replaying events. Events and state persistence unified into one mechanism.
+The honest counterargument: epic's consumers (TUI, file logger) all start at process startup. They never join late. A web dashboard, if built, would likely need a task tree snapshot + live updates anyway — not event replay. The replay capability that makes Option B interesting may never be exercised.
 
-**Pros**:
-- Single source of truth — eliminates the dual-mechanism problem (L4)
-- Full audit trail with time-travel debugging
-- State reconstruction is deterministic and verifiable
-- Natural fit for the orchestrator's state machine (phases, transitions, decisions are all events)
+The pragmatic path: **broadcast (Option A) handles the known requirements**. Option B's replay is speculative. If a late-joining consumer eventually needs history, the cheaper solution is: give it a state snapshot from `EpicState`, then subscribe to broadcast for live updates. This avoids building replay infrastructure for a scenario that may not materialize.
 
-**Cons**:
-- Significant complexity increase:
-  - Every state mutation must be captured as an event (current events are observational, not state-bearing)
-  - Need a reducer/fold function to reconstruct state from events
-  - Event versioning required as the schema evolves
-  - Startup time: replay all events vs. load one JSON snapshot
-  - Snapshot checkpoints needed for large runs to bound replay time
-- Current events are insufficient — they don't capture all state mutations (e.g., `set_assessment`, `record_attempt`, `set_model` have no corresponding events)
-- Fundamentally different architecture — not an incremental change
-
-**Implementation cost**: High. Requires rethinking the state model, adding ~15-20 new event types for state mutations, writing a state reducer, adding snapshot machinery.
-
-**Verdict**: Architecturally elegant but disproportionate to epic's current needs. The dual mechanism (events for observation + snapshots for persistence) is not causing problems. Event sourcing solves a problem epic doesn't have yet.
-
-### Option E: OpenTelemetry Integration
-
-Map epic's events to OTel spans and events. Use OTel exporters for different backends.
-
-**Pros**:
-- Industry-standard observability
-- Rich ecosystem of exporters (Jaeger, Prometheus, OTLP)
-- Distributed tracing if epic ever becomes multi-process
-
-**Cons**:
-- OTel is an observability framework, not an event distribution mechanism
-- Does not replace the need for internal event delivery to TUI
-- Adds a significant dependency (`opentelemetry` crate + exporters)
-- Impedance mismatch: OTel traces/spans are designed for request lifecycles, not task tree state machines
-
-**Verdict**: Complementary, not a replacement. Could layer on top of any of the above options. Premature for epic's current scope. Worth considering when external integrations (web dashboard, metrics) are actually being built.
+**When Option B stops being overkill**:
+- Post-run analysis from the event stream (not just state snapshots)
+- JSONL audit trail as a first-class feature
+- A consumer that genuinely reconstructs its view from event history (not state snapshots)
 
 ---
 
 ## Comparison Matrix
 
-| Criterion | A: Status Quo | B: Broadcast | C: Event Log | D: Event Sourcing | E: OTel |
-|---|---|---|---|---|---|
-| Multi-consumer | No | Yes | Yes | Yes | Yes (via exporters) |
-| Late-join replay | No | No | Yes | Yes | Partial (traces) |
-| Persistence | No | No | Optional JSONL | Yes (primary) | Yes (exporters) |
-| Audit trail | No | No | Yes (if persisted) | Yes | Yes |
-| Unifies state persistence | No | No | No | Yes | No |
-| Implementation cost | None | Low | Moderate | High | Moderate-High |
-| Complexity added | None | Minimal | Low | Significant | Moderate |
-| External dependencies | None | None | None | None | opentelemetry crates |
-| Extraction impact (cue) | None | Minimal | EventLog moves to cue | Major restructure | Separate concern |
+| Criterion | A: Broadcast | B: Event Log |
+|---|---|---|
+| Multi-consumer | Yes | Yes |
+| Late-join replay | No | Yes |
+| Persistence | No | Optional JSONL |
+| Audit trail | No | Yes (if persisted) |
+| Unifies state persistence | No | No |
+| Implementation cost | Low | Moderate |
+| Complexity added | Minimal | Low |
+| External dependencies | None | None |
+| Extraction impact (cue) | Minimal | EventLog moves to cue |
 
 ---
 
@@ -232,15 +184,13 @@ Map epic's events to OTel spans and events. Use OTel exporters for different bac
 
 The extraction spec ([ORCHESTRATOR_EXTRACTION.md](ORCHESTRATOR_EXTRACTION.md)) plans to move `Event`, `EventSender`, `EventReceiver`, and `event_channel()` into the cue crate. The orchestrator holds an `EventSender` directly.
 
-**Options B and C are compatible** with this plan — the channel/log type moves to cue, consumers live in epic. The interface boundary (`EventSender` or `EventLog` handle) stays clean.
-
-**Option D would significantly complicate extraction** — the event log becomes the state persistence mechanism, entangling it with `TaskStore` and `EpicState` in ways that cross the crate boundary.
+**Both options are compatible** with this plan — the channel/log type moves to cue, consumers live in epic. The interface boundary (`EventSender` or `EventLog` handle) stays clean.
 
 ---
 
 ## Recommendations
 
-### Near-term (before or during extraction): Option B — Broadcast Channel
+### Near-term (before or during extraction): Option A — Broadcast Channel
 
 Switch from `mpsc::unbounded_channel` to `tokio::sync::broadcast::channel`. This is a small, low-risk change that unblocks multi-consumer scenarios.
 
@@ -251,127 +201,21 @@ Specific steps:
 
 This change is compatible with the extraction plan — `broadcast` channel types move to cue identically to the current `mpsc` types.
 
-### Medium-term (post-extraction, when a second UI backend is being built): Option C — Event Log
+### Medium-term (post-extraction, when a second UI backend is being built): Option B — Event Log
 
 When the first non-TUI consumer is actually needed (web dashboard, Slack integration), upgrade from broadcast to an EventLog that provides replay and optional JSONL persistence.
 
 The EventLog can wrap a broadcast channel internally for real-time delivery while maintaining an in-memory Vec for replay. This is an additive change — existing consumers continue to work.
 
-### Not recommended now: Options D and E
-
-Event sourcing (D) solves problems epic doesn't have. The dual mechanism (events + snapshots) works and the two concerns are cleanly separated. If this changes — if state corruption bugs arise, if audit requirements emerge, if the snapshot mechanism proves fragile — revisit.
-
-OpenTelemetry (E) is premature. When epic actually has external integrations that need observability, OTel can layer on top of whatever event mechanism exists at that point.
-
 ### Immediate low-cost preparation (regardless of path)
 
-Add `Serialize` and `Deserialize` to `Event` now. This is a one-line derive change with zero behavioral impact. Every future option (B, C, D, E) benefits from serializable events, and it enables JSONL file logging immediately.
+Add `Serialize` and `Deserialize` to `Event` now. This is a one-line derive change with zero behavioral impact. Every future option benefits from serializable events, and it enables JSONL file logging immediately.
 
 ---
 
-## Deep Dive: Option C Variations
+## Cross-Crate Event Propagation Design
 
-### Crate Ecosystem Assessment
-
-No viable crate exists for this use case.
-
-- **eventfold** — append-only event log with reducer-based derived views. Closest match conceptually, but: low/unknown adoption, no download stats available, unclear maintenance status, appears potentially abandoned. Not suitable as a production dependency.
-- **eventlogs** — file-based append-only logs with optimistic concurrency. Targets a different use case (multi-writer durable logs), not in-memory multi-consumer.
-- **armature-cqrs** — CQRS framework, v0.1.0, unstable Rust 2024 edition, low visibility. Overkill and immature.
-
-The broader `append-only`, `event-log`, `event-store`, `event-stream` keyword space on crates.io yields nothing with reasonable adoption for in-process use. The Rust ecosystem has not converged on a crate for this — custom implementations using tokio primitives are idiomatic.
-
-**Conclusion**: No crate dependency. Build from tokio primitives.
-
-### Implementation Approaches
-
-Three concrete variations, compared for epic's constraints (single producer, tens of events/sec, hundreds to low thousands per run, currently 1 consumer growing to 2-4):
-
-#### C1: `Arc<RwLock<Vec<Event>>>` + `watch<usize>`
-
-Simplest correct approach. The `watch` channel tracks log length; consumers wait on `watch::changed()` then read from the Vec at their tracked offset.
-
-```
-EventLog {
-    events: Arc<RwLock<Vec<Event>>>,
-    len_tx: watch::Sender<usize>,
-}
-```
-
-- ~40-50 lines of core implementation
-- Single source of truth (one Vec)
-- Consumers track their own `usize` offset
-- `subscribe_from(offset)` returns a stream that replays from any point
-- `RwLock` contention negligible at epic's throughput (~1us write, readers unlimited)
-- No event cloning until consumer reads
-
-**Gotchas**: Readers briefly block writers (negligible). Consumer must handle the gap between `watch` notification and actual read.
-
-#### C2: `Arc<RwLock<Vec<Event>>>` + `Notify`
-
-Similar to C1 but uses `tokio::sync::Notify` instead of `watch`.
-
-- ~60-70 lines
-- `Notify::notify_waiters()` wakes all consumers on append
-- Consumers must deduplicate if notified multiple times before reading
-- Race between notification and offset tracking adds subtle bugs
-
-**Gotchas**: Notification timing bugs are common. `Notify` doesn't carry data — consumers must separately check what changed. More error-prone than C1.
-
-#### C3: `broadcast` + `Arc<RwLock<Vec<Event>>>` (hybrid)
-
-Broadcast for real-time delivery, Vec for replay/persistence. Two data structures.
-
-- ~80-100 lines
-- Real-time consumers use broadcast (familiar tokio pattern)
-- Late joiners read from Vec, then switch to broadcast
-- Must keep Vec and broadcast in sync
-
-**Gotchas**: Dual-storage sync. Consumer must manage the "switch point" between historical replay and live stream. Memory duplication (events stored in both Vec and broadcast buffer). Most error-prone of the three.
-
-### Variation Comparison
-
-| Criterion | C1: Vec + watch | C2: Vec + Notify | C3: broadcast + Vec |
-|---|---|---|---|
-| Lines of code | ~40-50 | ~60-70 | ~80-100 |
-| Correctness risk | Low | Medium | High |
-| Data sources | 1 (Vec) | 1 (Vec) | 2 (Vec + broadcast) |
-| Late-join replay | Yes | Yes | Yes |
-| Notification mechanism | `watch::changed()` | `notify_waiters()` | `broadcast::recv()` |
-| Consumer complexity | Track offset + await watch | Track offset + deduplicate | Switch between replay/live |
-
-**C1 is the clear winner** — fewest lines, lowest correctness risk, single source of truth.
-
-### Is Option C Overkill?
-
-The honest counterargument: epic's consumers (TUI, file logger) all start at process startup. They never join late. A web dashboard, if built, would likely need a task tree snapshot + live updates anyway — not event replay. The replay capability that makes Option C interesting may never be exercised.
-
-The pragmatic path: **broadcast (Option B) handles the known requirements**. Option C's replay is speculative. If a late-joining consumer eventually needs history, the cheaper solution is: give it a state snapshot from `EpicState`, then subscribe to broadcast for live updates. This avoids building replay infrastructure for a scenario that may not materialize.
-
-**When Option C stops being overkill**:
-- Post-run analysis from the event stream (not just state snapshots)
-- JSONL audit trail as a first-class feature
-- A consumer that genuinely reconstructs its view from event history (not state snapshots)
-
-### Recommendation (Revised)
-
-The original recommendation stands but with refined staging:
-
-1. **Now**: Add `Serialize`/`Deserialize` to `Event`. Zero cost, enables JSONL logging regardless of channel type.
-
-2. **During/after extraction**: Switch to `broadcast`. This is the right near-term move — it unblocks multi-consumer (TUI + file logger simultaneously) with minimal code change. The extraction spec already plans to move event types to cue; broadcast is a drop-in replacement for mpsc in that plan.
-
-3. **When evidence demands it**: Upgrade to EventLog (C1 variant) if a concrete use case for replay or offset-based consumption emerges. The upgrade from broadcast to C1 is additive — wrap the broadcast in an EventLog that also appends to a Vec. Existing broadcast consumers continue to work.
-
-Do not build C1 speculatively. Broadcast is sufficient until proven otherwise.
-
----
-
-## Implementation Guide: B then C1
-
-### Cross-Crate Event Propagation Design
-
-#### Current Crate Hierarchy
+### Current Crate Hierarchy
 
 ```
 epic (application)
@@ -384,7 +228,7 @@ epic (application)
 
 Events propagate **upward**: lower crates emit, higher crates consume. No crate should depend on a sibling's event types. No globals.
 
-#### Current Event Emission Sites
+### Current Event Emission Sites
 
 Two categories of emitters today:
 
@@ -394,13 +238,13 @@ Two categories of emitters today:
 2. **Task lifecycle methods** (`task/leaf.rs`, `task/branch.rs`) — emit via `svc.events.send()`:
    `RetryAttempt`, `FixAttempt`, `FixModelEscalated`, `ModelEscalated`, `DiscoveriesRecorded`, `FileLevelReviewCompleted`, `UsageUpdated`, `VaultRecorded`, `RecoveryStarted`, `RecoveryPlanSelected`, `CheckpointAdjust`, `CheckpointEscalate`
 
-#### Sibling Crate Status
+### Sibling Crate Status
 
 **Reel and vault emit no events today.** Both are return-value-only: they complete an operation and return a `RunResult<T>` or `SessionMetadata`. No mid-execution notifications. No callback traits, no channels, no observer patterns.
 
 If these crates grow to need mid-execution notifications (e.g., reel emitting `ToolExecuted` during an agent turn, vault emitting `DocumentCreated` during a record operation), the same sink-injection pattern described below applies.
 
-#### Design Principle: Injected Event Sinks
+### Design Principle: Injected Event Sinks
 
 Every crate that emits events receives an event sink at construction time. The sink is a concrete channel sender type, not a trait object. The crate that *creates* the channel owns the receiver(s). Events flow upward through the dependency graph via the sender.
 
@@ -417,7 +261,7 @@ epic (owns channel, holds receiver, spawns consumers)
 
 After extraction, cue defines the `Event` enum and the sender/receiver type aliases. Epic creates the channel, passes the sender down, keeps receiver(s) for consumers.
 
-#### Why Not a Trait for the Sink?
+### Why Not a Trait for the Sink?
 
 A trait (`trait EventSink { fn emit(&self, event: Event); }`) adds indirection and dynamic dispatch for no practical benefit. The event sender is always the same concrete type (`broadcast::Sender<Event>` or `EventLog` handle). Using the concrete type:
 - Enables `Clone` (broadcast senders are cheaply cloneable)
@@ -429,9 +273,11 @@ If a future crate needs to emit its own domain-specific events (e.g., reel emitt
 
 ---
 
-### Phase B: Upgrade to Broadcast
+## Implementation Guide: A then B
 
-#### B.1: Add Serialize/Deserialize to Event
+### Phase A: Upgrade to Broadcast
+
+#### A.1: Add Serialize/Deserialize to Event
 
 Add derives to `Event` and its contained types (`TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`).
 
@@ -449,7 +295,7 @@ Check that all types referenced by Event variants already derive `Serialize`/`De
 
 No behavioral change. Tests should pass unchanged.
 
-#### B.2: Replace mpsc with broadcast
+#### A.2: Replace mpsc with broadcast
 
 ```rust
 // events.rs — before
@@ -476,13 +322,13 @@ pub fn event_channel() -> (EventSender, EventReceiver) {
 
 Capacity 1024 is generous for epic's volume (hundreds of events per run). `RecvError::Lagged` is the backpressure signal if a consumer falls behind.
 
-#### B.3: Update send sites
+#### A.3: Update send sites
 
 `broadcast::Sender::send()` returns `Result<usize, SendError<T>>` (number of receivers that got the message). Current code already discards the result with `let _ = ...send()`. No change needed at send sites.
 
 One difference: `broadcast::send()` fails if there are **zero receivers** (returns `SendError`). Current code already ignores errors. Verify this is acceptable — it means events emitted before any consumer subscribes are silently dropped. This matches the current mpsc behavior (events are consumed, not accumulated).
 
-#### B.4: Update receive sites
+#### A.4: Update receive sites
 
 `broadcast::Receiver::recv()` is async and returns `Result<Event, RecvError>`. `RecvError::Lagged(n)` means the consumer missed `n` events (buffer wrapped). `RecvError::Closed` means all senders dropped.
 
@@ -510,7 +356,7 @@ match event_rx.try_recv() {
 
 **Headless logger** (`main.rs`): Same pattern.
 
-#### B.5: Enable multiple consumers
+#### A.5: Enable multiple consumers
 
 With broadcast, additional consumers subscribe by calling `tx.subscribe()`:
 
@@ -529,13 +375,13 @@ let log_rx = tx.subscribe();     // JSONL file logger (new)
 
 Note: `broadcast::channel()` returns one receiver, but it's cleaner to discard it and create all receivers via `subscribe()` so the pattern is uniform.
 
-#### B.6: Update tests
+#### A.6: Update tests
 
 Tests that create `event_channel()` and check received events need updated receive calls. Tests that discard the receiver (`_rx`) need no changes — broadcast senders work fine with no active receivers (send returns `Err` which is already ignored).
 
 For tests that assert on received events: `broadcast::Receiver::try_recv()` returns `Result<T, TryRecvError>` vs mpsc's. Update match arms.
 
-#### B.7: Extraction boundary (cue crate)
+#### A.7: Extraction boundary (cue crate)
 
 After extraction, `events.rs` moves to cue. The type aliases and `event_channel()` live in cue. Epic creates the channel, passes `EventSender` into `cue::Orchestrator`, and keeps/distributes `EventReceiver`s to consumers.
 
@@ -555,11 +401,11 @@ The `EventSender` (`broadcast::Sender<Event>`) is `Clone`. Cloning it is cheap a
 
 ---
 
-### Phase C1: Upgrade to EventLog
+### Phase B: Upgrade to EventLog
 
 Upgrade from broadcast to an EventLog when evidence demands replay or persistence. The EventLog wraps broadcast internally — existing consumer code changes minimally.
 
-#### C1.1: EventLog struct
+#### B.1: EventLog struct
 
 ```rust
 // events.rs (in cue crate)
@@ -666,7 +512,7 @@ impl EventSubscription {
 
 ~70 lines. Single source of truth (Vec). Broadcast kept internally for compatibility but not required — consumers use `EventSubscription`.
 
-#### C1.2: Producer API change
+#### B.2: Producer API change
 
 The producer API changes from `sender.send(event)` to `log.emit(event).await`.
 
@@ -692,7 +538,7 @@ pub fn emit(&self, event: Event) -> usize {
 
 This preserves the current `let _ = log.emit(event)` call pattern — no `.await` needed at send sites.
 
-#### C1.3: Consumer API change
+#### B.3: Consumer API change
 
 **TUI**: Replace `event_rx.try_recv()` with `subscription.try_recv()`. Same polling pattern. `try_recv()` returns `Option<Event>` instead of `Result`. Simpler.
 
@@ -712,7 +558,7 @@ async fn jsonl_logger(mut sub: EventSubscription, path: PathBuf) {
 }
 ```
 
-#### C1.4: Cross-crate propagation with EventLog
+#### B.4: Cross-crate propagation with EventLog
 
 The `EventLog` is `Clone` (all fields are `Arc`-wrapped or `Clone`). Cloning gives another handle to the same log. This replaces the broadcast sender's `Clone` semantics.
 
@@ -733,10 +579,10 @@ epic (creates EventLog, distributes subscriptions to consumers)
 **Type alias update** (in cue crate):
 
 ```rust
-// Phase B (broadcast)
+// Phase A (broadcast)
 pub type EventSender = broadcast::Sender<Event>;
 
-// Phase C1 (EventLog) — EventSender is replaced by EventLog
+// Phase B (EventLog) — EventSender is replaced by EventLog
 // The Orchestrator and TaskRuntime hold EventLog instead of EventSender.
 // Consumers hold EventSubscription instead of EventReceiver.
 ```
@@ -744,7 +590,7 @@ pub type EventSender = broadcast::Sender<Event>;
 The extraction spec's `Orchestrator` struct changes:
 
 ```rust
-// Phase B
+// Phase A
 pub struct Orchestrator<S: TaskStore> {
     store: S,
     events: EventSender,  // broadcast::Sender<Event>
@@ -752,7 +598,7 @@ pub struct Orchestrator<S: TaskStore> {
     state_path: Option<PathBuf>,
 }
 
-// Phase C1
+// Phase B
 pub struct Orchestrator<S: TaskStore> {
     store: S,
     events: EventLog,  // replaces EventSender
@@ -763,7 +609,7 @@ pub struct Orchestrator<S: TaskStore> {
 
 The call sites change from `events.send(event)` to `events.emit(event)` — a rename, not a structural change.
 
-#### C1.5: Future crate event propagation
+#### B.5: Future crate event propagation
 
 If reel or vault grow to emit their own events mid-execution:
 
@@ -789,7 +635,7 @@ epic
 
 For the current state (reel and vault are return-value-only), none of this is needed. The design accommodates it when the time comes.
 
-#### C1.6: Persistence (optional JSONL sink)
+#### B.6: Persistence (optional JSONL sink)
 
 EventLog can optionally write every event to a JSONL file. Two approaches:
 
@@ -797,9 +643,9 @@ EventLog can optionally write every event to a JSONL file. Two approaches:
 
 **(b) External consumer**: A dedicated JSONL logger subscribes at offset 0 and writes to file. No persistence logic in EventLog itself.
 
-**Recommendation**: **(b)**. Keeps EventLog simple. Persistence is just another consumer. The JSONL logger consumer shown in C1.3 is ~10 lines.
+**Recommendation**: **(b)**. Keeps EventLog simple. Persistence is just another consumer. The JSONL logger consumer shown in B.3 is ~10 lines.
 
-#### C1.7: Post-run analysis
+#### B.7: Post-run analysis
 
 After the orchestrator completes, `log.snapshot()` returns all events. Epic can:
 - Write a summary to stdout (headless mode)
@@ -814,43 +660,43 @@ This is a capability that broadcast alone cannot provide — the events are gone
 
 | Step | What changes | Lines changed (est.) | Risk |
 |---|---|---|---|
-| B.1 | Add `Serialize`/`Deserialize` derives | ~10 | None |
-| B.2 | Replace mpsc with broadcast in `events.rs` | ~10 | Low |
-| B.3 | Verify send sites (no change needed) | 0 | None |
-| B.4 | Update TUI + headless receive loops | ~20 | Low |
-| B.5 | Enable second consumer (JSONL logger) | ~30 new | Low |
-| B.6 | Update test event assertions | ~30 | Low |
-| B.7 | Move to cue during extraction | Mechanical | Low |
-| **B total** | | **~100** | **Low** |
-| C1.1 | Add EventLog + EventSubscription | ~70 new | Low |
-| C1.2 | Change emit call sites | ~40 (rename) | Low |
-| C1.3 | Change consumer receive calls | ~20 | Low |
-| C1.4 | Update Orchestrator/TaskRuntime types | ~10 | Low |
-| **C1 total (incremental over B)** | | **~140** | **Low** |
+| A.1 | Add `Serialize`/`Deserialize` derives | ~10 | None |
+| A.2 | Replace mpsc with broadcast in `events.rs` | ~10 | Low |
+| A.3 | Verify send sites (no change needed) | 0 | None |
+| A.4 | Update TUI + headless receive loops | ~20 | Low |
+| A.5 | Enable second consumer (JSONL logger) | ~30 new | Low |
+| A.6 | Update test event assertions | ~30 | Low |
+| A.7 | Move to cue during extraction | Mechanical | Low |
+| **A total** | | **~100** | **Low** |
+| B.1 | Add EventLog + EventSubscription | ~70 new | Low |
+| B.2 | Change emit call sites | ~40 (rename) | Low |
+| B.3 | Change consumer receive calls | ~20 | Low |
+| B.4 | Update Orchestrator/TaskRuntime types | ~10 | Low |
+| **B total (incremental over A)** | | **~140** | **Low** |
 
-Both phases are backward-compatible with the extraction plan. B is a prerequisite for C1 only in the sense that C1 includes broadcast internally — you could skip B and go directly to C1 if the timing aligns.
+Both phases are backward-compatible with the extraction plan. A is a prerequisite for B only in the sense that B includes broadcast internally — you could skip A and go directly to B if the timing aligns.
 
 ---
 
 ### Ordering Relative to Orchestrator Extraction
 
-#### Phase B (broadcast): Orthogonal to extraction
+#### Phase A (broadcast): Orthogonal to extraction
 
 The mpsc→broadcast change is behind the `EventSender`/`EventReceiver` type aliases. The extraction moves those aliases regardless of what they point to. Send sites use the same `let _ = sender.send(event)` pattern either way. Three viable orderings:
 
-1. **B before extraction** — Change in epic, then mechanically move broadcast-based `events.rs` to cue.
-2. **B during extraction** — Bundle the switch into Phase 6 (mechanical extraction) since `events.rs` is being moved anyway. Avoids touching the file twice.
-3. **B after extraction** — Change in cue, update receive sites in epic. Works but touches two crates.
+1. **A before extraction** — Change in epic, then mechanically move broadcast-based `events.rs` to cue.
+2. **A during extraction** — Bundle the switch into Phase 6 (mechanical extraction) since `events.rs` is being moved anyway. Avoids touching the file twice.
+3. **A after extraction** — Change in cue, update receive sites in epic. Works but touches two crates.
 
 No ordering creates complications or rework. **Recommended: bundle with extraction (Phase 6).**
 
-#### Phase C1 (EventLog): Slightly cleaner after extraction
+#### Phase B (EventLog): Slightly cleaner after extraction
 
-The `EventLog` struct belongs in cue. `EventSubscription` consumers belong in epic. Doing C1 after extraction means the crate boundary enforces this separation — the struct lands in the right crate from the start. Doing C1 before extraction means building it in epic then moving it — unnecessary churn.
+The `EventLog` struct belongs in cue. `EventSubscription` consumers belong in epic. Doing B after extraction means the crate boundary enforces this separation — the struct lands in the right crate from the start. Doing B before extraction means building it in epic then moving it — unnecessary churn.
 
 The extraction's preparatory phases (1-5: decision collapsing, cross-task queries, type decoupling, trait definitions, boundary verification) do not touch the event channel type. No conflict.
 
-**Recommended: C1 after extraction, when evidence demands it.**
+**Recommended: B after extraction, when evidence demands it.**
 
 ---
 
