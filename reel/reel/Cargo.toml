@@ -26,7 +26,7 @@ ureq = "3"
 sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"
-zip = "2"
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 
 [dev-dependencies]
 flick = { workspace = true, features = ["testing"] }

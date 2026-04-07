@@ -13,7 +13,7 @@ reel.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-regex = "1"
+regex = { version = "1", default-features = false, features = ["std", "perf"] }
 
 [dev-dependencies]
 tempfile.workspace = true

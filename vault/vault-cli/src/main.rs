@@ -110,7 +110,7 @@ fn read_stdin() -> Result<String, String> {
 fn load_config(path: &Path) -> Result<Config, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("failed to read config: {e}"))?;
-    serde_yaml::from_str(&content).map_err(|e| format!("failed to parse config: {e}"))
+    serde_yml::from_str(&content).map_err(|e| format!("failed to parse config: {e}"))
 }
 
 async fn build_vault(config: Config) -> Result<vault::Vault, String> {
@@ -300,7 +300,7 @@ models:
   record: "haiku"
   reorganize: "sonnet"
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = serde_yml::from_str(yaml).unwrap();
         assert_eq!(config.storage_root, PathBuf::from(".epic/docs/"));
         assert_eq!(config.models.bootstrap, "sonnet");
         assert_eq!(config.models.query, "haiku");
@@ -315,7 +315,7 @@ storage_root: ".epic/docs/"
 models:
   bootstrap: "sonnet"
 "#;
-        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        let result: Result<Config, _> = serde_yml::from_str(yaml);
         assert!(result.is_err());
     }
 

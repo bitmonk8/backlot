@@ -44,7 +44,7 @@ vault/                            (workspace root)
 - **reel** -- constructs `ModelRegistry` and `ProviderRegistry`
 - **clap** -- argument parsing with derive macros
 - **serde** + **serde_json** -- JSON output serialization
-- **serde_yaml** -- YAML configuration parsing
+- **serde_yml** -- YAML configuration parsing
 - **tokio** -- async runtime (single-threaded)
 
 ## Document Model

@@ -102,4 +102,4 @@ The `flick` library crate and `flick-cli` binary crate have a strict separation:
 3. **Library must not call `std::process::exit`.** Errors are returned, not fatal.
 4. **Context persistence is opt-in.** `FlickClient::run()` returns a `FlickResult` containing the updated `Context`. The caller decides whether to persist it. The CLI writes context files; library users may keep context in memory.
 5. **History recording is opt-in.** The `history` module is public but not called automatically. The CLI calls it; library users may skip it.
-6. **Interactive prompts live in the CLI.** `TerminalPrompter` and `dialoguer` are CLI-only dependencies.
+6. **Interactive prompts live in the CLI.** `TerminalPrompter` and `rpassword` are CLI-only dependencies.

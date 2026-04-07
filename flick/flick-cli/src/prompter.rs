@@ -1,3 +1,5 @@
+use std::io::Write as _;
+
 use flick::error::FlickError;
 
 /// Abstraction over interactive prompts, mockable in tests.
@@ -16,10 +18,9 @@ pub trait Prompter {
     fn message(&self, msg: &str) -> Result<(), FlickError>;
 }
 
-/// Production prompter wrapping `dialoguer` widgets. All output targets stderr.
-pub struct TerminalPrompter {
-    term: dialoguer::console::Term,
-}
+/// Production prompter using `rpassword` for hidden input and
+/// plain stdin/stderr for text input and selection. All output targets stderr.
+pub struct TerminalPrompter;
 
 impl Default for TerminalPrompter {
     fn default() -> Self {
@@ -29,75 +30,70 @@ impl Default for TerminalPrompter {
 
 impl TerminalPrompter {
     pub fn new() -> Self {
-        Self {
-            term: dialoguer::console::Term::stderr(),
-        }
+        Self
     }
 }
 
 impl Prompter for TerminalPrompter {
     fn password(&self, prompt: &str) -> Result<String, FlickError> {
-        use dialoguer::console::Key;
-
-        let map_io = |e| FlickError::Io(std::io::Error::other(e));
-
-        self.term
-            .write_str(&format!("{prompt}: "))
-            .map_err(map_io)?;
-        self.term.flush().map_err(map_io)?;
-
-        let mut input = String::new();
-        loop {
-            match self.term.read_key().map_err(map_io)? {
-                Key::Enter => break,
-                Key::Backspace if !input.is_empty() => {
-                    input.pop();
-                    // Erase the last '*': move back, overwrite with space, move back
-                    self.term.write_str("\x08 \x08").map_err(map_io)?;
-                    self.term.flush().map_err(map_io)?;
-                }
-                Key::Char(c) if !c.is_control() => {
-                    input.push(c);
-                    self.term.write_str("*").map_err(map_io)?;
-                    self.term.flush().map_err(map_io)?;
-                }
-                Key::CtrlC => {
-                    self.term.write_line("").map_err(map_io)?;
-                    return Err(FlickError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "interrupted",
-                    )));
-                }
-                _ => {}
-            }
-        }
-        self.term.write_line("").map_err(map_io)?;
-        Ok(input)
+        rpassword::prompt_password(format!("{prompt}: ")).map_err(FlickError::Io)
     }
 
     fn select(&self, prompt: &str, items: &[String], default: usize) -> Result<usize, FlickError> {
-        dialoguer::Select::new()
-            .with_prompt(prompt)
-            .items(items)
-            .default(default)
-            .interact_on(&self.term)
-            .map_err(|e| FlickError::Io(std::io::Error::other(e)))
+        let mut stderr = std::io::stderr().lock();
+        writeln!(stderr, "{prompt}").map_err(FlickError::Io)?;
+        for (i, item) in items.iter().enumerate() {
+            let marker = if i == default { ">" } else { " " };
+            writeln!(stderr, "  {marker} [{i}] {item}").map_err(FlickError::Io)?;
+        }
+        write!(stderr, "Selection [default: {default}]: ").map_err(FlickError::Io)?;
+        stderr.flush().map_err(FlickError::Io)?;
+        drop(stderr);
+
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(FlickError::Io)?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(default);
+        }
+        let idx = trimmed.parse::<usize>().map_err(|e| {
+            FlickError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+        })?;
+        if idx >= items.len() {
+            return Err(FlickError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("selection {idx} out of range (0..{})", items.len()),
+            )));
+        }
+        Ok(idx)
     }
 
     fn input(&self, prompt: &str, default: Option<&str>) -> Result<String, FlickError> {
-        let mut input = dialoguer::Input::<String>::new().with_prompt(prompt);
-        if let Some(d) = default {
-            input = input.default(d.to_string());
+        let mut stderr = std::io::stderr().lock();
+        match default {
+            Some(d) => write!(stderr, "{prompt} [{d}]: ").map_err(FlickError::Io)?,
+            None => write!(stderr, "{prompt}: ").map_err(FlickError::Io)?,
         }
-        input
-            .interact_on(&self.term)
-            .map_err(|e| FlickError::Io(std::io::Error::other(e)))
+        stderr.flush().map_err(FlickError::Io)?;
+        drop(stderr);
+
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(FlickError::Io)?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if let Some(d) = default {
+                return Ok(d.to_string());
+            }
+        }
+        Ok(trimmed.to_string())
     }
 
     fn message(&self, msg: &str) -> Result<(), FlickError> {
-        self.term
-            .write_line(msg)
-            .map_err(|e| FlickError::Io(std::io::Error::other(e)))
+        writeln!(std::io::stderr(), "{msg}").map_err(FlickError::Io)
     }
 }
 
