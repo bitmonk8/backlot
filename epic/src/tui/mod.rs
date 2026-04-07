@@ -10,10 +10,11 @@ use crate::tui::metrics::MetricsWidget;
 use crate::tui::task_tree::{TaskTreeWidget, TuiTask};
 use crate::tui::worklog::{WorklogEntry, WorklogWidget};
 use anyhow::Result;
-use crossterm::event::{self as ct_event, KeyCode, KeyModifiers};
+use crossterm::event::{self as ct_event, EventStream, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures::StreamExt;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::collections::HashMap;
@@ -53,7 +54,7 @@ impl TuiApp {
         }
     }
 
-    pub fn run(&mut self, mut event_rx: EventReceiver) -> Result<()> {
+    pub async fn run(&mut self, mut event_rx: EventReceiver) -> Result<()> {
         enable_raw_mode()?;
         crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
 
@@ -69,7 +70,7 @@ impl TuiApp {
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;
 
-        let result = self.event_loop(&mut terminal, &mut event_rx);
+        let result = self.event_loop(&mut terminal, &mut event_rx).await;
 
         // Restore original panic hook. Our hook captured and consumed it,
         // so take_hook returns it (with the terminal-cleanup wrapper). On
@@ -82,48 +83,47 @@ impl TuiApp {
         result
     }
 
-    fn event_loop(
+    async fn event_loop(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         event_rx: &mut EventReceiver,
     ) -> Result<()> {
+        let mut ct_stream = EventStream::new();
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+
         loop {
             terminal.draw(|frame| self.render(frame))?;
 
-            // Poll crossterm events with a short timeout so we stay responsive to orchestrator events.
-            let has_ct_event = ct_event::poll(Duration::from_millis(50))?;
-            if has_ct_event {
-                if let ct_event::Event::Key(key) = ct_event::read()? {
-                    match (key.code, key.modifiers) {
-                        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                            return Ok(());
+            tokio::select! {
+                _ = tick.tick() => {}
+                ct_event = ct_stream.next() => {
+                    if let Some(Ok(ct_event::Event::Key(key))) = ct_event {
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                return Ok(());
+                            }
+                            (KeyCode::Char('t'), _) => {
+                                self.follow_tail = !self.follow_tail;
+                            }
+                            (KeyCode::Char('m'), _) => {
+                                self.show_metrics = !self.show_metrics;
+                            }
+                            (KeyCode::Up, _) => {
+                                self.tree_scroll = self.tree_scroll.saturating_sub(1);
+                            }
+                            (KeyCode::Down, _) => {
+                                self.tree_scroll = (self.tree_scroll + 1).min(self.tasks.len());
+                            }
+                            _ => {}
                         }
-                        (KeyCode::Char('t'), _) => {
-                            self.follow_tail = !self.follow_tail;
-                        }
-                        (KeyCode::Char('m'), _) => {
-                            self.show_metrics = !self.show_metrics;
-                        }
-                        (KeyCode::Up, _) => {
-                            self.tree_scroll = self.tree_scroll.saturating_sub(1);
-                        }
-                        (KeyCode::Down, _) => {
-                            // Clamp to task count so the user can't scroll into void.
-                            self.tree_scroll = (self.tree_scroll + 1).min(self.tasks.len());
-                        }
-                        _ => {}
                     }
                 }
-            }
-
-            // Drain all pending orchestrator events.
-            loop {
-                match event_rx.try_recv() {
-                    Ok(event) => self.handle_event(event),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        self.orchestrator_done = true;
-                        break;
+                event = event_rx.recv() => {
+                    match event {
+                        Some(event) => self.handle_event(event),
+                        None => {
+                            self.orchestrator_done = true;
+                        }
                     }
                 }
             }

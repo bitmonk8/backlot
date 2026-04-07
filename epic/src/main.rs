@@ -228,7 +228,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             (result, final_state)
         });
 
-        let tui_result = tokio::task::spawn_blocking(move || tui_app.run(rx)).await?;
+        let tui_result = tokio::spawn(async move { tui_app.run(rx).await }).await?;
 
         let abort_handle = orch_handle.abort_handle();
         let mut saved = false;
