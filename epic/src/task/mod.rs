@@ -16,7 +16,7 @@ pub use cue::{
 
 use crate::agent::AgentService;
 use crate::config::project::LimitsConfig;
-use crate::events::EventSender;
+use crate::events::EventLog;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// or after deserialization via `bind_runtime()`.
 pub struct TaskRuntime<A: AgentService> {
     pub agent: Arc<A>,
-    pub events: EventSender,
+    pub events: EventLog,
     pub vault: Option<Arc<vault::Vault>>,
     pub limits: LimitsConfig,
     pub project_root: Option<PathBuf>,

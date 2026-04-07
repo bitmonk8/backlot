@@ -1,16 +1,9 @@
 [package]
-name = "cue"
+name = "traits"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-
-[dependencies]
-tokio = { workspace = true, features = ["sync"] }
-serde = { workspace = true }
-anyhow.workspace = true
-thiserror.workspace = true
-traits.workspace = true
 
 [lints.rust]
 unsafe_code = "deny"

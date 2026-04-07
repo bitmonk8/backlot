@@ -796,6 +796,6 @@ All major components receive dependencies explicitly. No globals, statics, or si
 
 Key dependency types:
 - `TaskContext` and `ReelAgent` — bundle reel config, document store, verification config. Each agent call builds a `reel::AgentRequestConfig` and calls `reel::Agent::run()`
-- `EventSender` — type alias (`mpsc::UnboundedSender<Event>`) for logging/TUI events
+- `EventLog` — append-only in-memory event store with `watch` notification; implements `EventEmitter<CueEvent>` for bridging cue events into epic's `Event` enum
 - `ProjectConfig` — verification steps, paths, model preferences (loaded from TOML)
 - `EpicState` — task tree and session state (owned by orchestrator)

@@ -1,10 +1,12 @@
-// Event system for orchestrator-to-presentation communication.
+// Event types for orchestrator-to-presentation communication.
+// CueEvent contains only the orchestration events emitted by the orchestrator.
+// Application crates define their own full event enums and map via From<CueEvent>.
 
 use crate::types::{Model, TaskId, TaskOutcome, TaskPath, TaskPhase};
-use tokio::sync::mpsc;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
-pub enum Event {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CueEvent {
     TaskRegistered {
         task_id: TaskId,
         parent_id: Option<TaskId>,
@@ -23,11 +25,6 @@ pub enum Event {
         task_id: TaskId,
         model: Model,
     },
-    ModelEscalated {
-        task_id: TaskId,
-        from: Model,
-        to: Model,
-    },
     SubtasksCreated {
         parent_id: TaskId,
         child_ids: Vec<TaskId>,
@@ -36,30 +33,8 @@ pub enum Event {
         task_id: TaskId,
         outcome: TaskOutcome,
     },
-    RetryAttempt {
+    TaskLimitReached {
         task_id: TaskId,
-        attempt: u32,
-        model: Model,
-    },
-    DiscoveriesRecorded {
-        task_id: TaskId,
-        count: usize,
-    },
-    CheckpointAdjust {
-        task_id: TaskId,
-    },
-    CheckpointEscalate {
-        task_id: TaskId,
-    },
-    FixAttempt {
-        task_id: TaskId,
-        attempt: u32,
-        model: Model,
-    },
-    FixModelEscalated {
-        task_id: TaskId,
-        from: Model,
-        to: Model,
     },
     BranchFixRound {
         task_id: TaskId,
@@ -71,48 +46,9 @@ pub enum Event {
         count: usize,
         round: u32,
     },
-    FileLevelReviewCompleted {
-        task_id: TaskId,
-        passed: bool,
-    },
-    RecoveryStarted {
-        task_id: TaskId,
-        round: u32,
-    },
-    RecoveryPlanSelected {
-        task_id: TaskId,
-        approach: String,
-    },
     RecoverySubtasksCreated {
         task_id: TaskId,
         count: usize,
         round: u32,
     },
-    TaskLimitReached {
-        task_id: TaskId,
-    },
-    UsageUpdated {
-        task_id: TaskId,
-        phase_cost_usd: f64,
-        total_cost_usd: f64,
-    },
-    VaultBootstrapCompleted {
-        cost_usd: f64,
-    },
-    VaultRecorded {
-        task_id: TaskId,
-        document: String,
-    },
-    VaultReorganizeCompleted {
-        merged: usize,
-        restructured: usize,
-        deleted: usize,
-    },
-}
-
-pub type EventSender = mpsc::UnboundedSender<Event>;
-pub type EventReceiver = mpsc::UnboundedReceiver<Event>;
-
-pub fn event_channel() -> (EventSender, EventReceiver) {
-    mpsc::unbounded_channel()
 }

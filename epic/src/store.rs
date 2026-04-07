@@ -3,7 +3,7 @@
 
 use crate::agent::AgentService;
 use crate::config::project::LimitsConfig;
-use crate::events::EventSender;
+use crate::events::EventLog;
 use crate::state::EpicState;
 use crate::task::node_impl::EpicTask;
 use crate::task::{Task, TaskId, TaskRuntime};
@@ -27,7 +27,7 @@ impl<A: AgentService + 'static> EpicStore<A> {
     pub fn from_state(
         state: EpicState,
         agent: Arc<A>,
-        events: EventSender,
+        events: EventLog,
         vault: Option<Arc<vault::Vault>>,
         limits: LimitsConfig,
         project_root: Option<PathBuf>,

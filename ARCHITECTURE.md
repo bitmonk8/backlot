@@ -18,16 +18,20 @@ graph TD
     epic --> cue
     epic --> reel
     epic --> vault
+    epic --> traits
+    cue --> traits
     vault --> reel
     reel --> flick
     reel --> lot
 ```
 
-**flick** and **lot** are leaf crates with no internal dependencies. **cue** is
-a leaf crate defining the generic orchestration framework (traits, types,
-coordination algorithm) with no AI dependencies. **reel** combines flick and lot
+**flick** and **lot** are leaf crates with no internal dependencies. **traits**
+is a leaf crate containing shared trait definitions (`EventEmitter<E>`). **cue**
+is a near-leaf crate defining the generic orchestration framework (types,
+coordination algorithm) depending only on traits. **reel** combines flick and lot
 into an agent runtime. **vault** layers a knowledge store on top of reel.
-**epic** implements cue's traits with AI agent calls via reel and vault.
+**epic** implements cue's traits with AI agent calls via reel and vault, and
+provides the `EventLog` that implements `EventEmitter<CueEvent>`.
 
 ## Code Map
 
@@ -194,22 +198,22 @@ flick, or lot dependencies.
 | `lib.rs` | Public API re-exports |
 | `types.rs` | All orchestration-protocol types: `TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`, `Attempt`, `Magnitude`, outcome/decision enums, context types (`SiblingSummary`, `ChildSummary`) |
 | `traits.rs` | `TaskNode` (28 methods: accessors, decisions, mutations, lifecycle) and `TaskStore` (storage, creation, cross-task queries) |
-| `orchestrator.rs` | `Orchestrator<S: TaskStore>` -- coordination loop: `run()`, `execute_task()`, `run_leaf()`, `execute_branch()`, `finalize_branch()`, `branch_fix_loop()`, `attempt_recovery()` |
+| `orchestrator.rs` | `Orchestrator<S: TaskStore, T: EventEmitter<CueEvent>>` -- coordination loop: `run()`, `execute_task()`, `run_leaf()`, `execute_branch()`, `finalize_branch()`, `branch_fix_loop()`, `attempt_recovery()` |
 | `context.rs` | `TreeContext` -- read-only snapshot of tree state around a task |
-| `events.rs` | `Event` enum (23 variants), `EventSender`/`EventReceiver`, `event_channel()` |
+| `events.rs` | `CueEvent` enum (10 orchestration variants) |
 | `config.rs` | `LimitsConfig` (depth, retry, fix rounds, recovery, task cap), `VerificationStep` |
 
 **Trait design:** Two-trait split. `TaskNode` covers data access, decisions,
 mutations, and async lifecycle methods. `TaskStore` covers task creation, storage,
 lookup, cross-task queries, and tree context building. The orchestrator is generic
-over `S: TaskStore` with `S::Task: TaskNode`.
+over `S: TaskStore` and `T: EventEmitter<CueEvent>` (from the `traits` crate).
 
 **Decision collapsing:** The coordinator asks the task what to do rather than
 inspecting internals. `resume_point()`, `forced_assessment()`,
 `can_attempt_recovery()`, `needs_decomposition()`, `fix_round_budget_check()` are
 collapsed decision methods that replace multi-field reads in the coordinator.
 
-**Runtime injection:** Tasks receive runtime deps (agent, vault, event sender) at
+**Runtime injection:** Tasks receive runtime deps (agent, vault, event log) at
 construction time via `TaskStore::create_subtask()`, not from the orchestrator.
 After deserialization, `TaskStore::bind_runtime()` re-injects non-serializable deps.
 
@@ -227,12 +231,11 @@ failures through retry, escalation, and re-decomposition.
 | `main.rs` | CLI entry point (init, run, resume, status, setup) |
 | `cli.rs` | Argument parsing, output formatting |
 | `store.rs` | `EpicStore<A>` — implements `cue::TaskStore`, wraps `EpicState` + runtime deps |
-| `orchestrator/mod.rs` | Legacy orchestrator (parallel path for existing tests) |
+| `orchestrator/mod.rs` | Thin module re-exporting `context` and `tests` submodules |
 | `orchestrator/context.rs` | `TreeContext` building, `TaskContext` assembly for agent calls |
-| `orchestrator/services.rs` | `Services<A>` — legacy shared infrastructure bundle |
 | `task/mod.rs` | `Task` struct, `TaskRuntime<A>`, types, self-contained mutation methods |
 | `task/node_impl.rs` | `EpicTask<A>` — implements `cue::TaskNode`, lifecycle methods |
-| `task/leaf.rs` | Leaf execution helpers (used by legacy orchestrator path) |
+| `task/leaf.rs` | Leaf execution helpers |
 | `task/branch.rs` | Branch decision types and methods (verify, fix, recovery, checkpoint) |
 | `task/scope.rs` | Scope circuit breaker — git diff magnitude check |
 | `task/assess.rs` | `AssessmentResult` — path (leaf/branch) + model selection |
@@ -242,7 +245,7 @@ failures through retry, escalation, and re-decomposition.
 | `agent/wire.rs` | Wire format types for structured agent output |
 | `knowledge.rs` | `ResearchQuery` tool (vault gap-filling pipeline), vault integration |
 | `state.rs` | `EpicState` — task tree and session state, JSON persistence |
-| `events.rs` | 23 event types, `EventSender` type alias |
+| `events.rs` | `Event` enum (24 variants), `EventLog` (append-only), `EventSubscription`, `From<CueEvent>` adapter |
 | `config/mod.rs` | `EpicConfig`, model config, vault config |
 | `config/project.rs` | `ProjectConfig` — verification steps from `epic.toml` |
 | `init.rs` | Interactive project setup (detect build system, generate config) |

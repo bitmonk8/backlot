@@ -1,5 +1,5 @@
 use crate::config::project::LimitsConfig;
-use crate::events::{self, Event, EventReceiver};
+use crate::events::{Event, EventLog};
 use crate::state::EpicState;
 use crate::store::EpicStore;
 use crate::task::branch::{DecompositionResult, SubtaskSpec};
@@ -9,21 +9,16 @@ use crate::task::{
 use crate::test_support::{MockAgentService, MockBuilder};
 use std::sync::Arc;
 
-type TestOrchestrator = cue::Orchestrator<EpicStore<MockAgentService>>;
+type TestOrchestrator = cue::Orchestrator<EpicStore<MockAgentService>, EventLog>;
 
-/// Build a `cue::Orchestrator<EpicStore<MockAgentService>>` with a single root task.
+/// Build a `cue::Orchestrator<EpicStore<MockAgentService>, EventLog>` with a single root task.
 /// Returns the orchestrator, a cloned Arc to the mock (for post-run inspection),
-/// the root `TaskId`, and the event receiver.
+/// the root `TaskId`, and the event log.
 ///
 /// Root gets TaskId(0); subtasks get sequential IDs (TaskId(1), TaskId(2), ...) in creation order.
 fn make_orchestrator(
     mock: MockAgentService,
-) -> (
-    TestOrchestrator,
-    Arc<MockAgentService>,
-    TaskId,
-    EventReceiver,
-) {
+) -> (TestOrchestrator, Arc<MockAgentService>, TaskId, EventLog) {
     let mut state = EpicState::new();
     let root_id = state.next_task_id();
     let root = Task::new(
@@ -34,18 +29,18 @@ fn make_orchestrator(
         0,
     );
     state.insert(root);
-    let (tx, rx) = events::event_channel();
+    let log = EventLog::new();
     let mock_arc = Arc::new(mock);
     let store = EpicStore::from_state(
         state,
         Arc::clone(&mock_arc),
-        tx.clone(),
+        log.clone(),
         None,
         LimitsConfig::default(),
         None,
     );
-    let orchestrator = cue::Orchestrator::new(store, tx);
-    (orchestrator, mock_arc, root_id, rx)
+    let orchestrator = cue::Orchestrator::new(store, log.clone());
+    (orchestrator, mock_arc, root_id, log)
 }
 
 /// Build a `cue::Orchestrator` with a single root task and custom limits on both
@@ -53,12 +48,7 @@ fn make_orchestrator(
 fn make_orchestrator_with_limits(
     mock: MockAgentService,
     mut limits: LimitsConfig,
-) -> (
-    TestOrchestrator,
-    Arc<MockAgentService>,
-    TaskId,
-    EventReceiver,
-) {
+) -> (TestOrchestrator, Arc<MockAgentService>, TaskId, EventLog) {
     // Apply the same clamping that Orchestrator::with_limits does, so the
     // store's runtime and the orchestrator see identical values.
     limits.retry_budget = limits.retry_budget.max(1);
@@ -76,37 +66,37 @@ fn make_orchestrator_with_limits(
         0,
     );
     state.insert(root);
-    let (tx, rx) = events::event_channel();
+    let log = EventLog::new();
     let mock_arc = Arc::new(mock);
     let store = EpicStore::from_state(
         state,
         Arc::clone(&mock_arc),
-        tx.clone(),
+        log.clone(),
         None,
         limits.clone(),
         None,
     );
-    let orchestrator = cue::Orchestrator::new(store, tx).with_limits(limits);
-    (orchestrator, mock_arc, root_id, rx)
+    let orchestrator = cue::Orchestrator::new(store, log.clone()).with_limits(limits);
+    (orchestrator, mock_arc, root_id, log)
 }
 
 /// Build a `cue::Orchestrator` from a pre-populated `EpicState` (for resume tests).
 fn make_orchestrator_from_state(
     mock: MockAgentService,
     state: EpicState,
-) -> (TestOrchestrator, Arc<MockAgentService>, EventReceiver) {
-    let (tx, rx) = events::event_channel();
+) -> (TestOrchestrator, Arc<MockAgentService>, EventLog) {
+    let log = EventLog::new();
     let mock_arc = Arc::new(mock);
     let store = EpicStore::from_state(
         state,
         Arc::clone(&mock_arc),
-        tx.clone(),
+        log.clone(),
         None,
         LimitsConfig::default(),
         None,
     );
-    let orchestrator = cue::Orchestrator::new(store, tx);
-    (orchestrator, mock_arc, rx)
+    let orchestrator = cue::Orchestrator::new(store, log.clone());
+    (orchestrator, mock_arc, log)
 }
 
 /// Build a `cue::Orchestrator` from a pre-populated `EpicState` with custom limits.
@@ -114,12 +104,19 @@ fn make_orchestrator_from_state_with_limits(
     mock: MockAgentService,
     state: EpicState,
     limits: LimitsConfig,
-) -> (TestOrchestrator, Arc<MockAgentService>, EventReceiver) {
-    let (tx, rx) = events::event_channel();
+) -> (TestOrchestrator, Arc<MockAgentService>, EventLog) {
+    let log = EventLog::new();
     let mock_arc = Arc::new(mock);
-    let store = EpicStore::from_state(state, Arc::clone(&mock_arc), tx.clone(), None, limits, None);
-    let orchestrator = cue::Orchestrator::new(store, tx);
-    (orchestrator, mock_arc, rx)
+    let store = EpicStore::from_state(
+        state,
+        Arc::clone(&mock_arc),
+        log.clone(),
+        None,
+        limits,
+        None,
+    );
+    let orchestrator = cue::Orchestrator::new(store, log.clone());
+    (orchestrator, mock_arc, log)
 }
 
 /// Extract the final `EpicState` from the orchestrator after run.
@@ -137,7 +134,7 @@ async fn single_leaf() {
         .verify_passes(2)
         .file_review_passes(2)
         .build();
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mock);
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -175,7 +172,7 @@ async fn two_children() {
         mb.assess_leaf().leaf_success();
     }
     mb.verify_passes(3).file_review_passes(3);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -199,7 +196,7 @@ async fn checkpoint_saves_state() {
     let state_path = dir.join("state.json");
     let _ = std::fs::remove_file(&state_path);
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mock);
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
     let mut orch = orch.with_state_path(state_path.clone());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -256,7 +253,7 @@ async fn resume_skips_completed_child() {
     state.insert(completed_child);
     state.insert(pending_child);
 
-    let (mut orch, _mock_arc, _rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, _log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -299,7 +296,7 @@ async fn resume_skips_decomposition_when_subtasks_exist() {
     state.insert(root);
     state.insert(child);
 
-    let (mut orch, _mock_arc, _rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, _log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -354,7 +351,7 @@ async fn resume_mid_execution_branch_not_reassessed() {
     state.insert(mid);
     state.insert(grandchild);
 
-    let (mut orch, _mock_arc, _rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, _log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -397,7 +394,7 @@ async fn resume_verifying_skips_execution() {
     state.insert(root);
     state.insert(child);
 
-    let (mut orch, _mock_arc, _rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, _log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -427,7 +424,7 @@ async fn custom_max_depth_forces_leaf() {
     let root = Task::new(root_id, None, "deep root".into(), vec!["passes".into()], 1);
     state.insert(root);
 
-    let (orch, _mock_arc, _rx) =
+    let (orch, _mock_arc, _log) =
         make_orchestrator_from_state_with_limits(mock, state, limits.clone());
     let mut orch = orch.with_limits(limits);
     let result = orch.run(root_id).await.unwrap();
@@ -453,7 +450,7 @@ async fn discoveries_propagated_to_checkpoint() {
     mb.checkpoint_proceed();
     mb.leaf_success();
     mb.verify_passes(3).file_review_passes(2);
-    let (mut orch, _mock_arc, root_id, mut rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -466,7 +463,7 @@ async fn discoveries_propagated_to_checkpoint() {
     );
 
     let mut found_discoveries_event = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(event, Event::DiscoveriesRecorded { task_id, count } if task_id == child_a_id && count == 2)
         {
             found_discoveries_event = true;
@@ -494,7 +491,7 @@ async fn branch_fix_creates_subtasks() {
         .verify_pass()
         .file_review_passes(3)
         .build();
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mock);
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -535,7 +532,7 @@ async fn branch_fix_round_budget() {
     }
     mb.recovery_unrecoverable();
     mb.file_review_passes(4);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert!(matches!(result, TaskOutcome::Failed { .. }));
 
@@ -572,7 +569,7 @@ async fn fix_subtasks_no_recursive_fix() {
         .verify_pass()
         .verify_pass();
     mb.file_review_passes(2);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -605,7 +602,7 @@ async fn fix_subtasks_no_recursive_fix() {
         .verify_pass()
         .verify_pass();
     mb.file_review_passes(3);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -669,7 +666,7 @@ async fn leaf_fix_persists_and_resumes() {
     state.insert(root);
     state.insert(child);
 
-    let (mut orch, _mock_arc, _rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, _log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -732,7 +729,7 @@ async fn leaf_fix_resume_escalates_immediately_when_tier_exhausted() {
     state.insert(root);
     state.insert(child);
 
-    let (mut orch, _mock_arc, mut rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -744,7 +741,7 @@ async fn leaf_fix_resume_escalates_immediately_when_tier_exhausted() {
     assert!(child.fix_attempts[3].succeeded);
 
     let mut saw_escalation = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(
             event,
             Event::FixModelEscalated {
@@ -781,7 +778,7 @@ async fn branch_fix_root_opus_round() {
         }
     }
     mb.file_review_passes(5);
-    let (mut orch, _mock_arc, root_id, mut rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -792,7 +789,7 @@ async fn branch_fix_root_opus_round() {
     assert_eq!(root.subtask_ids.len(), 5);
 
     let mut branch_fix_rounds: Vec<(u32, Model)> = Vec::new();
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if let Event::BranchFixRound {
             task_id,
             round,
@@ -827,7 +824,7 @@ async fn recovery_incremental_creates_subtasks() {
     mb.assess_leaf().leaf_success().verify_pass();
     mb.verify_pass();
     mb.file_review_passes(3);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -869,7 +866,7 @@ async fn recovery_full_redecomp_preserves_completed_siblings() {
     // Root verification passes.
     mb.verify_pass();
     mb.file_review_passes(3);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -919,7 +916,7 @@ async fn recovery_round_limit_exhausted() {
         .recovery_plan_incremental();
     mb.assess_leaf().leaf_failures(9, "recovery 2 failed");
 
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert!(
         matches!(result, TaskOutcome::Failed { reason } if reason.contains("recovery rounds exhausted"))
@@ -944,7 +941,7 @@ async fn recovery_not_attempted_for_fix_tasks() {
     root.is_fix_task = true;
     state.insert(root);
 
-    let (mut orch, _mock_arc, _rx) = make_orchestrator_from_state(mb.build(), state);
+    let (mut orch, _mock_arc, _log) = make_orchestrator_from_state(mb.build(), state);
     let result = orch.run(root_id).await.unwrap();
     assert!(matches!(result, TaskOutcome::Failed { .. }));
 
@@ -962,7 +959,7 @@ async fn recovery_not_attempted_when_unrecoverable() {
         .leaf_failures(9, "terminal")
         .recovery_unrecoverable()
         .build();
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mock);
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
     let result = orch.run(root_id).await.unwrap();
     assert!(matches!(result, TaskOutcome::Failed { .. }));
     let state = into_state(orch);
@@ -981,7 +978,7 @@ async fn recovery_rounds_persisted() {
     mb.assess_leaf().leaf_success().verify_pass();
     mb.verify_pass();
     mb.file_review_passes(2);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1005,7 +1002,7 @@ async fn recovery_empty_plan_fails() {
         subtasks: vec![],
         rationale: "empty plan".into(),
     });
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert!(matches!(result, TaskOutcome::Failed { reason } if reason.contains("no subtasks")));
     let state = into_state(orch);
@@ -1022,14 +1019,14 @@ async fn recovery_emits_events() {
     mb.assess_leaf().leaf_success().verify_pass();
     mb.verify_pass();
     mb.file_review_passes(2);
-    let (mut orch, _mock_arc, root_id, mut rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
     let mut saw_recovery_started = false;
     let mut saw_recovery_plan = false;
     let mut saw_recovery_subtasks = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         match event {
             Event::RecoveryStarted { task_id, round } => {
                 assert_eq!(task_id, root_id);
@@ -1073,7 +1070,7 @@ async fn checkpoint_adjust_stores_guidance() {
     mb.leaf_success();
     mb.verify_passes(3);
     mb.file_review_passes(3);
-    let (mut orch, _mock_arc, root_id, mut rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1085,7 +1082,7 @@ async fn checkpoint_adjust_stores_guidance() {
     );
 
     let mut saw_adjust = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(event, Event::CheckpointAdjust { task_id } if task_id == root_id) {
             saw_adjust = true;
         }
@@ -1115,7 +1112,7 @@ async fn checkpoint_escalate_triggers_recovery() {
     mb.assess_leaf().leaf_success();
     mb.verify_passes(4);
     mb.file_review_passes(4);
-    let (mut orch, _mock_arc, root_id, mut rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1124,7 +1121,7 @@ async fn checkpoint_escalate_triggers_recovery() {
 
     let mut saw_escalate = false;
     let mut saw_recovery_started = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(event, Event::CheckpointEscalate { task_id } if task_id == root_id) {
             saw_escalate = true;
         }
@@ -1147,7 +1144,7 @@ async fn checkpoint_escalate_unrecoverable_fails() {
     mb.checkpoint_escalate();
     mb.recovery_unrecoverable();
     mb.file_review_passes(1);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert!(matches!(result, TaskOutcome::Failed { .. }));
 }
@@ -1162,11 +1159,11 @@ async fn checkpoint_agent_error_treated_as_proceed() {
     mb.checkpoint_error("simulated LLM failure");
     mb.verify_passes(2);
     mb.file_review_passes(2);
-    let (mut orch, _mock_arc, root_id, mut rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         assert!(
             !matches!(event, Event::CheckpointAdjust { .. }),
             "unexpected CheckpointAdjust event after agent error"
@@ -1195,7 +1192,7 @@ async fn checkpoint_guidance_persisted() {
     mb.leaf_success();
     mb.verify_passes(3);
     mb.file_review_passes(3);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1226,7 +1223,7 @@ async fn checkpoint_multiple_adjusts_accumulates_guidance() {
     mb.leaf_success();
     mb.verify_passes(4);
     mb.file_review_passes(4);
-    let (mut orch, _mock_arc, root_id, mut rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1237,7 +1234,7 @@ async fn checkpoint_multiple_adjusts_accumulates_guidance() {
     );
 
     let mut adjust_count = 0;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(event, Event::CheckpointAdjust { task_id } if task_id == root_id) {
             adjust_count += 1;
         }
@@ -1273,13 +1270,13 @@ async fn checkpoint_escalate_on_fix_task_fails() {
     root.is_fix_task = true;
     state.insert(root);
 
-    let (mut orch, _mock_arc, mut rx) = make_orchestrator_from_state(mb.build(), state);
+    let (mut orch, _mock_arc, log) = make_orchestrator_from_state(mb.build(), state);
     let result = orch.run(root_id).await.unwrap();
     assert!(matches!(result, TaskOutcome::Failed { .. }));
 
     let mut saw_escalate = false;
     let mut saw_recovery_started = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(event, Event::CheckpointEscalate { task_id } if task_id == root_id) {
             saw_escalate = true;
         }
@@ -1335,9 +1332,9 @@ fn checkpoint_guidance_flows_to_child_context() {
     state.insert(child_b);
 
     let mock = MockAgentService::new();
-    let (tx, _rx) = events::event_channel();
+    let log = EventLog::new();
     let mock_arc = Arc::new(mock);
-    let store = EpicStore::from_state(state, mock_arc, tx, None, LimitsConfig::default(), None);
+    let store = EpicStore::from_state(state, mock_arc, log, None, LimitsConfig::default(), None);
 
     let tree_ctx = cue::TaskStore::build_tree_context(&store, second_child_id).unwrap();
     assert_eq!(
@@ -1372,7 +1369,7 @@ async fn checkpoint_escalate_recovery_rounds_exhausted() {
     root.recovery_rounds = 2;
     state.insert(root);
 
-    let (mut orch, _mock_arc, mut rx) = make_orchestrator_from_state(mb.build(), state);
+    let (mut orch, _mock_arc, log) = make_orchestrator_from_state(mb.build(), state);
     let result = orch.run(root_id).await.unwrap();
     assert!(
         matches!(result, TaskOutcome::Failed { ref reason } if reason.contains("recovery rounds exhausted")),
@@ -1381,7 +1378,7 @@ async fn checkpoint_escalate_recovery_rounds_exhausted() {
 
     let mut saw_escalate = false;
     let mut saw_recovery_started = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(event, Event::CheckpointEscalate { task_id } if task_id == root_id) {
             saw_escalate = true;
         }
@@ -1422,7 +1419,7 @@ async fn checkpoint_escalate_clears_prior_guidance() {
     mb.assess_leaf().leaf_success();
     mb.verify_passes(5);
     mb.file_review_passes(4);
-    let (mut orch, _mock_arc, root_id, mut rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1435,7 +1432,7 @@ async fn checkpoint_escalate_clears_prior_guidance() {
     let mut saw_adjust = false;
     let mut saw_escalate = false;
     let mut saw_recovery_started = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(event, Event::CheckpointAdjust { task_id } if task_id == root_id) {
             saw_adjust = true;
         }
@@ -1498,7 +1495,7 @@ async fn leaf_retry_counter_persists_on_resume() {
     state.insert(root);
     state.insert(child);
 
-    let (mut orch, _mock_arc, mut rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1512,7 +1509,7 @@ async fn leaf_retry_counter_persists_on_resume() {
     assert!(child.attempts[3].succeeded);
 
     let mut saw_escalation = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(
             event,
             Event::ModelEscalated {
@@ -1591,7 +1588,7 @@ async fn leaf_retry_counter_resume_at_sonnet_tier() {
     state.insert(root);
     state.insert(child);
 
-    let (mut orch, _mock_arc, mut rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1605,7 +1602,7 @@ async fn leaf_retry_counter_resume_at_sonnet_tier() {
     assert!(child.attempts[6].succeeded);
 
     let mut saw_escalation = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(
             event,
             Event::ModelEscalated {
@@ -1670,7 +1667,7 @@ async fn leaf_retry_resume_escalates_immediately_when_tier_exhausted() {
     state.insert(root);
     state.insert(child);
 
-    let (mut orch, _mock_arc, mut rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1682,7 +1679,7 @@ async fn leaf_retry_resume_escalates_immediately_when_tier_exhausted() {
     assert!(child.attempts[3].succeeded);
 
     let mut saw_escalation = false;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(
             event,
             Event::ModelEscalated {
@@ -1712,7 +1709,7 @@ async fn leaf_retry_attempts_persisted_to_disk() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let state_path = tmp.path().to_path_buf();
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mock);
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
     let mut orch = orch.with_state_path(state_path.clone());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1753,7 +1750,7 @@ async fn custom_max_recovery_rounds_limits_recovery() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let mut orch = orch.with_limits(limits);
 
     let result = orch.run(root_id).await.unwrap();
@@ -1785,7 +1782,7 @@ async fn custom_root_fix_rounds_limits_fix_attempts() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let mut orch = orch.with_limits(limits);
 
     let result = orch.run(root_id).await.unwrap();
@@ -1826,7 +1823,7 @@ async fn custom_branch_fix_rounds_limits_fix_attempts() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let mut orch = orch.with_limits(limits);
 
     let result = orch.run(root_id).await.unwrap();
@@ -1856,7 +1853,7 @@ async fn zero_retry_budget_clamped_to_one() {
         ..LimitsConfig::default()
     };
 
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator_with_limits(mock, limits);
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator_with_limits(mock, limits);
 
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1878,7 +1875,7 @@ async fn decompose_model_from_assessment() {
         .verify_passes(2)
         .file_review_passes(2)
         .build();
-    let (mut orch, mock_arc, root_id, _rx) = make_orchestrator(mock);
+    let (mut orch, mock_arc, root_id, _log) = make_orchestrator(mock);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -1913,7 +1910,7 @@ async fn task_limit_blocks_decomposition() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, mut rx) = make_orchestrator(mb.build());
+    let (orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let mut orch = orch.with_limits(limits);
     let result = orch.run(root_id).await.unwrap();
     let TaskOutcome::Failed { reason } = &result else {
@@ -1925,7 +1922,7 @@ async fn task_limit_blocks_decomposition() {
     );
 
     let mut limit_events: Vec<TaskId> = Vec::new();
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if let Event::TaskLimitReached { task_id } = event {
             limit_events.push(task_id);
         }
@@ -1955,7 +1952,7 @@ async fn task_limit_blocks_fix_subtasks() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let mut orch = orch.with_limits(limits);
     let result = orch.run(root_id).await.unwrap();
     let TaskOutcome::Failed { reason } = &result else {
@@ -1988,7 +1985,7 @@ async fn task_limit_blocks_recovery_subtasks() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let mut orch = orch.with_limits(limits);
     let result = orch.run(root_id).await.unwrap();
     let TaskOutcome::Failed { reason } = &result else {
@@ -2019,7 +2016,7 @@ async fn recovery_depth_inherited_not_fresh() {
     mb.verify_passes(2);
     mb.file_review_passes(2);
 
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -2049,7 +2046,7 @@ async fn recovery_inherited_budget_blocks_second_recovery() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let mut orch = orch.with_limits(limits);
 
     let result = orch.run(root_id).await.unwrap();
@@ -2079,7 +2076,7 @@ async fn max_total_tasks_zero_clamped_blocks_decomposition() {
         .verify_passes(2)
         .build();
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mock);
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
     let mut orch = orch.with_limits(LimitsConfig {
         max_total_tasks: 0,
         ..LimitsConfig::default()
@@ -2106,7 +2103,7 @@ async fn task_limit_exact_boundary_permits() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let mut orch = orch.with_limits(limits);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -2130,7 +2127,7 @@ async fn branch_fix_design_error_retries() {
         .verify_pass()
         .verify_pass();
     mb.file_review_passes(2);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -2162,7 +2159,7 @@ async fn branch_fix_verify_error_retries() {
         .verify_pass() // fix subtask verification
         .verify_pass(); // root re-verify passes
     mb.file_review_passes(3);
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
@@ -2196,7 +2193,7 @@ async fn branch_fix_design_error_exhausts_budget() {
         ..LimitsConfig::default()
     };
 
-    let (orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let mut orch = orch.with_limits(limits);
     let result = orch.run(root_id).await.unwrap();
     assert!(matches!(result, TaskOutcome::Failed { .. }));
@@ -2216,7 +2213,7 @@ async fn initial_verify_error_is_fatal() {
         .leaf_success()
         .verify_error(TaskId(1), "agent crashed")
         .build();
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mock);
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
     let result = orch.run(root_id).await;
     assert!(result.is_err());
 }
@@ -2265,7 +2262,7 @@ async fn branch_fails_when_all_children_failed() {
     state.insert(a);
     state.insert(b);
 
-    let (mut orch, _mock_arc, _rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, _log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert!(
         matches!(result, TaskOutcome::Failed { ref reason } if reason.contains("all non-fix children failed")),
@@ -2317,7 +2314,7 @@ async fn branch_succeeds_when_some_children_completed() {
     state.insert(a);
     state.insert(b);
 
-    let (mut orch, _mock_arc, _rx) = make_orchestrator_from_state(mock, state);
+    let (mut orch, _mock_arc, _log) = make_orchestrator_from_state(mock, state);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 }
@@ -2337,12 +2334,12 @@ async fn branch_skips_file_level_review() {
         .verify_pass()
         .file_review_passes(2)
         .build();
-    let (mut orch, _mock_arc, root_id, mut rx) = make_orchestrator(mock);
+    let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mock);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 
     let mut root_review_events = 0;
-    while let Ok(event) = rx.try_recv() {
+    for event in log.snapshot() {
         if matches!(event, Event::FileLevelReviewCompleted { task_id, .. } if task_id == root_id) {
             root_review_events += 1;
         }
@@ -2378,7 +2375,7 @@ async fn fix_task_file_review_fail_no_fix_loop() {
         .verify_pass()
         .file_review_pass();
     mb.verify_pass();
-    let (mut orch, _mock_arc, root_id, _rx) = make_orchestrator(mb.build());
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
 

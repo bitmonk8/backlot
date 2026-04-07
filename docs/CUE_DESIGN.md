@@ -321,29 +321,40 @@ Called after phase transitions, task creation, and recovery decisions. Enables r
 
 ## Event System
 
-Unbounded `mpsc` channel. Non-blocking emission (`let _ = sender.send(event)`). Decouples presentation from orchestration.
+Cue defines `CueEvent` (10 orchestration variants) and emits via the `EventEmitter<CueEvent>` trait from the `traits` crate. The orchestrator is generic over `T: EventEmitter<CueEvent>`. Application crates provide their own event enums and map via `From<CueEvent>`.
 
 ```rust
-pub type EventSender = mpsc::UnboundedSender<Event>;
-pub type EventReceiver = mpsc::UnboundedReceiver<Event>;
-pub fn event_channel() -> (EventSender, EventReceiver);
+// traits crate
+pub trait EventEmitter<E>: Send + Sync {
+    fn emit(&self, event: E);
+}
+
+// cue/src/events.rs
+pub enum CueEvent {
+    TaskRegistered { .. },
+    PhaseTransition { .. },
+    PathSelected { .. },
+    ModelSelected { .. },
+    SubtasksCreated { .. },
+    TaskCompleted { .. },
+    TaskLimitReached { .. },
+    BranchFixRound { .. },
+    FixSubtasksCreated { .. },
+    RecoverySubtasksCreated { .. },
+}
 ```
 
-### Event Variants
+### CueEvent Variants
 
 **Lifecycle:** `TaskRegistered`, `PhaseTransition`, `PathSelected`, `ModelSelected`, `TaskCompleted`
 
-**Escalation & Retry:** `ModelEscalated`, `RetryAttempt`, `FixModelEscalated`, `FixAttempt`
+**Decomposition:** `SubtasksCreated`, `FixSubtasksCreated`, `RecoverySubtasksCreated`
 
-**Decomposition:** `SubtasksCreated`, `FixSubtasksCreated`
+**Fix loop:** `BranchFixRound`
 
-**Checkpoint:** `DiscoveriesRecorded`, `CheckpointAdjust`, `CheckpointEscalate`
+**Limits:** `TaskLimitReached`
 
-**Recovery:** `RecoveryStarted`, `RecoveryPlanSelected`, `RecoverySubtasksCreated`
-
-**Review:** `FileLevelReviewCompleted`, `BranchFixRound`
-
-**Limits & Observability:** `TaskLimitReached`, `UsageUpdated`, `VaultBootstrapCompleted`, `VaultRecorded`, `VaultReorganizeCompleted`
+Application-specific events (escalation, retry, checkpoint, vault, usage) are defined in the application crate (e.g., epic's `Event` enum with 24 variants).
 
 ---
 
@@ -382,9 +393,9 @@ cue/src/
   traits.rs           TaskNode, TaskStore trait definitions
   types.rs            TaskId, TaskPhase, TaskPath, Model, Attempt, all protocol types
   context.rs          TreeContext
-  events.rs           Event enum (23+ variants), EventSender, EventReceiver, event_channel
+  events.rs           CueEvent enum (10 orchestration variants)
   config.rs           LimitsConfig, VerificationStep
-  orchestrator.rs     Orchestrator<S: TaskStore>, OrchestratorError
+  orchestrator.rs     Orchestrator<S: TaskStore, T: EventEmitter<CueEvent>>, OrchestratorError
 ```
 
-Dependencies: `tokio` (sync), `serde`, `anyhow`, `thiserror`. No AI/IO/network dependencies.
+Dependencies: `tokio` (sync), `serde`, `anyhow`, `thiserror`, `traits`. No AI/IO/network dependencies.

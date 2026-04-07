@@ -4,7 +4,7 @@ pub mod metrics;
 pub mod task_tree;
 pub mod worklog;
 
-use crate::events::{Event, EventReceiver};
+use crate::events::{Event, EventSubscription};
 use crate::task::{TaskId, TaskOutcome, TaskPhase};
 use crate::tui::metrics::MetricsWidget;
 use crate::tui::task_tree::{TaskTreeWidget, TuiTask};
@@ -54,7 +54,7 @@ impl TuiApp {
         }
     }
 
-    pub async fn run(&mut self, mut event_rx: EventReceiver) -> Result<()> {
+    pub async fn run(&mut self, mut event_rx: EventSubscription) -> Result<()> {
         enable_raw_mode()?;
         crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
 
@@ -86,7 +86,7 @@ impl TuiApp {
     async fn event_loop(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-        event_rx: &mut EventReceiver,
+        event_rx: &mut EventSubscription,
     ) -> Result<()> {
         let mut ct_stream = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(50));

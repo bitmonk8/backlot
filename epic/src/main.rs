@@ -17,7 +17,7 @@ pub(crate) mod test_support;
 use agent::reel_adapter::ReelAgent;
 use cli::{Cli, Command};
 use config::project::EpicConfig;
-use events::event_channel;
+use events::EventLog;
 use state::EpicState;
 use store::EpicStore;
 use task::Task;
@@ -28,7 +28,7 @@ use clap::Parser;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(e) = run().await {
         eprintln!("Error: {e:#}");
@@ -173,7 +173,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         Command::Init | Command::Status | Command::Setup => unreachable!(),
     };
 
-    let (tx, rx) = event_channel();
+    let log = EventLog::new();
 
     // Bootstrap vault on new runs (not resume).
     if let Some(ref v) = vault_handle {
@@ -182,7 +182,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             eprintln!("Bootstrapping vault knowledge base...");
             match v.bootstrap(&goal_text).await {
                 Ok((_warnings, meta)) => {
-                    let _ = tx.send(events::Event::VaultBootstrapCompleted {
+                    log.emit(events::Event::VaultBootstrapCompleted {
                         cost_usd: meta.cost_usd,
                     });
                     eprintln!("Vault bootstrap complete (${:.4})", meta.cost_usd);
@@ -198,18 +198,17 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let epic_store = EpicStore::from_state(
         state,
         Arc::new(agent),
-        tx.clone(),
+        log.clone(),
         vault_handle,
         epic_config.limits.clone(),
         Some(project_root.clone()),
     );
 
-    let mut orchestrator = cue::Orchestrator::new(epic_store, tx)
+    let mut orchestrator = cue::Orchestrator::new(epic_store, log.clone())
         .with_limits(epic_config.limits)
         .with_state_path(state_path.clone());
 
     if cli.no_tui {
-        drop(rx);
         let outcome = orchestrator.run(root_id).await?;
         let final_state = orchestrator.store().as_state();
         final_state.save(&state_path)?;
@@ -221,6 +220,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         );
     } else {
         let mut tui_app = TuiApp::new(goal_text);
+        let tui_sub = log.subscribe();
 
         let orch_handle = tokio::spawn(async move {
             let result = orchestrator.run(root_id).await;
@@ -228,7 +228,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             (result, final_state)
         });
 
-        let tui_result = tokio::spawn(async move { tui_app.run(rx).await }).await?;
+        let tui_result = tokio::spawn(async move { tui_app.run(tui_sub).await }).await?;
 
         let abort_handle = orch_handle.abort_handle();
         let mut saved = false;

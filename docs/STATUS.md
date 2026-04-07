@@ -81,17 +81,17 @@
 - Generic recursive task orchestration framework
 - `TaskNode` trait (28 methods: 8 read accessors, 6 decision methods, 6 mutations, 8 lifecycle)
 - `TaskStore` trait (task creation, storage, lookup, cross-task queries, tree context building)
-- `Orchestrator<S: TaskStore>` coordination loop (DFS traversal, resume, retry, escalation, fix loops, recovery)
+- `Orchestrator<S: TaskStore, T: EventEmitter<CueEvent>>` coordination loop (DFS traversal, resume, retry, escalation, fix loops, recovery)
 - All orchestration protocol types (`TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`, etc.)
-- Event system (24 event variants, `EventSender`/`EventReceiver`, `event_channel()`)
+- `CueEvent` enum (10 orchestration event variants)
 - `LimitsConfig` (depth, retry budget, fix rounds, recovery rounds, task cap)
-- No AI, vault, reel, flick, or lot dependencies
+- Depends only on `traits` crate (for `EventEmitter<E>`)
 
 ---
 
 ## Epic
 
-**Phase:** Core orchestration, knowledge layer, file-level review, and cue integration complete. All orchestrator tests exercise `cue::Orchestrator<EpicStore<A>>`.
+**Phase:** Core orchestration, knowledge layer, file-level review, and cue integration complete. All orchestrator tests exercise `cue::Orchestrator<EpicStore<A>, EventLog>`.
 
 **Implemented:**
 - Recursive problem-solver with DFS execution, retry/escalation, fix loops, recovery re-decomposition

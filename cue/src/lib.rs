@@ -12,7 +12,7 @@ pub mod types;
 // Re-export primary public API.
 pub use config::LimitsConfig;
 pub use context::TreeContext;
-pub use events::{Event, EventReceiver, EventSender, event_channel};
+pub use events::CueEvent;
 pub use orchestrator::{Orchestrator, OrchestratorError};
 pub use traits::{TaskNode, TaskStore};
 pub use types::*;

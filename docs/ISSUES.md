@@ -784,8 +784,26 @@ cue/src/types.rs — Two near-identical enums for the same concept. `VerifyOutco
 ### 85. Stale module comments not mentioning legacy status
 epic/src/orchestrator/mod.rs, epic/src/task/leaf.rs, epic/src/task/branch.rs — Comments describe full orchestrator/lifecycle responsibility without noting these are legacy paths superseded by cue+node_impl.rs. **Documentation.**
 
+### 86. No unit tests for EventLog/EventSubscription
+epic/src/events.rs — New infrastructure (EventLog, EventSubscription, EventEmitter<CueEvent> impl) has no direct unit tests. Shutdown semantics, subscribe-before-emit edge case, try_recv, len/is_empty/snapshot are covered only indirectly via orchestrator integration tests. **Testing.**
+
+### 87. No tests for From<CueEvent> mapping
+epic/src/events.rs — The 10-variant From<CueEvent> for Event mapping has no direct test coverage. A field-mapping typo would go undetected. **Testing.**
+
+### 88. Orchestrator field named `transmitter` inconsistent with trait
+cue/src/orchestrator.rs — The `transmitter` field holds an `EventEmitter<CueEvent>` and the private helper method is called `emit()`. The field name should be `emitter` to match the trait and method. **Naming.**
+
+### 89. `traits` crate name is maximally generic
+traits/ — The crate name `traits` collides conceptually with the Rust keyword and conveys no domain information. All other crates have distinctive names (cue, epic, flick, lot, reel, vault). Consider `backlot-traits` or similar. **Naming.**
+
+### 90. Pre-existing cruft in epic/README.md
+epic/README.md — Module structure lists legacy orchestrator entries (orchestrator/mod.rs as "Coordinator", services.rs as "Services<A>"). Missing store.rs and task/node_impl.rs entries. events.rs described as "channel types" (stale). **Documentation.**
+
+### 91. Resolved issues in ISSUES.md not marked
+docs/ISSUES.md — Issues 74, 85, and several others (42, 43, 45, 51, 53, 54) reference orchestrator/mod.rs logic that was removed with the legacy orchestrator. These are resolved or partially resolved but not annotated. **Documentation.**
+
 ---
 
 ## Cue
 
-No standalone issues. All cue-related findings tracked under Epic (issues 72-85) as they concern the extraction boundary.
+No standalone issues. All cue-related findings tracked under Epic (issues 72-91) as they concern the extraction boundary.

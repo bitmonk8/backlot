@@ -61,7 +61,7 @@ impl<A: AgentService> EpicTask<A> {
                 let session_meta = crate::agent::session_meta_from_vault(&meta);
                 self.task.accumulate_usage(&session_meta);
                 self.emit_usage_event();
-                let _ = rt.events.send(Event::VaultReorganizeCompleted {
+                rt.events.emit(Event::VaultReorganizeCompleted {
                     merged: report.merged.len(),
                     restructured: report.restructured.len(),
                     deleted: report.deleted.len(),
@@ -90,7 +90,7 @@ impl<A: AgentService> EpicTask<A> {
                 let session_meta = crate::agent::session_meta_from_vault(&meta);
                 self.task.accumulate_usage(&session_meta);
                 self.emit_usage_event();
-                let _ = rt.events.send(Event::VaultRecorded {
+                rt.events.emit(Event::VaultRecorded {
                     task_id: self.task.id,
                     document: name.to_string(),
                 });
@@ -104,7 +104,7 @@ impl<A: AgentService> EpicTask<A> {
     /// Emit usage updated event.
     fn emit_usage_event(&self) {
         let rt = self.rt();
-        let _ = rt.events.send(Event::UsageUpdated {
+        rt.events.emit(Event::UsageUpdated {
             task_id: self.task.id,
             phase_cost_usd: 0.0,
             total_cost_usd: self.task.usage.cost_usd,
@@ -113,13 +113,13 @@ impl<A: AgentService> EpicTask<A> {
 
     fn emit_escalation(rt: &TaskRuntime<A>, id: TaskId, from: Model, to: Model, is_fix: bool) {
         if is_fix {
-            let _ = rt.events.send(Event::FixModelEscalated {
+            rt.events.emit(Event::FixModelEscalated {
                 task_id: id,
                 from,
                 to,
             });
         } else {
-            let _ = rt.events.send(Event::ModelEscalated {
+            rt.events.emit(Event::ModelEscalated {
                 task_id: id,
                 from,
                 to,
@@ -314,7 +314,7 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
         match decision {
             CheckpointDecision::Proceed => Ok(ChildResponse::Continue),
             CheckpointDecision::Adjust { guidance } => {
-                let _ = rt.events.send(Event::CheckpointAdjust {
+                rt.events.emit(Event::CheckpointAdjust {
                     task_id: self.task.id,
                 });
                 let vault_content = format!(
@@ -326,7 +326,7 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
                 Ok(ChildResponse::Continue)
             }
             CheckpointDecision::Escalate => {
-                let _ = rt.events.send(Event::CheckpointEscalate {
+                rt.events.emit(Event::CheckpointEscalate {
                     task_id: self.task.id,
                 });
                 self.task.set_checkpoint_guidance(None);
@@ -541,7 +541,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
                 let reason = failure_reason.as_deref().unwrap_or("unknown failure");
                 #[allow(clippy::cast_possible_truncation)]
                 let attempt_number = self.task.fix_attempts.len() as u32 + 1;
-                let _ = rt.events.send(Event::FixAttempt {
+                rt.events.emit(Event::FixAttempt {
                     task_id: self.task.id,
                     attempt: attempt_number,
                     model: current_model,
@@ -572,7 +572,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
             if !discoveries.is_empty() {
                 let content = discoveries.join("\n");
                 let count = self.task.record_discoveries(discoveries);
-                let _ = rt.events.send(Event::DiscoveriesRecorded {
+                rt.events.emit(Event::DiscoveriesRecorded {
                     task_id: self.task.id,
                     count,
                 });
@@ -598,7 +598,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
 
             if retries_at_tier < rt.limits.retry_budget {
                 if !is_fix {
-                    let _ = rt.events.send(Event::RetryAttempt {
+                    rt.events.emit(Event::RetryAttempt {
                         task_id: self.task.id,
                         attempt: retries_at_tier,
                         model: current_model,
@@ -664,7 +664,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
         self.emit_usage_event();
 
         let passed = review_result.value.outcome == VerificationOutcome::Pass;
-        let _ = rt.events.send(Event::FileLevelReviewCompleted {
+        rt.events.emit(Event::FileLevelReviewCompleted {
             task_id: self.task.id,
             passed,
         });
@@ -729,7 +729,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
         )
         .await;
 
-        let _ = rt.events.send(Event::RecoveryStarted {
+        rt.events.emit(Event::RecoveryStarted {
             task_id: self.task.id,
             round,
         });
@@ -764,7 +764,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
         } else {
             "incremental"
         };
-        let _ = rt.events.send(Event::RecoveryPlanSelected {
+        rt.events.emit(Event::RecoveryPlanSelected {
             task_id: self.task.id,
             approach: approach.into(),
         });

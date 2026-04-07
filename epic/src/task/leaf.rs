@@ -18,7 +18,7 @@ impl Task {
 mod tests {
     use super::*;
     use crate::config::project::LimitsConfig;
-    use crate::events::{self, Event, EventReceiver};
+    use crate::events::{Event, EventLog};
     use crate::orchestrator::context::TreeContext;
     use crate::task::node_impl::EpicTask;
     use crate::task::{Model, TaskId, TaskOutcome, TaskPath, TaskPhase, TaskRuntime};
@@ -30,7 +30,7 @@ mod tests {
     ) -> (
         Arc<TaskRuntime<MockAgentService>>,
         Arc<MockAgentService>,
-        EventReceiver,
+        EventLog,
     ) {
         make_runtime_with_limits(mock, LimitsConfig::default())
     }
@@ -41,18 +41,18 @@ mod tests {
     ) -> (
         Arc<TaskRuntime<MockAgentService>>,
         Arc<MockAgentService>,
-        EventReceiver,
+        EventLog,
     ) {
-        let (tx, rx) = events::event_channel();
+        let log = EventLog::new();
         let mock_arc = Arc::new(mock);
         let rt = Arc::new(TaskRuntime {
             agent: Arc::clone(&mock_arc),
-            events: tx,
+            events: log.clone(),
             vault: None,
             limits,
             project_root: None,
         });
-        (rt, mock_arc, rx)
+        (rt, mock_arc, log)
     }
 
     fn make_leaf_task(rt: &Arc<TaskRuntime<MockAgentService>>) -> EpicTask<MockAgentService> {
@@ -112,7 +112,7 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let (rt, _mock_arc, _log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
         let tree = empty_tree();
         let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
@@ -127,7 +127,7 @@ mod tests {
         let mock = MockBuilder::new()
             .leaf_failures(9, "persistent failure")
             .build();
-        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let (rt, _mock_arc, _log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
         let tree = empty_tree();
         let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
@@ -148,7 +148,7 @@ mod tests {
             retry_budget: 1,
             ..LimitsConfig::default()
         };
-        let (rt, _mock_arc, _rx) = make_runtime_with_limits(mock, limits);
+        let (rt, _mock_arc, _log) = make_runtime_with_limits(mock, limits);
         let mut task = make_leaf_task(&rt);
         let tree = empty_tree();
         let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
@@ -171,7 +171,7 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let (rt, _mock_arc, _log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
         let tree = empty_tree();
         let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
@@ -191,7 +191,7 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (rt, _mock_arc, mut rx) = make_runtime(mock);
+        let (rt, _mock_arc, log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
         let task_id = task.task.id;
         let tree = empty_tree();
@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(task.task.current_model, Some(Model::Sonnet));
 
         let mut found_escalation = false;
-        while let Ok(event) = rx.try_recv() {
+        for event in log.snapshot() {
             if matches!(event, Event::FixModelEscalated { task_id: id, from: Model::Haiku, to: Model::Sonnet } if id == task_id)
             {
                 found_escalation = true;
@@ -218,7 +218,7 @@ mod tests {
             .verify_fail("tests fail")
             .fix_leaf_failures(9, "still broken")
             .build();
-        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let (rt, _mock_arc, _log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
         let tree = empty_tree();
         let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
@@ -235,7 +235,7 @@ mod tests {
         mb.verify_errors_sequence(TaskId(1), vec![None, Some("transient API error".into())]);
         mb.fix_leaf_success();
         mb.verify_pass().file_review_pass();
-        let (rt, _mock_arc, _rx) = make_runtime(mb.build());
+        let (rt, _mock_arc, _log) = make_runtime(mb.build());
         let mut task = make_leaf_task(&rt);
         let tree = empty_tree();
         let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
@@ -257,7 +257,7 @@ mod tests {
         for _ in 0..9 {
             mb.fix_leaf_success();
         }
-        let (rt, _mock_arc, _rx) = make_runtime(mb.build());
+        let (rt, _mock_arc, _log) = make_runtime(mb.build());
         let mut task = make_leaf_task(&rt);
         let tree = empty_tree();
         let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
@@ -277,7 +277,7 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (rt, _mock_arc, mut rx) = make_runtime(mock);
+        let (rt, _mock_arc, log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
         let task_id = task.task.id;
         let tree = empty_tree();
@@ -285,7 +285,7 @@ mod tests {
         assert_eq!(result, TaskOutcome::Success);
 
         let mut saw_review_passed = false;
-        while let Ok(event) = rx.try_recv() {
+        for event in log.snapshot() {
             if matches!(event, Event::FileLevelReviewCompleted { task_id: id, passed } if id == task_id && passed)
             {
                 saw_review_passed = true;
@@ -308,7 +308,7 @@ mod tests {
             .verify_pass()
             .file_review_pass()
             .build();
-        let (rt, _mock_arc, mut rx) = make_runtime(mock);
+        let (rt, _mock_arc, log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
         let task_id = task.task.id;
         let tree = empty_tree();
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(task.task.fix_attempts.len(), 1);
 
         let mut review_events: Vec<bool> = Vec::new();
-        while let Ok(event) = rx.try_recv() {
+        for event in log.snapshot() {
             if let Event::FileLevelReviewCompleted {
                 task_id: id,
                 passed,
@@ -343,7 +343,7 @@ mod tests {
             .verify_pass()
             .file_review_fail("fix incomplete")
             .build();
-        let (rt, _mock_arc, _rx) = make_runtime(mock);
+        let (rt, _mock_arc, _log) = make_runtime(mock);
         let mut task_inner = Task::new(
             TaskId(1),
             Some(TaskId(0)),

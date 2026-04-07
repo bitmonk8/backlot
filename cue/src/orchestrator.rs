@@ -1,8 +1,8 @@
 // Recursive task execution, DFS traversal, state persistence, resume.
-// Generic over S: TaskStore.
+// Generic over S: TaskStore and T: EventEmitter<CueEvent>.
 
 use crate::config::LimitsConfig;
-use crate::events::{Event, EventSender};
+use crate::events::CueEvent;
 use crate::traits::{TaskNode, TaskStore};
 use crate::types::{
     BranchVerifyOutcome, FixBudgetCheck, RecoveryDecision, RecoveryEligibility, ResumePoint,
@@ -12,6 +12,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use thiserror::Error;
+use traits::EventEmitter;
 
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
@@ -21,18 +22,18 @@ pub enum OrchestratorError {
     Agent(#[from] anyhow::Error),
 }
 
-pub struct Orchestrator<S: TaskStore> {
+pub struct Orchestrator<S: TaskStore, T: EventEmitter<CueEvent>> {
     store: S,
-    events: EventSender,
+    transmitter: T,
     limits: LimitsConfig,
     state_path: Option<PathBuf>,
 }
 
-impl<S: TaskStore> Orchestrator<S> {
-    pub fn new(store: S, events: EventSender) -> Self {
+impl<S: TaskStore, T: EventEmitter<CueEvent>> Orchestrator<S, T> {
+    pub fn new(store: S, transmitter: T) -> Self {
         Self {
             store,
-            events,
+            transmitter,
             limits: LimitsConfig::default(),
             state_path: None,
         }
@@ -75,8 +76,8 @@ impl<S: TaskStore> Orchestrator<S> {
         &self.limits
     }
 
-    fn emit(&self, event: Event) {
-        let _ = self.events.send(event);
+    fn emit(&self, event: CueEvent) {
+        self.transmitter.emit(event);
     }
 
     fn checkpoint_save(&self) {
@@ -93,14 +94,14 @@ impl<S: TaskStore> Orchestrator<S> {
             .get_mut(id)
             .ok_or(OrchestratorError::TaskNotFound(id))?;
         task.set_phase(phase);
-        self.emit(Event::PhaseTransition { task_id: id, phase });
+        self.emit(CueEvent::PhaseTransition { task_id: id, phase });
         Ok(())
     }
 
     fn fail_task(&mut self, id: TaskId, reason: String) -> Result<TaskOutcome, OrchestratorError> {
         self.transition(id, TaskPhase::Failed)?;
         let outcome = TaskOutcome::Failed { reason };
-        self.emit(Event::TaskCompleted {
+        self.emit(CueEvent::TaskCompleted {
             task_id: id,
             outcome: outcome.clone(),
         });
@@ -121,7 +122,7 @@ impl<S: TaskStore> Orchestrator<S> {
 
     fn complete_task_verified(&mut self, id: TaskId) -> Result<TaskOutcome, OrchestratorError> {
         self.transition(id, TaskPhase::Completed)?;
-        self.emit(Event::TaskCompleted {
+        self.emit(CueEvent::TaskCompleted {
             task_id: id,
             outcome: TaskOutcome::Success,
         });
@@ -134,7 +135,7 @@ impl<S: TaskStore> Orchestrator<S> {
         let current = self.store.task_count();
         let max = self.limits.max_total_tasks as usize;
         if current + count > max {
-            self.emit(Event::TaskLimitReached { task_id: parent_id });
+            self.emit(CueEvent::TaskLimitReached { task_id: parent_id });
             Some(format!(
                 "task limit reached ({current} tasks, max {})",
                 self.limits.max_total_tasks
@@ -177,7 +178,7 @@ impl<S: TaskStore> Orchestrator<S> {
         for &child_id in &child_ids {
             if let Some(child) = self.store.get(child_id) {
                 let info = child.registration_info();
-                self.emit(Event::TaskRegistered {
+                self.emit(CueEvent::TaskRegistered {
                     task_id: child_id,
                     parent_id: info.parent_id,
                     goal: info.goal,
@@ -196,14 +197,14 @@ impl<S: TaskStore> Orchestrator<S> {
         for id in self.store.dfs_order(root_id) {
             if let Some(t) = self.store.get(id) {
                 let info = t.registration_info();
-                self.emit(Event::TaskRegistered {
+                self.emit(CueEvent::TaskRegistered {
                     task_id: id,
                     parent_id: info.parent_id,
                     goal: info.goal,
                     depth: info.depth,
                 });
                 if info.phase != TaskPhase::Pending {
-                    self.emit(Event::PhaseTransition {
+                    self.emit(CueEvent::PhaseTransition {
                         task_id: id,
                         phase: info.phase,
                     });
@@ -276,11 +277,11 @@ impl<S: TaskStore> Orchestrator<S> {
                 );
             }
 
-            self.emit(Event::PathSelected {
+            self.emit(CueEvent::PathSelected {
                 task_id: id,
                 path: assessment.path.clone(),
             });
-            self.emit(Event::ModelSelected {
+            self.emit(CueEvent::ModelSelected {
                 task_id: id,
                 model: assessment.model,
             });
@@ -392,7 +393,7 @@ impl<S: TaskStore> Orchestrator<S> {
                 }
             }
 
-            self.emit(Event::BranchFixRound {
+            self.emit(CueEvent::BranchFixRound {
                 task_id: id,
                 round,
                 model,
@@ -423,7 +424,7 @@ impl<S: TaskStore> Orchestrator<S> {
             }
 
             let fix_child_ids = self.create_subtasks(id, &subtask_specs, true, true, None)?;
-            self.emit(Event::FixSubtasksCreated {
+            self.emit(CueEvent::FixSubtasksCreated {
                 task_id: id,
                 count: fix_child_ids.len(),
                 round,
@@ -483,7 +484,7 @@ impl<S: TaskStore> Orchestrator<S> {
 
             let new_child_ids =
                 self.create_subtasks(id, &decomposition.subtasks, false, false, None)?;
-            self.emit(Event::SubtasksCreated {
+            self.emit(CueEvent::SubtasksCreated {
                 parent_id: id,
                 child_ids: new_child_ids,
             });
@@ -552,7 +553,7 @@ impl<S: TaskStore> Orchestrator<S> {
                                         .ok_or(OrchestratorError::TaskNotFound(eid))?;
                                     if existing_child.phase() == TaskPhase::Pending {
                                         existing_child.set_phase(TaskPhase::Failed);
-                                        self.emit(Event::TaskCompleted {
+                                        self.emit(CueEvent::TaskCompleted {
                                             task_id: eid,
                                             outcome: TaskOutcome::Failed {
                                                 reason: "superseded by recovery re-decomposition"
@@ -574,7 +575,7 @@ impl<S: TaskStore> Orchestrator<S> {
                                 .ok_or(OrchestratorError::TaskNotFound(id))?
                                 .recovery_rounds();
                             self.create_subtasks(id, &specs, false, true, Some(parent_rounds))?;
-                            self.emit(Event::RecoverySubtasksCreated {
+                            self.emit(CueEvent::RecoverySubtasksCreated {
                                 task_id: id,
                                 count,
                                 round: parent_rounds,
@@ -660,7 +661,7 @@ impl<S: TaskStore> Orchestrator<S> {
                             .ok_or(OrchestratorError::TaskNotFound(child_id))?;
                         if child.phase() == TaskPhase::Pending {
                             child.set_phase(TaskPhase::Failed);
-                            self.emit(Event::TaskCompleted {
+                            self.emit(CueEvent::TaskCompleted {
                                 task_id: child_id,
                                 outcome: TaskOutcome::Failed {
                                     reason: "superseded by recovery re-decomposition".into(),
@@ -684,7 +685,7 @@ impl<S: TaskStore> Orchestrator<S> {
                     .recovery_rounds();
                 self.create_subtasks(parent_id, &specs, false, true, Some(parent_rounds))?;
 
-                self.emit(Event::RecoverySubtasksCreated {
+                self.emit(CueEvent::RecoverySubtasksCreated {
                     task_id: parent_id,
                     count,
                     round,
