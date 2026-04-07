@@ -109,13 +109,12 @@
 - File-level review (leaf tasks, post-verification semantic review)
 - Vault integration (document store, ResearchQuery tool, discovery recording, reorganize)
 - Research Service gap-filling (vault query -> gap identification -> codebase exploration -> synthesis)
+- Branch verification separation (three sequential agent calls: correctness, completeness, aggregate simplification — fail-fast)
 
 **Not Implemented:**
 - Simplification review (local leaf + aggregate branch)
-- Branch verification separation (single call, not split into correctness + completeness + simplification)
 - User-level config fallback (`~/.config/epic/config.toml`)
 
 **Next Work:**
-1. **Branch verification separation** — Split single-call branch verification into correctness + completeness + aggregate simplification reviews.
-2. **Web search scope for Research Service** — Add WEB scope to gap-filling pipeline (vault + codebase + web search).
-3. **User-level config fallback** — `~/.config/epic/config.toml` resolution for user defaults.
+1. **Web search scope for Research Service** — Add WEB scope to gap-filling pipeline (vault + codebase + web search).
+2. **User-level config fallback** — `~/.config/epic/config.toml` resolution for user defaults.

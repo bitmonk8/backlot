@@ -126,6 +126,18 @@ impl<A: AgentService> EpicTask<A> {
             });
         }
     }
+
+    /// Map a `VerificationOutcome` to a branch-fail outcome, returning `None` on pass.
+    fn branch_fail_outcome(&self, outcome: VerificationOutcome) -> Option<BranchVerifyOutcome> {
+        match outcome {
+            VerificationOutcome::Pass => None,
+            VerificationOutcome::Fail { reason } => Some(if self.task.is_fix_task {
+                BranchVerifyOutcome::FailedNoFixLoop { reason }
+            } else {
+                BranchVerifyOutcome::Failed { reason }
+            }),
+        }
+    }
 }
 
 impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
@@ -237,20 +249,44 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
         let rt = self.rt_arc();
         let verify_model = self.task.verification_model();
         let task_ctx = self.build_task_context(ctx);
-        let agent_result = rt.agent.verify(&task_ctx, verify_model).await?;
-        self.task.accumulate_usage(&agent_result.meta);
+
+        // Phase 1: Correctness review.
+        let correctness = rt
+            .agent
+            .verify_branch_correctness(&task_ctx, verify_model)
+            .await?;
+        self.task.accumulate_usage(&correctness.meta);
         self.emit_usage_event();
 
-        match agent_result.value.outcome {
-            VerificationOutcome::Pass => Ok(BranchVerifyOutcome::Passed),
-            VerificationOutcome::Fail { reason } => {
-                if self.task.is_fix_task {
-                    Ok(BranchVerifyOutcome::FailedNoFixLoop { reason })
-                } else {
-                    Ok(BranchVerifyOutcome::Failed { reason })
-                }
-            }
+        if let Some(outcome) = self.branch_fail_outcome(correctness.value.outcome) {
+            return Ok(outcome);
         }
+
+        // Phase 2: Completeness review.
+        let completeness = rt
+            .agent
+            .verify_branch_completeness(&task_ctx, verify_model)
+            .await?;
+        self.task.accumulate_usage(&completeness.meta);
+        self.emit_usage_event();
+
+        if let Some(outcome) = self.branch_fail_outcome(completeness.value.outcome) {
+            return Ok(outcome);
+        }
+
+        // Phase 3: Aggregate simplification review.
+        let simplification = rt
+            .agent
+            .verify_branch_simplification(&task_ctx, verify_model)
+            .await?;
+        self.task.accumulate_usage(&simplification.meta);
+        self.emit_usage_event();
+
+        if let Some(outcome) = self.branch_fail_outcome(simplification.value.outcome) {
+            return Ok(outcome);
+        }
+
+        Ok(BranchVerifyOutcome::Passed)
     }
 
     fn fix_round_budget_check(&self, limits: &LimitsConfig) -> FixBudgetCheck {

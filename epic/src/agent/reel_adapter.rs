@@ -224,6 +224,28 @@ impl ReelAgent {
             meta,
         })
     }
+
+    async fn run_verification(
+        &self,
+        pair: &prompts::PromptPair,
+        model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        let schema = wire::verification_schema();
+        let AgentResult { value: wire, meta }: AgentResult<VerificationWire> = self
+            .run_request(
+                &pair.system_prompt,
+                &pair.query,
+                model,
+                readonly_grant(),
+                schema,
+                false,
+            )
+            .await?;
+        Ok(AgentResult {
+            value: VerificationResult::try_from(wire)?,
+            meta,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -317,21 +339,34 @@ impl AgentService for ReelAgent {
         model: Model,
     ) -> anyhow::Result<AgentResult<VerificationResult>> {
         let pair = prompts::build_verify(ctx, &self.verification_steps);
-        let schema = wire::verification_schema();
-        let AgentResult { value: wire, meta }: AgentResult<VerificationWire> = self
-            .run_request(
-                &pair.system_prompt,
-                &pair.query,
-                model,
-                readonly_grant(),
-                schema,
-                false,
-            )
-            .await?;
-        Ok(AgentResult {
-            value: VerificationResult::try_from(wire)?,
-            meta,
-        })
+        self.run_verification(&pair, model).await
+    }
+
+    async fn verify_branch_correctness(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        let pair = prompts::build_branch_correctness_review(ctx);
+        self.run_verification(&pair, model).await
+    }
+
+    async fn verify_branch_completeness(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        let pair = prompts::build_branch_completeness_review(ctx);
+        self.run_verification(&pair, model).await
+    }
+
+    async fn verify_branch_simplification(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        let pair = prompts::build_branch_simplification_review(ctx);
+        self.run_verification(&pair, model).await
     }
 
     async fn file_level_review(
@@ -340,21 +375,7 @@ impl AgentService for ReelAgent {
         model: Model,
     ) -> anyhow::Result<AgentResult<VerificationResult>> {
         let pair = prompts::build_file_level_review(ctx);
-        let schema = wire::verification_schema();
-        let AgentResult { value: wire, meta }: AgentResult<VerificationWire> = self
-            .run_request(
-                &pair.system_prompt,
-                &pair.query,
-                model,
-                readonly_grant(),
-                schema,
-                false,
-            )
-            .await?;
-        Ok(AgentResult {
-            value: VerificationResult::try_from(wire)?,
-            meta,
-        })
+        self.run_verification(&pair, model).await
     }
 
     async fn checkpoint(

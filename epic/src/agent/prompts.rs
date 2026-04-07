@@ -290,12 +290,8 @@ pub fn build_verify(ctx: &TaskContext, verification_steps: &[VerificationStep]) 
             "\n\nThis is a leaf task. Verify that the code changes are correct and complete. \
 Check that the implementation matches the verification criteria. Run verification commands if available."
         }
-        Some(TaskPath::Branch) => {
-            "\n\nThis is a branch task. Verify that all subtasks' results collectively \
-satisfy the branch goal. Check integration between subtask outputs. Verify no gaps or conflicts between \
-subtask implementations."
-        }
-        None => "",
+        // Branch verification uses dedicated three-phase prompts; this path is leaf-only.
+        Some(TaskPath::Branch) | None => "",
     };
 
     let system_prompt = format!(
@@ -317,6 +313,97 @@ subtask implementations."
     let query = format!(
         "{context}\n\n\
          Verify this task against its criteria. Use tools to inspect the actual state.",
+        context = format_context(ctx),
+    );
+
+    PromptPair {
+        system_prompt,
+        query,
+    }
+}
+
+pub fn build_branch_correctness_review(ctx: &TaskContext) -> PromptPair {
+    let system_prompt = "\
+You are a correctness reviewer in a recursive problem-solving system.
+
+Verify that the aggregate result of all subtasks satisfies the parent task's objectives. \
+Go beyond checking that sub-problems were completed — verify that the combined output is correct as a whole.
+
+Check:
+- Interface compatibility between sibling subtasks.
+- Unhandled interactions between pieces.
+- Requirements that fell through decomposition gaps.
+- Review committed code against the original problem statement.
+
+Report pass only if the aggregate result is correct. Provide detailed explanation of what was checked and findings.
+
+Respond with the required JSON schema."
+        .into();
+
+    let query = format!(
+        "{context}\n\n\
+         Review the aggregate result of all subtasks for correctness against the parent task's objectives.",
+        context = format_context(ctx),
+    );
+
+    PromptPair {
+        system_prompt,
+        query,
+    }
+}
+
+pub fn build_branch_completeness_review(ctx: &TaskContext) -> PromptPair {
+    let system_prompt = "\
+You are a completeness reviewer in a recursive problem-solving system.
+
+Verify that the decomposition covered the entire problem. The decomposition assumed \
+A + B + C = whole problem — check whether that equation holds.
+
+Check:
+- Are there gaps or requirements that no subtask addressed?
+- Did the decomposition actually equal the whole problem?
+- Were any edge cases or requirements lost during decomposition?
+
+Report pass only if the decomposition fully covered the problem. Provide detailed explanation of what was checked and findings.
+
+Respond with the required JSON schema."
+        .into();
+
+    let query = format!(
+        "{context}\n\n\
+         Review whether the decomposition into subtasks fully covered the parent task's requirements.",
+        context = format_context(ctx),
+    );
+
+    PromptPair {
+        system_prompt,
+        query,
+    }
+}
+
+pub fn build_branch_simplification_review(ctx: &TaskContext) -> PromptPair {
+    let system_prompt = "\
+You are a simplification reviewer in a recursive problem-solving system.
+
+Check whether the decomposition introduced unnecessary complexity. When each sub-problem is solved \
+independently, the aggregate may have issues only visible at the whole-problem level.
+
+Check:
+- Redundancies across subtask outputs.
+- Unnecessary abstractions.
+- Over-engineering.
+- Missed opportunities for simpler solutions visible only at the aggregate level.
+- Cross-file and cross-subtask simplification that individual leaf tasks cannot see.
+
+Report pass if the aggregate is acceptably simple. Report fail if there are concrete simplification opportunities. \
+Provide detailed explanation of what was checked and findings.
+
+Respond with the required JSON schema."
+        .into();
+
+    let query = format!(
+        "{context}\n\n\
+         Review the aggregate subtask outputs for unnecessary complexity or simplification opportunities.",
         context = format_context(ctx),
     );
 
@@ -842,11 +929,13 @@ mod tests {
             pair.system_prompt,
         );
 
+        // Branch path no longer gets special guidance in build_verify
+        // (branch verification uses dedicated three-phase prompts).
         ctx.task.path = Some(TaskPath::Branch);
         let pair = build_verify(&ctx, &[]);
         assert!(
-            pair.system_prompt.contains("branch task"),
-            "branch prompt should contain 'branch task', got: {}",
+            !pair.system_prompt.contains("branch task"),
+            "branch path should not contain 'branch task' guidance in build_verify, got: {}",
             pair.system_prompt,
         );
 
@@ -856,6 +945,63 @@ mod tests {
             !pair.system_prompt.contains("leaf task")
                 && !pair.system_prompt.contains("branch task"),
             "no-path prompt should not contain path-specific guidance",
+        );
+    }
+
+    #[test]
+    fn branch_correctness_review_prompt() {
+        let ctx = test_context();
+        let pair = build_branch_correctness_review(&ctx);
+        assert!(
+            pair.system_prompt.contains("correctness reviewer"),
+            "system prompt should contain 'correctness reviewer', got: {}",
+            pair.system_prompt,
+        );
+        assert!(
+            pair.system_prompt.contains("Interface compatibility"),
+            "system prompt should mention interface compatibility",
+        );
+        assert!(
+            pair.query.contains("implement feature X"),
+            "query should contain goal",
+        );
+    }
+
+    #[test]
+    fn branch_completeness_review_prompt() {
+        let ctx = test_context();
+        let pair = build_branch_completeness_review(&ctx);
+        assert!(
+            pair.system_prompt.contains("completeness reviewer"),
+            "system prompt should contain 'completeness reviewer', got: {}",
+            pair.system_prompt,
+        );
+        assert!(
+            pair.system_prompt.contains("gaps"),
+            "system prompt should mention gaps",
+        );
+        assert!(
+            pair.query.contains("implement feature X"),
+            "query should contain goal",
+        );
+    }
+
+    #[test]
+    fn branch_simplification_review_prompt() {
+        let ctx = test_context();
+        let pair = build_branch_simplification_review(&ctx);
+        assert!(
+            pair.system_prompt.contains("simplification reviewer"),
+            "system prompt should contain 'simplification reviewer', got: {}",
+            pair.system_prompt,
+        );
+        assert!(
+            pair.system_prompt.contains("Redundancies"),
+            "system prompt should mention redundancies",
+        );
+        assert!(
+            pair.query.contains("implement feature X"),
+            "query should contain goal",
         );
     }
 

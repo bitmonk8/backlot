@@ -64,7 +64,7 @@ Root task is always forced to branch (guarantees recovery machinery exists). Tas
 2. Create subtasks with magnitude estimates
 3. Execute subtasks sequentially (DFS preorder)
 4. Inter-subtask checkpoint on discoveries
-5. Branch verification (Sonnet): correctness + completeness + aggregate simplification
+5. Branch verification (Sonnet): three sequential reviews — correctness, completeness, aggregate simplification (each a separate agent call, fail-fast on first failure)
 6. Up to 3 fix rounds; root gets one additional Opus round
 
 ### Context Propagation
@@ -390,10 +390,11 @@ Returns `DecompositionResult` (reuses existing type). Fix subtask specs are stru
 
 #### Branch Verification Content
 
-Each round performs three reviews:
-- **Correctness**: do changes satisfy the goal?
-- **Completeness**: are all aspects addressed?
-- **Aggregate simplification**: can the combined output be simplified?
+Each round performs three sequential reviews, each a separate agent call with a focused prompt. Reviews short-circuit: if an earlier review fails, later reviews are skipped.
+
+1. **Correctness**: Does the aggregate result satisfy the parent task's objectives? Checks interface compatibility between sibling subtasks, unhandled interactions, requirements that fell through decomposition gaps.
+2. **Completeness**: Did the sub-problems cover the whole problem? Checks for gaps or requirements that no subtask addressed.
+3. **Aggregate simplification**: Did decomposition introduce unnecessary complexity? Cross-file and cross-subtask simplification that individual leaf tasks cannot see.
 
 #### Fix Subtask Rules
 

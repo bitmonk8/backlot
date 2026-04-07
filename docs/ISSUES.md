@@ -802,6 +802,18 @@ epic/README.md — Module structure lists legacy orchestrator entries (orchestra
 ### 91. Resolved issues in ISSUES.md not marked
 docs/ISSUES.md — Issues 74, 85, and several others (42, 43, 45, 51, 53, 54) reference orchestrator/mod.rs logic that was removed with the legacy orchestrator. These are resolved or partially resolved but not annotated. **Documentation.**
 
+### 92. Naming inconsistency: "verify" vs "review" in branch verification
+epic/src/agent/mod.rs (lines 91-107) and epic/src/agent/prompts.rs (lines 325, 355, 384) — Trait methods use `verify_branch_*` but prompt builders use `build_branch_*_review`. Breaks convention established by `file_level_review`/`build_file_level_review` pair. **Naming.**
+
+### 93. `build_verify` and `verify` names are now ambiguously scoped
+epic/src/agent/prompts.rs (line 274), epic/src/agent/mod.rs (line 85) — These are now leaf-only (branch uses three-phase prompts) but names don't reflect the narrowed scope. **Naming.**
+
+### 94. Missing error injection for branch verification in MockAgent
+epic/src/test_support.rs — No mechanism to inject `Err` for `verify_branch_{correctness,completeness,simplification}`, so the `Err` path through `verify_branch` is untested. **Testing.**
+
+### 95. `branch_verify_all_three_phases_pass` test duplicates `single_leaf`
+epic/src/orchestrator/tests.rs — Same mock setup and assertions as `single_leaf`. Adds no unique verification of three-phase behavior. **Testing.**
+
 ---
 
 ## Cue

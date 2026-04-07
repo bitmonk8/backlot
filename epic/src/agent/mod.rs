@@ -88,6 +88,24 @@ pub trait AgentService: Send + Sync {
         model: Model,
     ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<VerificationResult>>> + Send;
 
+    fn verify_branch_correctness(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<VerificationResult>>> + Send;
+
+    fn verify_branch_completeness(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<VerificationResult>>> + Send;
+
+    fn verify_branch_simplification(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<VerificationResult>>> + Send;
+
     fn file_level_review(
         &self,
         ctx: &TaskContext,

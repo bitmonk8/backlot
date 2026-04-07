@@ -131,8 +131,9 @@ async fn single_leaf() {
         .decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass() // leaf child verification
+        .file_review_pass() // leaf child file review
+        .branch_verify_pass() // root branch verification (3 phases)
         .build();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
     let result = orch.run(root_id).await.unwrap();
@@ -171,7 +172,9 @@ async fn two_children() {
     for _ in 0..2 {
         mb.assess_leaf().leaf_success();
     }
-    mb.verify_passes(3).file_review_passes(3);
+    mb.verify_passes(2) // leaf children verification
+        .file_review_passes(2) // leaf children file review
+        .branch_verify_pass(); // root branch verification
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -187,8 +190,9 @@ async fn checkpoint_saves_state() {
         .decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let dir = std::env::temp_dir().join("epic_test_checkpoint_cue");
@@ -217,8 +221,9 @@ async fn resume_skips_completed_child() {
     let mock = MockBuilder::new()
         .assess_leaf()
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let mut state = EpicState::new();
@@ -274,8 +279,9 @@ async fn resume_skips_decomposition_when_subtasks_exist() {
     let mock = MockBuilder::new()
         .assess_leaf()
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let mut state = EpicState::new();
@@ -312,8 +318,10 @@ async fn resume_mid_execution_branch_not_reassessed() {
     let mock = MockBuilder::new()
         .assess_leaf()
         .leaf_success()
-        .verify_passes(3)
-        .file_review_passes(3)
+        .verify_pass() // grandchild leaf
+        .file_review_pass() // grandchild leaf file review
+        .branch_verify_pass() // mid branch
+        .branch_verify_pass() // root branch
         .build();
 
     let mut state = EpicState::new();
@@ -366,8 +374,9 @@ async fn resume_mid_execution_branch_not_reassessed() {
 #[tokio::test]
 async fn resume_verifying_skips_execution() {
     let mock = MockBuilder::new()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass() // child leaf (in Verifying phase)
+        .file_review_pass() // child leaf file review
+        .branch_verify_pass() // root branch
         .build();
 
     let mut state = EpicState::new();
@@ -404,14 +413,14 @@ async fn resume_verifying_skips_execution() {
 }
 
 /// Custom `max_depth`: child at depth limit is forced to Leaf without assess.
-/// Subsumes the previous `depth_cap_forces_leaf` test.
 #[tokio::test]
 async fn custom_max_depth_forces_leaf() {
     let mock = MockBuilder::new()
         .decompose_one()
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let limits = LimitsConfig {
@@ -449,7 +458,9 @@ async fn discoveries_propagated_to_checkpoint() {
     ]);
     mb.checkpoint_proceed();
     mb.leaf_success();
-    mb.verify_passes(3).file_review_passes(2);
+    mb.verify_passes(2) // two leaf children
+        .file_review_passes(2) // two leaf file reviews
+        .branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -478,19 +489,20 @@ async fn discoveries_propagated_to_checkpoint() {
 /// Branch fix loop: root verification fails -> fix subtask created -> re-verify passes.
 #[tokio::test]
 async fn branch_fix_creates_subtasks() {
-    let mock = MockBuilder::new()
-        .decompose_one()
+    let mut mb = MockBuilder::new();
+    mb.decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass()
-        .verify_fail("root check failed")
+        .verify_pass() // original leaf child
+        .file_review_pass() // original leaf file review
+        .branch_correctness_fail("root check failed") // root branch fails correctness
         .fix_subtask_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass()
-        .verify_pass()
-        .file_review_passes(3)
-        .build();
+        .verify_pass() // fix leaf child
+        .file_review_pass() // fix leaf file review
+        .branch_verify_pass(); // root branch re-verify passes
+    let mock = mb.build();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -520,18 +532,21 @@ async fn branch_fix_round_budget() {
         rationale: "one mid branch".into(),
     });
     mb.assess_branch().decompose_one();
-    mb.assess_leaf().leaf_success().verify_pass();
-    mb.verify_fail("mid check failed");
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // grandchild leaf
+    mb.branch_correctness_fail("mid check failed"); // mid branch fails
 
     for _ in 0..3 {
         mb.fix_subtask_one()
             .assess_leaf()
             .leaf_success()
-            .verify_pass()
-            .verify_fail("still failing");
+            .verify_pass() // fix leaf child
+            .file_review_pass() // fix leaf file review
+            .branch_correctness_fail("still failing"); // mid branch re-verify fails
     }
     mb.recovery_unrecoverable();
-    mb.file_review_passes(4);
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert!(matches!(result, TaskOutcome::Failed { .. }));
@@ -545,7 +560,6 @@ async fn branch_fix_round_budget() {
 }
 
 /// Fix tasks (leaf or branch) fail immediately to prevent recursive fix-within-fix.
-/// Merged from `branch_fix_subtasks_no_recursive_fix` and `leaf_fix_subtask_no_recursive_fix_loop`.
 #[tokio::test]
 async fn fix_subtasks_no_recursive_fix() {
     // --- Part 1: Leaf fix subtask that fails verification must NOT enter leaf fix loop ---
@@ -554,21 +568,22 @@ async fn fix_subtasks_no_recursive_fix() {
     mb.decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass()
-        .verify_fail("root check failed");
+        .verify_pass() // original leaf child
+        .file_review_pass() // original leaf file review
+        .branch_correctness_fail("root check failed"); // root branch fails
     // Fix round 1: leaf fix subtask succeeds but verification fails.
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
-        .verify_fail("fix leaf failed");
-    mb.verify_fail("root still failing");
+        .verify_fail("fix leaf failed"); // fix leaf verification fails (is_fix_task)
+    mb.branch_correctness_fail("root still failing"); // root branch still fails
     // Fix round 2: simple fix subtask succeeds and verification passes.
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass()
-        .verify_pass();
-    mb.file_review_passes(2);
+        .verify_pass() // fix leaf child
+        .file_review_pass() // fix leaf file review
+        .branch_verify_pass(); // root branch re-verify passes
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -588,20 +603,24 @@ async fn fix_subtasks_no_recursive_fix() {
     mb.decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass()
-        .verify_fail("root check failed");
+        .verify_pass() // original leaf child
+        .file_review_pass() // original leaf file review
+        .branch_correctness_fail("root check failed"); // root branch fails
     // Fix round 1: branch fix subtask.
     mb.fix_subtask_one().assess_branch().decompose_one();
-    mb.assess_leaf().leaf_success().verify_pass();
-    mb.verify_fail("branch fix subtask failed");
-    mb.verify_fail("root still failing");
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // grandchild leaf
+    mb.branch_correctness_fail("branch fix subtask failed"); // branch fix subtask fails (is_fix_task -> FailedNoFixLoop)
+    mb.branch_correctness_fail("root still failing"); // root branch still fails
     // Fix round 2: simple fix subtask succeeds.
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass()
-        .verify_pass();
-    mb.file_review_passes(3);
+        .verify_pass() // fix leaf child
+        .file_review_pass() // fix leaf file review
+        .branch_verify_pass(); // root branch re-verify passes
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -624,10 +643,11 @@ async fn fix_subtasks_no_recursive_fix() {
 #[tokio::test]
 async fn leaf_fix_persists_and_resumes() {
     let mock = MockBuilder::new()
-        .verify_fail("still broken")
-        .fix_leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_fail("still broken") // child leaf verify fails
+        .fix_leaf_success() // fix succeeds
+        .verify_pass() // fix verify passes
+        .file_review_pass() // fix file review
+        .branch_verify_pass() // root branch
         .build();
 
     let mut state = EpicState::new();
@@ -684,8 +704,9 @@ async fn leaf_fix_resume_escalates_immediately_when_tier_exhausted() {
     let mock = MockBuilder::new()
         .verify_fail("still broken")
         .fix_leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let mut state = EpicState::new();
@@ -763,21 +784,22 @@ async fn branch_fix_root_opus_round() {
     mb.decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass()
-        .verify_fail("root check failed");
+        .verify_pass() // original leaf child
+        .file_review_pass() // original leaf file review
+        .branch_correctness_fail("root check failed"); // root branch fails
 
     for round in 1..=4 {
         mb.fix_subtask_one()
             .assess_leaf()
             .leaf_success()
-            .verify_pass();
+            .verify_pass() // fix leaf child
+            .file_review_pass(); // fix leaf file review
         if round < 4 {
-            mb.verify_fail("root still failing");
+            mb.branch_correctness_fail("root still failing"); // root branch re-verify fails
         } else {
-            mb.verify_pass();
+            mb.branch_verify_pass(); // root branch re-verify passes
         }
     }
-    mb.file_review_passes(5);
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -820,10 +842,15 @@ async fn recovery_incremental_creates_subtasks() {
     mb.assess_leaf().leaf_failures(9, "A failed");
     mb.recovery_recoverable("retry differently")
         .recovery_plan_incremental();
-    mb.assess_leaf().leaf_success().verify_pass();
-    mb.assess_leaf().leaf_success().verify_pass();
-    mb.verify_pass();
-    mb.file_review_passes(3);
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // recovery child leaf
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // child B leaf
+    mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -850,22 +877,26 @@ async fn recovery_incremental_creates_subtasks() {
 
 /// Full re-decomposition with 3 children: child A completed, child B fails,
 /// child C (pending) gets superseded. Recovery subtask succeeds.
-/// Subsumes the previous `recovery_full_redecomposition_skips_pending` test.
 #[tokio::test]
 async fn recovery_full_redecomp_preserves_completed_siblings() {
     let mut mb = MockBuilder::new();
     mb.decompose_three();
     // Child A: succeeds.
-    mb.assess_leaf().leaf_success().verify_pass();
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass();
     // Child B: fails terminally.
     mb.assess_leaf().leaf_failures(9, "B failed");
     // Recovery: full re-decomposition.
     mb.recovery_recoverable("redo").recovery_plan_full();
     // Recovery subtask: succeeds.
-    mb.assess_leaf().leaf_success().verify_pass();
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass();
     // Root verification passes.
-    mb.verify_pass();
-    mb.file_review_passes(3);
+    mb.branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -975,9 +1006,11 @@ async fn recovery_rounds_persisted() {
         .leaf_failures(9, "A failed");
     mb.recovery_recoverable("try again")
         .recovery_plan_incremental();
-    mb.assess_leaf().leaf_success().verify_pass();
-    mb.verify_pass();
-    mb.file_review_passes(2);
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // recovery child leaf
+    mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1016,9 +1049,11 @@ async fn recovery_emits_events() {
     mb.decompose_one().assess_leaf().leaf_failures(9, "broke");
     mb.recovery_recoverable("fix it")
         .recovery_plan_incremental();
-    mb.assess_leaf().leaf_success().verify_pass();
-    mb.verify_pass();
-    mb.file_review_passes(2);
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // recovery child leaf
+    mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1068,8 +1103,8 @@ async fn checkpoint_adjust_stores_guidance() {
     mb.leaf_success_with_discoveries(vec!["use API v2".into()]);
     mb.checkpoint_adjust("switch to API v2 format");
     mb.leaf_success();
-    mb.verify_passes(3);
-    mb.file_review_passes(3);
+    mb.verify_passes(2).file_review_passes(2); // two leaf children
+    mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1097,6 +1132,7 @@ async fn checkpoint_escalate_triggers_recovery() {
     mb.decompose_two();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["approach is wrong".into()]);
+    mb.verify_pass().file_review_pass(); // child A leaf verification
     mb.checkpoint_escalate();
     mb.recovery_recoverable("switch approach");
     mb.recovery_plan(RecoveryPlan {
@@ -1108,10 +1144,15 @@ async fn checkpoint_escalate_triggers_recovery() {
         }],
         rationale: "fix approach".into(),
     });
-    mb.assess_leaf().leaf_success();
-    mb.assess_leaf().leaf_success();
-    mb.verify_passes(4);
-    mb.file_review_passes(4);
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // recovery child leaf
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // child B leaf
+    mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1140,10 +1181,9 @@ async fn checkpoint_escalate_unrecoverable_fails() {
     mb.decompose_two();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["fatal issue".into()]);
-    mb.verify_pass();
+    mb.verify_pass().file_review_pass(); // child A leaf
     mb.checkpoint_escalate();
     mb.recovery_unrecoverable();
-    mb.file_review_passes(1);
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert!(matches!(result, TaskOutcome::Failed { .. }));
@@ -1157,8 +1197,8 @@ async fn checkpoint_agent_error_treated_as_proceed() {
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["something interesting".into()]);
     mb.checkpoint_error("simulated LLM failure");
-    mb.verify_passes(2);
-    mb.file_review_passes(2);
+    mb.verify_pass().file_review_pass(); // child leaf
+    mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1190,8 +1230,8 @@ async fn checkpoint_guidance_persisted() {
     mb.leaf_success_with_discoveries(vec!["found issue".into()]);
     mb.checkpoint_adjust("use new approach");
     mb.leaf_success();
-    mb.verify_passes(3);
-    mb.file_review_passes(3);
+    mb.verify_passes(2).file_review_passes(2); // two leaf children
+    mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1221,8 +1261,8 @@ async fn checkpoint_multiple_adjusts_accumulates_guidance() {
     mb.leaf_success_with_discoveries(vec!["discovered gzip support".into()]);
     mb.checkpoint_adjust("also use gzip");
     mb.leaf_success();
-    mb.verify_passes(4);
-    mb.file_review_passes(4);
+    mb.verify_passes(3).file_review_passes(3); // three leaf children
+    mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1253,9 +1293,8 @@ async fn checkpoint_escalate_on_fix_task_fails() {
     mb.decompose_two();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["fatal issue".into()]);
-    mb.verify_pass();
+    mb.verify_pass().file_review_pass(); // child A leaf
     mb.checkpoint_escalate();
-    mb.file_review_passes(1);
 
     // Build state with root marked as fix task.
     let mut state = EpicState::new();
@@ -1352,9 +1391,8 @@ async fn checkpoint_escalate_recovery_rounds_exhausted() {
     mb.decompose_two();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["approach is wrong".into()]);
-    mb.verify_pass();
+    mb.verify_pass().file_review_pass(); // child A leaf
     mb.checkpoint_escalate();
-    mb.file_review_passes(2);
 
     // Build state with pre-set recovery_rounds.
     let mut state = EpicState::new();
@@ -1401,9 +1439,11 @@ async fn checkpoint_escalate_clears_prior_guidance() {
     mb.decompose_three();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["use API v2".into()]);
+    mb.verify_pass().file_review_pass(); // child A leaf
     mb.checkpoint_adjust("old guidance");
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["approach is fundamentally wrong".into()]);
+    mb.verify_pass().file_review_pass(); // child B leaf
     mb.checkpoint_escalate();
     mb.recovery_recoverable("fix approach");
     mb.recovery_plan(RecoveryPlan {
@@ -1415,10 +1455,15 @@ async fn checkpoint_escalate_clears_prior_guidance() {
         }],
         rationale: "fix approach".into(),
     });
-    mb.assess_leaf().leaf_success();
-    mb.assess_leaf().leaf_success();
-    mb.verify_passes(5);
-    mb.file_review_passes(4);
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // recovery child leaf
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // child C leaf
+    mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -1455,8 +1500,9 @@ async fn leaf_retry_counter_persists_on_resume() {
     let mock = MockBuilder::new()
         .leaf_failed("fail3")
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let mut state = EpicState::new();
@@ -1533,8 +1579,9 @@ async fn leaf_retry_counter_resume_at_sonnet_tier() {
     let mock = MockBuilder::new()
         .leaf_failed("sonnet fail3")
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let mut state = EpicState::new();
@@ -1622,8 +1669,9 @@ async fn leaf_retry_counter_resume_at_sonnet_tier() {
 async fn leaf_retry_resume_escalates_immediately_when_tier_exhausted() {
     let mock = MockBuilder::new()
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let mut state = EpicState::new();
@@ -1702,8 +1750,9 @@ async fn leaf_retry_attempts_persisted_to_disk() {
         .assess_leaf()
         .leaf_failed("first try failed")
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1768,14 +1817,15 @@ async fn custom_root_fix_rounds_limits_fix_attempts() {
     mb.decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass()
-        .verify_fail("root check failed");
+        .verify_pass() // original leaf child
+        .file_review_pass() // original leaf file review
+        .branch_correctness_fail("root check failed"); // root branch fails
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass();
-    mb.verify_fail("root still failing");
-    mb.file_review_passes(2);
+        .verify_pass() // fix leaf child
+        .file_review_pass(); // fix leaf file review
+    mb.branch_correctness_fail("root still failing"); // root branch re-verify fails
 
     let limits = LimitsConfig {
         root_fix_rounds: 1,
@@ -1808,15 +1858,18 @@ async fn custom_branch_fix_rounds_limits_fix_attempts() {
         }],
         rationale: "one grandchild".into(),
     });
-    mb.assess_leaf().leaf_success().verify_pass();
-    mb.verify_fail("branch check failed");
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // grandchild leaf
+    mb.branch_correctness_fail("branch check failed"); // mid branch fails
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass();
-    mb.verify_fail("branch still failing");
+        .verify_pass()
+        .file_review_pass(); // fix leaf child
+    mb.branch_correctness_fail("branch still failing"); // mid branch re-verify fails
     mb.recovery_unrecoverable();
-    mb.file_review_passes(2);
 
     let limits = LimitsConfig {
         branch_fix_rounds: 1,
@@ -1844,8 +1897,9 @@ async fn zero_retry_budget_clamped_to_one() {
         .assess_leaf()
         .leaf_failed("haiku failed")
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
 
     let limits = LimitsConfig {
@@ -1872,8 +1926,9 @@ async fn decompose_model_from_assessment() {
         .decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_passes(2)
-        .file_review_passes(2)
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
         .build();
     let (mut orch, mock_arc, root_id, _log) = make_orchestrator(mock);
     let result = orch.run(root_id).await.unwrap();
@@ -1942,10 +1997,10 @@ async fn task_limit_blocks_fix_subtasks() {
     mb.decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass();
-    mb.verify_fail("root verification failed");
+        .verify_pass()
+        .file_review_pass(); // leaf child
+    mb.branch_correctness_fail("root verification failed"); // root branch fails
     mb.fix_subtask_one();
-    mb.file_review_passes(1);
 
     let limits = LimitsConfig {
         max_total_tasks: 2,
@@ -2012,9 +2067,11 @@ async fn recovery_depth_inherited_not_fresh() {
         }],
         rationale: "recovery".into(),
     });
-    mb.assess_leaf().leaf_success();
-    mb.verify_passes(2);
-    mb.file_review_passes(2);
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass(); // recovery child leaf
+    mb.branch_verify_pass(); // root branch
 
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -2073,7 +2130,8 @@ async fn max_total_tasks_zero_clamped_blocks_decomposition() {
         .decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_passes(2)
+        .verify_pass()
+        .branch_verify_pass()
         .build();
 
     let (orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
@@ -2096,7 +2154,9 @@ async fn task_limit_exact_boundary_permits() {
     for _ in 0..2 {
         mb.assess_leaf().leaf_success();
     }
-    mb.verify_passes(3).file_review_passes(3);
+    mb.verify_passes(2)
+        .file_review_passes(2) // two leaf children
+        .branch_verify_pass(); // root branch
 
     let limits = LimitsConfig {
         max_total_tasks: 3,
@@ -2119,14 +2179,15 @@ async fn branch_fix_design_error_retries() {
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .verify_fail("root check failed");
+        .file_review_pass()
+        .branch_correctness_fail("root check failed");
     mb.fix_subtask_error(TaskId(0), "LLM timeout");
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .verify_pass();
-    mb.file_review_passes(2);
+        .file_review_pass()
+        .branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -2137,7 +2198,7 @@ async fn branch_fix_design_error_retries() {
     assert_eq!(root.verification_fix_rounds, 2);
 }
 
-/// Branch fix loop: `verify()` returns Err on round 1 re-verification, passes on round 2.
+/// Branch fix loop: branch verify fails on round 1 re-verification, passes on round 2.
 #[tokio::test]
 async fn branch_fix_verify_error_retries() {
     let mut mb = MockBuilder::new();
@@ -2145,20 +2206,23 @@ async fn branch_fix_verify_error_retries() {
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .verify_fail("root check failed");
-    // Round 1: fix subtask succeeds, root verify returns Err.
+        .file_review_pass()
+        .branch_correctness_fail("root check failed");
+    // Round 1: fix subtask succeeds, root re-verify fails completeness.
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass(); // fix subtask verification
-    mb.verify_errors_sequence(TaskId(0), vec![None, Some("transient verify error".into())]);
-    // Round 2: fix subtask succeeds, root verify passes.
+        .verify_pass()
+        .file_review_pass();
+    mb.branch_correctness_pass()
+        .branch_completeness_fail("transient verify failure");
+    // Round 2: fix subtask succeeds, root re-verify passes.
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass() // fix subtask verification
-        .verify_pass(); // root re-verify passes
-    mb.file_review_passes(3);
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -2177,7 +2241,8 @@ async fn branch_fix_design_error_exhausts_budget() {
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .verify_fail("root check failed");
+        .file_review_pass()
+        .branch_correctness_fail("root check failed");
     mb.fix_subtask_errors(
         TaskId(0),
         vec![
@@ -2186,7 +2251,6 @@ async fn branch_fix_design_error_exhausts_budget() {
         ],
     );
     mb.recovery_unrecoverable();
-    mb.file_review_passes(1);
 
     let limits = LimitsConfig {
         root_fix_rounds: 2,
@@ -2273,7 +2337,7 @@ async fn branch_fails_when_all_children_failed() {
 /// Branch with a mix of failed and completed non-fix children should still report Success.
 #[tokio::test]
 async fn branch_succeeds_when_some_children_completed() {
-    let mock = MockBuilder::new().verify_pass().build();
+    let mock = MockBuilder::new().branch_verify_pass().build();
     let mut state = EpicState::new();
 
     let root_id = state.next_task_id();
@@ -2330,9 +2394,9 @@ async fn branch_skips_file_level_review() {
         .decompose_one()
         .assess_leaf()
         .leaf_success()
-        .verify_pass()
-        .verify_pass()
-        .file_review_passes(2)
+        .verify_pass() // leaf child verification
+        .file_review_pass() // leaf child file review
+        .branch_verify_pass() // root branch verification
         .build();
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mock);
     let result = orch.run(root_id).await.unwrap();
@@ -2358,23 +2422,22 @@ async fn fix_task_file_review_fail_no_fix_loop() {
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .verify_fail("root check failed");
-    // Original child file review.
-    mb.file_review_pass();
+        .file_review_pass() // original leaf child
+        .branch_correctness_fail("root check failed"); // root branch fails
     // Fix round 1: fix subtask passes verification but fails file review.
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_fail("fix incomplete");
-    mb.verify_fail("root still failing");
+        .file_review_fail("fix incomplete"); // fix leaf fails file review (is_fix_task)
+    mb.branch_correctness_fail("root still failing"); // root branch still fails
     // Fix round 2: succeeds.
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass();
-    mb.verify_pass();
+        .file_review_pass() // fix leaf succeeds
+        .branch_verify_pass(); // root branch re-verify passes
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
     assert_eq!(result, TaskOutcome::Success);
@@ -2391,5 +2454,153 @@ async fn fix_task_file_review_fail_no_fix_loop() {
         fix1.fix_attempts.len(),
         0,
         "fix task should not enter fix loop on file-level review failure"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Three-phase branch verification tests
+// -----------------------------------------------------------------------
+
+/// All three branch review phases pass -> BranchVerifyOutcome::Passed.
+#[tokio::test]
+async fn branch_verify_all_three_phases_pass() {
+    let mock = MockBuilder::new()
+        .decompose_one()
+        .assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass()
+        .build();
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
+    let result = orch.run(root_id).await.unwrap();
+    assert_eq!(result, TaskOutcome::Success);
+
+    let state = into_state(orch);
+    let root = state.get(root_id).unwrap();
+    assert_eq!(root.phase, TaskPhase::Completed);
+}
+
+/// Correctness fails -> early return, no completeness/simplification calls consumed.
+#[tokio::test]
+async fn branch_verify_correctness_fails_early_return() {
+    let mut mb = MockBuilder::new();
+    mb.decompose_one()
+        .assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass()
+        .branch_correctness_fail("interface mismatch");
+    // Fix round: succeeds.
+    mb.fix_subtask_one()
+        .assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass();
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
+    let result = orch.run(root_id).await.unwrap();
+    assert_eq!(result, TaskOutcome::Success);
+
+    let state = into_state(orch);
+    let root = state.get(root_id).unwrap();
+    assert_eq!(root.verification_fix_rounds, 1);
+}
+
+/// Completeness fails -> no simplification call consumed.
+#[tokio::test]
+async fn branch_verify_completeness_fails_no_simplification() {
+    let mut mb = MockBuilder::new();
+    mb.decompose_one()
+        .assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass()
+        .branch_correctness_pass()
+        .branch_completeness_fail("missing requirement X");
+    // Fix round: succeeds.
+    mb.fix_subtask_one()
+        .assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass();
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
+    let result = orch.run(root_id).await.unwrap();
+    assert_eq!(result, TaskOutcome::Success);
+
+    let state = into_state(orch);
+    let root = state.get(root_id).unwrap();
+    assert_eq!(root.verification_fix_rounds, 1);
+}
+
+/// Simplification fails -> BranchVerifyOutcome::Failed (triggers fix round).
+#[tokio::test]
+async fn branch_verify_simplification_fails() {
+    let mut mb = MockBuilder::new();
+    mb.decompose_one()
+        .assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass()
+        .branch_correctness_pass()
+        .branch_completeness_pass()
+        .branch_simplification_fail("redundant abstraction layer");
+    // Fix round: succeeds.
+    mb.fix_subtask_one()
+        .assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass();
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
+    let result = orch.run(root_id).await.unwrap();
+    assert_eq!(result, TaskOutcome::Success);
+
+    let state = into_state(orch);
+    let root = state.get(root_id).unwrap();
+    assert_eq!(root.verification_fix_rounds, 1);
+}
+
+/// Fix task: any branch verification failure -> FailedNoFixLoop.
+#[tokio::test]
+async fn branch_verify_fix_task_fails_no_fix_loop() {
+    let mut mb = MockBuilder::new();
+    mb.decompose_one()
+        .assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass()
+        .branch_correctness_fail("root check failed");
+    // Fix round 1: branch fix subtask that is itself a branch. Its branch verify fails.
+    mb.fix_subtask_one().assess_branch().decompose_one();
+    mb.assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass();
+    mb.branch_correctness_fail("fix branch failed"); // is_fix_task -> FailedNoFixLoop
+    // Root re-verifies after fix round 1 (fix subtask failed, root still re-checks).
+    mb.branch_correctness_fail("root still failing");
+    // Root fix round 2: succeeds.
+    mb.fix_subtask_one()
+        .assess_leaf()
+        .leaf_success()
+        .verify_pass()
+        .file_review_pass()
+        .branch_verify_pass();
+    let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
+    let result = orch.run(root_id).await.unwrap();
+    assert_eq!(result, TaskOutcome::Success);
+
+    let state = into_state(orch);
+    let root = state.get(root_id).unwrap();
+    assert_eq!(root.verification_fix_rounds, 2);
+    let fix1_id = root.subtask_ids[1];
+    let fix1 = state.get(fix1_id).unwrap();
+    assert!(fix1.is_fix_task);
+    assert_eq!(fix1.phase, TaskPhase::Failed);
+    assert_eq!(
+        fix1.verification_fix_rounds, 0,
+        "fix-task branch should not enter its own fix loop"
     );
 }

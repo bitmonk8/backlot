@@ -14,6 +14,9 @@ pub struct MockAgentService {
     pub decompose_responses: Mutex<VecDeque<DecompositionResult>>,
     pub fix_subtask_responses: Mutex<VecDeque<DecompositionResult>>,
     pub verify_responses: Mutex<VecDeque<VerificationResult>>,
+    pub branch_correctness_responses: Mutex<VecDeque<VerificationResult>>,
+    pub branch_completeness_responses: Mutex<VecDeque<VerificationResult>>,
+    pub branch_simplification_responses: Mutex<VecDeque<VerificationResult>>,
     pub file_level_review_responses: Mutex<VecDeque<VerificationResult>>,
     pub checkpoint_responses: Mutex<VecDeque<CheckpointDecision>>,
     pub checkpoint_errors: Mutex<VecDeque<String>>,
@@ -34,6 +37,9 @@ impl MockAgentService {
             decompose_responses: Mutex::new(VecDeque::new()),
             fix_subtask_responses: Mutex::new(VecDeque::new()),
             verify_responses: Mutex::new(VecDeque::new()),
+            branch_correctness_responses: Mutex::new(VecDeque::new()),
+            branch_completeness_responses: Mutex::new(VecDeque::new()),
+            branch_simplification_responses: Mutex::new(VecDeque::new()),
             file_level_review_responses: Mutex::new(VecDeque::new()),
             checkpoint_responses: Mutex::new(VecDeque::new()),
             checkpoint_errors: Mutex::new(VecDeque::new()),
@@ -79,6 +85,7 @@ pub struct MockBuilder {
     inner: MockAgentService,
 }
 
+#[allow(dead_code)]
 impl MockBuilder {
     pub fn new() -> Self {
         Self {
@@ -253,6 +260,103 @@ impl MockBuilder {
         errors: Vec<Option<String>>,
     ) -> &mut Self {
         self.inner.push_verify_errors(task_id, errors);
+        self
+    }
+
+    // -----------------------------------------------------------------------
+    // Branch verification (three-phase)
+    // -----------------------------------------------------------------------
+
+    pub fn branch_correctness_pass(&mut self) -> &mut Self {
+        self.inner
+            .branch_correctness_responses
+            .lock()
+            .unwrap()
+            .push_back(crate::task::verify::VerificationResult {
+                outcome: crate::task::verify::VerificationOutcome::Pass,
+                details: "correctness review passed".into(),
+            });
+        self
+    }
+
+    pub fn branch_correctness_fail(&mut self, reason: &str) -> &mut Self {
+        self.inner
+            .branch_correctness_responses
+            .lock()
+            .unwrap()
+            .push_back(crate::task::verify::VerificationResult {
+                outcome: crate::task::verify::VerificationOutcome::Fail {
+                    reason: reason.into(),
+                },
+                details: "correctness review failed".into(),
+            });
+        self
+    }
+
+    pub fn branch_completeness_pass(&mut self) -> &mut Self {
+        self.inner
+            .branch_completeness_responses
+            .lock()
+            .unwrap()
+            .push_back(crate::task::verify::VerificationResult {
+                outcome: crate::task::verify::VerificationOutcome::Pass,
+                details: "completeness review passed".into(),
+            });
+        self
+    }
+
+    pub fn branch_completeness_fail(&mut self, reason: &str) -> &mut Self {
+        self.inner
+            .branch_completeness_responses
+            .lock()
+            .unwrap()
+            .push_back(crate::task::verify::VerificationResult {
+                outcome: crate::task::verify::VerificationOutcome::Fail {
+                    reason: reason.into(),
+                },
+                details: "completeness review failed".into(),
+            });
+        self
+    }
+
+    pub fn branch_simplification_pass(&mut self) -> &mut Self {
+        self.inner
+            .branch_simplification_responses
+            .lock()
+            .unwrap()
+            .push_back(crate::task::verify::VerificationResult {
+                outcome: crate::task::verify::VerificationOutcome::Pass,
+                details: "simplification review passed".into(),
+            });
+        self
+    }
+
+    pub fn branch_simplification_fail(&mut self, reason: &str) -> &mut Self {
+        self.inner
+            .branch_simplification_responses
+            .lock()
+            .unwrap()
+            .push_back(crate::task::verify::VerificationResult {
+                outcome: crate::task::verify::VerificationOutcome::Fail {
+                    reason: reason.into(),
+                },
+                details: "simplification review failed".into(),
+            });
+        self
+    }
+
+    /// Queue all three branch review phases as passing.
+    pub fn branch_verify_pass(&mut self) -> &mut Self {
+        self.branch_correctness_pass()
+            .branch_completeness_pass()
+            .branch_simplification_pass()
+    }
+
+    /// Queue all three branch review phases as passing, repeated `count` times.
+    pub fn branch_verify_passes(&mut self, count: usize) -> &mut Self {
+        for _ in 0..count {
+            self.branch_verify_pass();
+        }
         self
     }
 
@@ -586,6 +690,45 @@ impl AgentService for MockAgentService {
             .pop_front()
             .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no verify response queued"))
+    }
+
+    async fn verify_branch_correctness(
+        &self,
+        _ctx: &TaskContext,
+        _model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        self.branch_correctness_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .map(mock_result)
+            .ok_or_else(|| anyhow::anyhow!("no branch_correctness response queued"))
+    }
+
+    async fn verify_branch_completeness(
+        &self,
+        _ctx: &TaskContext,
+        _model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        self.branch_completeness_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .map(mock_result)
+            .ok_or_else(|| anyhow::anyhow!("no branch_completeness response queued"))
+    }
+
+    async fn verify_branch_simplification(
+        &self,
+        _ctx: &TaskContext,
+        _model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        self.branch_simplification_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .map(mock_result)
+            .ok_or_else(|| anyhow::anyhow!("no branch_simplification response queued"))
     }
 
     async fn file_level_review(
