@@ -50,6 +50,10 @@ pub struct EnvironmentConfig {
 #[derive(serde::Deserialize, Default)]
 pub struct ProcessConfig {
     pub cwd: Option<PathBuf>,
+    #[serde(default, rename = "ipc-sem")]
+    pub ipc_semaphore: bool,
+    #[serde(default, rename = "ipc-shm")]
+    pub ipc_shm: bool,
 }
 
 /// Expand `${VAR}` references in `s` using the process environment.
@@ -108,6 +112,8 @@ pub fn build_policy(config: &SandboxConfig) -> lot::Result<lot::SandboxPolicy> {
     }
 
     builder = builder.allow_network(config.network.allow);
+    builder = builder.allow_ipc_semaphore(config.process.ipc_semaphore);
+    builder = builder.allow_ipc_shm(config.process.ipc_shm);
 
     builder.build()
 }

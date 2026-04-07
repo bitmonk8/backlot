@@ -21,11 +21,16 @@ unsafe extern "C" {
 /// Programs need stat() on these to locate libraries and resolve paths.
 const METADATA_SYSTEM_PATHS: &[&str] = &[
     "/",
+    "/etc",
     "/usr",
     "/usr/lib",
     "/usr/local",
+    "/usr/share",
+    "/usr/share/zoneinfo",
     "/System",
     "/System/Library",
+    "/System/Volumes",
+    "/System/Volumes/Data",
     "/Library",
     "/Library/Preferences",
     "/private",
@@ -88,6 +93,13 @@ pub fn generate_profile(
     profile.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
     profile.push_str("(allow file-read* (literal \"/dev/random\"))\n");
     profile.push_str("(allow file-read* (literal \"/dev/null\"))\n");
+
+    // Top-level system directories and APFS volumes — directory listing
+    // (readdir) needed by system frameworks to locate subdirectories.
+    profile.push_str("(allow file-read-data (literal \"/Library\"))\n");
+    profile.push_str("(allow file-read-data (literal \"/System\"))\n");
+    profile.push_str("(allow file-read-data (literal \"/System/Volumes\"))\n");
+    profile.push_str("(allow file-read-data (literal \"/System/Volumes/Data\"))\n");
 
     // dyld maps shared libraries with executable permissions. file-read* does
     // NOT cover this — file-map-executable is a separate sandbox operation.
@@ -168,6 +180,20 @@ pub fn generate_profile(
     // This is consistent with Chrome and Firefox sandbox profiles.
     profile.push_str("(allow mach-lookup)\n");
 
+    // POSIX named semaphores — glob covers sem-create, sem-open, sem-post,
+    // sem-wait, and sem-unlink. Used by .NET named mutexes and runtime libs.
+    if policy.allow_ipc_semaphore() {
+        profile.push_str("(allow ipc-posix-sem*)\n");
+    }
+
+    // POSIX shared memory — glob covers shm-read-data, shm-read-metadata,
+    // shm-write-create, shm-write-data, shm-write-unlink. Used by
+    // CoreFoundation preferences, notification center, and other macOS
+    // subsystems for inter-process state.
+    if policy.allow_ipc_shm() {
+        profile.push_str("(allow ipc-posix-shm*)\n");
+    }
+
     // Only allow sending signals to self
     profile.push_str("(allow signal (target self))\n");
 
@@ -201,9 +227,9 @@ pub fn generate_profile(
         append_sbpl_rule(&mut profile, "deny", "file-map-executable", "subpath", path)?;
     }
 
-    // Ancestor directory metadata: macOS needs stat() on every component of a
-    // path to traverse to it. Grant file-read-metadata on each ancestor of
-    // every policy path so the kernel allows directory traversal.
+    // Ancestor directory traversal: macOS Seatbelt checks both stat()
+    // (file-read-metadata) and readdir (file-read-data) on every component
+    // of a path. Grant both on each ancestor of every policy path.
     let ancestor_dirs = collect_ancestor_dirs(policy, program_path);
     for ancestor in &ancestor_dirs {
         append_sbpl_rule(
@@ -213,11 +239,20 @@ pub fn generate_profile(
             "literal",
             ancestor,
         )?;
+        append_sbpl_rule(
+            &mut profile,
+            "allow",
+            "file-read-data",
+            "literal",
+            ancestor,
+        )?;
     }
 
-    // Network access
+    // Network access — includes system-socket for AF_SYSTEM kernel control
+    // sockets used internally by the networking stack (e.g. TLS, DNS).
     if policy.allow_network() {
         profile.push_str("(allow network*)\n");
+        profile.push_str("(allow system-socket)\n");
     }
 
     Ok(profile)
@@ -418,6 +453,32 @@ mod tests {
         assert!(profile.contains("(allow process-fork)"));
         assert!(profile.contains("(allow process-info* (target self))"));
         assert!(profile.contains("(allow mach-lookup)"));
+        // ipc-posix-sem and ipc-posix-shm are off by default
+        assert!(!profile.contains("ipc-posix-sem"));
+        assert!(!profile.contains("ipc-posix-shm"));
+    }
+
+    #[test]
+    fn profile_ipc_semaphore_when_enabled() {
+        let mut policy = basic_policy();
+        policy.allow_ipc_semaphore = true;
+        let profile = generate_profile(&policy, &test_program()).unwrap();
+        assert!(profile.contains("(allow ipc-posix-sem*)"));
+    }
+
+    #[test]
+    fn profile_ipc_shm_when_enabled() {
+        let mut policy = basic_policy();
+        policy.allow_ipc_shm = true;
+        let profile = generate_profile(&policy, &test_program()).unwrap();
+        assert!(profile.contains("(allow ipc-posix-shm*)"));
+    }
+
+    #[test]
+    fn profile_no_ipc_shm_by_default() {
+        let policy = basic_policy();
+        let profile = generate_profile(&policy, &test_program()).unwrap();
+        assert!(!profile.contains("ipc-posix-shm"));
     }
 
     #[test]
@@ -496,6 +557,7 @@ mod tests {
         );
         let profile = generate_profile(&policy, &test_program()).unwrap();
         assert!(profile.contains("(allow network*)"));
+        assert!(profile.contains("(allow system-socket)"));
         // Redundant sub-rules should not be present
         assert!(!profile.contains("(allow network-outbound)"));
         assert!(!profile.contains("(allow network-inbound)"));
@@ -618,6 +680,10 @@ mod tests {
         assert!(
             profile.contains("(allow file-read-metadata (literal \"/opt\"))"),
             "profile should contain ancestor metadata for /opt"
+        );
+        assert!(
+            profile.contains("(allow file-read-data (literal \"/opt\"))"),
+            "profile should contain ancestor readdir for /opt"
         );
     }
 

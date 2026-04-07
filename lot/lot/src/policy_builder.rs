@@ -38,6 +38,8 @@ pub struct SandboxPolicyBuilder {
     exec_paths: Vec<PathBuf>,
     deny_paths: Vec<PathBuf>,
     allow_network: bool,
+    allow_ipc_semaphore: bool,
+    allow_ipc_shm: bool,
     sentinel_dir: Option<PathBuf>,
 }
 
@@ -224,6 +226,20 @@ impl SandboxPolicyBuilder {
         self
     }
 
+    /// Set whether POSIX named semaphores (ipc-posix-sem) are allowed.
+    #[must_use]
+    pub const fn allow_ipc_semaphore(mut self, allow: bool) -> Self {
+        self.allow_ipc_semaphore = allow;
+        self
+    }
+
+    /// Set whether POSIX shared memory (ipc-posix-shm) is allowed.
+    #[must_use]
+    pub const fn allow_ipc_shm(mut self, allow: bool) -> Self {
+        self.allow_ipc_shm = allow;
+        self
+    }
+
     /// Set a custom directory for sentinel files (Windows only).
     ///
     /// By default, sentinel files are written to `std::env::temp_dir()`.
@@ -249,6 +265,8 @@ impl SandboxPolicyBuilder {
             self.deny_paths,
             self.allow_network,
         );
+        policy.allow_ipc_semaphore = self.allow_ipc_semaphore;
+        policy.allow_ipc_shm = self.allow_ipc_shm;
         policy.sentinel_dir = self.sentinel_dir;
         policy.validate()?;
         Ok(policy)

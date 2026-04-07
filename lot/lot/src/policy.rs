@@ -19,6 +19,8 @@ pub struct SandboxPolicy {
     exec_paths: Vec<PathBuf>,
     deny_paths: Vec<PathBuf>,
     allow_network: bool,
+    pub(crate) allow_ipc_semaphore: bool,
+    pub(crate) allow_ipc_shm: bool,
     pub(crate) sentinel_dir: Option<PathBuf>,
 }
 
@@ -38,6 +40,8 @@ impl SandboxPolicy {
             exec_paths,
             deny_paths,
             allow_network,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         }
     }
@@ -65,6 +69,16 @@ impl SandboxPolicy {
     /// Whether outbound network access is allowed.
     pub const fn allow_network(&self) -> bool {
         self.allow_network
+    }
+
+    /// Whether POSIX named semaphores (ipc-posix-sem) are allowed.
+    pub const fn allow_ipc_semaphore(&self) -> bool {
+        self.allow_ipc_semaphore
+    }
+
+    /// Whether POSIX shared memory (ipc-posix-shm) is allowed.
+    pub const fn allow_ipc_shm(&self) -> bool {
+        self.allow_ipc_shm
     }
 
     /// Directory for sentinel files (Windows). When `None`, uses the
@@ -388,6 +402,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -402,6 +418,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -416,6 +434,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -436,6 +456,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -456,6 +478,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         policy
@@ -475,6 +499,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -491,6 +517,8 @@ mod tests {
             exec_paths: vec![p],
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -507,6 +535,8 @@ mod tests {
             exec_paths: vec![p],
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -522,6 +552,8 @@ mod tests {
             exec_paths: vec![tmp.path().to_path_buf()],
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         assert!(policy.validate().is_ok());
@@ -539,6 +571,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -555,6 +589,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -578,6 +614,8 @@ mod tests {
             exec_paths: vec![child],
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         assert!(
@@ -599,6 +637,8 @@ mod tests {
             exec_paths: vec![parent],
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -622,6 +662,8 @@ mod tests {
             exec_paths: vec![parent],
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         assert!(
@@ -643,6 +685,8 @@ mod tests {
             exec_paths: vec![child],
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         assert!(
@@ -661,6 +705,8 @@ mod tests {
             exec_paths: vec![p.clone(), p],
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -684,6 +730,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![denied],
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         policy.validate().expect("valid policy with deny path");
@@ -703,6 +751,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![denied],
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -724,6 +774,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![p],
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -748,6 +800,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![deny_parent, deny_child],
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -772,6 +826,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![denied],
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -799,6 +855,8 @@ mod tests {
             exec_paths: vec![exec.clone()],
             deny_paths: vec![deny.clone()],
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
 
@@ -825,6 +883,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![deny.clone()],
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
 
@@ -844,6 +904,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -864,6 +926,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: Vec::new(),
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         let err = policy.validate().unwrap_err();
@@ -889,6 +953,8 @@ mod tests {
             exec_paths: Vec::new(),
             deny_paths: vec![denied],
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         policy
@@ -909,6 +975,8 @@ mod tests {
             exec_paths: vec![parent],
             deny_paths: vec![denied],
             allow_network: false,
+            allow_ipc_semaphore: false,
+            allow_ipc_shm: false,
             sentinel_dir: None,
         };
         policy

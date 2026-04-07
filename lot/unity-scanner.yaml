@@ -1,0 +1,90 @@
+filesystem:
+  include_platform_exec: true
+  include_platform_lib: true
+  include_temp: true
+
+  read:
+    # Unity app bundle
+    - ./build/MacEditor/arm64/Debug/Unity.app
+    - ${UNITYPATH}
+    # Project (read; write entries below cover mutable subdirs)
+    - ${PROJECTPATH}
+    # Unity runtime / editor metadata lookups
+    - /opt/UnitySrc/scanner-process/Runtime
+    - /opt/UnitySrc/scanner-process/Editor
+    # Unity license / preferences
+    - ${HOME}/Library/Unity
+    - ${HOME}/Library/Preferences
+    - ${HOME}/Library/Application Support
+    - /Library/Application Support
+    - /usr/share/icu
+    - /private/var/folders
+    - /private/tmp
+    # getconf DARWIN_USER_TEMP_DIR
+    - /var/folders/s1/rv58rnqn1sv3y3y5fr3dh88m0000gn/T/
+    - /Users/jonasd/Library/Spelling
+    - /Library/Spelling
+    - /usr/share/langid
+    # System paths needed by CoreFoundation / timezone / network resolution
+    - /private/etc
+    - /private/var/run
+    - /private/var/db/timezone
+    - /usr/share/zoneinfo
+    - /System/Volumes/Preboot/Cryptexes/OS
+    - /private/var/db/eligibilityd
+    # User-level files Unity and helpers read
+    - ${HOME}/.CFUserTextEncoding
+    - ${HOME}/Library/Input Methods
+    - ${HOME}/Library/Keyboard Layouts
+    - ${HOME}/Library/Caches/com.unity3d.UnityEditor
+    - ${HOME}/Library/Caches/Unity
+    - ${HOME}/Library/Logs/Unity
+    # UPM package manager and project subdirs
+    - /opt/UnitySrc/scanner-process/Packages
+    - /opt/UnitySrc/scanner-process/Shaders
+    - /opt/UnitySrc/scanner-process/Tests
+    - /opt/UnitySrc/scanner-process/build
+    - ${HOME}/Library/Preferences/Unity
+
+  write:
+    # Unity writes Library cache, Temp artifacts, and Logs into the project
+    - ${PROJECTPATH}
+    # Unity license activation writes here
+    - ${HOME}/Library/Unity
+    - ${UNITYPATH}/Contents/Helpers/UnityLicensingClient.app/Contents/MacOS
+    - /private/var/folders
+    - /private/tmp
+    # getconf DARWIN_USER_TEMP_DIR
+    - /var/folders/s1/rv58rnqn1sv3y3y5fr3dh88m0000gn/T/
+    # Unity editor logs and HTTP cache
+    - ${HOME}/Library/Logs/Unity
+    - ${HOME}/Library/Caches/com.unity3d.UnityEditor
+    - ${HOME}/Library/Caches/Unity
+    - ${HOME}/Library/Application Support
+    # System-wide license file written by Unity.Licensing.Client
+    - /Library/Application Support
+    - ${HOME}/Library/Preferences/Unity
+
+  exec:
+    # Unity helper processes inside the app bundle
+    - ./build/MacEditor/arm64/Debug/Unity.app/Contents/MacOS
+    - ${UNITYPATH}/Contents/MacOS
+    - ./build/MacEditor/arm64/Debug/Unity.app/Contents/Frameworks
+    - ${UNITYPATH}/Contents/Frameworks
+    - ./build/MacEditor/arm64/Debug/Unity.app/Contents/Helpers
+    - ${UNITYPATH}/Contents/Helpers
+    - ./build/MacEditor/arm64/Debug/Unity.app/Contents/Resources
+    - ${UNITYPATH}/Contents/Resources
+
+network:
+  # Unity requires network for license validation
+  allow: true
+
+environment:
+  forward_common: true
+  vars:
+    PATH: /usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+process:
+  cwd: ${PROJECTPATH}
+  ipc-sem: true
+  ipc-shm: true
