@@ -81,6 +81,7 @@ EventLog
   ├── subscribe()              // returns subscription from offset 0
   ├── subscribe_from(offset)   // returns subscription from specific offset
   ├── len()                    // current event count
+  ├── is_empty()               // len() == 0
   └── snapshot()               // read-only copy of all events
 ```
 
@@ -113,7 +114,7 @@ EventLog
 
 ### Step 1: Split Event Enum Between Cue and Epic
 
-Replace cue's 24-variant `Event` with a 10-variant `CueEvent` (orchestration events only). Create epic's own `Event` enum (all 24 variants) with `From<CueEvent>` mapping. Add `type Event` associated type to `TaskStore`. Make cue's `Orchestrator` generic over `T: EventEmitter<CueEvent>` instead of holding a concrete `EventSender`. See the "Prerequisite: Split Event Enum Between Cue and Epic" section for the full variant breakdown and adapter pattern.
+Replace cue's 24-variant `Event` with a 10-variant `CueEvent` (orchestration events only). Create epic's own `Event` enum (all 24 variants) with `From<CueEvent>` mapping. Make cue's `Orchestrator` generic over `T: EventEmitter<CueEvent>` instead of holding a concrete `EventSender`. No changes to `TaskStore`. See the "Prerequisite: Split Event Enum Between Cue and Epic" section for the full variant breakdown and adapter pattern.
 
 ### Step 2: Create `traits` Crate
 
@@ -192,6 +193,11 @@ impl EventLog {
         self.events.read().unwrap().len()
     }
 
+    /// Whether the log is empty.
+    pub fn is_empty(&self) -> bool {
+        self.events.read().unwrap().is_empty()
+    }
+
     /// Read-only snapshot of all events.
     pub fn snapshot(&self) -> Vec<Event> {
         self.events.read().unwrap().clone()
@@ -200,6 +206,11 @@ impl EventLog {
 
 impl EventSubscription {
     /// Receive the next event. Blocks until one is available.
+    ///
+    /// Note: `watch::Receiver::changed()` considers the initial channel value as
+    /// unseen, so the first call returns immediately — causing one harmless spin
+    /// iteration when a subscription starts already caught up. The loop re-checks
+    /// the Vec and blocks correctly on the second `changed()` call.
     pub async fn recv(&mut self) -> Option<Event> {
         loop {
             {
@@ -336,7 +347,11 @@ Epic defines `Event` (24 variants total — 14 epic-specific + mapped cue events
 3. Cue's orchestrator takes `T: EventEmitter<CueEvent>`. Epic provides an adapter that maps `CueEvent` → `Event` and appends to `EventLog`:
 
 ```rust
-// In epic — adapter that bridges cue events into epic's EventLog
+// In epic — adapter that bridges cue events into epic's EventLog.
+// The trait's emit() delegates to EventLog's inherent emit(Event) method.
+// In Rust, self.emit() resolves to the inherent method (not the trait method)
+// because inherent methods take precedence — so this is unambiguous at the
+// call site despite the shared name.
 impl EventEmitter<CueEvent> for EventLog {
     fn emit(&self, event: CueEvent) {
         self.emit(Event::from(event));
@@ -352,10 +367,12 @@ A shared `traits` crate defines the minimal emit contract. All crates that need 
 
 ```rust
 // traits crate — depended on by cue, epic, and any future emitters
-pub trait EventEmitter<E> {
+pub trait EventEmitter<E>: Send + Sync {
     fn emit(&self, event: E);
 }
 ```
+
+**Why `Send + Sync`?** The orchestrator runs in a `tokio::spawn`ed task, which requires `Send`. The emitter is shared (via `Clone`/`Arc`), which requires `Sync`. Bounding the trait rather than each call site keeps the constraint visible and centralized.
 
 **Why a trait?** The orchestrator (cue) only needs to *emit* events, never subscribe. Giving cue a concrete `EventLog` would pull subscription/replay infrastructure into a crate that doesn't use it. A trait keeps cue decoupled — it calls `emit()` without knowing what's behind it.
 
@@ -381,8 +398,10 @@ epic (creates EventLog, distributes subscriptions to consumers)
   │
   ├── let log = EventLog::new();
   │
-  ├── cue::Orchestrator receives log.clone() as impl EventEmitter<epic::Event>
-  │     └── passes to TaskRuntime → Task methods call transmitter.emit()
+  ├── cue::Orchestrator receives log.clone() as impl EventEmitter<CueEvent>
+  │     └── orchestrator calls transmitter.emit(CueEvent::...) — adapter maps to epic::Event
+  │
+  ├── epic's TaskRuntime holds log.clone() directly, emits epic::Event via inherent method
   │
   ├── tui_sub = log.subscribe();        ◄──── TUI replays from 0
   ├── logger_sub = log.subscribe();     ◄──── JSONL logger replays from 0
@@ -391,17 +410,11 @@ epic (creates EventLog, distributes subscriptions to consumers)
 
 ### Cue's Orchestrator
 
-Cue takes a generic transmitter, not a concrete EventLog. This requires adding an `Event` associated type to `TaskStore` (it currently has only `type Task: TaskNode`):
+Cue takes a generic transmitter, not a concrete EventLog. The orchestrator is generic over `EventEmitter<CueEvent>` — it emits cue's own event type and never sees epic's types:
 
 ```rust
 // In cue crate
-pub trait TaskStore: Send {
-    type Task: TaskNode;
-    type Event;
-    // ... existing methods
-}
-
-pub struct Orchestrator<S: TaskStore, T: EventEmitter<S::Event>> {
+pub struct Orchestrator<S: TaskStore, T: EventEmitter<CueEvent>> {
     store: S,
     transmitter: T,
     limits: LimitsConfig,
@@ -409,7 +422,7 @@ pub struct Orchestrator<S: TaskStore, T: EventEmitter<S::Event>> {
 }
 ```
 
-Cue's current `emit()` helper method (`let _ = self.events.send(event)`) becomes `self.transmitter.emit(event)`. Cue never sees `EventLog`, `EventSubscription`, or epic's `Event` enum.
+No changes to `TaskStore` — it keeps only `type Task: TaskNode`. Cue's current `emit()` helper method (`let _ = self.events.send(event)`) becomes `self.transmitter.emit(event)`. Cue never sees `EventLog`, `EventSubscription`, or epic's `Event` enum. The mapping from `CueEvent` to `epic::Event` lives entirely in epic's adapter (see "Prerequisite: Split Event Enum" above).
 
 ### Future Crate Event Propagation
 
@@ -429,7 +442,7 @@ impl EventEmitter<reel::AgentEvent> for ReelEmitter {
 This keeps each crate independent:
 - Reel depends on `traits`, not epic or cue
 - Epic owns the mapping logic (it's the only crate that knows all event types)
-- EventLog implements only `EventEmitter<epic::Event>` — one type, one impl
+- EventLog's inherent `emit(Event)` is the single append path — all trait impls (`EventEmitter<CueEvent>`, future `EventEmitter<reel::AgentEvent>`, etc.) convert and delegate to it
 - Adapters handle cross-type bridging at the boundary
 
 ---
@@ -439,16 +452,16 @@ This keeps each crate independent:
 | Step | What changes | Lines changed (est.) | Risk |
 |---|---|---|---|
 | 0 | Switch epic to `current_thread` tokio runtime | ~5 | Low |
-| 1 | Move `Event` enum from cue to epic, add `TaskStore::Event` associated type | ~60 | Medium |
+| 1 | Split `Event` enum: `CueEvent` in cue, `Event` in epic, `From` mapping | ~60 | Medium |
 | 2 | Create `traits` crate with `EventEmitter<E>` trait | ~15 new | None |
 | 3 | Add `Serialize`/`Deserialize` derives to Event | ~10 | None |
-| 4 | Add EventLog + EventSubscription in epic | ~70 new | Low |
+| 4 | Add EventLog + EventSubscription in epic | ~80 new | Low |
 | 5 | Change send sites (`send` → `emit`) | ~40 (rename) | Low |
 | 6 | Change consumer receive calls | ~20 | Low |
-| 7 | Update test event assertions | ~30 | Low |
-| 8 | Post-run snapshot usage | ~10 new | Low |
-| 9 | Document `traits` crate and `EventEmitter<E>` pattern | ~50 new | None |
-| **Total** | | **~310** | **Low** |
+| 7 | Wire up EventLog in main.rs, pass adapter to orchestrator, subscription to TUI | ~15 | Low |
+| 8 | Update test event assertions | ~30 | Low |
+| 9 | Post-run snapshot usage | ~10 new | Low |
+| **Total** | | **~285** | **Low** |
 
 ### Ordering Relative to Orchestrator Extraction
 
