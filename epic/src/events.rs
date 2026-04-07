@@ -221,16 +221,19 @@ impl EventLog {
     }
 
     /// Current event count.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.events.read().unwrap().len()
     }
 
     /// Whether the log is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.events.read().unwrap().is_empty()
     }
 
     /// Read-only snapshot of all events.
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> Vec<Event> {
         self.events.read().unwrap().clone()
     }
@@ -261,6 +264,7 @@ impl EventSubscription {
     }
 
     /// Non-blocking receive.
+    #[allow(dead_code)]
     pub fn try_recv(&mut self) -> Option<Event> {
         let events = self.events.read().ok()?;
         if self.offset < events.len() {
