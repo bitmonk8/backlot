@@ -8,11 +8,11 @@ Research and analysis of epic's event system design, and implementation plan for
 
 ### Implementation
 
-Epic's `src/events.rs`: 24 `Event` enum variants, `tokio::sync::mpsc::unbounded_channel`, fire-and-forget. One producer side (`EventSender`), one consumer side (`EventReceiver`).
+Cue's `src/events.rs`: 24 `Event` enum variants, `tokio::sync::mpsc::unbounded_channel`, fire-and-forget. One producer side (`EventSender`), one consumer side (`EventReceiver`). Epic re-exports these types via `pub use cue::{Event, EventReceiver, EventSender, event_channel}`.
 
-Producers: epic's `orchestrator/mod.rs`, `task/leaf.rs`, `task/branch.rs` — emit via `EventSender` held in `Services<A>` (or directly by the orchestrator).
+Producers: cue's `orchestrator.rs` emits via `EventSender` held directly on the `Orchestrator` struct. Epic's `task/node_impl.rs` emits via `EventSender` held in `TaskRuntime<A>`.
 
-Consumer: either epic's TUI (`tui/mod.rs`) or a headless logger in `main.rs`. Never both simultaneously.
+Consumer: epic's TUI (`tui/mod.rs`) when enabled, otherwise the receiver is dropped (no headless logger exists today).
 
 ### Characteristics
 
@@ -29,9 +29,10 @@ Consumer: either epic's TUI (`tui/mod.rs`) or a headless logger in `main.rs`. Ne
 
 ### Functional Role
 
-Events serve exactly two purposes:
+Events serve one purpose today:
 1. **TUI rendering** — task tree updates, worklog entries, metrics panel
-2. **Headless logging** — console output when TUI is disabled
+
+In headless mode (`--no-tui`), the receiver is dropped and events are discarded.
 
 Events do **not** drive state transitions, trigger side effects, or feed back into orchestration logic. The orchestrator and task methods use direct method calls and return values for all decision-making.
 
@@ -91,7 +92,7 @@ EventLog
 | Late-join replay | Yes — subscribe from offset 0 gets full history |
 | Persistence | Optional — JSONL logger is just another subscriber |
 | Audit trail | Yes — `snapshot()` returns all events after run completes |
-| Backpressure | N/A — Vec grows, consumers read at their own pace |
+| Backpressure | N/A — Vec grows, consumers read at their own pace. ~200 bytes/event, thousands per run = single-digit MB |
 | Consumer API | `Option<Event>` (simpler than channel `Result` types) |
 
 **Notification mechanism:** `tokio::sync::watch<()>` notifies consumers that new events are available. When a consumer has caught up to the Vec length, it waits on `watch::changed()`. No polling. The watch value is `()` — the Vec itself is the source of truth for event count.
@@ -100,7 +101,25 @@ EventLog
 
 ## Implementation Guide
 
-### Step 1: Add Serialize/Deserialize to Event
+### Step 0: Switch Epic to Single-Threaded Tokio Runtime
+
+**Prerequisite.** Epic currently uses `#[tokio::main]` which defaults to a multi-threaded runtime. The EventLog design uses `std::sync::RwLock` for `Send + Sync` compliance, with the assumption that the lock is never contended in practice. A multi-threaded runtime breaks this assumption — `emit()` and `recv()` could race across OS threads.
+
+**Change:** Replace `#[tokio::main]` with `#[tokio::main(flavor = "current_thread")]` in `epic/src/main.rs`. This matches the other backlot binaries (flick-cli, reel-cli, vault-cli all use `current_thread`).
+
+**Why this works:** Epic's two `tokio::spawn` calls (orchestrator + TUI) do not require parallel OS threads. On a single-threaded runtime, spawned tasks interleave cooperatively at `.await` points, which is sufficient — the orchestrator yields at every LLM call, and the TUI yields in its `tokio::select!` loop. No CPU-bound parallel work occurs.
+
+**Test impact:** Run the full epic test suite and TUI manually after the switch to verify no latent dependency on thread-parallelism.
+
+### Step 1: Split Event Enum Between Cue and Epic
+
+Replace cue's 24-variant `Event` with a 10-variant `CueEvent` (orchestration events only). Create epic's own `Event` enum (all 24 variants) with `From<CueEvent>` mapping. Add `type Event` associated type to `TaskStore`. Make cue's `Orchestrator` generic over `T: EventEmitter<CueEvent>` instead of holding a concrete `EventSender`. See the "Prerequisite: Split Event Enum Between Cue and Epic" section for the full variant breakdown and adapter pattern.
+
+### Step 2: Create `traits` Crate
+
+Create the `traits` crate with `EventEmitter<E>`. Add it as a dependency of cue and epic. See the "Architecture" section above.
+
+### Step 3: Add Serialize/Deserialize to Event
 
 Add derives to `Event` and its contained types (`TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`).
 
@@ -116,7 +135,7 @@ pub enum Event {
 
 Most contained types already derive these for state persistence; add any missing derives. No behavioral change.
 
-### Step 2: Implement EventLog and EventSubscription
+### Step 4: Implement EventLog and EventSubscription
 
 ```rust
 // events.rs
@@ -212,75 +231,70 @@ impl EventSubscription {
 ```
 
 Key design notes:
-- **`std::sync::RwLock`** exists for `Send + Sync` compliance, not cross-thread synchronization. Backlot runs on a single-threaded tokio runtime — tasks interleave at `.await` points, never in parallel — so the lock is never contended. But `tokio::spawn` requires `Send`, and `Arc<Vec<Event>>` is not `Sync`, so `RwLock` provides the necessary `Sync` impl. `std::sync` (not `tokio::sync`) because the lock is never held across an `.await` — `emit()` is synchronous, matching the current `let _ = sender.send(event)` pattern.
+- **`std::sync::RwLock`** exists for `Send + Sync` compliance. After Step 0, epic runs on a single-threaded tokio runtime — spawned tasks interleave at `.await` points, never in parallel — so the lock is never contended. `tokio::spawn` requires `Send`, and `Arc<Vec<Event>>` is not `Sync`, so `RwLock` provides the necessary `Sync` impl. `std::sync` (not `tokio::sync`) because the lock is never held across an `.await` — `emit()` is synchronous, matching the current `let _ = sender.send(event)` pattern.
 - **`emit()` takes ownership** of the event. No clone needed on the producer side.
 - **`Event` needs `Clone`** only for the subscription side (`recv`/`try_recv` clone from the Vec). This is already derived on `Event`.
 - **`try_recv` uses `read().ok()?`** — returns `None` if the lock is poisoned or contended, which is the correct non-blocking behavior.
 
-### Step 3: Update send sites
+### Step 5: Update send sites
 
 All send sites currently use `let _ = sender.send(event)`. Change to `let _ = log.emit(event)`.
 
 This is a mechanical rename. `emit()` is sync and infallible (panics only on poisoned lock, which indicates a bug). The `let _ =` pattern drops the returned offset, matching the current fire-and-forget semantics.
 
-### Step 4: Update receive sites
+### Step 6: Update receive sites
 
-**TUI** (`tui/mod.rs`): Currently calls `event_rx.try_recv()` in a polling loop.
+**TUI** (`tui/mod.rs`): Currently uses `event_rx.recv()` inside a `tokio::select!` loop alongside crossterm input and a tick interval.
 
 ```rust
 // Before (mpsc)
-match event_rx.try_recv() {
-    Ok(event) => self.handle_event(event),
-    Err(mpsc::error::TryRecvError::Empty) => {},
-    Err(mpsc::error::TryRecvError::Disconnected) => { self.orchestrator_done = true; }
+tokio::select! {
+    _ = tick.tick() => {}
+    ct_event = ct_stream.next() => { /* handle crossterm input */ }
+    event = event_rx.recv() => {
+        match event {
+            Some(event) => self.handle_event(event),
+            None => { self.orchestrator_done = true; }
+        }
+    }
 }
 
 // After (EventSubscription)
-if let Some(event) = subscription.try_recv() {
-    self.handle_event(event);
+tokio::select! {
+    _ = tick.tick() => {}
+    ct_event = ct_stream.next() => { /* handle crossterm input */ }
+    event = subscription.recv() => {
+        match event {
+            Some(event) => self.handle_event(event),
+            None => { self.orchestrator_done = true; }
+        }
+    }
 }
-// Disconnection detected when EventLog is dropped and try_recv returns None
-// after all events are consumed. TUI already handles this via orchestrator
-// completion signals.
 ```
 
-**Headless logger** (`main.rs`): Same pattern.
+**Shutdown semantics:** `subscription.recv()` returns `None` when the internal `watch` sender is dropped (all `EventLog` clones dropped) AND all buffered events have been consumed. This matches the current mpsc behavior where `recv()` returns `None` after the sender is dropped and the channel is drained.
 
-The consumer API is simpler: `Option<Event>` instead of `Result<Event, TryRecvError>`.
+**Headless mode** (`main.rs`): Currently drops the receiver (`drop(rx)`). After migration, simply don't create a subscription — `EventLog` with no subscribers works fine (events accumulate in the Vec for post-run `snapshot()`).
 
-### Step 5: Enable multiple consumers
+### Step 7: Wire up EventLog
 
 ```rust
 // main.rs
 let log = EventLog::new();
 
-let tui_sub = log.subscribe();      // TUI consumer — replays from 0
-let logger_sub = log.subscribe();   // JSONL file logger — replays from 0
+let tui_sub = log.subscribe();  // TUI consumer — replays from 0
 
 // Pass log.clone() to Orchestrator (producer)
 // Pass tui_sub to TUI
-// Spawn logger task with logger_sub
 ```
 
-Example JSONL logger consumer:
+The multi-consumer design supports future additions (JSONL file logger, web dashboard) as additional `log.subscribe()` calls — no changes to `EventLog` or existing consumers required.
 
-```rust
-async fn jsonl_logger(mut sub: EventSubscription, path: PathBuf) {
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true).append(true).open(&path).await.unwrap();
-    while let Some(event) = sub.recv().await {
-        let line = serde_json::to_string(&event).unwrap();
-        file.write_all(line.as_bytes()).await.unwrap();
-        file.write_all(b"\n").await.unwrap();
-    }
-}
-```
-
-### Step 6: Update tests
+### Step 8: Update tests
 
 Tests that create `event_channel()` and assert on received events need updated to use `EventLog::new()` + `subscribe()`. Tests that discard the receiver need no changes — `EventLog` with no subscribers works fine (events accumulate in the Vec).
 
-### Step 7: Post-run analysis
+### Step 9: Post-run analysis
 
 After the orchestrator completes, `log.snapshot()` returns all events for summary output, JSONL persistence to `.epic/events.jsonl`, or aggregate metric computation. This replaces the current pattern where events vanish after consumption.
 
@@ -300,6 +314,37 @@ epic (application)
 ```
 
 Events propagate **upward**: lower crates emit, higher crates consume. No crate should depend on a sibling's event types. No globals.
+
+### Prerequisite: Split Event Enum Between Cue and Epic
+
+The `Event` enum currently lives in `cue/src/events.rs` with 24 variants in a single enum. Cue is a generic orchestration framework — it should own only orchestration-level events, not application-specific ones.
+
+**Event ownership after split:**
+
+Cue defines `CueEvent` (10 variants — the events emitted by `orchestrator.rs`):
+- `TaskRegistered`, `PhaseTransition`, `TaskCompleted`, `TaskLimitReached`
+- `PathSelected`, `ModelSelected`
+- `SubtasksCreated`, `BranchFixRound`, `FixSubtasksCreated`, `RecoverySubtasksCreated`
+
+Epic defines `Event` (24 variants total — 14 epic-specific + mapped cue events):
+- **Epic-specific** (emitted by `task/node_impl.rs` and `main.rs`): `VaultBootstrapCompleted`, `VaultRecorded`, `VaultReorganizeCompleted`, `UsageUpdated`, `FixModelEscalated`, `ModelEscalated`, `CheckpointAdjust`, `CheckpointEscalate`, `FixAttempt`, `DiscoveriesRecorded`, `RetryAttempt`, `FileLevelReviewCompleted`, `RecoveryStarted`, `RecoveryPlanSelected`
+- **Mapped from CueEvent** (via `From<CueEvent>` impl): the 10 cue variants above, mapped 1:1 into epic's `Event` enum
+
+**Migration:**
+1. Replace `cue/src/events.rs` with a `CueEvent` enum containing only the 10 orchestration variants. Remove `EventSender`, `EventReceiver`, `event_channel()` — cue emits via the `EventEmitter<CueEvent>` trait.
+2. In `epic/src/events.rs`, replace the re-export with epic's own `Event` enum (all 24 variants). Implement `From<CueEvent> for Event`.
+3. Cue's orchestrator takes `T: EventEmitter<CueEvent>`. Epic provides an adapter that maps `CueEvent` → `Event` and appends to `EventLog`:
+
+```rust
+// In epic — adapter that bridges cue events into epic's EventLog
+impl EventEmitter<CueEvent> for EventLog {
+    fn emit(&self, event: CueEvent) {
+        self.emit(Event::from(event));
+    }
+}
+```
+
+4. Epic's `task/node_impl.rs` emits `Event` variants directly into the `EventLog` (no adapter needed — it already knows epic's types).
 
 ### Architecture: `traits` Crate + `EventEmitter<E>`
 
@@ -346,10 +391,16 @@ epic (creates EventLog, distributes subscriptions to consumers)
 
 ### Cue's Orchestrator
 
-Cue takes a generic transmitter, not a concrete EventLog:
+Cue takes a generic transmitter, not a concrete EventLog. This requires adding an `Event` associated type to `TaskStore` (it currently has only `type Task: TaskNode`):
 
 ```rust
 // In cue crate
+pub trait TaskStore: Send {
+    type Task: TaskNode;
+    type Event;
+    // ... existing methods
+}
+
 pub struct Orchestrator<S: TaskStore, T: EventEmitter<S::Event>> {
     store: S,
     transmitter: T,
@@ -358,7 +409,7 @@ pub struct Orchestrator<S: TaskStore, T: EventEmitter<S::Event>> {
 }
 ```
 
-Cue never sees `EventLog`, `EventSubscription`, or epic's `Event` enum.
+Cue's current `emit()` helper method (`let _ = self.events.send(event)`) becomes `self.transmitter.emit(event)`. Cue never sees `EventLog`, `EventSubscription`, or epic's `Event` enum.
 
 ### Future Crate Event Propagation
 
@@ -387,16 +438,17 @@ This keeps each crate independent:
 
 | Step | What changes | Lines changed (est.) | Risk |
 |---|---|---|---|
-| 1 | Create `traits` crate with `EventEmitter<E>` trait | ~15 new | None |
-| 2 | Add `Serialize`/`Deserialize` derives to Event | ~10 | None |
-| 3 | Add EventLog + EventSubscription in epic | ~70 new | Low |
-| 4 | Change send sites (`send` → `emit`) | ~40 (rename) | Low |
-| 5 | Change consumer receive calls | ~20 | Low |
-| 6 | Enable second consumer (JSONL logger) | ~30 new | Low |
+| 0 | Switch epic to `current_thread` tokio runtime | ~5 | Low |
+| 1 | Move `Event` enum from cue to epic, add `TaskStore::Event` associated type | ~60 | Medium |
+| 2 | Create `traits` crate with `EventEmitter<E>` trait | ~15 new | None |
+| 3 | Add `Serialize`/`Deserialize` derives to Event | ~10 | None |
+| 4 | Add EventLog + EventSubscription in epic | ~70 new | Low |
+| 5 | Change send sites (`send` → `emit`) | ~40 (rename) | Low |
+| 6 | Change consumer receive calls | ~20 | Low |
 | 7 | Update test event assertions | ~30 | Low |
 | 8 | Post-run snapshot usage | ~10 new | Low |
-| 9 | Document `traits` crate and `EventEmitter<E>` pattern in `ARCHITECTURE.md` | ~50 new | None |
-| **Total** | | **~275** | **Low** |
+| 9 | Document `traits` crate and `EventEmitter<E>` pattern | ~50 new | None |
+| **Total** | | **~310** | **Low** |
 
 ### Ordering Relative to Orchestrator Extraction
 

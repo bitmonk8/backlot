@@ -83,7 +83,7 @@
 - `TaskStore` trait (task creation, storage, lookup, cross-task queries, tree context building)
 - `Orchestrator<S: TaskStore>` coordination loop (DFS traversal, resume, retry, escalation, fix loops, recovery)
 - All orchestration protocol types (`TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`, etc.)
-- Event system (23 event variants, `EventSender`/`EventReceiver`, `event_channel()`)
+- Event system (24 event variants, `EventSender`/`EventReceiver`, `event_channel()`)
 - `LimitsConfig` (depth, retry budget, fix rounds, recovery rounds, task cap)
 - No AI, vault, reel, flick, or lot dependencies
 
