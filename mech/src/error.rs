@@ -1,8 +1,8 @@
 //! Error types for the mech crate.
 //!
 //! Covers the five runtime error categories from `docs/MECH_SPEC.md` §10.2
-//! plus placeholder load-time variants which will be fleshed out in later
-//! deliverables (2, 4, 5).
+//! plus load-time variants, with the aggregated `Validation` variant still
+//! a placeholder to be fleshed out in Deliverable 5.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,8 +15,8 @@ use thiserror::Error;
 ///
 /// * **Runtime errors** (per spec §10.2): raised while executing a workflow.
 /// * **Load-time errors**: raised while reading, parsing, or validating a
-///   workflow file. These are placeholders for now and will gain fields in
-///   later deliverables.
+///   workflow file. The schema variants are wired up; only the aggregated
+///   `Validation` variant remains a placeholder for Deliverable 5.
 #[derive(Debug, Error)]
 pub enum MechError {
     // ---- Runtime errors (§10.2) -------------------------------------------
@@ -114,7 +114,7 @@ pub enum MechError {
         message: String,
     },
 
-    // ---- Load-time errors (placeholders) ----------------------------------
+    // ---- Load-time errors -------------------------------------------------
     /// Failed to read a workflow file from disk.
     #[error("io error reading {path}: {source}")]
     Io {
@@ -135,12 +135,46 @@ pub enum MechError {
     },
 
     /// A schema `$ref` referenced an unknown shared schema name.
-    ///
-    /// Placeholder for Deliverable 4 (schema registry).
     #[error("unresolved schema $ref: '{name}'")]
     SchemaRefUnresolved {
         /// The unresolved schema name.
         name: String,
+    },
+
+    /// A schema `$ref` form is malformed (e.g. not `$ref:#name` or `$ref:path`).
+    #[error("malformed schema $ref: '{raw}'")]
+    SchemaRefMalformed {
+        /// The raw $ref string as it appeared in the workflow file.
+        raw: String,
+    },
+
+    /// A workflow-level shared schema (or chain of `extends`-style refs) forms
+    /// a cycle. Detected at registry construction time.
+    #[error("circular schema $ref involving: {chain}", chain = chain.join(" -> "))]
+    SchemaRefCircular {
+        /// Names of the schemas participating in the cycle, in traversal order.
+        chain: Vec<String>,
+    },
+
+    /// A workflow-level shared schema is not a syntactically valid JSON Schema.
+    #[error("invalid JSON Schema for '{name}': {message}")]
+    SchemaInvalid {
+        /// Name of the offending shared schema.
+        name: String,
+        /// Underlying jsonschema compilation error message.
+        message: String,
+    },
+
+    /// A JSON value failed validation against a resolved schema.
+    ///
+    /// `path` is the JSON Pointer to the failing field within the instance
+    /// (empty string for the root).
+    #[error("schema validation failed at `{path}`: {message}")]
+    SchemaValidationFailed {
+        /// JSON Pointer to the failing field within the instance.
+        path: String,
+        /// Validator error message.
+        message: String,
     },
 
     /// Aggregated load-time validation errors.

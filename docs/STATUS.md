@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Deliverable 3 complete. CEL expression compilation, evaluation, and `{{...}}` template interpolation landed in `mech/src/cel.rs` with five namespaces (`input`, `context`, `workflow`, `block`, `meta`). 37 tests passing (3 error + 13 schema + 21 cel), zero clippy warnings.
+**Phase:** Deliverable 4 complete. JSON Schema registry with `$ref:#name` resolution, inline schema compilation, cycle detection, validation with JSON-Pointer error paths, and an `infer` deferred-marker landed in `mech/src/schema/registry.rs` (uses the `jsonschema` crate). 51 tests passing (3 error + 13 schema parse + 14 schema registry + 21 cel), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -115,7 +115,7 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 1. ~~Crate skeleton & error types~~ ✅
 2. ~~YAML schema types (parse-only, serde)~~ ✅
 3. ~~CEL expression compilation & evaluation (5 namespaces, template interpolation)~~ ✅
-4. Schema registry & JSON Schema handling (`$ref` resolution)
+4. ~~Schema registry & JSON Schema handling (`$ref` resolution)~~ ✅
 5. Load-time validation (the 24+ checks from §10)
 6. Schema inference for function outputs (`output: infer`)
 7. Workflow loader (end-to-end load pipeline)
@@ -130,7 +130,7 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 16. End-to-end integration test suite (hermetic, fake LLM)
 17. Documentation polish & examples
 
-**Immediate next action:** Deliverable 4 — Schema registry & JSON Schema handling (`$ref` resolution).
+**Immediate next action:** Deliverable 5 — Load-time validation (the 24+ checks from §10).
 
 ---
 

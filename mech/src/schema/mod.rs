@@ -4,7 +4,7 @@
 //! workflow YAML file deserializes into, along with a thin [`parse_workflow`]
 //! helper. It performs **no** semantic validation — no CEL compilation, no
 //! JSON-Schema checking, no `$ref` resolution, no block-field validity rules.
-//! Those live in later deliverables (Deliverables 3–7).
+//! Those live in later deliverables (Deliverables 5–7).
 //!
 //! Every struct uses `#[serde(deny_unknown_fields)]` so that typos and
 //! accidental fields are caught at load time.
@@ -25,6 +25,10 @@
 //! validity (e.g. "a prompt block must not have `call`") is enforced later in
 //! Deliverable 5; this module only rejects genuinely unknown fields.
 
+pub mod registry;
+
+pub use registry::{ResolvedSchema, SchemaRegistry};
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -32,8 +36,9 @@ use serde::{Deserialize, Serialize};
 /// A raw, template-bearing string (CEL / `{{...}}`). Kept as-is at parse time.
 pub type Expr = String;
 
-/// A raw JSON Schema value. We defer JSON-Schema validation to Deliverable 4,
-/// so any valid JSON value is accepted here.
+/// A raw JSON Schema value. JSON Schema compilation and validation live in
+/// [`crate::schema::registry`]; this type alias remains `serde_json::Value`
+/// because inline schemas in the YAML grammar can be any JSON value.
 pub type JsonValue = serde_json::Value;
 
 // ─── Top-level ──────────────────────────────────────────────────────────────

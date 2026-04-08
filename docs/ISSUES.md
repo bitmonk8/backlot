@@ -898,3 +898,21 @@ mech/src/cel.rs — `append_rendered` branches for `Null`, `UInt`, `Float`, `Map
 
 ### 120. Mech cel: `block`/`meta` namespace names diverge from spec §7 (`blocks` + `output`)
 mech/src/cel.rs — Module doc flags the discrepancy and defers reconciliation to Deliverable 8. Track explicitly so D8 revisits the namespace layout and either updates §7 or renames the fields. **Naming (deferred).**
+
+### 121. `SchemaRegistry::validate` does not use `self`
+mech/src/schema/registry.rs — `validate(&self, ..)` dispatches through `ResolvedSchema::validator()` without touching registry state. Falsely implies the registry is required to validate inline/infer resolutions. Move to a method on `ResolvedSchema` or a free function. **Separation.**
+
+### 122. `ResolvedSchema::Infer` forces fake `SchemaInvalid` error on validate
+mech/src/schema/registry.rs — Mixing a non-validator sentinel (`Infer`) into the same enum as real compiled validators forces `validate()` to synthesize a misleading `SchemaInvalid` error (name `<infer>`) for the deferred case. Cleaner: split into `enum ResolvedSchema { Named{..}, Inline(..) }` plus `enum SchemaResolution { Ready(ResolvedSchema), Deferred }` at the `resolve` boundary, or add a dedicated `SchemaInferDeferred` error variant. **Separation / Naming.**
+
+### 123. `SchemaInvalid` variant overloaded for inline compile failures and deferred-infer
+mech/src/error.rs — `SchemaInvalid { name, .. }` is used for (a) a named shared schema that fails to compile, (b) an inline schema that fails to compile (sentinel `name: "<inline>"`), and (c) validating against a deferred `Infer` marker (sentinel `name: "<infer>"`). The variant's `name` field's stated responsibility is "registered schema name"; sentinels conflate three distinct conditions. Split into dedicated variants or rename `name` to `source`. **Naming.**
+
+### 124. `SchemaRef::Ref("$ref:path")` external-file case rejected as "malformed"
+mech/src/schema/registry.rs (`parse_named_ref`) — External file refs like `$ref:./foo.json` (reserved for Deliverable 7) currently produce `SchemaRefMalformed`, but they are not malformed — they are unsupported/deferred. Introduce `SchemaRefUnsupported` or `SchemaRefExternalDeferred` so the diagnostic matches the condition. Revisit in D7. **Naming.**
+
+### 125. `registry.rs` placement under `mech/src/schema/` conflates two "schema" senses
+mech/src/schema/registry.rs — The file's own module doc explicitly flags the collision: `crate::schema` is the parse-only YAML AST while `registry` implements a JSON Schema runtime concern. Relocating to a sibling top-level module (`mech/src/json_schema.rs` or similar) would match the architectural layering the doc comment describes. **Placement.**
+
+### 126. Registry test coverage gaps
+mech/src/schema/registry.rs tests — Missing: (a) a 3+ node cycle (a→b→c→a) to exercise `chain` accumulation beyond length 2; (b) a multi-hop non-cyclic alias chain (c→b→a) to exercise the `loop { continue }` path in `follow_top_level_ref` more than once; (c) a `$ref:./other.json`-shaped input to pin the current "external file refs are rejected" contract until D7; (d) a cycle test using the string form `"$ref:#a"` (current cycle tests only use the object form). **Testing.**
