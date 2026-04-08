@@ -148,10 +148,14 @@ mod tests {
 
     #[test]
     fn expand_vars_multiple() {
-        // Use two vars that are always present.
-        let home = std::env::var("HOME").expect("HOME must be set");
+        // Use two vars that are always present. HOME is POSIX-only; Windows uses USERPROFILE.
+        #[cfg(windows)]
+        let home_var = "USERPROFILE";
+        #[cfg(not(windows))]
+        let home_var = "HOME";
+        let home = std::env::var(home_var).unwrap_or_else(|_| panic!("{home_var} must be set"));
         let path = std::env::var("PATH").expect("PATH must be set");
-        let result = expand_vars("${HOME}:${PATH}").unwrap();
+        let result = expand_vars(&format!("${{{home_var}}}:${{PATH}}")).unwrap();
         assert_eq!(result, format!("{home}:{path}"));
     }
 
