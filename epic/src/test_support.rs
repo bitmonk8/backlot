@@ -18,6 +18,7 @@ pub struct MockAgentService {
     pub branch_completeness_responses: Mutex<VecDeque<VerificationResult>>,
     pub branch_simplification_responses: Mutex<VecDeque<VerificationResult>>,
     pub file_level_review_responses: Mutex<VecDeque<VerificationResult>>,
+    pub leaf_simplification_responses: Mutex<VecDeque<VerificationResult>>,
     pub checkpoint_responses: Mutex<VecDeque<CheckpointDecision>>,
     pub checkpoint_errors: Mutex<VecDeque<String>>,
     pub verify_errors: Mutex<HashMap<TaskId, VecDeque<Option<String>>>>,
@@ -41,6 +42,7 @@ impl MockAgentService {
             branch_completeness_responses: Mutex::new(VecDeque::new()),
             branch_simplification_responses: Mutex::new(VecDeque::new()),
             file_level_review_responses: Mutex::new(VecDeque::new()),
+            leaf_simplification_responses: Mutex::new(VecDeque::new()),
             checkpoint_responses: Mutex::new(VecDeque::new()),
             checkpoint_errors: Mutex::new(VecDeque::new()),
             verify_errors: Mutex::new(HashMap::new()),
@@ -398,6 +400,43 @@ impl MockBuilder {
     }
 
     // -----------------------------------------------------------------------
+    // Leaf simplification review
+    // -----------------------------------------------------------------------
+
+    pub fn leaf_simplification_pass(&mut self) -> &mut Self {
+        self.inner
+            .leaf_simplification_responses
+            .lock()
+            .unwrap()
+            .push_back(crate::task::verify::VerificationResult {
+                outcome: crate::task::verify::VerificationOutcome::Pass,
+                details: "leaf simplification review passed".into(),
+            });
+        self
+    }
+
+    pub fn leaf_simplification_passes(&mut self, count: usize) -> &mut Self {
+        for _ in 0..count {
+            self.leaf_simplification_pass();
+        }
+        self
+    }
+
+    pub fn leaf_simplification_fail(&mut self, reason: &str) -> &mut Self {
+        self.inner
+            .leaf_simplification_responses
+            .lock()
+            .unwrap()
+            .push_back(crate::task::verify::VerificationResult {
+                outcome: crate::task::verify::VerificationOutcome::Fail {
+                    reason: reason.into(),
+                },
+                details: "leaf simplification review failed".into(),
+            });
+        self
+    }
+
+    // -----------------------------------------------------------------------
     // Decomposition
     // -----------------------------------------------------------------------
 
@@ -742,6 +781,19 @@ impl AgentService for MockAgentService {
             .pop_front()
             .map(mock_result)
             .ok_or_else(|| anyhow::anyhow!("no file_level_review response queued"))
+    }
+
+    async fn leaf_simplification_review(
+        &self,
+        _ctx: &TaskContext,
+        _model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        self.leaf_simplification_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .map(mock_result)
+            .ok_or_else(|| anyhow::anyhow!("no leaf_simplification response queued"))
     }
 
     async fn checkpoint(

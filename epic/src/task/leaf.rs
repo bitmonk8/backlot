@@ -111,6 +111,7 @@ mod tests {
             .leaf_success()
             .verify_pass()
             .file_review_pass()
+            .leaf_simplification_pass()
             .build();
         let (rt, _mock_arc, _log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
@@ -143,6 +144,7 @@ mod tests {
             .leaf_success()
             .verify_pass()
             .file_review_pass()
+            .leaf_simplification_pass()
             .build();
         let limits = LimitsConfig {
             retry_budget: 1,
@@ -170,6 +172,7 @@ mod tests {
             .fix_leaf_success()
             .verify_pass()
             .file_review_pass()
+            .leaf_simplification_pass()
             .build();
         let (rt, _mock_arc, _log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
@@ -190,6 +193,7 @@ mod tests {
             .fix_leaf_success()
             .verify_pass()
             .file_review_pass()
+            .leaf_simplification_pass()
             .build();
         let (rt, _mock_arc, log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
@@ -234,7 +238,9 @@ mod tests {
         mb.fix_leaf_success();
         mb.verify_errors_sequence(TaskId(1), vec![None, Some("transient API error".into())]);
         mb.fix_leaf_success();
-        mb.verify_pass().file_review_pass();
+        mb.verify_pass()
+            .file_review_pass()
+            .leaf_simplification_pass();
         let (rt, _mock_arc, _log) = make_runtime(mb.build());
         let mut task = make_leaf_task(&rt);
         let tree = empty_tree();
@@ -276,6 +282,7 @@ mod tests {
             .leaf_success()
             .verify_pass()
             .file_review_pass()
+            .leaf_simplification_pass()
             .build();
         let (rt, _mock_arc, log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
@@ -307,6 +314,7 @@ mod tests {
             .fix_leaf_success()
             .verify_pass()
             .file_review_pass()
+            .leaf_simplification_pass()
             .build();
         let (rt, _mock_arc, log) = make_runtime(mock);
         let mut task = make_leaf_task(&rt);
@@ -363,6 +371,111 @@ mod tests {
             task.task.fix_attempts.len(),
             0,
             "fix task should not enter fix loop on file-level review failure"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Leaf simplification review
+    // -----------------------------------------------------------------------
+
+    /// Leaf passes simplification review -> completes normally, event emitted.
+    #[tokio::test]
+    async fn leaf_simplification_pass_completes() {
+        let mock = MockBuilder::new()
+            .leaf_success()
+            .verify_pass()
+            .file_review_pass()
+            .leaf_simplification_pass()
+            .build();
+        let (rt, _mock_arc, log) = make_runtime(mock);
+        let mut task = make_leaf_task(&rt);
+        let task_id = task.task.id;
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
+        assert_eq!(result, TaskOutcome::Success);
+
+        let mut saw_simplification_passed = false;
+        for event in log.snapshot() {
+            if matches!(event, Event::LeafSimplificationReviewCompleted { task_id: id, passed } if id == task_id && passed)
+            {
+                saw_simplification_passed = true;
+            }
+        }
+        assert!(
+            saw_simplification_passed,
+            "LeafSimplificationReviewCompleted(passed=true) event not found"
+        );
+    }
+
+    /// Leaf fails simplification review -> enters fix loop -> succeeds.
+    #[tokio::test]
+    async fn leaf_simplification_fail_triggers_fix_loop() {
+        let mock = MockBuilder::new()
+            .leaf_success()
+            .verify_pass()
+            .file_review_pass()
+            .leaf_simplification_fail("redundant code detected")
+            .fix_leaf_success()
+            .verify_pass()
+            .file_review_pass()
+            .leaf_simplification_pass()
+            .build();
+        let (rt, _mock_arc, log) = make_runtime(mock);
+        let mut task = make_leaf_task(&rt);
+        let task_id = task.task.id;
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
+        assert_eq!(result, TaskOutcome::Success);
+        assert_eq!(task.task.fix_attempts.len(), 1);
+
+        let mut review_events: Vec<bool> = Vec::new();
+        for event in log.snapshot() {
+            if let Event::LeafSimplificationReviewCompleted {
+                task_id: id,
+                passed,
+            } = event
+            {
+                if id == task_id {
+                    review_events.push(passed);
+                }
+            }
+        }
+        assert_eq!(
+            review_events,
+            vec![false, true],
+            "expected [failed, passed] simplification review events"
+        );
+    }
+
+    /// Fix task that fails simplification review -> fails immediately (no fix loop).
+    #[tokio::test]
+    async fn fix_task_simplification_fail_immediate_failure() {
+        let mock = MockBuilder::new()
+            .leaf_success()
+            .verify_pass()
+            .file_review_pass()
+            .leaf_simplification_fail("over-engineered")
+            .build();
+        let (rt, _mock_arc, _log) = make_runtime(mock);
+        let mut task_inner = Task::new(
+            TaskId(1),
+            Some(TaskId(0)),
+            "child task".into(),
+            vec!["child passes".into()],
+            1,
+        );
+        task_inner.path = Some(TaskPath::Leaf);
+        task_inner.current_model = Some(Model::Haiku);
+        task_inner.phase = TaskPhase::Executing;
+        task_inner.is_fix_task = true;
+        let mut task = EpicTask::new(task_inner, Some(Arc::clone(&rt)));
+        let tree = empty_tree();
+        let result = cue::TaskNode::execute_leaf(&mut task, &tree).await;
+        assert!(matches!(result, TaskOutcome::Failed { .. }));
+        assert_eq!(
+            task.task.fix_attempts.len(),
+            0,
+            "fix task should not enter fix loop on simplification review failure"
         );
     }
 }

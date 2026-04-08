@@ -98,7 +98,7 @@
 - `EpicTask<A>` implementing `cue::TaskNode` (bridges Task + AgentService to cue's trait contract)
 - `EpicStore<A>` implementing `cue::TaskStore` (wraps EpicState + runtime deps)
 - `TaskRuntime<A>` (agent, vault, events, limits, project_root) injected into tasks at construction
-- `ReelAgent` adapter (10 AgentService methods)
+- `ReelAgent` adapter (14 AgentService methods)
 - State persistence (`.epic/state.json`), resume, cycle-safe DFS
 - TUI (ratatui + crossterm), CLI (init, run, resume, status, setup)
 - Process sandboxing via reel/lot, AppContainer prerequisites check
@@ -110,9 +110,9 @@
 - Vault integration (document store, ResearchQuery tool, discovery recording, reorganize)
 - Research Service gap-filling (vault query -> gap identification -> codebase/web exploration -> synthesis)
 - Branch verification separation (three sequential agent calls: correctness, completeness, aggregate simplification — fail-fast)
+- Simplification review (local leaf simplification after file-level review, aggregate branch simplification in branch verification)
 
 **Not Implemented:**
-- Simplification review (local leaf + aggregate branch)
 - User-level config fallback (`~/.config/epic/config.toml`)
 
 **Next Work:**

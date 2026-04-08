@@ -528,7 +528,7 @@ SessionMetadata now captures RunResult fields.
 
 ## Epic
 
-71 issues. All non-critical.
+75 issues. All non-critical.
 
 ### 1. `ReelAgent::new()` error paths untested
 src/agent/reel_adapter.rs — Neither `build_model_registry()` nor `ProviderRegistry::load_default()` error path is tested. **Testing.**
@@ -825,6 +825,18 @@ src/knowledge.rs lines 271-276 — No test verifies that all `scope_label()` val
 
 ### 99. `run_pipeline` with Web/ProjectAndWeb scopes untested
 src/knowledge.rs lines 540-633 — The core behavioral change (scope-conditional codebase exploration and web search loops) has no integration test. Consistent with pre-existing gap for Project scope (issue 29). **Testing.**
+
+### 100. `try_leaf_simplification_review` duplicates `try_file_level_review` structure
+src/task/node_impl.rs — Both methods are ~25 lines with identical structure (get rt, build context, call agent, accumulate usage, emit event, match outcome). Could be a shared helper parameterized by agent call and event variant. Same duplication exists in the post-verify review chain between `leaf_finalize` and `try_verify`. **Simplification.**
+
+### 101. No test asserts on `LeafSimplificationReviewCompleted` event at orchestrator level
+src/orchestrator/tests.rs — The event is emitted but no orchestrator-level test verifies it. Unit-level coverage exists in `leaf.rs`. **Testing.**
+
+### 102. Simplification review in fix loop's `try_verify` path lacks dedicated test
+src/task/node_impl.rs lines 686-692 — In `try_verify` (called during fix retry loop), after verification passes and file-level review passes, simplification review runs. No test exercises a scenario where simplification fails specifically in this code path. **Testing.**
+
+### 103. STATUS.md Phase line does not mention simplification review
+docs/STATUS.md line 94 — The one-line Phase summary for Epic still reads "file-level review" but does not mention the new leaf simplification review. The Implemented list is current. **Documentation.**
 
 ---
 

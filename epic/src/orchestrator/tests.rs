@@ -133,6 +133,7 @@ async fn single_leaf() {
         .leaf_success()
         .verify_pass() // leaf child verification
         .file_review_pass() // leaf child file review
+        .leaf_simplification_pass() // leaf child simplification review
         .branch_verify_pass() // root branch verification (3 phases)
         .build();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
@@ -174,6 +175,7 @@ async fn two_children() {
     }
     mb.verify_passes(2) // leaf children verification
         .file_review_passes(2) // leaf children file review
+        .leaf_simplification_passes(2) // leaf children simplification review
         .branch_verify_pass(); // root branch verification
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -192,6 +194,7 @@ async fn checkpoint_saves_state() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -223,6 +226,7 @@ async fn resume_skips_completed_child() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -281,6 +285,7 @@ async fn resume_skips_decomposition_when_subtasks_exist() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -320,6 +325,7 @@ async fn resume_mid_execution_branch_not_reassessed() {
         .leaf_success()
         .verify_pass() // grandchild leaf
         .file_review_pass() // grandchild leaf file review
+        .leaf_simplification_pass() // grandchild leaf simplification review
         .branch_verify_pass() // mid branch
         .branch_verify_pass() // root branch
         .build();
@@ -376,6 +382,7 @@ async fn resume_verifying_skips_execution() {
     let mock = MockBuilder::new()
         .verify_pass() // child leaf (in Verifying phase)
         .file_review_pass() // child leaf file review
+        .leaf_simplification_pass() // child leaf simplification review
         .branch_verify_pass() // root branch
         .build();
 
@@ -420,6 +427,7 @@ async fn custom_max_depth_forces_leaf() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -460,6 +468,7 @@ async fn discoveries_propagated_to_checkpoint() {
     mb.leaf_success();
     mb.verify_passes(2) // two leaf children
         .file_review_passes(2) // two leaf file reviews
+        .leaf_simplification_passes(2) // two leaf simplification reviews
         .branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -495,12 +504,14 @@ async fn branch_fix_creates_subtasks() {
         .leaf_success()
         .verify_pass() // original leaf child
         .file_review_pass() // original leaf file review
+        .leaf_simplification_pass() // original leaf simplification review
         .branch_correctness_fail("root check failed") // root branch fails correctness
         .fix_subtask_one()
         .assess_leaf()
         .leaf_success()
         .verify_pass() // fix leaf child
         .file_review_pass() // fix leaf file review
+        .leaf_simplification_pass() // fix leaf simplification review
         .branch_verify_pass(); // root branch re-verify passes
     let mock = mb.build();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
@@ -535,7 +546,8 @@ async fn branch_fix_round_budget() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // grandchild leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // grandchild leaf
     mb.branch_correctness_fail("mid check failed"); // mid branch fails
 
     for _ in 0..3 {
@@ -544,6 +556,7 @@ async fn branch_fix_round_budget() {
             .leaf_success()
             .verify_pass() // fix leaf child
             .file_review_pass() // fix leaf file review
+            .leaf_simplification_pass() // fix leaf simplification review
             .branch_correctness_fail("still failing"); // mid branch re-verify fails
     }
     mb.recovery_unrecoverable();
@@ -570,6 +583,7 @@ async fn fix_subtasks_no_recursive_fix() {
         .leaf_success()
         .verify_pass() // original leaf child
         .file_review_pass() // original leaf file review
+        .leaf_simplification_pass() // original leaf simplification review
         .branch_correctness_fail("root check failed"); // root branch fails
     // Fix round 1: leaf fix subtask succeeds but verification fails.
     mb.fix_subtask_one()
@@ -583,6 +597,7 @@ async fn fix_subtasks_no_recursive_fix() {
         .leaf_success()
         .verify_pass() // fix leaf child
         .file_review_pass() // fix leaf file review
+        .leaf_simplification_pass() // fix leaf simplification review
         .branch_verify_pass(); // root branch re-verify passes
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -605,13 +620,15 @@ async fn fix_subtasks_no_recursive_fix() {
         .leaf_success()
         .verify_pass() // original leaf child
         .file_review_pass() // original leaf file review
+        .leaf_simplification_pass() // original leaf simplification review
         .branch_correctness_fail("root check failed"); // root branch fails
     // Fix round 1: branch fix subtask.
     mb.fix_subtask_one().assess_branch().decompose_one();
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // grandchild leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // grandchild leaf
     mb.branch_correctness_fail("branch fix subtask failed"); // branch fix subtask fails (is_fix_task -> FailedNoFixLoop)
     mb.branch_correctness_fail("root still failing"); // root branch still fails
     // Fix round 2: simple fix subtask succeeds.
@@ -620,6 +637,7 @@ async fn fix_subtasks_no_recursive_fix() {
         .leaf_success()
         .verify_pass() // fix leaf child
         .file_review_pass() // fix leaf file review
+        .leaf_simplification_pass() // fix leaf simplification review
         .branch_verify_pass(); // root branch re-verify passes
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -647,6 +665,7 @@ async fn leaf_fix_persists_and_resumes() {
         .fix_leaf_success() // fix succeeds
         .verify_pass() // fix verify passes
         .file_review_pass() // fix file review
+        .leaf_simplification_pass() // fix simplification review
         .branch_verify_pass() // root branch
         .build();
 
@@ -706,6 +725,7 @@ async fn leaf_fix_resume_escalates_immediately_when_tier_exhausted() {
         .fix_leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -786,6 +806,7 @@ async fn branch_fix_root_opus_round() {
         .leaf_success()
         .verify_pass() // original leaf child
         .file_review_pass() // original leaf file review
+        .leaf_simplification_pass() // original leaf simplification review
         .branch_correctness_fail("root check failed"); // root branch fails
 
     for round in 1..=4 {
@@ -793,7 +814,8 @@ async fn branch_fix_root_opus_round() {
             .assess_leaf()
             .leaf_success()
             .verify_pass() // fix leaf child
-            .file_review_pass(); // fix leaf file review
+            .file_review_pass() // fix leaf file review
+            .leaf_simplification_pass(); // fix leaf simplification review
         if round < 4 {
             mb.branch_correctness_fail("root still failing"); // root branch re-verify fails
         } else {
@@ -845,11 +867,13 @@ async fn recovery_incremental_creates_subtasks() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // recovery child leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // recovery child leaf
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // child B leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // child B leaf
     mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -885,7 +909,8 @@ async fn recovery_full_redecomp_preserves_completed_siblings() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass();
+        .file_review_pass()
+        .leaf_simplification_pass();
     // Child B: fails terminally.
     mb.assess_leaf().leaf_failures(9, "B failed");
     // Recovery: full re-decomposition.
@@ -894,7 +919,8 @@ async fn recovery_full_redecomp_preserves_completed_siblings() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass();
+        .file_review_pass()
+        .leaf_simplification_pass();
     // Root verification passes.
     mb.branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
@@ -1009,7 +1035,8 @@ async fn recovery_rounds_persisted() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // recovery child leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // recovery child leaf
     mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -1052,7 +1079,8 @@ async fn recovery_emits_events() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // recovery child leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // recovery child leaf
     mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -1103,7 +1131,9 @@ async fn checkpoint_adjust_stores_guidance() {
     mb.leaf_success_with_discoveries(vec!["use API v2".into()]);
     mb.checkpoint_adjust("switch to API v2 format");
     mb.leaf_success();
-    mb.verify_passes(2).file_review_passes(2); // two leaf children
+    mb.verify_passes(2)
+        .file_review_passes(2)
+        .leaf_simplification_passes(2); // two leaf children
     mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -1132,7 +1162,9 @@ async fn checkpoint_escalate_triggers_recovery() {
     mb.decompose_two();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["approach is wrong".into()]);
-    mb.verify_pass().file_review_pass(); // child A leaf verification
+    mb.verify_pass()
+        .file_review_pass()
+        .leaf_simplification_pass(); // child A leaf verification
     mb.checkpoint_escalate();
     mb.recovery_recoverable("switch approach");
     mb.recovery_plan(RecoveryPlan {
@@ -1147,11 +1179,13 @@ async fn checkpoint_escalate_triggers_recovery() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // recovery child leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // recovery child leaf
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // child B leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // child B leaf
     mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -1181,7 +1215,9 @@ async fn checkpoint_escalate_unrecoverable_fails() {
     mb.decompose_two();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["fatal issue".into()]);
-    mb.verify_pass().file_review_pass(); // child A leaf
+    mb.verify_pass()
+        .file_review_pass()
+        .leaf_simplification_pass(); // child A leaf
     mb.checkpoint_escalate();
     mb.recovery_unrecoverable();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
@@ -1197,7 +1233,9 @@ async fn checkpoint_agent_error_treated_as_proceed() {
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["something interesting".into()]);
     mb.checkpoint_error("simulated LLM failure");
-    mb.verify_pass().file_review_pass(); // child leaf
+    mb.verify_pass()
+        .file_review_pass()
+        .leaf_simplification_pass(); // child leaf
     mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -1230,7 +1268,9 @@ async fn checkpoint_guidance_persisted() {
     mb.leaf_success_with_discoveries(vec!["found issue".into()]);
     mb.checkpoint_adjust("use new approach");
     mb.leaf_success();
-    mb.verify_passes(2).file_review_passes(2); // two leaf children
+    mb.verify_passes(2)
+        .file_review_passes(2)
+        .leaf_simplification_passes(2); // two leaf children
     mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -1261,7 +1301,9 @@ async fn checkpoint_multiple_adjusts_accumulates_guidance() {
     mb.leaf_success_with_discoveries(vec!["discovered gzip support".into()]);
     mb.checkpoint_adjust("also use gzip");
     mb.leaf_success();
-    mb.verify_passes(3).file_review_passes(3); // three leaf children
+    mb.verify_passes(3)
+        .file_review_passes(3)
+        .leaf_simplification_passes(3); // three leaf children
     mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -1293,7 +1335,9 @@ async fn checkpoint_escalate_on_fix_task_fails() {
     mb.decompose_two();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["fatal issue".into()]);
-    mb.verify_pass().file_review_pass(); // child A leaf
+    mb.verify_pass()
+        .file_review_pass()
+        .leaf_simplification_pass(); // child A leaf
     mb.checkpoint_escalate();
 
     // Build state with root marked as fix task.
@@ -1391,7 +1435,9 @@ async fn checkpoint_escalate_recovery_rounds_exhausted() {
     mb.decompose_two();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["approach is wrong".into()]);
-    mb.verify_pass().file_review_pass(); // child A leaf
+    mb.verify_pass()
+        .file_review_pass()
+        .leaf_simplification_pass(); // child A leaf
     mb.checkpoint_escalate();
 
     // Build state with pre-set recovery_rounds.
@@ -1439,11 +1485,15 @@ async fn checkpoint_escalate_clears_prior_guidance() {
     mb.decompose_three();
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["use API v2".into()]);
-    mb.verify_pass().file_review_pass(); // child A leaf
+    mb.verify_pass()
+        .file_review_pass()
+        .leaf_simplification_pass(); // child A leaf
     mb.checkpoint_adjust("old guidance");
     mb.assess_leaf();
     mb.leaf_success_with_discoveries(vec!["approach is fundamentally wrong".into()]);
-    mb.verify_pass().file_review_pass(); // child B leaf
+    mb.verify_pass()
+        .file_review_pass()
+        .leaf_simplification_pass(); // child B leaf
     mb.checkpoint_escalate();
     mb.recovery_recoverable("fix approach");
     mb.recovery_plan(RecoveryPlan {
@@ -1458,11 +1508,13 @@ async fn checkpoint_escalate_clears_prior_guidance() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // recovery child leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // recovery child leaf
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // child C leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // child C leaf
     mb.branch_verify_pass(); // root branch
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -1502,6 +1554,7 @@ async fn leaf_retry_counter_persists_on_resume() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -1581,6 +1634,7 @@ async fn leaf_retry_counter_resume_at_sonnet_tier() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -1671,6 +1725,7 @@ async fn leaf_retry_resume_escalates_immediately_when_tier_exhausted() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -1752,6 +1807,7 @@ async fn leaf_retry_attempts_persisted_to_disk() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -1819,12 +1875,14 @@ async fn custom_root_fix_rounds_limits_fix_attempts() {
         .leaf_success()
         .verify_pass() // original leaf child
         .file_review_pass() // original leaf file review
+        .leaf_simplification_pass() // original leaf simplification review
         .branch_correctness_fail("root check failed"); // root branch fails
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
         .verify_pass() // fix leaf child
-        .file_review_pass(); // fix leaf file review
+        .file_review_pass() // fix leaf file review
+        .leaf_simplification_pass(); // fix leaf simplification review
     mb.branch_correctness_fail("root still failing"); // root branch re-verify fails
 
     let limits = LimitsConfig {
@@ -1861,13 +1919,15 @@ async fn custom_branch_fix_rounds_limits_fix_attempts() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // grandchild leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // grandchild leaf
     mb.branch_correctness_fail("branch check failed"); // mid branch fails
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // fix leaf child
+        .file_review_pass()
+        .leaf_simplification_pass(); // fix leaf child
     mb.branch_correctness_fail("branch still failing"); // mid branch re-verify fails
     mb.recovery_unrecoverable();
 
@@ -1899,6 +1959,7 @@ async fn zero_retry_budget_clamped_to_one() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
 
@@ -1928,6 +1989,7 @@ async fn decompose_model_from_assessment() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
     let (mut orch, mock_arc, root_id, _log) = make_orchestrator(mock);
@@ -1998,7 +2060,8 @@ async fn task_limit_blocks_fix_subtasks() {
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // leaf child
+        .file_review_pass()
+        .leaf_simplification_pass(); // leaf child
     mb.branch_correctness_fail("root verification failed"); // root branch fails
     mb.fix_subtask_one();
 
@@ -2070,7 +2133,8 @@ async fn recovery_depth_inherited_not_fresh() {
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass(); // recovery child leaf
+        .file_review_pass()
+        .leaf_simplification_pass(); // recovery child leaf
     mb.branch_verify_pass(); // root branch
 
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
@@ -2156,6 +2220,7 @@ async fn task_limit_exact_boundary_permits() {
     }
     mb.verify_passes(2)
         .file_review_passes(2) // two leaf children
+        .leaf_simplification_passes(2)
         .branch_verify_pass(); // root branch
 
     let limits = LimitsConfig {
@@ -2180,6 +2245,7 @@ async fn branch_fix_design_error_retries() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_correctness_fail("root check failed");
     mb.fix_subtask_error(TaskId(0), "LLM timeout");
     mb.fix_subtask_one()
@@ -2187,6 +2253,7 @@ async fn branch_fix_design_error_retries() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -2207,13 +2274,15 @@ async fn branch_fix_verify_error_retries() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_correctness_fail("root check failed");
     // Round 1: fix subtask succeeds, root re-verify fails completeness.
     mb.fix_subtask_one()
         .assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass();
+        .file_review_pass()
+        .leaf_simplification_pass();
     mb.branch_correctness_pass()
         .branch_completeness_fail("transient verify failure");
     // Round 2: fix subtask succeeds, root re-verify passes.
@@ -2222,6 +2291,7 @@ async fn branch_fix_verify_error_retries() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -2242,6 +2312,7 @@ async fn branch_fix_design_error_exhausts_budget() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_correctness_fail("root check failed");
     mb.fix_subtask_errors(
         TaskId(0),
@@ -2396,6 +2467,7 @@ async fn branch_skips_file_level_review() {
         .leaf_success()
         .verify_pass() // leaf child verification
         .file_review_pass() // leaf child file review
+        .leaf_simplification_pass() // leaf child simplification review
         .branch_verify_pass() // root branch verification
         .build();
     let (mut orch, _mock_arc, root_id, log) = make_orchestrator(mock);
@@ -2423,6 +2495,7 @@ async fn fix_task_file_review_fail_no_fix_loop() {
         .leaf_success()
         .verify_pass()
         .file_review_pass() // original leaf child
+        .leaf_simplification_pass()
         .branch_correctness_fail("root check failed"); // root branch fails
     // Fix round 1: fix subtask passes verification but fails file review.
     mb.fix_subtask_one()
@@ -2437,6 +2510,7 @@ async fn fix_task_file_review_fail_no_fix_loop() {
         .leaf_success()
         .verify_pass()
         .file_review_pass() // fix leaf succeeds
+        .leaf_simplification_pass()
         .branch_verify_pass(); // root branch re-verify passes
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -2470,6 +2544,7 @@ async fn branch_verify_all_three_phases_pass() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass()
         .build();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mock);
@@ -2490,6 +2565,7 @@ async fn branch_verify_correctness_fails_early_return() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_correctness_fail("interface mismatch");
     // Fix round: succeeds.
     mb.fix_subtask_one()
@@ -2497,6 +2573,7 @@ async fn branch_verify_correctness_fails_early_return() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -2516,6 +2593,7 @@ async fn branch_verify_completeness_fails_no_simplification() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_correctness_pass()
         .branch_completeness_fail("missing requirement X");
     // Fix round: succeeds.
@@ -2524,6 +2602,7 @@ async fn branch_verify_completeness_fails_no_simplification() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -2543,6 +2622,7 @@ async fn branch_verify_simplification_fails() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_correctness_pass()
         .branch_completeness_pass()
         .branch_simplification_fail("redundant abstraction layer");
@@ -2552,6 +2632,7 @@ async fn branch_verify_simplification_fails() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();
@@ -2571,13 +2652,15 @@ async fn branch_verify_fix_task_fails_no_fix_loop() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_correctness_fail("root check failed");
     // Fix round 1: branch fix subtask that is itself a branch. Its branch verify fails.
     mb.fix_subtask_one().assess_branch().decompose_one();
     mb.assess_leaf()
         .leaf_success()
         .verify_pass()
-        .file_review_pass();
+        .file_review_pass()
+        .leaf_simplification_pass();
     mb.branch_correctness_fail("fix branch failed"); // is_fix_task -> FailedNoFixLoop
     // Root re-verifies after fix round 1 (fix subtask failed, root still re-checks).
     mb.branch_correctness_fail("root still failing");
@@ -2587,6 +2670,7 @@ async fn branch_verify_fix_task_fails_no_fix_loop() {
         .leaf_success()
         .verify_pass()
         .file_review_pass()
+        .leaf_simplification_pass()
         .branch_verify_pass();
     let (mut orch, _mock_arc, root_id, _log) = make_orchestrator(mb.build());
     let result = orch.run(root_id).await.unwrap();

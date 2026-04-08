@@ -79,6 +79,10 @@ pub enum Event {
         task_id: TaskId,
         passed: bool,
     },
+    LeafSimplificationReviewCompleted {
+        task_id: TaskId,
+        passed: bool,
+    },
     RecoveryStarted {
         task_id: TaskId,
         round: u32,

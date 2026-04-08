@@ -447,6 +447,45 @@ Respond with the required JSON schema."
     }
 }
 
+pub fn build_leaf_simplification_review(ctx: &TaskContext) -> PromptPair {
+    let system_prompt = "\
+You are a simplification reviewer in a recursive problem-solving system.
+
+A leaf task has been implemented and passed both build/lint/test verification and file-level \
+review. Your job is to check whether the changes created local simplification opportunities.
+
+The leaf task has the best context for this: it just wrote the code and can spot now-redundant \
+code, duplication of nearby functionality, or cleanup opportunities within the files it touched. \
+This is the boy scout principle — leave the code in an equal or better state.
+
+Check:
+- Redundant or duplicated code within the changed files.
+- Over-engineered solutions where simpler approaches would work.
+- Cleanup opportunities in the surrounding code (not just what was written).
+- Missed refactoring opportunities visible only to code that just integrated with this section.
+- Code style, naming, or structural simplifications that would improve clarity.
+
+Report pass if no concrete simplification opportunities exist, or if the code is already \
+well-simplified. Report fail if there are concrete, actionable simplification opportunities. \
+Provide detailed explanation of what was reviewed and any opportunities found.
+
+Respond with the required JSON schema."
+        .into();
+
+    let query = format!(
+        "{context}\n\n\
+         Review the actual source files changed by this task for local simplification \
+         opportunities. Check whether the changes are as simple as they can be, and whether \
+         surrounding code can be simplified.",
+        context = format_context(ctx),
+    );
+
+    PromptPair {
+        system_prompt,
+        query,
+    }
+}
+
 pub fn build_checkpoint(ctx: &TaskContext, discoveries: &[String]) -> PromptPair {
     let system_prompt = "\
 You are a checkpoint reviewer in a recursive problem-solving system.

@@ -112,6 +112,12 @@ pub trait AgentService: Send + Sync {
         model: Model,
     ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<VerificationResult>>> + Send;
 
+    fn leaf_simplification_review(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> impl std::future::Future<Output = anyhow::Result<AgentResult<VerificationResult>>> + Send;
+
     fn checkpoint(
         &self,
         ctx: &TaskContext,

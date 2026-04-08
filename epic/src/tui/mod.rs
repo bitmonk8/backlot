@@ -352,6 +352,19 @@ impl TuiApp {
                     ));
                 }
             }
+            Event::LeafSimplificationReviewCompleted { task_id, passed } => {
+                if passed {
+                    self.worklog.push(WorklogEntry::success(
+                        format!("{task_id} leaf simplification review passed"),
+                        self.session_start,
+                    ));
+                } else {
+                    self.worklog.push(WorklogEntry::warn(
+                        format!("{task_id} leaf simplification review failed"),
+                        self.session_start,
+                    ));
+                }
+            }
             Event::VaultBootstrapCompleted { cost_usd } => {
                 self.worklog.push(WorklogEntry::info(
                     format!("vault bootstrap completed (${cost_usd:.4})"),

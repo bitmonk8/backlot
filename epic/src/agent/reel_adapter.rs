@@ -378,6 +378,15 @@ impl AgentService for ReelAgent {
         self.run_verification(&pair, model).await
     }
 
+    async fn leaf_simplification_review(
+        &self,
+        ctx: &TaskContext,
+        model: Model,
+    ) -> anyhow::Result<AgentResult<VerificationResult>> {
+        let pair = prompts::build_leaf_simplification_review(ctx);
+        self.run_verification(&pair, model).await
+    }
+
     async fn checkpoint(
         &self,
         ctx: &TaskContext,

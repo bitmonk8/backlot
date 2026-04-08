@@ -484,7 +484,18 @@ impl<A: AgentService + 'static> EpicTask<A> {
                         self.leaf_fix_loop(tree, &fail_reason).await
                     }
                 } else {
-                    TaskOutcome::Success
+                    // File-level review passed; now check for simplification opportunities.
+                    if let Some(fail_reason) = self.try_leaf_simplification_review(tree).await {
+                        if self.task.is_fix_task {
+                            TaskOutcome::Failed {
+                                reason: fail_reason,
+                            }
+                        } else {
+                            self.leaf_fix_loop(tree, &fail_reason).await
+                        }
+                    } else {
+                        TaskOutcome::Success
+                    }
                 }
             }
             VerificationOutcome::Fail { reason } => {
@@ -669,10 +680,16 @@ impl<A: AgentService + 'static> EpicTask<A> {
                 self.task.accumulate_usage(&agent_result.meta);
                 self.emit_usage_event();
                 match agent_result.value.outcome {
-                    VerificationOutcome::Pass => self
-                        .try_file_level_review(tree)
-                        .await
-                        .map_or(VerifyOutcome::Passed, VerifyOutcome::Failed),
+                    VerificationOutcome::Pass => {
+                        if let Some(reason) = self.try_file_level_review(tree).await {
+                            VerifyOutcome::Failed(reason)
+                        } else if let Some(reason) = self.try_leaf_simplification_review(tree).await
+                        {
+                            VerifyOutcome::Failed(reason)
+                        } else {
+                            VerifyOutcome::Passed
+                        }
+                    }
                     VerificationOutcome::Fail { reason } => {
                         self.record_to_vault("VERIFICATION_FAILURE", &reason).await;
                         VerifyOutcome::Failed(reason)
@@ -701,6 +718,35 @@ impl<A: AgentService + 'static> EpicTask<A> {
 
         let passed = review_result.value.outcome == VerificationOutcome::Pass;
         rt.events.emit(Event::FileLevelReviewCompleted {
+            task_id: self.task.id,
+            passed,
+        });
+
+        match review_result.value.outcome {
+            VerificationOutcome::Pass => None,
+            VerificationOutcome::Fail { reason } => Some(reason),
+        }
+    }
+
+    async fn try_leaf_simplification_review(&mut self, tree: &TreeContext) -> Option<String> {
+        let rt = self.rt_arc();
+        let review_model = self.task.verification_model();
+        let ctx = self.build_task_context(tree);
+        let review_result = match rt
+            .agent
+            .leaf_simplification_review(&ctx, review_model)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return Some(format!("leaf simplification review error: {e}"));
+            }
+        };
+        self.task.accumulate_usage(&review_result.meta);
+        self.emit_usage_event();
+
+        let passed = review_result.value.outcome == VerificationOutcome::Pass;
+        rt.events.emit(Event::LeafSimplificationReviewCompleted {
             task_id: self.task.id,
             passed,
         });
