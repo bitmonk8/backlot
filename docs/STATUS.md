@@ -88,7 +88,15 @@
 - Depends only on `traits` crate (for `EventEmitter<E>`)
 
 **Next Work:**
-1. **Graph/Workflow DSL** — YAML-based workflow DSL for structured agent workflows (CFG, CTFG, dataflow modes). Initial research in `docs/GRAPHS_DSL.md`, being iteratively developed into a complete spec. See [GRAPHS_DSL.md](GRAPHS_DSL.md).
+1. **Graph/Workflow DSL spec** — YAML-based workflow DSL for structured agent workflows. Spec in `docs/GRAPHS_DSL.md`. Sections 1–4 drafted (motivation, design goals, core concepts, unified CDFG model including conversation model, system prompts, model selection, history compaction). Remaining sections to reach implementation-ready:
+   - §5 Block Specification — full schema for prompt blocks and call blocks, valid field combinations
+   - §6 Transitions & Guards — CEL expression details, ordered evaluation, self-loops, fallback semantics
+   - §7 Template Variables & Scoping — `{{input.*}}`, `{{output.*}}`, `{{context.*}}`, `{{blocks.<name>.output.*}}` resolution rules
+   - §8 Schema Handling — inline YAML vs `$ref`, load-time vs runtime validation, schema composition
+   - §9 Context & State — mutable scratchpad lifecycle, persistence, interaction with compaction
+   - §10 Validation & Error Handling — load-time checks (cycle detection, CEL compilation, schema resolution, unreachable blocks), runtime errors (schema failures, guard errors, timeout)
+   - §11 Integration with Cue — mapping to `TaskNode`/`TaskStore`/`Orchestrator`, whether a function is one cue task or each block is
+   - §12 YAML Reference Grammar — complete annotated schema for the workflow format
 
 ---
 
