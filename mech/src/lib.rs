@@ -12,9 +12,11 @@
 //! There is no execution or runtime logic yet, and no validation beyond
 //! serde's `deny_unknown_fields`.
 
+pub mod cel;
 pub mod error;
 pub mod schema;
 
+pub use cel::{CelExpression, Namespaces, Template};
 pub use error::{MechError, MechResult};
 pub use schema::{
     AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,

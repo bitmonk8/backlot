@@ -258,12 +258,14 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e67d01db98df8aa969b94da2e5aedb17810ae52130d9cb241babb22eeb4f20ca"
 dependencies = [
+ "base64",
  "cel-parser",
  "chrono",
  "nom",
  "paste",
  "regex",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 

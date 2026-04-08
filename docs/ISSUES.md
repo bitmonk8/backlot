@@ -886,3 +886,15 @@ mech/src/schema/mod.rs lines 266–292 — Per §12.1, `extends` is allowed on i
 
 ### 116. Mech schema: single 770-line mod.rs could split into submodules
 mech/src/schema/mod.rs — Spec wording said "src/schema/mod.rs and submodules". Natural seams: `blocks.rs`, `agent.rs`, `schema_ref.rs`, `workflow.rs`. Cheaper to split now, before Deliverables 3–7 add validators that co-locate with each type cluster. **Separation.**
+
+### 117. Mech cel: guard error policy not enforced (§10.2)
+mech/src/cel.rs — `CelExpression::evaluate_guard` propagates evaluation errors to the caller. Spec §10.2 says guard runtime errors should be treated as `false` (non-fatal, with a warning). Either add the policy here or document clearly that the D11 transition executor must wrap `evaluate_guard` and apply the false-on-error rule. **Correctness (deferred).**
+
+### 118. Mech cel: `CelEvaluation` variant reused for namespace binding failure
+mech/src/cel.rs — `Namespaces::to_context` converts `serde_json::Value` → `cel_interpreter::Value` via `to_value`, which is effectively infallible for well-formed JSON. The fallible path reports `MechError::CelEvaluation` with a synthetic `source_text: "<namespace {name}>"`, which is a variant shape mismatch. Either use `.expect("JsonValue -> cel Value is infallible")` or introduce a dedicated `NamespaceBind` variant. **Naming / simplification.**
+
+### 119. Mech cel: thin coverage for render branches and multibyte template literals
+mech/src/cel.rs — `append_rendered` branches for `Null`, `UInt`, `Float`, `Map` are untested; no test exercises multi-level nested field access in a template (e.g. `{{block.foo.bar.baz}}`); no test covers multibyte literal text around `{{...}}` (e.g. `"héllo {{input.name}}"`). Add these when convenient. **Testing.**
+
+### 120. Mech cel: `block`/`meta` namespace names diverge from spec §7 (`blocks` + `output`)
+mech/src/cel.rs — Module doc flags the discrepancy and defers reconciliation to Deliverable 8. Track explicitly so D8 revisits the namespace layout and either updates §7 or renames the fields. **Naming (deferred).**

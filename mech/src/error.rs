@@ -76,6 +76,44 @@ pub enum MechError {
         duration: Duration,
     },
 
+    /// A CEL expression failed to compile.
+    #[error("CEL compile error in `{source_text}`: {message}")]
+    CelCompilation {
+        /// The source text of the expression.
+        source_text: String,
+        /// Underlying parser error message.
+        message: String,
+    },
+
+    /// A CEL expression failed to evaluate.
+    #[error("CEL evaluation error in `{source_text}`: {message}")]
+    CelEvaluation {
+        /// The source text of the expression.
+        source_text: String,
+        /// Underlying execution error message.
+        message: String,
+    },
+
+    /// A CEL expression returned a value of the wrong type.
+    #[error("CEL type error in `{source_text}`: expected {expected}, got {got}")]
+    CelType {
+        /// The source text of the expression.
+        source_text: String,
+        /// Expected CEL type (e.g. `bool`).
+        expected: String,
+        /// Actual CEL type produced.
+        got: String,
+    },
+
+    /// A `{{ ... }}` template string failed to parse.
+    #[error("template parse error in `{source_text}`: {message}")]
+    TemplateParse {
+        /// The source text of the template string.
+        source_text: String,
+        /// Parser error message.
+        message: String,
+    },
+
     // ---- Load-time errors (placeholders) ----------------------------------
     /// Failed to read a workflow file from disk.
     #[error("io error reading {path}: {source}")]
