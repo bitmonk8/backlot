@@ -239,13 +239,7 @@ pub fn generate_profile(
             "literal",
             ancestor,
         )?;
-        append_sbpl_rule(
-            &mut profile,
-            "allow",
-            "file-read-data",
-            "literal",
-            ancestor,
-        )?;
+        append_sbpl_rule(&mut profile, "allow", "file-read-data", "literal", ancestor)?;
     }
 
     // Network access — includes system-socket for AF_SYSTEM kernel control

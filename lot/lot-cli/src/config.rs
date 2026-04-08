@@ -68,8 +68,7 @@ pub fn expand_vars(s: &str) -> Result<String, String> {
             .find('}')
             .ok_or_else(|| format!("unclosed '${{' in: {s}"))?;
         let name = &after_open[..end];
-        let value = std::env::var(name)
-            .map_err(|_| format!("undefined env var: {name}"))?;
+        let value = std::env::var(name).map_err(|_| format!("undefined env var: {name}"))?;
         result.push_str(&value);
         rest = &after_open[end + 1..];
     }
@@ -137,7 +136,10 @@ mod tests {
     fn expand_vars_undefined_errors() {
         // LOT_GUARANTEED_ABSENT is never set by this test suite.
         let err = expand_vars("${LOT_GUARANTEED_ABSENT}").unwrap_err();
-        assert!(err.contains("LOT_GUARANTEED_ABSENT"), "error should name the variable");
+        assert!(
+            err.contains("LOT_GUARANTEED_ABSENT"),
+            "error should name the variable"
+        );
     }
 
     #[test]
@@ -168,7 +170,8 @@ mod tests {
     #[test]
     fn build_policy_path_with_env_var() {
         // Use CARGO_MANIFEST_DIR which cargo sets for all tests.
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set");
+        let manifest_dir =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set");
         let config = SandboxConfig {
             filesystem: FilesystemConfig {
                 read: vec![std::path::PathBuf::from("${CARGO_MANIFEST_DIR}")],

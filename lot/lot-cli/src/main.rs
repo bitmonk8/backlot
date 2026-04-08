@@ -116,7 +116,9 @@ fn cmd_run(args: &RunArgs) -> ExitCode {
     // User's explicit vars first so forward_common_env() skips duplicates.
     for (key, val) in &config.environment.vars {
         match crate::config::expand_vars(val) {
-            Ok(expanded_val) => { cmd.env(key, expanded_val); }
+            Ok(expanded_val) => {
+                cmd.env(key, expanded_val);
+            }
             Err(e) => {
                 eprintln!("error: env var expansion failed: {e}");
                 return ExitCode::FAILURE;
@@ -128,7 +130,9 @@ fn cmd_run(args: &RunArgs) -> ExitCode {
     }
     if let Some(ref cwd) = config.process.cwd {
         match crate::config::expand_path(cwd) {
-            Ok(expanded_cwd) => { cmd.cwd(expanded_cwd); }
+            Ok(expanded_cwd) => {
+                cmd.cwd(expanded_cwd);
+            }
             Err(e) => {
                 eprintln!("error: cwd expansion failed: {e}");
                 return ExitCode::FAILURE;
