@@ -26,7 +26,8 @@ pub use error::{MechError, MechResult};
 pub use schema::{
     AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,
     ContextVarDef, FunctionDef, InferLiteral, ParallelStrategy, PromptBlock, ResolvedSchema,
-    SchemaRef, SchemaRegistry, TransitionDef, WorkflowDefaults, WorkflowFile, parse_workflow,
+    SchemaRef, SchemaRegistry, TransitionDef, WorkflowDefaults, WorkflowFile,
+    infer_function_outputs, parse_workflow,
 };
 pub use validate::{
     AnyModel, KnownModels, Location, ModelChecker, ValidationIssue, ValidationReport,

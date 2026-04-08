@@ -4,7 +4,9 @@
 //! workflow YAML file deserializes into, along with a thin [`parse_workflow`]
 //! helper. It performs **no** semantic validation — no CEL compilation, no
 //! JSON-Schema checking, no `$ref` resolution, no block-field validity rules.
-//! Those live in later deliverables (Deliverables 5–7).
+//! Semantic validation lives in [`crate::validate`] and output inference in
+//! [`crate::schema::infer`]; the workflow loader that ties everything together
+//! lands in a later deliverable.
 //!
 //! Every struct uses `#[serde(deny_unknown_fields)]` so that typos and
 //! accidental fields are caught at load time.
@@ -22,11 +24,14 @@
 //!
 //! [`BlockDef`] is also an untagged enum distinguishing prompt blocks from
 //! call blocks by the presence of the `prompt` vs `call` field. Full field
-//! validity (e.g. "a prompt block must not have `call`") is enforced later in
-//! Deliverable 5; this module only rejects genuinely unknown fields.
+//! validity (e.g. "a prompt block must not have `call`") is enforced by
+//! [`crate::validate::validate_workflow`]; this module only rejects genuinely
+//! unknown fields.
 
+pub mod infer;
 pub mod registry;
 
+pub use infer::infer_function_outputs;
 pub use registry::{ResolvedSchema, SchemaRegistry};
 
 use std::collections::BTreeMap;
@@ -94,7 +99,8 @@ pub struct FunctionDef {
     pub input: JsonValue,
 
     /// Output schema: inline, `$ref:...`, or the literal `"infer"`. Defaults
-    /// to `"infer"` if omitted (handled by Deliverable 5).
+    /// to `"infer"` if omitted (resolved by
+    /// [`crate::schema::infer::infer_function_outputs`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<SchemaRef>,
 
@@ -125,7 +131,8 @@ pub struct FunctionDef {
 // ─── Blocks ─────────────────────────────────────────────────────────────────
 
 /// A prompt or call block. Discrimination is by presence of `prompt` or
-/// `call`. Full validity rules (§5.3) are enforced in Deliverable 5.
+/// `call`. Full validity rules (§5.3) are enforced by
+/// [`crate::validate::validate_workflow`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockDef {
@@ -175,7 +182,8 @@ pub struct CallBlock {
 
     /// Shared input mapping. Required for single-function and uniform-list
     /// calls; forbidden for per-call list calls. Parse-time we accept any
-    /// combination; validity is enforced in Deliverable 5.
+    /// combination; validity is enforced by
+    /// [`crate::validate::validate_workflow`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<BTreeMap<String, Expr>>,
 

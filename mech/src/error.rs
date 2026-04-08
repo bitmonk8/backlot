@@ -1,8 +1,8 @@
 //! Error types for the mech crate.
 //!
 //! Covers the five runtime error categories from `docs/MECH_SPEC.md` §10.2
-//! plus load-time variants, with the aggregated `Validation` variant still
-//! a placeholder to be fleshed out in Deliverable 5.
+//! plus load-time variants, including the aggregated `Validation` variant
+//! populated by `validate.rs`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,8 +15,8 @@ use thiserror::Error;
 ///
 /// * **Runtime errors** (per spec §10.2): raised while executing a workflow.
 /// * **Load-time errors**: raised while reading, parsing, or validating a
-///   workflow file. The schema variants are wired up; only the aggregated
-///   `Validation` variant remains a placeholder for Deliverable 5.
+///   workflow file. This includes the aggregated `Validation` variant
+///   produced by `validate.rs`.
 #[derive(Debug, Error)]
 pub enum MechError {
     // ---- Runtime errors (§10.2) -------------------------------------------
@@ -177,9 +177,20 @@ pub enum MechError {
         message: String,
     },
 
-    /// Aggregated load-time validation errors.
+    /// Function output schema inference failed (§13 Deliverable 6).
     ///
-    /// Placeholder for Deliverable 5 (load-time validation).
+    /// Raised when a function declares `output: infer` (or omits `output:`)
+    /// but its terminal blocks produce incompatible schemas, or no terminal
+    /// block can supply a concrete schema.
+    #[error("output inference failed for function '{function}': {message}")]
+    InferenceFailed {
+        /// Name of the function whose output schema could not be inferred.
+        function: String,
+        /// Human-readable description of the failure.
+        message: String,
+    },
+
+    /// Aggregated load-time validation errors produced by `validate.rs`.
     #[error("validation failed with {} error(s): {}", errors.len(), errors.join("; "))]
     Validation {
         /// All validation error messages collected during loading.

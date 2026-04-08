@@ -1772,6 +1772,12 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 
 **Acceptance:** Every function has a concrete output schema after loading.
 
+**Design notes (implemented):**
+- "Union" is narrow: structural equality on resolved JSON bodies. Non-matching terminals error (`MechError::InferenceFailed`); no `oneOf`/`anyOf` synthesis is attempted.
+- Terminal prompt blocks contribute their resolved `schema:` (inline or `$ref:#name`). Terminal call blocks contribute the callee's output schema only when the block is a single-function call with no `output:` mapping; list-form calls or call blocks that declare an `output:` mapping cannot be structurally inferred and must live under a function with an explicit `output:` schema.
+- A fixed-point pass resolves chains of `infer` functions (A's terminal calls B, B's output also `infer`). Functions still unresolved after the fixed point error out.
+- Inference mutates the parsed `WorkflowFile` in place, replacing `SchemaRef::Infer` with `SchemaRef::Inline`, and is idempotent on a second run. Public entry point: `mech::infer_function_outputs(&mut WorkflowFile)`.
+
 ---
 
 ### Deliverable 7 — Workflow loader (end-to-end load pipeline)

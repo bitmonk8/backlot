@@ -967,3 +967,18 @@ mech/src/validate.rs (~line 42) and mech/src/lib.rs (~line 29) — `knows(...)` 
 
 ### 143. External `$ref:path` schema/agent file resolution deferred to D7
 mech/src/validate.rs (~line 694 and ~line 862) — `$ref:#name` is checked here; `$ref:path` (external file) is silently accepted. Spec §10.1 requires file existence checks at load time. Tracked to the Deliverable 7 workflow loader. **Tracking.**
+
+### 144. Duplicated terminal-block detection between validate.rs and schema/infer.rs
+mech/src/schema/infer.rs (~lines 143-151, 244-249) and mech/src/validate.rs (~lines 340-369, `inferred_terminals`) both encode "a block with no outgoing transitions is terminal" and the `func.terminals.is_empty() ? inferred : explicit` fallback. Lift a shared helper (e.g. `FunctionDef::effective_terminals`) so the two sites cannot drift as BlockDef variants evolve. **Separation.**
+
+### 145. Duplicated `$ref:#name` resolution between SchemaRegistry and schema/infer.rs
+mech/src/schema/infer.rs `resolve_schema_ref` (~lines 255-265) re-implements `$ref:` / `#` prefix stripping and shared-schema lookup that `SchemaRegistry` already owns (mech/src/schema/registry.rs). Grow a `SchemaRegistry::resolve_to_json(&SchemaRef) -> Option<&JsonValue>` helper and delegate from infer to avoid drift on what counts as a valid `$ref`. **Separation.**
+
+### 146. Weak assertions in mech schema inference tests
+mech/src/schema/infer.rs tests — `multiple_terminals_with_identical_schemas_unify` only asserts `/properties/done` exists; should also assert `/properties/done/type == "boolean"` and that `start` block's `/properties/r` is absent. `ref_and_inline_interact_correctly` does not prove the `$ref` path was hit (same-body inline would also pass); add a variant where one terminal is `$ref` and the other structurally differs and expect an incompatibility error. `terminal_call_block_inferred_callee_resolves_via_fixed_point` does not force fixed-point because `BTreeMap` iteration order happens to visit `callee` before `caller`; rename functions so caller sorts first (e.g. `a_caller` / `z_callee`) to actually exercise the multi-pass loop. **Testing.**
+
+### 147. Missing test coverage for mech infer error branches
+mech/src/schema/infer.rs — no test for a prompt terminal with block-level `schema: infer` (the `SchemaRef::Infer` defensive branch in `terminal_block_output`). No test for list-form call block as terminal (`CallSpec` non-`Single`) hitting the "list-form call block cannot be structurally inferred" branch. No test for explicit `terminals:` field on a function. No test for `$ref:#unknown` terminal prompt (unresolved reference branch). **Testing.**
+
+### 148. `MechError::InferenceFailed` variant name is generic
+mech/src/error.rs (~line 180) — `InferenceFailed` does not say *what* was being inferred. The module scope is specifically function output schema inference; rename to `OutputSchemaInferenceFailed` (or split by kind if mech ever gains input inference) to match the variant's actual responsibility. Also consider reconciling with the pre-existing `SchemaValidationFailure` (runtime) / `SchemaValidationFailed` (load-time) pair, which differ only by tense and are now joined by another `-Failed` load-time variant. **Naming.**
