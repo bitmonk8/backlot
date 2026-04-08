@@ -814,6 +814,18 @@ epic/src/test_support.rs — No mechanism to inject `Err` for `verify_branch_{co
 ### 95. `branch_verify_all_three_phases_pass` test duplicates `single_leaf`
 epic/src/orchestrator/tests.rs — Same mock setup and assertions as `single_leaf`. Adds no unique verification of three-phase behavior. **Testing.**
 
+### 96. `gaps_filled` double-counts for ProjectAndWeb scope
+src/knowledge.rs lines 574-607 — Both the codebase exploration loop and web search loop independently increment `gaps_filled` for the same gap. A gap filled by both sources counts twice. The counter is informational only (displayed as "Gaps filled: N" to the calling agent), no control flow depends on it. **Correctness.**
+
+### 97. `fill_method` match in `identify_gaps` disconnected from `ResearchScope`
+src/knowledge.rs lines 271-276 — String-matches on `scope_label()` return values instead of being a method on `ResearchScope`. Adding a new scope variant could silently fall to the `_ =>` default arm. Should be `ResearchScope::fill_description()` colocated with the enum. **Separation.**
+
+### 98. `fill_method` match untested
+src/knowledge.rs lines 271-276 — No test verifies that all `scope_label()` values are covered by the match (the `_ =>` fallback arm would silently produce generic text for any unhandled scope). **Testing.**
+
+### 99. `run_pipeline` with Web/ProjectAndWeb scopes untested
+src/knowledge.rs lines 540-633 — The core behavioral change (scope-conditional codebase exploration and web search loops) has no integration test. Consistent with pre-existing gap for Project scope (issue 29). **Testing.**
+
 ---
 
 ## Cue

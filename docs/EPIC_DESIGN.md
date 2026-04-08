@@ -250,7 +250,7 @@ A reel agent manages document placement, merging, and restructuring. Vault const
 Exposed as a `ResearchQuery` custom tool via reel's `ToolHandler` trait. Injected into `AgentRequestConfig::custom_tools` for execute, decompose, fix, and recovery design phases.
 
 ```
-ResearchQuery { question: String, scope?: "vault" | "project" }
+ResearchQuery { question: String, scope?: "vault" | "project" | "web" | "both" }
   -> formatted text (gaps_filled + answer + document_refs)
 ```
 
@@ -260,12 +260,16 @@ Implements a multi-step gap-filling pipeline:
 research_query(question, scope)
     |-- Step 1: vault.query(question) -> QueryResult with coverage
     |-- Step 2: If coverage != Full -> gap identification (Haiku, no tools, structured output)
-    |           Returns list of specific gaps
-    |-- Step 3: If gaps exist and scope == Project:
+    |           Returns list of specific gaps (scope-aware prompting)
+    |-- Step 3a: If scope includes project (Project or ProjectAndWeb):
     |   |-- For each gap:
     |       |-- Spawn Haiku agent with read-only tools to explore codebase
     |       |-- vault.record() findings (best-effort)
-    |-- Step 4: Synthesis (Haiku, no tools) -- combine vault knowledge + exploration findings
+    |-- Step 3b: If scope includes web (Web or ProjectAndWeb):
+    |   |-- For each gap:
+    |       |-- Spawn Haiku agent with ToolGrant::NETWORK to search the web
+    |       |-- vault.record() findings (best-effort)
+    |-- Step 4: Synthesis (Haiku, no tools) -- combine vault knowledge + all findings
     |-- Return ResearchResult { answer, document_refs, gaps_filled }
 ```
 
@@ -274,9 +278,9 @@ Short-circuit paths:
 - Vault-only scope: return vault answer immediately (no exploration)
 - Gap analysis says sufficient: return vault answer (no exploration)
 
-All internal agent calls use Haiku ("fast" model key). Exploration agents get `ToolGrant::TOOLS` (read-only: Read, Glob, Grep, NuShell). Each pipeline step's usage is tracked in the usage sink and folded into the calling task's cost.
+All internal agent calls use Haiku ("fast" model key). Codebase exploration agents get `ToolGrant::TOOLS` (read-only: Read, Glob, Grep, NuShell). Web search agents get `ToolGrant::NETWORK` (NuShell with network access). Each pipeline step's usage is tracked in the usage sink and folded into the calling task's cost.
 
-**Scope parameter**: `vault` queries stored knowledge only. `project` (default) queries vault then explores the codebase to fill gaps. WEB scope (web search) is deferred.
+**Scope parameter**: `vault` queries stored knowledge only. `project` (default) queries vault then explores the codebase to fill gaps. `web` queries vault then searches the web. `both` queries vault then explores the codebase and searches the web sequentially.
 
 **Error handling**: Each pipeline step degrades gracefully. Gap identification failure falls back to vault answer. Exploration failure for a gap is logged and skipped. Synthesis failure falls back to vault answer with raw findings appended. Vault record operations are best-effort.
 

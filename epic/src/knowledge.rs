@@ -1,8 +1,9 @@
 // Vault integration: ResearchTool (reel ToolHandler) with gap-filling pipeline.
 //
-// Pipeline: vault query -> gap identification -> codebase exploration -> synthesis.
-// All internal agent calls use Haiku ("fast" model key). Exploration agents get
-// read-only tools (ToolGrant::TOOLS). Gap identification and synthesis are
+// Pipeline: vault query -> gap identification -> codebase/web exploration -> synthesis.
+// All internal agent calls use Haiku ("fast" model key). Codebase exploration agents
+// get read-only tools (ToolGrant::TOOLS). Web search agents get ToolGrant::NETWORK
+// (NuShell with network access). Gap identification and synthesis are
 // structured-output calls with no tools.
 
 use crate::agent::SessionMeta;
@@ -27,6 +28,10 @@ pub enum ResearchScope {
     Vault,
     /// Query vault + explore project codebase to fill gaps.
     Project,
+    /// Query vault + search the web to fill gaps.
+    Web,
+    /// Query vault + explore codebase + search the web to fill gaps.
+    ProjectAndWeb,
 }
 
 impl ResearchScope {
@@ -34,7 +39,29 @@ impl ResearchScope {
     fn from_str_opt(s: Option<&str>) -> Self {
         match s {
             Some("vault") => Self::Vault,
+            Some("web") => Self::Web,
+            Some("both") => Self::ProjectAndWeb,
             _ => Self::Project,
+        }
+    }
+
+    /// Whether this scope includes codebase exploration.
+    const fn includes_project(self) -> bool {
+        matches!(self, Self::Project | Self::ProjectAndWeb)
+    }
+
+    /// Whether this scope includes web search.
+    const fn includes_web(self) -> bool {
+        matches!(self, Self::Web | Self::ProjectAndWeb)
+    }
+
+    /// Human-readable label for gap identification prompts.
+    const fn scope_label(self) -> &'static str {
+        match self {
+            Self::Vault => "vault",
+            Self::Project => "project",
+            Self::Web => "web",
+            Self::ProjectAndWeb => "project+web",
         }
     }
 }
@@ -90,7 +117,7 @@ fn gap_analysis_schema() -> serde_json::Value {
             "gaps": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "Specific information gaps that need to be filled by exploring the project codebase"
+                "description": "Specific information gaps that need to be filled by exploring the project codebase and/or searching the web"
             },
             "sufficient": {
                 "type": "boolean",
@@ -182,8 +209,9 @@ fn format_findings(findings: &[Finding]) -> String {
 
 /// Custom reel tool that exposes the research service to agents.
 ///
-/// Pipeline: vault query -> gap identification -> codebase exploration -> synthesis.
-/// All internal agent calls use Haiku. Exploration agents get read-only tools.
+/// Pipeline: vault query -> gap identification -> codebase/web exploration -> synthesis.
+/// All internal agent calls use Haiku. Codebase agents get read-only tools.
+/// Web search agents get network-enabled tools.
 pub struct ResearchTool {
     vault: Arc<vault::Vault>,
     agent: Arc<reel::Agent>,
@@ -231,6 +259,7 @@ impl ResearchTool {
         &self,
         question: &str,
         query_result: &vault::QueryResult,
+        scope_label: &str,
     ) -> anyhow::Result<GapAnalysis> {
         let coverage_label = match query_result.coverage {
             vault::Coverage::Full => "Full",
@@ -240,23 +269,32 @@ impl ResearchTool {
 
         let extracts_text = format_extracts(&query_result.extracts);
 
-        let system_prompt = "You are an information gap analyst. Given a question and \
+        let fill_method = match scope_label {
+            "project" => "exploring the project codebase",
+            "web" => "searching the web",
+            "project+web" => "exploring the project codebase and searching the web",
+            _ => "exploring available sources",
+        };
+
+        let system_prompt = format!(
+            "You are an information gap analyst. Given a question and \
             existing knowledge from a document store, identify specific information gaps \
-            that need to be filled by exploring the project codebase. Focus on gaps that \
+            that need to be filled by {fill_method}. Focus on gaps that \
             would cause wrong decisions if not filled. Do not list nice-to-have information. \
-            Set sufficient=true if the existing knowledge adequately answers the question.";
+            Set sufficient=true if the existing knowledge adequately answers the question."
+        );
 
         let query = format!(
             "QUESTION:\n{question}\n\n\
              COVERAGE: {coverage_label}\n\n\
              EXISTING ANSWER:\n{answer}\n\n\
              SUPPORTING EXTRACTS:\n{extracts_text}\n\n\
-             Identify what specific information gaps remain.",
+             Identify what specific information gaps remain that can be filled by {fill_method}.",
             answer = query_result.answer,
         );
 
         self.run_haiku(
-            system_prompt,
+            &system_prompt,
             &query,
             gap_analysis_schema(),
             reel::ToolGrant::empty(),
@@ -265,7 +303,7 @@ impl ResearchTool {
     }
 
     // -----------------------------------------------------------------------
-    // Step 3: Codebase exploration (Haiku, read-only tools)
+    // Step 3a: Codebase exploration (Haiku, read-only tools)
     // -----------------------------------------------------------------------
 
     async fn explore_codebase(&self, question: &str, gap: &str) -> anyhow::Result<Vec<Finding>> {
@@ -287,6 +325,36 @@ impl ResearchTool {
                 &query,
                 exploration_result_schema(),
                 reel::ToolGrant::TOOLS,
+            )
+            .await?;
+        Ok(result.findings)
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3b: Web search (Haiku, network-enabled tools)
+    // -----------------------------------------------------------------------
+
+    async fn search_web(&self, question: &str, gap: &str) -> anyhow::Result<Vec<Finding>> {
+        let system_prompt = "You are a web search agent. Your job is to search the web \
+            for current information about a specific topic. Focus on authoritative sources \
+            (official documentation, reputable technical sources). Extract specific, actionable \
+            information. Note source URLs for verification. Report only factual observations. \
+            Do not speculate or make recommendations.";
+
+        let query = format!(
+            "RESEARCH QUESTION:\n{question}\n\n\
+             SPECIFIC GAP TO FILL:\n{gap}\n\n\
+             Search the web using the available tools (NuShell with network access) \
+             to find information that addresses the gap above. Report your findings \
+             with source URLs.",
+        );
+
+        let result: ExplorationResult = self
+            .run_haiku(
+                system_prompt,
+                &query,
+                exploration_result_schema(),
+                reel::ToolGrant::NETWORK,
             )
             .await?;
         Ok(result.findings)
@@ -389,9 +457,10 @@ impl reel::ToolHandler for ResearchTool {
             name: "ResearchQuery".into(),
             description: "Query the project knowledge base for accumulated research, \
                           discoveries, requirements, and design decisions. When vault \
-                          knowledge is insufficient, explores the project codebase to \
-                          fill gaps. Use when you need context about the project or \
-                          answers to questions about prior work."
+                          knowledge is insufficient, explores the project codebase \
+                          and/or searches the web to fill gaps. Use when you need \
+                          context about the project or answers to questions about \
+                          prior work."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -402,8 +471,8 @@ impl reel::ToolHandler for ResearchTool {
                     },
                     "scope": {
                         "type": "string",
-                        "enum": ["vault", "project"],
-                        "description": "Where to look. 'vault' = stored knowledge only. 'project' = vault + codebase exploration to fill gaps. Default: project."
+                        "enum": ["vault", "project", "web", "both"],
+                        "description": "Where to look. 'vault' = stored knowledge only. 'project' = vault + codebase exploration. 'web' = vault + web search. 'both' = vault + codebase + web search. Default: project."
                     }
                 },
                 "required": ["question"]
@@ -483,8 +552,11 @@ impl ResearchTool {
             return Ok(vault_only_result(&query_result));
         }
 
-        // Step 2: Gap identification
-        let gap_analysis = match self.identify_gaps(question, &query_result).await {
+        // Step 2: Gap identification (scope-aware)
+        let gap_analysis = match self
+            .identify_gaps(question, &query_result, scope.scope_label())
+            .await
+        {
             Ok(ga) => ga,
             Err(e) => {
                 eprintln!("Research: gap identification failed: {e}");
@@ -496,21 +568,41 @@ impl ResearchTool {
             return Ok(vault_only_result(&query_result));
         }
 
-        // Step 3: Codebase exploration (sequential, capped at MAX_GAPS)
         let mut gaps_filled = 0u32;
         let mut all_findings: Vec<Finding> = Vec::new();
 
-        for gap in gap_analysis.gaps.iter().take(MAX_GAPS) {
-            match self.explore_codebase(question, gap).await {
-                Ok(findings) => {
-                    if !findings.is_empty() {
-                        self.record_findings(question, &findings).await;
-                        all_findings.extend(findings);
-                        gaps_filled += 1;
+        // Step 3a: Codebase exploration (sequential, capped at MAX_GAPS)
+        if scope.includes_project() {
+            for gap in gap_analysis.gaps.iter().take(MAX_GAPS) {
+                match self.explore_codebase(question, gap).await {
+                    Ok(findings) => {
+                        if !findings.is_empty() {
+                            self.record_findings(question, &findings).await;
+                            all_findings.extend(findings);
+                            gaps_filled += 1;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Research: exploration failed for gap '{gap}': {e}");
                     }
                 }
-                Err(e) => {
-                    eprintln!("Research: exploration failed for gap '{gap}': {e}");
+            }
+        }
+
+        // Step 3b: Web search (sequential, capped at MAX_GAPS)
+        if scope.includes_web() {
+            for gap in gap_analysis.gaps.iter().take(MAX_GAPS) {
+                match self.search_web(question, gap).await {
+                    Ok(findings) => {
+                        if !findings.is_empty() {
+                            self.record_findings(question, &findings).await;
+                            all_findings.extend(findings);
+                            gaps_filled += 1;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Research: web search failed for gap '{gap}': {e}");
+                    }
                 }
             }
         }
@@ -573,7 +665,7 @@ fn format_research_result(result: &ResearchResult) -> String {
 /// sink handle (drain after agent run to fold research costs into task usage).
 ///
 /// The `agent` parameter is the reel Agent used for internal Haiku calls
-/// (gap identification, codebase exploration, synthesis).
+/// (gap identification, codebase exploration, web search, synthesis).
 pub fn build_research_tool(
     vault: &Arc<vault::Vault>,
     agent: &Arc<reel::Agent>,
@@ -667,6 +759,59 @@ mod tests {
             ResearchScope::from_str_opt(Some("vault")),
             ResearchScope::Vault
         );
+    }
+
+    #[test]
+    fn scope_from_str_web() {
+        assert_eq!(ResearchScope::from_str_opt(Some("web")), ResearchScope::Web);
+    }
+
+    #[test]
+    fn scope_from_str_both() {
+        assert_eq!(
+            ResearchScope::from_str_opt(Some("both")),
+            ResearchScope::ProjectAndWeb
+        );
+    }
+
+    #[test]
+    fn scope_includes_project() {
+        assert!(!ResearchScope::Vault.includes_project());
+        assert!(ResearchScope::Project.includes_project());
+        assert!(!ResearchScope::Web.includes_project());
+        assert!(ResearchScope::ProjectAndWeb.includes_project());
+    }
+
+    #[test]
+    fn scope_includes_web() {
+        assert!(!ResearchScope::Vault.includes_web());
+        assert!(!ResearchScope::Project.includes_web());
+        assert!(ResearchScope::Web.includes_web());
+        assert!(ResearchScope::ProjectAndWeb.includes_web());
+    }
+
+    #[test]
+    fn scope_label_values() {
+        assert_eq!(ResearchScope::Vault.scope_label(), "vault");
+        assert_eq!(ResearchScope::Project.scope_label(), "project");
+        assert_eq!(ResearchScope::Web.scope_label(), "web");
+        assert_eq!(ResearchScope::ProjectAndWeb.scope_label(), "project+web");
+    }
+
+    #[test]
+    fn tool_definition_scope_enum_includes_web() {
+        let vault = make_dummy_vault();
+        let agent = make_dummy_agent();
+        let (tool, _sink) = build_research_tool(&vault, &agent);
+        let def = tool.definition();
+        let scope_enum = def.parameters["properties"]["scope"]["enum"]
+            .as_array()
+            .expect("scope should have enum array");
+        let values: Vec<&str> = scope_enum.iter().filter_map(|v| v.as_str()).collect();
+        assert!(values.contains(&"web"), "scope enum missing 'web'");
+        assert!(values.contains(&"both"), "scope enum missing 'both'");
+        assert!(values.contains(&"vault"), "scope enum missing 'vault'");
+        assert!(values.contains(&"project"), "scope enum missing 'project'");
     }
 
     // -----------------------------------------------------------------------
