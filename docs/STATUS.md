@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Deliverable 4 complete. JSON Schema registry with `$ref:#name` resolution, inline schema compilation, cycle detection, validation with JSON-Pointer error paths, and an `infer` deferred-marker landed in `mech/src/schema/registry.rs` (uses the `jsonschema` crate). 51 tests passing (3 error + 13 schema parse + 14 schema registry + 21 cel), zero clippy warnings.
+**Phase:** Deliverable 5 complete. Load-time validation pass (`mech/src/validate.rs`) walks a parsed `WorkflowFile` and emits the complete list of errors + warnings per spec §10.1 in a single pass (never short-circuits). Checks cover structural rules (block discrimination, name format + reserved names, context declarations with type/initial compatibility, `set_context`/`set_workflow` target validity, terminal block validation, `n_of_m` range), graph rules (dataflow DAG cycle detection, transition target existence, call target existence, unreachable blocks, dead transitions after unconditional fallback, parallel context-write conflicts), and type rules (JSON Schema validity with `object` root + non-empty `required`, workflow-level `$ref:#name` resolution, template reference resolution via AST walk, dominator- or `depends_on`-based reachability, CEL compilation + variable scope (the 5 namespaces), agent model resolution via a pluggable `ModelChecker` trait, agent grant validity + normalization warning for `write_paths` without `write`, agent `extends` resolution and cycle detection, per-call list consistency, and call-block input schema match against the callee's required fields). 91 tests passing (3 error + 19 schema parse + 14 schema registry + 21 cel + 34 validate), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -116,7 +116,7 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 2. ~~YAML schema types (parse-only, serde)~~ ✅
 3. ~~CEL expression compilation & evaluation (5 namespaces, template interpolation)~~ ✅
 4. ~~Schema registry & JSON Schema handling (`$ref` resolution)~~ ✅
-5. Load-time validation (the 24+ checks from §10)
+5. ~~Load-time validation (the 24+ checks from §10)~~ ✅
 6. Schema inference for function outputs (`output: infer`)
 7. Workflow loader (end-to-end load pipeline)
 8. Context & state management (workflow/context/block namespaces)
@@ -130,7 +130,7 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 16. End-to-end integration test suite (hermetic, fake LLM)
 17. Documentation polish & examples
 
-**Immediate next action:** Deliverable 5 — Load-time validation (the 24+ checks from §10).
+**Immediate next action:** Deliverable 6 — Schema inference for function outputs (`output: infer`).
 
 ---
 

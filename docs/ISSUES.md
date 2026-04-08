@@ -916,3 +916,54 @@ mech/src/schema/registry.rs — The file's own module doc explicitly flags the c
 
 ### 126. Registry test coverage gaps
 mech/src/schema/registry.rs tests — Missing: (a) a 3+ node cycle (a→b→c→a) to exercise `chain` accumulation beyond length 2; (b) a multi-hop non-cyclic alias chain (c→b→a) to exercise the `loop { continue }` path in `follow_top_level_ref` more than once; (c) a `$ref:./other.json`-shaped input to pin the current "external file refs are rejected" contract until D7; (d) a cycle test using the string form `"$ref:#a"` (current cycle tests only use the object form). **Testing.**
+
+### 127. Dataflow cycle error message inverts edge direction; duplicate reports possible
+mech/src/validate.rs `detect_dataflow_cycles` (~line 902) — The error message says "`{node}` -> `{next}` closes a cycle in `depends_on`", but `depends_on` points from dependent to prerequisite, so the data edge runs `next → node`. Also, a single cycle may be reported multiple times from different DFS start points. **Correctness (low).**
+
+### 128. `validate_named_agents` duplicate-reports missing extends target
+mech/src/validate.rs (~line 763) — For N agents in a chain whose terminal `extends` points at a missing name, the "extends target not a named agent" error can be pushed up to N times. Dedupe or check each agent's own `extends` once in the top loop. **Correctness (low).**
+
+### 129. Heavy Prompt/Call arm duplication in validate_block and validate_cel_and_templates
+mech/src/validate.rs lines ~412-559 and ~1038-1215 — The Prompt and Call arms duplicate ~60 lines each iterating `depends_on`, `set_context`, `set_workflow`, and transitions. Extract per-kind helpers or a shared `validate_common_block_fields`. Also bundle `check_cel_expr`'s 8 parameters into a `CelCtx<'_>` struct (removes the `clippy::too_many_arguments` allow). **Simplification.**
+
+### 130. Misleading `validate_agent_ref_with_defaults` pair
+mech/src/validate.rs (~line 828 / ~867) — `validate_agent_ref` takes `&WorkflowDefaults`; `validate_agent_ref_with_defaults` takes `Option<&WorkflowDefaults>`. The `_with_defaults` suffix implies the other is "without defaults" — opposite of reality. Rename or restructure. **Naming.**
+
+### 131. Hand-rolled dominator algorithm over-engineered for reverse-reachability need
+mech/src/validate.rs `compute_dominators` (~line 1414) — The sole use is "does target_block reach cur_block through control-flow or depends_on?" which is plain reverse-reachability, not dominance. A combined predecessor-graph BFS from `cur_block` would replace ~60 lines of worklist iteration. **Simplification.**
+
+### 132. `normalized_grants` name misleads; only caller checks `"write"` membership
+mech/src/validate.rs (~line 1335) — Name suggests normalization but the function also *expands* grants (adds `tools` under various conditions). The sole caller uses only `normalized.contains("write")` which is equivalent to `ac.grant.iter().any(|g| g == "write")`. Inline or rename to `effective_grants`. **Naming / simplification.**
+
+### 133. `CollectedRefs.block_refs` has a pointless outer Option
+mech/src/validate.rs (~line 1587) — Field typed `Vec<Option<(String, Option<String>)>>` but the producer at line 1654 only ever pushes `Some(...)`. The outer Option is dead structure misleading readers. Drop to `Vec<(String, Option<String>)>`. **Cruft / simplification.**
+
+### 134. Unused `_fn_name` parameter in validate_cel_and_templates
+mech/src/validate.rs (~line 1038) — The `_fn_name: &str` parameter is unused (underscore-prefixed). Remove it rather than keep as dead API surface. **Cruft.**
+
+### 135. CEL reference-extraction helpers belong in `mech::cel`
+mech/src/validate.rs lines ~1519-1700 — `CollectedRefs`, `collect_references`, `walk`, `walk_member_subexprs`, `flatten_member_chain`, and `extract_template_exprs` operate purely on `cel_parser::Expression` and `${...}` template strings with no validator state. They belong in `mech/src/cel.rs` (or `cel::refs`) where future linters or the runtime renderer could share them. **Placement.**
+
+### 136. `resolve_schema_value` and `value_matches_json_type` belong in schema/registry.rs
+mech/src/validate.rs (~lines 1322 and 1507) — Pure schema-resolution / JSON-Schema predicates are validator-agnostic and mirror functionality already in `mech/src/schema/registry.rs`. Move next to the rest of the JSON Schema machinery. **Placement.**
+
+### 137. `check_*` vs `validate_*` naming inconsistency
+mech/src/validate.rs — Most methods are `validate_*` but `check_cel_expr`, `check_template`, `check_call_fn` break the pattern for the same "emit errors into report" responsibility. Rename to `validate_*`. **Naming.**
+
+### 138. validate.rs (2606 lines) warrants promotion to `validate/` directory
+mech/src/validate.rs — Single flat file mixes public API types (`ModelChecker`, `Location`, `ValidationIssue`, `ValidationReport`), the `Validator` walker, graph algorithms, CEL ref extraction, schema helpers, and 40+ inline tests. Promote to `validate/mod.rs` + `validate/model.rs` + `validate/report.rs` + `validate/walker.rs` mirroring the `schema/` directory layout. **Placement.**
+
+### 139. Double CEL parse per expression
+mech/src/validate.rs (~line 1233) — `cel_parser::parse(expr_src)` is called after `CelExpression::compile(expr_src)`. `compile` presumably parses internally; exposing the AST on `CelExpression` would avoid parsing every workflow expression twice. **Simplification / performance.**
+
+### 140. `collects_multiple_errors` test is weak
+mech/src/validate.rs (~line 2525) — Asserts only `r.errors.len() >= 2`. A regression where the same error is reported twice would satisfy this. Use `assert_err_contains` for each of the two specific expected errors, and consider exercising aggregation across different functions + different check categories (structural + graph + type) in one pass. **Testing.**
+
+### 141. Missing dedicated passing fixtures for most §10.1 checks
+mech/src/validate.rs — D5 spec requires each check have "at least one failing fixture AND one passing fixture". Many checks have only the failing side and rely on the global worked-example test for positive coverage. Rows lacking a dedicated positive test: invalid block name, reserved name, schema empty-required, context var types, `set_context`/`set_workflow`, dataflow DAG, transition target, call target, `n_of_m` with valid `n`, terminal validation, agent extends/grant/model/`$ref:#name`, input schema match. **Testing.**
+
+### 142. `ModelChecker::knows` and bare `Location` re-export
+mech/src/validate.rs (~line 42) and mech/src/lib.rs (~line 29) — `knows(...)` reads awkwardly; prefer `is_known` / `contains`. The trait itself might be better named `ModelRegistry` / `ModelResolver`. Separately, `Location` is re-exported unqualified at the crate root where it could collide with future parser/CEL error locations; keep it module-qualified or rename. **Naming / placement.**
+
+### 143. External `$ref:path` schema/agent file resolution deferred to D7
+mech/src/validate.rs (~line 694 and ~line 862) — `$ref:#name` is checked here; `$ref:path` (external file) is silently accepted. Spec §10.1 requires file existence checks at load time. Tracked to the Deliverable 7 workflow loader. **Tracking.**

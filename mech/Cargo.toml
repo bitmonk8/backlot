@@ -9,6 +9,7 @@ rust-version.workspace = true
 cue.workspace = true
 reel.workspace = true
 cel-interpreter.workspace = true
+cel-parser = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yml.workspace = true

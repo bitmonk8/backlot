@@ -1554,6 +1554,7 @@ name = "mech"
 version = "0.1.0"
 dependencies = [
  "cel-interpreter",
+ "cel-parser",
  "cue",
  "jsonschema",
  "reel",
