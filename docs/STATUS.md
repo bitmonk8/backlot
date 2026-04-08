@@ -2,7 +2,7 @@
 
 ## Flick
 
-**Phase:** Complete. 373 tests passing, zero clippy errors.
+**Phase:** Complete. 347 tests passing, zero clippy errors. On reqwest 0.13.2.
 
 **Implemented:**
 - Monadic LLM call architecture (single model call per invocation, JSON result to stdout)
@@ -16,8 +16,7 @@
 - CLI: `provider add/list`, `model add/list/remove`, `init`, `run`
 - CLI input hardening (stdin cap, key validation, whitespace rejection)
 
-**Next Work:**
-- reqwest 0.13 upgrade (intermittent rustc crashes on this machine are CPU-related — Intel i9-14900K instability — not a windows-sys or rustc bug)
+**Next Work:** None identified.
 
 ---
 

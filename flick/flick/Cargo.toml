@@ -12,7 +12,7 @@ serde_yml.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "fs", "io-util", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 chacha20poly1305 = "0.10"
 zeroize = { version = "1", features = ["alloc"] }
 hex = "0.4"
