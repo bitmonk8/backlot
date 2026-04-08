@@ -75,7 +75,7 @@
 
 ## Cue
 
-**Phase:** Complete. 7 tests passing, zero clippy errors.
+**Phase:** Complete. 7 tests passing, zero clippy errors. Graph/workflow DSL spec in progress.
 
 **Implemented:**
 - Generic recursive task orchestration framework
@@ -86,6 +86,9 @@
 - `CueEvent` enum (10 orchestration event variants)
 - `LimitsConfig` (depth, retry budget, fix rounds, recovery rounds, task cap)
 - Depends only on `traits` crate (for `EventEmitter<E>`)
+
+**Next Work:**
+1. **Graph/Workflow DSL** — YAML-based workflow DSL for structured agent workflows (CFG, CTFG, dataflow modes). Initial research in `docs/GRAPHS_DSL.md`, being iteratively developed into a complete spec. See [GRAPHS_DSL.md](GRAPHS_DSL.md).
 
 ---
 
