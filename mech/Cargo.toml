@@ -1,0 +1,23 @@
+[package]
+name = "mech"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cue.workspace = true
+reel.workspace = true
+cel-interpreter.workspace = true
+serde = { workspace = true }
+serde_yml.workspace = true
+schemars.workspace = true
+jsonschema.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

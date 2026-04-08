@@ -5,6 +5,7 @@ members = [
     "flick/flick-cli",
     "lot/lot",
     "lot/lot-cli",
+    "mech",
     "reel/reel",
     "reel/reel-cli",
     "epic",
@@ -25,6 +26,7 @@ rust-version = "1.85"
 cue = { path = "cue" }
 flick = { path = "flick/flick" }
 lot = { path = "lot/lot" }
+mech = { path = "mech" }
 reel = { path = "reel/reel" }
 traits = { path = "traits" }
 vault = { path = "vault/vault" }
@@ -40,6 +42,9 @@ toml = "0.8"
 serde_yml = "0.0.12"
 anyhow = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+cel-interpreter = "0.9"
+schemars = "0.8"
+jsonschema = "0.28"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

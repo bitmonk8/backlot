@@ -843,3 +843,16 @@ docs/STATUS.md line 94 — The one-line Phase summary for Epic still reads "file
 ## Cue
 
 No standalone issues. All cue-related findings tracked under Epic (issues 72-91) as they concern the extraction boundary.
+
+---
+
+## Mech
+
+### 104. mech/Cargo.toml declares unused dependencies
+mech/Cargo.toml — Deliverable 1 only needs `thiserror`, but the manifest already pulls in `cue`, `reel`, `cel-interpreter`, `serde`, `serde_yml`, `schemars`, `jsonschema`, and `tokio`. These should be added in the deliverables that first use them to keep compile times and the dependency surface minimal. **Simplification.**
+
+### 105. `SchemaValidationFailure` Display embeds full raw LLM output
+mech/src/error.rs line 24 — The `#[error(...)]` format includes `{raw_output}`, which for realistic LLM outputs produces unwieldy single-line error messages. Keep the field for programmatic access but drop it from the Display format. **Simplification.**
+
+### 106. `MechError::Validation` variant name conflicts with `SchemaValidationFailure`
+mech/src/error.rs lines 108-115 — `Validation` is a load-time aggregate but its name does not distinguish it from the runtime `SchemaValidationFailure` (§10.2). Rename to `LoadValidation` or `WorkflowValidation` to match the doc comment's stated responsibility. **Naming.**
