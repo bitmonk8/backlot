@@ -37,9 +37,9 @@ Cue provides generic recursive task orchestration (`TaskNode`, `TaskStore`, `Orc
 - **Data edge** — A `depends_on` declaration. The block cannot execute until all named dependencies have produced output. Acyclic by definition.
 - **Activation rule** — A block with inbound control edges is *activated* when a transition targets it. A block with only data edges is activated implicitly when its dependencies are met. A block with both requires the transition to fire AND all dependencies to be satisfied. (Control gates activation; data gates readiness.)
 - **Schema** — JSON Schema (inline YAML or `$ref` path) declaring the typed output of a block. Used for load-time validation of downstream template references.
-- **Template variable** — Mustache-style references (`{{input.*}}`, `{{output.*}}`, `{{context.*}}`, `{{blocks.<name>.output.*}}`) interpolated into prompt text. Scoping rules defined in §7.
-- **Guard** — A CEL expression on a transition. Evaluated against the current block's output and the workflow context.
-- **Context** — A mutable key-value scratchpad scoped to a function invocation. Used for cross-block state (retry counters, accumulated data).
+- **Template expression** — `{{...}}` references interpolated into prompt text. The expression inside the braces is a CEL expression evaluated against the available namespaces (`input`, `output`, `context`, `workflow`, `blocks`). Simple paths like `{{input.text}}` and computed values like `{{context.score >= 0.8 ? "high" : "low"}}` both work. Scoping rules defined in §7.
+- **Guard** — A CEL expression on a transition. Evaluated against the current block's output, function context, and workflow context.
+- **Context** — Mutable typed variables declared with initial values. Two levels: **workflow context** (`workflow.*`, shared across all function invocations) and **function context** (`context.*`, scoped to a single invocation). Variables are pre-declared — blocks can only write to declared variables, and all variables always exist.
 
 ## 4. Graph Model — Unified CDFG
 
@@ -78,27 +78,61 @@ How a block fires depends on which inbound edge types it has:
 
 ### 4.4 Function Calls
 
-A **call block** invokes one or more functions. `call` accepts a single function name (string) or a list. Execution is **sequential by default**. The optional `parallel` property opts into concurrent execution and specifies the join strategy.
+A **call block** invokes one or more functions. `call` accepts three forms:
+
+1. **Single function** — a string naming one function. The block-level `input` maps to that function.
+2. **Uniform list** — a list of strings. All functions share the block-level `input` (all must accept the same input fields).
+3. **Per-call list** — a list of `{ fn, input }` objects. Each call carries its own input mapping, allowing heterogeneous function signatures.
+
+Execution is **sequential by default**. The optional `parallel` property opts into concurrent execution and specifies the join strategy.
 
 ```yaml
-# Sequential, single function
+# Single function — block-level input
 lookup:
   call: sentiment_check
   input: { text: "{{input.text}}" }
 
-# Sequential, multiple functions — executed in list order
+# Uniform list — shared input, sequential
 pipeline:
   call: [extract, validate, transform]
   input: { text: "{{input.text}}" }
 
-# Parallel, multiple functions
+# Per-call list — each call has its own input, parallel
 analyze:
-  call: [sentiment_check, policy_lookup, translation]
+  call:
+    - fn: sentiment_check
+      input: { text: "{{input.text}}" }
+    - fn: policy_lookup
+      input: { query: "{{input.text}}", category: "{{context.category}}" }
+    - fn: translation
+      input: { text: "{{input.text}}", target_lang: "en" }
   parallel: all       # all | any | n_of_m
-  input: { text: "{{input.text}}" }
 ```
 
-**Sequential list execution:** Functions execute in list order. All receive the same `input`. Each function's output is accessible by name via `{{blocks.<name>.output.*}}` in subsequent blocks. The call block's own `output` is the output of the last function in the list.
+**Input mapping rules:**
+
+- **Single function or uniform list:** The block-level `input` field is required and maps to all called functions.
+- **Per-call list:** Each entry carries its own `input`. A block-level `input` is forbidden (ambiguous which takes precedence).
+- Detection: if `call` is a list and the first element is an object (has `fn` key), the list is per-call. If the first element is a string, the list is uniform.
+
+**Output mapping:** A call block may declare an optional `output` field — a map of field names to template/CEL expressions that construct the block's output from the called functions' results. Expressions can reference each called function's result by name (`<fn_name>.output.*`), plus `input` and `context` from the caller's scope.
+
+```yaml
+analyze:
+  call:
+    - fn: sentiment_check
+      input: { text: "{{input.text}}" }
+    - fn: policy_lookup
+      input: { query: "{{input.text}}", category: "{{context.category}}" }
+  parallel: all
+  output:
+    sentiment: "{{sentiment_check.output.score}}"
+    policies: "{{policy_lookup.output.policies}}"
+```
+
+If `output` is omitted, the default applies: for a single function call, the block's output is the function's return value; for list calls, the output is the last function's return value (sequential) or a map of function names to outputs (parallel `all`).
+
+**Sequential list execution:** Functions execute in list order. Each function's output is accessible by name via `{{blocks.<name>.output.*}}` in subsequent blocks. The call block's own `output` is determined by the `output` mapping if present, otherwise the last function's return value.
 
 **Parallel execution:** Functions execute concurrently as independent CDFGs. Results are collected per the join strategy:
 
@@ -110,11 +144,11 @@ analyze:
 
 **Cancellation:** When `any` or `n_of_m` triggers early completion, remaining in-flight functions receive a cancellation signal. A cancelled function's output is not available — template references to cancelled functions are a runtime error. Callers using `any` or `n_of_m` should only reference outputs conditionally or use the join result which identifies which functions completed.
 
-**Result collection:** All completed function outputs are accessible via `{{blocks.<name>.output.*}}` regardless of execution mode. For `any`, only the winning function's output is populated. For `n_of_m`, outputs of the `n` completed functions are populated; the rest are absent.
+**Result collection:** All completed function outputs are accessible via `{{blocks.<name>.output.*}}` regardless of execution mode. For `any`, only the winning function's output is populated. For `n_of_m`, outputs of the `n` completed functions are populated; the rest are absent. If an `output` mapping is declared, it is evaluated after result collection — the mapping expressions see all completed function outputs.
 
 ### 4.5 Function Definitions
 
-A function declares its **input schema** (typed arguments) and zero or more **terminal blocks**.
+A function declares its **input schema** (typed arguments), an optional **output schema** (typed return value), and zero or more **terminal blocks**.
 
 ```yaml
 functions:
@@ -124,6 +158,12 @@ functions:
       required: [text]
       properties:
         text: { type: string }
+    output:                # explicit output schema; omit to infer from terminals
+      type: object
+      required: [summary, label]
+      properties:
+        summary: { type: string }
+        label: { type: string }
     terminals: [result]    # explicit; omit to auto-detect
 
     blocks:
@@ -150,6 +190,19 @@ functions:
             label: { type: string }
 ```
 
+**Output schema** declares the function's return type — the schema that callers can validate against.
+
+- **Explicit schema:** An inline JSON Schema object or `$ref` string. The loader validates that all terminal blocks produce output compatible with this schema.
+- **`infer`:** The string literal `"infer"`. The loader derives the output schema from the terminal blocks (see inference rules below).
+- **Omitted:** Defaults to `infer`.
+
+**Output schema inference rules:**
+
+- **Single terminal:** output schema = that terminal's schema.
+- **Multiple terminals (CFG paths):** output schema = `oneOf` the distinct terminal schemas. If all terminals share the same schema, collapses to that single schema.
+- **Multiple terminals (dataflow sinks):** output schema = object with terminal block names as keys, each terminal's schema as the property type.
+- **No terminals detected:** load-time error — the author must declare an explicit output schema or fix the terminal detection.
+
 **Terminal blocks** determine the function's return value:
 
 - If `terminals` is specified: those blocks are terminal. Validated at load time (must exist, must have no outgoing transitions or data edges).
@@ -167,7 +220,7 @@ Each function invocation creates a new **conversation** — an ordered message l
 1. **Function = conversation boundary.** A function invocation creates a fresh, empty conversation. When the function returns, its conversation is discarded. The caller sees only the function's structured output — analogous to a stack frame that is popped on return.
 2. **Control edges carry history forward.** When a transition fires from block A to block B, block B's LLM call includes the full conversation accumulated along the control-flow path that reached it. Each prompt block appends a user message (the rendered prompt) and an assistant message (the LLM's structured response) to the conversation.
 3. **Data edges do not carry history.** A block activated by `depends_on` receives its dependencies' structured outputs via template variables (`{{blocks.<name>.output.*}}`), but does not inherit their conversation history. Dataflow blocks are single-turn by nature.
-4. **Call blocks reset conversation.** A `call` block invokes a sub-function, which gets its own conversation. The sub-function's internal conversation is invisible to the caller. The caller's conversation is not affected — call blocks are transparent (they produce structured output but add no messages to the parent conversation).
+4. **Call blocks are conversation-transparent.** A `call` block invokes a sub-function, which starts with its own empty conversation. The caller's conversation is unchanged — the call block contributes only structured output, not conversation history. The sub-function's internal conversation is invisible to the caller.
 5. **Parallel branches are conversation-isolated.** Parallel function calls (via `parallel: all|any|n_of_m`) each get independent conversations. No merge problem exists because there is no shared history to merge.
 
 **Cycles and history accumulation:**
@@ -270,12 +323,13 @@ Invokes an LLM with a rendered prompt template. Validates the response against a
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `prompt` | string | Yes | Template string rendered with variable substitution (§7). Becomes the user message in the conversation. |
+| `prompt` | string | Yes | Template string with `{{...}}` CEL expressions (§7). Becomes the user message in the conversation. |
 | `schema` | object \| string | Yes | JSON Schema for the LLM's structured output. Inline YAML object or `$ref` string path (§8). |
 | `model` | string | No | Model override for this block. Resolves via flick's `ModelRegistry`. If omitted, inherits from function or workflow default. |
 | `transitions` | list | No | Outbound control edges. Each entry has `goto` (required) and `when` (optional CEL guard). See §6. |
 | `depends_on` | list of strings | No | Block names whose outputs must be available before this block executes. Acyclic (enforced at load time). |
-| `set_context` | object | No | CEL expressions evaluated against the block's output, writing results to the function's mutable context. Keys are context field names, values are CEL expressions. See §9. |
+| `set_context` | object | No | CEL expressions writing to function context variables. Keys must be declared in the function's `context`. See §9. |
+| `set_workflow` | object | No | CEL expressions writing to workflow context variables. Keys must be declared in `workflow.context`. See §9. |
 
 **Minimal prompt block:**
 
@@ -307,7 +361,7 @@ analyze:
   depends_on: [classify]
   set_context:
     last_severity: "output.severity"
-    attempt_count: "has(context.attempt_count) ? context.attempt_count + 1 : 1"
+    attempt_count: "context.attempt_count + 1"
   transitions:
     - when: 'output.severity >= 4'
       goto: escalate
@@ -320,15 +374,24 @@ Invokes one or more named functions. The called function(s) execute with their o
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `call` | string \| list of strings | Yes | Function name(s) to invoke. Single string for one function, list for sequential or parallel execution. |
-| `input` | object | Yes | Input mapping. Keys are the called function's input field names, values are CEL expressions or template strings resolved in the caller's scope. |
+| `call` | string \| list of strings \| list of call entries | Yes | Function name(s) to invoke. Single string, uniform list (shared input), or per-call list (`{ fn, input }` objects). See §4.4 for the three forms. |
+| `input` | object | Conditional | Input mapping. Required for single-function and uniform-list calls. Forbidden for per-call list calls (each entry carries its own `input`). Keys are the called function's input field names, values are CEL expressions or template strings resolved in the caller's scope. |
+| `output` | object | No | Output mapping. Keys are output field names, values are template/CEL expressions evaluated after the call completes. Expressions can reference called function results (`<fn_name>.output.*`), `input`, and `context`. If omitted, defaults to the last function's return value. See §4.4. |
 | `parallel` | string | No | Join strategy for list calls: `all`, `any`, `n_of_m`. If omitted, list calls execute sequentially. Ignored for single-function calls. |
 | `n` | integer | No | Required when `parallel: n_of_m`. Number of completions needed before resuming. |
 | `transitions` | list | No | Outbound control edges (same as prompt blocks). |
 | `depends_on` | list of strings | No | Block names whose outputs must be available before this block executes (same as prompt blocks). |
-| `set_context` | object | No | CEL expressions against the call block's output, writing to context (same as prompt blocks). |
+| `set_context` | object | No | CEL expressions writing to function context variables (same as prompt blocks). |
+| `set_workflow` | object | No | CEL expressions writing to workflow context variables (same as prompt blocks). |
 
-**Call block output:** For a single function call, the block's output is the function's return value. For sequential list calls, the output is the last function's return value (all are accessible via `{{blocks.<fn_name>.output.*}}`). For parallel calls, see §4.4 result collection rules.
+**Call entry fields** (per-call list only):
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `fn` | string | Yes | Function name to invoke. |
+| `input` | object | Yes | Input mapping for this specific call. Same semantics as the block-level `input`. |
+
+**Call block output:** If an `output` mapping is declared, the block's output is the object constructed from it. Otherwise: for a single function call, the block's output is the function's return value; for sequential list calls, the output is the last function's return value (all are accessible via `{{blocks.<fn_name>.output.*}}`); for parallel calls, see §4.4 result collection rules.
 
 **Minimal call block:**
 
@@ -338,13 +401,45 @@ lookup:
   input: { text: "{{input.text}}" }
 ```
 
-**Parallel call block:**
+**Uniform list call block:**
+
+```yaml
+pipeline:
+  call: [extract, validate, transform]
+  input: { text: "{{input.text}}" }
+  transitions:
+    - goto: next
+```
+
+**Per-call list block (heterogeneous functions):**
 
 ```yaml
 analyze:
-  call: [sentiment_check, policy_lookup, translation]
+  call:
+    - fn: sentiment_check
+      input: { text: "{{input.text}}" }
+    - fn: policy_lookup
+      input: { query: "{{input.text}}", category: "{{context.category}}" }
+    - fn: translation
+      input: { text: "{{input.text}}", target_lang: "en" }
   parallel: all
-  input: { text: "{{input.text}}" }
+  transitions:
+    - goto: synthesize
+```
+
+**Per-call list with output mapping:**
+
+```yaml
+analyze:
+  call:
+    - fn: sentiment_check
+      input: { text: "{{input.text}}" }
+    - fn: policy_lookup
+      input: { query: "{{input.text}}", category: "{{context.category}}" }
+  parallel: all
+  output:
+    sentiment: "{{sentiment_check.output.score}}"
+    policies: "{{policy_lookup.output.policies}}"
   transitions:
     - goto: synthesize
 ```
@@ -357,18 +452,20 @@ analyze:
 | `schema` | Required | Forbidden |
 | `model` | Optional | Forbidden |
 | `call` | Forbidden | Required |
-| `input` | Forbidden | Required |
+| `input` | Forbidden | Conditional (required for single/uniform, forbidden for per-call list) |
+| `output` | Forbidden | Optional |
 | `parallel` | Forbidden | Optional |
 | `n` | Forbidden | Optional (requires `parallel: n_of_m`) |
 | `transitions` | Optional | Optional |
 | `depends_on` | Optional | Optional |
 | `set_context` | Optional | Optional |
+| `set_workflow` | Optional | Optional |
 
-**Load-time enforcement:** A block with both `prompt` and `call` is an error. A block with neither is an error. A block with `schema` or `model` but no `prompt` is an error. A block with `parallel` or `n` but no `call` is an error. A block with `n` but `parallel` not set to `n_of_m` is an error.
+**Load-time enforcement:** A block with both `prompt` and `call` is an error. A block with neither is an error. A block with `schema` or `model` but no `prompt` is an error. A block with `output` but no `call` is an error. A block with `parallel` or `n` but no `call` is an error. A block with `n` but `parallel` not set to `n_of_m` is an error. A per-call list block with a block-level `input` is an error. A single-function or uniform-list block without a block-level `input` is an error. A per-call entry missing `fn` or `input` is an error.
 
 ### 5.4 Block Identity and Naming
 
-Block names are the YAML keys under the `blocks:` map. Names must be valid identifiers: `[a-z][a-z0-9_]*` (lowercase, underscore-separated). Names must be unique within a function. Reserved names: `input`, `output`, `context` (these conflict with template variable namespaces).
+Block names are the YAML keys under the `blocks:` map. Names must be valid identifiers: `[a-z][a-z0-9_]*` (lowercase, underscore-separated). Names must be unique within a function. Reserved names: `input`, `output`, `context`, `workflow` (these conflict with CEL namespace variables).
 
 ### 5.5 Default Model Resolution
 
@@ -414,17 +511,19 @@ Transitions are evaluated **top-to-bottom, first match wins**. This is identical
 
 ### 6.3 CEL Expression Language
 
-All guard expressions use [CEL (Common Expression Language)](https://cel.dev/). CEL is sandboxed, side-effect-free, and evaluates in constant time (no loops, no I/O).
+[CEL (Common Expression Language)](https://cel.dev/) is the single expression language for the entire DSL — used in `{{...}}` template expressions, `when` guards, `set_context`, call block `input` mappings, and call block `output` mappings. CEL is sandboxed, side-effect-free, and evaluates in constant time (no loops, no I/O).
 
-**Available variables in guard expressions:**
+**Available variables** depend on evaluation context:
 
-| Variable | Type | Description |
-|---|---|---|
-| `output` | object | The current block's structured output (validated against its schema). |
-| `input` | object | The function's input arguments. |
-| `context` | object | The function's mutable context scratchpad. |
+| Variable | Template (`prompt`, `system`) | Template (`input`/`output` mapping) | `set_context` / `set_workflow` / `transitions` |
+|---|---|---|---|
+| `input` | Yes | Yes | Yes |
+| `context` | Yes | Yes | Yes |
+| `workflow` | Yes | Yes | Yes |
+| `blocks.*` | Yes (executed predecessors) | Yes (executed predecessors / call results) | No (use `context`/`workflow`) |
+| `output` | No (not yet produced) | No | Yes |
 
-**Not available:** `blocks.*` — upstream block outputs are not directly accessible in guards. If a guard needs upstream data, the workflow author should pipe it through `set_context` on an earlier block and reference `context.*` in the guard.
+**Guard scope restriction:** `blocks.*` is not available in `when` guards, `set_context`, or `set_workflow`. If a guard needs upstream data, the workflow author should pipe it through `set_context` on an earlier block and reference `context.*` in the guard.
 
 **CEL type mapping from JSON Schema:**
 
@@ -479,7 +578,7 @@ draft:
       text: { type: string }
       quality_score: { type: number }
   set_context:
-    draft_attempts: "has(context.draft_attempts) ? context.draft_attempts + 1 : 1"
+    draft_attempts: "context.draft_attempts + 1"
   transitions:
     - when: 'output.quality_score >= 0.8'
       goto: finalize
@@ -521,95 +620,104 @@ Load-time validation emits a **warning** (not error) for transition lists that l
 | Transition list is empty (`transitions: []`) | Warning (equivalent to omitting `transitions`) |
 | Guard references a variable not in scope (`output`, `input`, `context`) | Error |
 
-## 7. Template Variables & Scoping
+## 7. Template Expressions & Scoping
 
-Template variables are `{{...}}` references interpolated into prompt text, `input` mappings on call blocks, and `system` prompt strings. The expression inside the braces is a dotted path into a named namespace.
+Template expressions are `{{...}}` references interpolated into prompt text, `input` and `output` mappings on call blocks, and `system` prompt strings. The expression inside the braces is a **CEL expression** evaluated against the available namespaces. This is the same CEL used in `when` guards and `set_context` — one expression language everywhere.
+
+Simple path references (`{{input.text}}`) and computed expressions (`{{size(blocks.extract.output.items)}}`, `{{context.attempts + 1}}`) are both valid.
 
 ### 7.1 Namespaces
 
-| Namespace | Syntax | Description |
-|---|---|---|
-| `input` | `{{input.field}}` | The function's input arguments (immutable for the function's lifetime). |
-| `output` | `{{output.field}}` | The current block's own output. Only valid in `set_context` and `transitions` (the block must have already produced output). |
-| `context` | `{{context.field}}` | The function's mutable context scratchpad (§9). |
-| `blocks` | `{{blocks.<name>.output.field}}` | A named block's output. The referenced block must have produced output (enforced by data edges or control-flow ordering). |
+| Namespace | Description |
+|---|---|
+| `input` | The function's input arguments (immutable for the function's lifetime). |
+| `output` | The current block's own output. Only available in `set_context`, `set_workflow`, and `transitions` (the block must have already produced output). |
+| `context` | The function's declared context variables (§9). Scoped to the current function invocation. |
+| `workflow` | The workflow's declared context variables (§9). Shared across all function invocations. |
+| `blocks` | Named block outputs. `blocks.<name>.output` accesses a block's structured output. The referenced block must have produced output (enforced by data edges or control-flow ordering). |
+
+All five namespaces are CEL variables. See §6.3 for which variables are available in each evaluation context.
 
 ### 7.2 Resolution Rules
 
-Template variables are resolved **at render time** — just before the block executes (for `prompt` and `input` fields) or just after (for `set_context` and `transitions`).
+Template expressions are resolved **at render time** — just before the block executes (for `prompt`, `system`, and call block `input` fields) or just after (for `set_context`, `set_workflow`, `output` mappings, and `transitions`).
 
 **Resolution order for a prompt block:**
 
-1. Resolve `{{input.*}}` and `{{context.*}}` and `{{blocks.*.output.*}}` in the `prompt` template.
+1. Evaluate `{{...}}` CEL expressions in the `prompt` template. Available: `input`, `context`, `workflow`, `blocks.*`.
 2. Send the rendered prompt to the LLM. Receive structured output.
 3. Validate output against `schema`.
-4. Resolve `{{output.*}}` in `set_context` expressions (CEL, not template syntax — `output.field` not `{{output.field}}`).
-5. Resolve `{{output.*}}`, `{{input.*}}`, `{{context.*}}` in `transitions` guard expressions (CEL).
+4. Evaluate `set_context` and `set_workflow` CEL expressions. Available: `output`, `input`, `context`, `workflow`.
+5. Evaluate `transitions` guard CEL expressions. Available: `output`, `input`, `context`, `workflow`.
 
 **Resolution order for a call block:**
 
-1. Resolve all template variables in `input` field values.
+1. Evaluate `{{...}}` CEL expressions in `input` field values (or per-call `input` entries). Available: `input`, `context`, `workflow`, `blocks.*`.
 2. Invoke the called function(s) with resolved input.
-3. Collect output(s).
-4. Resolve `set_context` and `transitions` against the call block's output.
+3. Collect raw function output(s).
+4. If `output` mapping is declared: evaluate its CEL expressions against the raw function outputs, `input`, `context`, and `workflow`. The result becomes the call block's output. Otherwise: apply the default (§4.4).
+5. Evaluate `set_context`, `set_workflow`, and `transitions` against the call block's output.
 
 ### 7.3 Availability by Block Position
 
 Which namespaces are available depends on how the block was activated:
 
-| Block activation | `input` | `context` | `blocks.*` | `output` |
-|---|---|---|---|---|
-| Entry point (no inbound edges) | Yes | Yes (initial state) | No (no predecessors) | After execution only |
-| Control-flow target (via transition) | Yes | Yes | Only blocks on the control path that have executed | After execution only |
-| Dataflow node (via `depends_on`) | Yes | Yes | Only declared dependencies | After execution only |
-| Hybrid (control + data) | Yes | Yes | Dependencies + control-path predecessors | After execution only |
+| Block activation | `input` | `context` | `workflow` | `blocks.*` | `output` |
+|---|---|---|---|---|---|
+| Entry point (no inbound edges) | Yes | Yes | Yes | No (no predecessors) | After execution only |
+| Control-flow target (via transition) | Yes | Yes | Yes | Only blocks on the control path that have executed | After execution only |
+| Dataflow node (via `depends_on`) | Yes | Yes | Yes | Only declared dependencies | After execution only |
+| Hybrid (control + data) | Yes | Yes | Yes | Dependencies + control-path predecessors | After execution only |
 
-**Key constraint:** `{{blocks.<name>.output.*}}` references must be statically resolvable — the named block must be guaranteed to have executed before the referencing block. This is enforced at load time:
+**Key constraint:** `blocks.<name>.output` references must be statically resolvable — the named block must be guaranteed to have executed before the referencing block. This is enforced at load time:
 
-- A block referencing `{{blocks.foo.output.*}}` must have `foo` in its `depends_on` list, OR `foo` must **dominate** the block in the control-flow graph (every control-flow path to the block passes through `foo`).
+- A block referencing `blocks.foo.output` (in any CEL expression) must have `foo` in its `depends_on` list, OR `foo` must **dominate** the block in the control-flow graph (every control-flow path to the block passes through `foo`).
 - If neither condition is met: load-time error.
 
-### 7.4 Nested Field Access
+### 7.4 CEL in Templates — Examples
 
-Template variables support dotted paths for nested object access:
+**Simple path access** (identical to the old dotted-path syntax):
 
 ```yaml
 prompt: |
   The user's name is {{input.user.name}}.
-  Their top preference is {{blocks.preferences.output.items[0].label}}.
+  Category: {{blocks.classify.output.category}}
 ```
 
-Array indexing uses bracket notation: `field[0]`, `field[1]`. Out-of-bounds access is a runtime error.
-
-**Optional field access:** Use CEL's `has()` function in guards and `set_context`, but template variables in `prompt` strings do not support conditional logic. If a field may be absent, the workflow author should either:
-
-1. Ensure the schema marks it `required`, or
-2. Pipe it through `set_context` with a CEL default value, then reference `{{context.field}}` in the prompt.
+**Nested field and array access:**
 
 ```yaml
-# Safely defaulting an optional field via set_context
-check:
-  prompt: "Check status"
-  schema:
-    type: object
-    properties:
-      note: { type: string }      # not required — may be absent
-  set_context:
-    safe_note: 'has(output.note) ? output.note : "No note provided"'
-  transitions:
-    - goto: report
+prompt: |
+  Top preference: {{blocks.preferences.output.items[0].label}}.
+```
 
-report:
-  prompt: "Report: {{context.safe_note}}"
-  schema: { ... }
+Array indexing uses bracket notation: `items[0]`, `items[1]`. Out-of-bounds access is a runtime error.
+
+**Conditional expressions:**
+
+```yaml
+prompt: |
+  Status: {{input.score >= 0.8 ? "high confidence" : "needs review"}}
+  Attempt {{context.attempts}} of 3.
+```
+
+CEL's ternary operator and all standard functions work directly in templates. Since context variables are pre-declared (§9), they always exist — no `has()` checks needed.
+
+**Computed values:**
+
+```yaml
+prompt: |
+  Found {{size(blocks.extract.output.items)}} items.
+  Average score: {{blocks.scores.output.total / blocks.scores.output.count}}
 ```
 
 ### 7.5 Template Syntax Details
 
 - **Delimiters:** `{{` and `}}`. Literal braces in prompt text must be escaped as `{{"{"}}` and `{{"}"}}` (CEL string expression).
 - **Whitespace:** `{{ input.text }}` is equivalent to `{{input.text}}` — leading/trailing whitespace inside delimiters is trimmed.
-- **Rendering:** Template variable values are serialized to their JSON string representation when interpolated into prompt text. Objects and arrays are rendered as compact JSON. Strings are rendered without quotes. Numbers and booleans render as their literal representation.
-- **Undefined variable:** A template reference to a namespace or field that doesn't exist is a **runtime error**. The block does not execute. The executor reports which variable failed resolution and in which block.
+- **Expression language:** CEL (§6.3). The full CEL feature set is available: field access, arithmetic, comparisons, ternary (`? :`), `has()`, `size()`, string functions, list/map operations. No loops, no I/O, no side effects.
+- **Rendering:** CEL expression results are serialized to their JSON string representation when interpolated into prompt text. Objects and arrays are rendered as compact JSON. Strings are rendered without quotes. Numbers and booleans render as their literal representation.
+- **Evaluation error:** A CEL expression that fails (undefined variable, type mismatch, out-of-bounds access) is a **runtime error**. The block does not execute. The executor reports the expression, the error, and the block name.
 
 ## 8. Schema Handling
 
@@ -660,7 +768,7 @@ At workflow load time, the loader performs these schema checks:
 | Template type checking | For each `{{blocks.<name>.output.field}}` reference in downstream blocks, verify that the referenced block's schema declares the field and its type is compatible with the usage context. |
 | Circular `$ref` | External schemas that reference each other are a load-time error. |
 
-**Template type checking** is best-effort static analysis. The loader traces dotted paths (`output.field.subfield`) through the schema's `properties` tree and verifies the field exists. Type mismatches (e.g., referencing `output.count` as a string when the schema declares it as `integer`) produce warnings, not errors — the LLM may return compatible values that don't match the JSON Schema type precisely.
+**Template type checking** is best-effort static analysis. The loader traces field access paths in CEL expressions (e.g., `blocks.foo.output.field.subfield`) through the schema's `properties` tree and verifies the field exists. Type mismatches (e.g., referencing `output.count` as a string when the schema declares it as `integer`) produce warnings, not errors — the LLM may return compatible values that don't match the JSON Schema type precisely. Computed CEL expressions (ternary, function calls) are not type-checked beyond verifying that referenced variables exist.
 
 ### 8.4 Runtime Validation
 
@@ -718,38 +826,80 @@ functions:
 
 ## 9. Context & State
 
-Each function invocation has a **context** — a mutable key-value map that persists across block executions within that invocation. Context provides cross-block state that is not part of the conversation history or structured output chain.
+Context provides mutable state that persists across block executions. Two context levels exist: **workflow context** (shared across all function invocations) and **function context** (scoped to a single function invocation).
 
-### 9.1 Lifecycle
+All context variables must be **declared** with a type and initial value. Blocks can only write to pre-declared variables. Because every variable is initialized at declaration, variables always exist — CEL expressions never need `has()` checks on context variables.
 
-1. **Creation.** When a function is invoked, its context is initialized as an empty map `{}`.
-2. **Reading.** Any block can read context via `{{context.field}}` in templates or `context.field` in CEL expressions (guards, `set_context`).
-3. **Writing.** Blocks write to context via the `set_context` field (§5). Writes happen after the block produces output, before transitions are evaluated.
-4. **Destruction.** When the function returns, its context is discarded. The caller cannot access the callee's context — only its structured output.
+### 9.1 Declarations
 
-Context does not cross function boundaries. A called function starts with a fresh context. This mirrors the conversation model (§4.6) — function = stack frame.
+**Workflow context** is declared in the `workflow.context` field:
 
-### 9.2 Writing Context: `set_context`
+```yaml
+workflow:
+  context:
+    total_calls: { type: integer, initial: 0 }
+    all_categories: { type: array, initial: [] }
+```
 
-The `set_context` field is a map of context keys to CEL expressions:
+**Function context** is declared in the `function.context` field:
+
+```yaml
+functions:
+  support_triage:
+    context:
+      attempts: { type: integer, initial: 0 }
+      best_score: { type: number, initial: 0.0 }
+      all_results: { type: array, initial: [] }
+    blocks: { ... }
+```
+
+Each declaration is a map entry: key is the variable name, value is an object with:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | string | Yes | JSON Schema type: `string`, `number`, `integer`, `boolean`, `array`, `object`. |
+| `initial` | any | Yes | Initial value. Must be a literal compatible with the declared type. |
+
+Variable names must be valid identifiers: `[a-z][a-z0-9_]*`. Workflow and function contexts occupy separate namespaces (`workflow.*` vs. `context.*`), so name collisions across levels are permitted but discouraged.
+
+### 9.2 Two-Level Scoping
+
+| Level | CEL namespace | Lifetime | Visibility |
+|---|---|---|---|
+| **Workflow** | `workflow.*` | Entire workflow execution | All functions — readable and writable |
+| **Function** | `context.*` | Single function invocation | Only the declaring function's blocks |
+
+**Workflow context** is created once when the workflow starts executing, initialized from declarations, and lives until the workflow completes. All functions — including nested calls — can read and write workflow context. This is the mechanism for cross-function state.
+
+**Function context** is created when a function is invoked, initialized from declarations, and destroyed when the function returns. A called function cannot see the caller's function context — only its own declarations. This mirrors the conversation model (§4.6) — function = stack frame.
+
+### 9.3 Writing Context
+
+Blocks write to context via two fields:
+
+- **`set_context`** — writes to function context variables. Keys must be declared in the function's `context`.
+- **`set_workflow`** — writes to workflow context variables. Keys must be declared in the workflow's `context`.
 
 ```yaml
 set_context:
-  attempt_count: "has(context.attempt_count) ? context.attempt_count + 1 : 1"
-  last_score: "output.score"
-  best_result: "!has(context.best_result) || output.score > context.best_result.score ? output : context.best_result"
+  attempts: "context.attempts + 1"
+  best_score: "output.score > context.best_score ? output.score : context.best_score"
+set_workflow:
+  total_calls: "workflow.total_calls + 1"
 ```
 
 **Evaluation rules:**
 
-1. All `set_context` expressions are evaluated after the block produces output.
-2. Expressions have access to `output`, `input`, `context`, and `blocks.*` (same scope as the block's templates).
-3. Expressions are evaluated **atomically** — all expressions see the context state from *before* `set_context` runs, not partially-updated state. This prevents order-dependent behavior within a single `set_context` block.
-4. After all expressions are evaluated, results are merged into the context map (new keys are added, existing keys are overwritten).
+1. Both `set_context` and `set_workflow` expressions are evaluated after the block produces output.
+2. Expressions have access to `output`, `input`, `context`, `workflow`, and `blocks.*` (same scope as the block's templates, plus `output`).
+3. Expressions within each field are evaluated **atomically** — all expressions see the state from *before* the write, not partially-updated state.
+4. `set_context` writes are applied first, then `set_workflow` writes. Transitions are evaluated after both complete.
+5. **Undeclared variable:** A key in `set_context` that is not declared in the function's `context`, or a key in `set_workflow` that is not declared in `workflow.context`, is a **load-time error**.
+6. **Type mismatch:** If static analysis can determine that the expression produces a type incompatible with the declaration, it is a load-time **warning**.
 
-### 9.3 Context in Cycles
+### 9.4 Context in Cycles
 
-Context is the primary mechanism for bounding and controlling cycles. Self-loops and backward transitions accumulate both conversation history and context state.
+Context is the primary mechanism for bounding and controlling cycles. Since variables are pre-declared with initial values, cycle patterns are straightforward:
 
 **Retry counter pattern:**
 
@@ -763,7 +913,7 @@ attempt:
       solution: { type: string }
       confidence: { type: number }
   set_context:
-    attempts: "has(context.attempts) ? context.attempts + 1 : 1"
+    attempts: "context.attempts + 1"
   transitions:
     - when: 'output.confidence >= 0.9'
       goto: done
@@ -776,40 +926,31 @@ attempt:
 
 ```yaml
 set_context:
-  all_results: "has(context.all_results) ? context.all_results + [output] : [output]"
+  all_results: "context.all_results + [output]"
 ```
 
-### 9.4 Context and Compaction
+**Best-so-far pattern:**
 
-When conversation compaction fires (§4.6), context is **not** compacted — it retains its full state. Context is separate from conversation history. The compaction summary may reference context values (e.g., "after 3 attempts, best score was 0.87"), but the context map itself is preserved verbatim.
+```yaml
+set_context:
+  best_score: "output.score > context.best_score ? output.score : context.best_score"
+```
+
+No `has()` guards needed — `context.attempts` starts at `0`, `context.all_results` starts at `[]`, `context.best_score` starts at `0.0`.
+
+### 9.5 Context and Compaction
+
+When conversation compaction fires (§4.6), context is **not** compacted — it retains its full state. Context is separate from conversation history. The compaction summary may reference context values (e.g., "after 3 attempts, best score was 0.87"), but context variables are preserved verbatim.
 
 This means context is suitable for data that must survive compaction: running totals, best-so-far results, iteration counters. Conversation history degrades gracefully through summarization; context does not degrade.
 
-### 9.5 Context and Parallel Execution
+### 9.6 Context and Parallel Execution
 
-Parallel function calls (via `parallel: all|any|n_of_m`) each get their own context (they're separate function invocations). The parent block's `set_context` runs after the parallel calls complete, in the parent function's context scope.
+Parallel function calls (via `parallel: all|any|n_of_m`) each get their own function context (they're separate function invocations). However, parallel functions **share** the workflow context. Writes to workflow context from parallel functions are applied in completion order. If two parallel functions write the same workflow variable, the last to complete wins. Load-time validation flags this as a **warning**.
 
-Dataflow blocks within a single function that execute in parallel at the same topological level share the function's context. However, since `set_context` writes happen after block execution, and parallel blocks cannot have data dependencies on each other, there is no write conflict — each block's `set_context` writes are applied in an arbitrary order after all blocks at that level complete. If two parallel blocks write the same context key, the result is nondeterministic. Load-time validation flags this as a **warning**.
+The parent block's `set_context` and `set_workflow` run after the parallel calls complete, in the parent function's scope.
 
-### 9.6 Initial Context
-
-A function's `input` field defines the function's typed arguments, not its context. To seed context from input:
-
-```yaml
-functions:
-  process:
-    input:
-      type: object
-      required: [text]
-      properties:
-        text: { type: string }
-    initial_context:
-      language: '"en"'                           # CEL literal
-      source_length: "size(input.text)"          # CEL expression over input
-    blocks: { ... }
-```
-
-The optional `initial_context` field on a function is a map of context keys to CEL expressions evaluated against the function's input at invocation time. If omitted, the initial context is empty.
+Dataflow blocks within a single function that execute in parallel at the same topological level share the function's context. Since `set_context` writes happen after block execution, and parallel blocks cannot have data dependencies on each other, there is no write conflict — each block's writes are applied in an arbitrary order after all blocks at that level complete. If two parallel blocks write the same context variable, the result is nondeterministic. Load-time validation flags this as a **warning**.
 
 ## 10. Validation & Error Handling
 
@@ -833,6 +974,10 @@ The loader performs all of the following checks when a workflow file is loaded. 
 | Terminal block validation | Error | If `terminals` is declared, listed blocks must exist and have no outgoing transitions. |
 | `n_of_m` requires `n` | Error | `parallel: n_of_m` without an `n` field. |
 | `n` range | Error | `n` must be `1 <= n <= len(call list)`. |
+| Context variable declaration | Error | Each entry in `workflow.context` and `function.context` must have `type` and `initial` fields. `type` must be a valid JSON Schema type. `initial` must be compatible with `type`. |
+| Context variable names | Error | Context variable names must match `[a-z][a-z0-9_]*`. |
+| `set_context` target validity | Error | Every key in `set_context` must be declared in the function's `context`. |
+| `set_workflow` target validity | Error | Every key in `set_workflow` must be declared in `workflow.context`. |
 
 #### Graph Checks
 
@@ -843,7 +988,7 @@ The loader performs all of the following checks when a workflow file is loaded. 
 | Call target existence | Error | Every `call` target must name a function in the workflow (or a registered external function). |
 | Unreachable blocks | Warning | Blocks with no inbound edges (control or data) and that are not entry points are never executed. |
 | Dead transitions | Warning | Transitions after an unconditional fallback are unreachable. |
-| Parallel context write conflict | Warning | Two blocks that may execute in parallel both write the same `set_context` key. |
+| Parallel context write conflict | Warning | Two blocks that may execute in parallel both write the same `set_context` or `set_workflow` variable. |
 
 #### Type Checks
 
@@ -854,9 +999,13 @@ The loader performs all of the following checks when a workflow file is loaded. 
 | Template reference resolution | Error | `{{blocks.<name>.output.field}}` — the named block exists, the field exists in its schema. |
 | Template reference reachability | Error | The referenced block is guaranteed to have executed before the referencing block (domination or `depends_on`). |
 | CEL compilation | Error | All `when` guards and `set_context` expressions compile as valid CEL. |
-| CEL variable scope | Error | Guard expressions only reference `output`, `input`, `context`. Template variables only reference valid namespaces. |
+| CEL variable scope | Error | All CEL expressions (guards, `set_context`, template `{{...}}`) only reference variables available in their evaluation context (§6.3). |
 | Model resolution | Error | All `model` fields (block, function, workflow) resolve via flick's `ModelRegistry`. |
-| Input schema match | Error | Call block `input` fields must provide all `required` fields declared in the called function's `input` schema. |
+| Input schema match | Error | Call block `input` fields must provide all `required` fields declared in the called function's `input` schema. For per-call lists, each entry's `input` is validated against its own target function's schema. |
+| Per-call list consistency | Error | A per-call list block must not have a block-level `input`. A uniform-list or single-function block must have a block-level `input`. Per-call entries must each have `fn` and `input` fields. |
+| Function output schema | Error | If `output` is an explicit schema: must be valid JSON Schema with root type `object`. Terminal block schemas must be compatible with the declared output schema. |
+| Function output inference | Error | If `output` is `infer` or omitted: at least one terminal block must be detectable. If no terminals found, the author must declare an explicit output schema. |
+| Call block output type checking | Warning | Call block `output` mapping fields and downstream `{{blocks.<name>.output.*}}` references are checked against the called function's output schema (explicit or inferred). |
 
 ### 10.2 Runtime Errors
 
@@ -1035,6 +1184,10 @@ Complete annotated schema for the workflow file format. All fields shown; option
 workflow:                                       # optional — workflow-level defaults
   system: <string>                              # optional — default system prompt (template vars allowed)
   model: <string>                               # optional — default model name (flick ModelRegistry)
+  context:                                      # optional — workflow-level context variables
+    <variable_name>:                            #   identifier: [a-z][a-z0-9_]*
+      type: <string>                            #   JSON Schema type
+      initial: <value>                          #   literal initial value
   schemas:                                      # optional — reusable schema definitions
     <schema_name>:
       type: object
@@ -1055,12 +1208,16 @@ functions:
       required: [...]
       properties: { ... }
 
+    output: <object | "$ref:path" | "$ref:#name" | "infer">  # optional — output schema (default: infer)
+
     system: <string>                            # optional — override workflow system prompt
     model: <string>                             # optional — override workflow default model
     terminals: [<block_name>, ...]              # optional — explicit terminal blocks (auto-detected if omitted)
 
-    initial_context:                            # optional — seed context from input
-      <key>: <cel_expression>                   #   evaluated against input at invocation
+    context:                                    # optional — function-level context variables
+      <variable_name>:                          #   identifier: [a-z][a-z0-9_]*
+        type: <string>                          #   JSON Schema type
+        initial: <value>                        #   literal initial value
 
     compaction:                                 # optional — override workflow compaction config
       keep_recent_tokens: <integer>
@@ -1072,30 +1229,61 @@ functions:
     blocks:
       # ── Prompt Block ──
       <block_name>:                             # identifier: [a-z][a-z0-9_]*, not input/output/context
-        prompt: <string>                        # required — template string ({{...}} variables)
+        prompt: <string>                        # required — template string ({{CEL}} expressions)
         schema: <object | "$ref:path" | "$ref:#name">  # required — output JSON Schema
         model: <string>                         # optional — override function/workflow model
 
         depends_on: [<block_name>, ...]         # optional — data edges (must be acyclic)
 
-        set_context:                            # optional — write to function context after execution
-          <key>: <cel_expression>               #   evaluated against output, input, context, blocks.*
+        set_context:                            # optional — write to function context (declared vars only)
+          <key>: <cel_expression>               #   evaluated against output, input, context, workflow
+        set_workflow:                           # optional — write to workflow context (declared vars only)
+          <key>: <cel_expression>
 
         transitions:                            # optional — outbound control edges
           - when: <cel_expression>              # optional — CEL guard (omit for unconditional)
             goto: <block_name>                  # required — target block in same function
 
-      # ── Call Block ──
+      # ── Call Block (single function or uniform list) ──
       <block_name>:
         call: <string | [string, ...]>          # required — function name(s)
-        input:                                  # required — input mapping for called function(s)
+        input:                                  # required — shared input mapping
           <field>: <template_or_cel_expr>
 
+        output:                                 # optional — construct block output from results
+          <field>: <template_or_cel_expr>       #   refs: <fn_name>.output.*, input, context
         parallel: <all | any | n_of_m>          # optional — join strategy (list calls only)
         n: <integer>                            # optional — required when parallel: n_of_m
 
         depends_on: [<block_name>, ...]         # optional
         set_context:                            # optional
+          <key>: <cel_expression>
+        set_workflow:                           # optional
+          <key>: <cel_expression>
+        transitions:                            # optional
+          - when: <cel_expression>              # optional
+            goto: <block_name>                  # required
+
+      # ── Call Block (per-call list — heterogeneous inputs) ──
+      <block_name>:
+        call:                                   # required — list of { fn, input } entries
+          - fn: <string>                        #   function name
+            input:                              #   input mapping for this call
+              <field>: <template_or_cel_expr>
+          - fn: <string>
+            input:
+              <field>: <template_or_cel_expr>
+        # no block-level input — each entry carries its own
+
+        output:                                 # optional — construct block output from results
+          <field>: <template_or_cel_expr>       #   refs: <fn_name>.output.*, input, context
+        parallel: <all | any | n_of_m>          # optional — join strategy
+        n: <integer>                            # optional — required when parallel: n_of_m
+
+        depends_on: [<block_name>, ...]         # optional
+        set_context:                            # optional
+          <key>: <cel_expression>
+        set_workflow:                           # optional
           <key>: <cel_expression>
         transitions:                            # optional
           - when: <cel_expression>              # optional
@@ -1108,23 +1296,29 @@ functions:
 |---|---|---|
 | `workflow.system` | Template string | Top-level |
 | `workflow.model` | Model name string | Top-level |
+| `workflow.context` | Map of variable name → `{ type, initial }` | Top-level (optional) |
 | `workflow.schemas` | Map of name → JSON Schema object | Top-level |
 | `workflow.compaction` | Compaction config object | Top-level |
 | `function.input` | JSON Schema (root type: object) | Function |
+| `function.output` | JSON Schema object, `$ref` string, or `"infer"` | Function (optional, default: `infer`) |
 | `function.system` | Template string | Function |
 | `function.model` | Model name string | Function |
 | `function.terminals` | List of block name strings | Function |
-| `function.initial_context` | Map of key → CEL expression | Function |
+| `function.context` | Map of variable name → `{ type, initial }` | Function (optional) |
 | `function.compaction` | Compaction config object | Function |
 | `block.prompt` | Template string | Prompt block |
 | `block.schema` | JSON Schema object or `$ref` string | Prompt block |
 | `block.model` | Model name string | Prompt block |
-| `block.call` | String or list of strings | Call block |
-| `block.input` | Map of field → template/CEL expression | Call block |
+| `block.call` | String, list of strings, or list of call entries | Call block |
+| `block.input` | Map of field → template/CEL expression | Call block (single/uniform only) |
+| `block.output` | Map of field → template/CEL expression | Call block (optional) |
+| `call_entry.fn` | String | Per-call list entry |
+| `call_entry.input` | Map of field → template/CEL expression | Per-call list entry |
 | `block.parallel` | Enum: `all`, `any`, `n_of_m` | Call block |
 | `block.n` | Positive integer | Call block |
 | `block.depends_on` | List of block name strings | Any block |
-| `block.set_context` | Map of key → CEL expression | Any block |
+| `block.set_context` | Map of variable name → CEL expression | Any block (function context only) |
+| `block.set_workflow` | Map of variable name → CEL expression | Any block (workflow context only) |
 | `block.transitions` | List of transition entries | Any block |
 | `transition.when` | CEL expression string | Transition |
 | `transition.goto` | Block name string | Transition |
@@ -1152,8 +1346,8 @@ functions:
         ticket_text: { type: string }
         customer_tier: { type: string, enum: [free, pro, enterprise] }
 
-    initial_context:
-      attempts: '0'
+    context:
+      attempts: { type: integer, initial: 0 }
 
     blocks:
       classify:
