@@ -1557,6 +1557,7 @@ dependencies = [
  "reel",
  "schemars",
  "serde",
+ "serde_json",
  "serde_yml",
  "thiserror 2.0.18",
  "tokio",

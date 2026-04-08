@@ -1,0 +1,145 @@
+workflow:
+  system: "You are a customer support agent."
+
+  agents:
+    default:
+      model: sonnet
+      grant: [tools]
+    diagnostician:
+      model: opus
+      grant: [tools, network]
+      tools: [web_search]
+
+  agent: "$ref:#default"
+
+  schemas:
+    resolution:
+      type: object
+      required: [resolved, summary]
+      properties:
+        resolved: { type: boolean }
+        summary: { type: string }
+
+functions:
+  support_triage:
+    input:
+      type: object
+      required: [ticket_text]
+      properties:
+        ticket_text: { type: string }
+        customer_tier: { type: string, enum: [free, pro, enterprise] }
+
+    context:
+      attempts: { type: integer, initial: 0 }
+
+    blocks:
+      classify:
+        prompt: |
+          Classify the following support ticket into a category.
+          Ticket: {{input.ticket_text}}
+        schema:
+          type: object
+          required: [category, urgency]
+          properties:
+            category: { type: string, enum: [billing, technical, account, other] }
+            urgency: { type: string, enum: [low, medium, high] }
+        transitions:
+          - when: 'output.category == "billing"'
+            goto: billing
+          - when: 'output.category == "technical"'
+            goto: technical
+          - goto: general
+
+      billing:
+        call: resolve_billing
+        input:
+          issue: "{{input.ticket_text}}"
+          urgency: "{{blocks.classify.output.urgency}}"
+        depends_on: [classify]
+        transitions:
+          - goto: respond
+
+      technical:
+        agent: "$ref:#diagnostician"
+        prompt: |
+          Diagnose this technical issue.
+          Ticket: {{input.ticket_text}}
+          Urgency: {{blocks.classify.output.urgency}}
+        schema:
+          type: object
+          required: [diagnosis, steps]
+          properties:
+            diagnosis: { type: string }
+            steps: { type: array, items: { type: string } }
+        depends_on: [classify]
+        set_context:
+          attempts: "context.attempts + 1"
+        transitions:
+          - when: 'size(output.steps) > 0'
+            goto: respond
+          - when: 'context.attempts < 3'
+            goto: technical
+          - goto: escalate
+
+      general:
+        prompt: |
+          Provide a helpful response to this general inquiry.
+          Ticket: {{input.ticket_text}}
+        schema: "$ref:#resolution"
+        depends_on: [classify]
+
+      escalate:
+        prompt: |
+          This ticket could not be resolved automatically after {{context.attempts}} attempts.
+          Draft an escalation notice for a human agent.
+          Ticket: {{input.ticket_text}}
+          Last diagnosis: {{blocks.technical.output.diagnosis}}
+        schema:
+          type: object
+          required: [notice, suggested_team]
+          properties:
+            notice: { type: string }
+            suggested_team: { type: string }
+
+      respond:
+        prompt: |
+          Write a customer-facing response summarizing the resolution.
+          Customer tier: {{input.customer_tier}}
+        schema: "$ref:#resolution"
+
+  resolve_billing:
+    input:
+      type: object
+      required: [issue, urgency]
+      properties:
+        issue: { type: string }
+        urgency: { type: string }
+    system: "You are a billing specialist. Be precise about amounts and dates."
+    agent:
+      extends: default
+      grant: [write]
+      write_paths: [billing/]
+
+    blocks:
+      analyze:
+        prompt: |
+          Analyze this billing issue: {{input.issue}}
+          Urgency: {{input.urgency}}
+        schema:
+          type: object
+          required: [root_cause, resolution_action]
+          properties:
+            root_cause: { type: string }
+            resolution_action: { type: string }
+
+      resolve:
+        prompt: |
+          Apply the resolution: {{blocks.analyze.output.resolution_action}}
+          Confirm the outcome.
+        schema:
+          type: object
+          required: [resolved, summary]
+          properties:
+            resolved: { type: boolean }
+            summary: { type: string }
+        depends_on: [analyze]

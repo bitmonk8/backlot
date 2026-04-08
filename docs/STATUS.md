@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Deliverable 1 complete. Crate skeleton and error types in place. 3 tests passing, zero clippy warnings.
+**Phase:** Deliverable 2 complete. Parse-only serde schema types for the §12 YAML grammar landed in `mech/src/schema/`. 16 tests passing (3 error + 13 schema), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -113,7 +113,7 @@ Mech implementation is broken into 17 incremental TDD deliverables — see `docs
 Deliverables (strictly sequential except 9↔10 which can overlap):
 
 1. ~~Crate skeleton & error types~~ ✅
-2. YAML schema types (parse-only, serde)
+2. ~~YAML schema types (parse-only, serde)~~ ✅
 3. CEL expression compilation & evaluation (5 namespaces, template interpolation)
 4. Schema registry & JSON Schema handling (`$ref` resolution)
 5. Load-time validation (the 24+ checks from §10)
@@ -130,7 +130,7 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 16. End-to-end integration test suite (hermetic, fake LLM)
 17. Documentation polish & examples
 
-**Immediate next action:** Deliverable 2 — YAML schema types (parse-only, serde).
+**Immediate next action:** Deliverable 3 — CEL expression compilation & evaluation (5 namespaces, template interpolation).
 
 ---
 

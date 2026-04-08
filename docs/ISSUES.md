@@ -856,3 +856,33 @@ mech/src/error.rs line 24 — The `#[error(...)]` format includes `{raw_output}`
 
 ### 106. `MechError::Validation` variant name conflicts with `SchemaValidationFailure`
 mech/src/error.rs lines 108-115 — `Validation` is a load-time aggregate but its name does not distinguish it from the runtime `SchemaValidationFailure` (§10.2). Rename to `LoadValidation` or `WorkflowValidation` to match the doc comment's stated responsibility. **Naming.**
+
+### 107. Mech schema: `Def` suffix applied inconsistently
+mech/src/schema/mod.rs — Suffix used on `FunctionDef`, `BlockDef`, `TransitionDef`, `ContextVarDef` but not on `PromptBlock`, `CallBlock`, `CallEntry`, `AgentConfig`, `CompactionConfig`, `ParallelStrategy`. Pick one convention — either drop `Def` everywhere or apply it everywhere. Current mix is misleading. **Naming.**
+
+### 108. Mech schema: `WorkflowFile` / `WorkflowDefaults` names misleading
+mech/src/schema/mod.rs lines 44–80 — `WorkflowFile` holds the whole mech document including `functions:`, not a file handle. `WorkflowDefaults` holds the entire `workflow:` section (named agents, schemas, context) — not just "defaults". Consider `MechDocument` / `WorkflowSection` (or similar) for clarity. **Naming.**
+
+### 109. Mech schema: `AgentConfig.grant` is singular but typed as `Vec<String>`
+mech/src/schema/mod.rs lines 273–275 — Field is named `grant` (singular) but holds a list of grant flags. Either pluralize to `grants` or match the underlying `ToolGrant` naming. Verify against MECH_SPEC §5.5.1 YAML keyword before renaming. **Naming.**
+
+### 110. Mech schema: `CallEntry.func` inconsistent with `CompactionConfig::r#fn`
+mech/src/schema/mod.rs line 220 — `CallEntry` uses `func` + `#[serde(rename = "fn")]` while `CompactionConfig` uses `r#fn` directly for the same YAML key. Pick one. **Naming.**
+
+### 111. Mech schema: `InferLiteral` wrapper type could be collapsed
+mech/src/schema/mod.rs lines 309–315 — Single-variant enum exists only to serialize the string `"infer"`. Can be folded into `SchemaRef::Infer` as a unit variant with `#[serde(rename = "infer")]`, removing a type and the awkward `SchemaRef::Infer(InferLiteral::Infer)` match pattern. **Simplification.**
+
+### 112. Mech schema: `full_example.yaml` placement under src/
+mech/src/schema/full_example.yaml — Pure test fixture, used only via `include_str!` from `#[cfg(test)]`. Conventional home is `mech/tests/fixtures/` or `mech/src/schema/testdata/` to make non-source nature explicit. **Placement.**
+
+### 113. Mech schema: re-export surface flattens the `schema` module boundary
+mech/src/lib.rs lines 17–21 — 16 schema types are re-exported at the crate root while `pub mod schema` is also exposed, giving two canonical paths for every type. Either re-export only entry points (`WorkflowFile`, `parse_workflow`) or make `schema` `pub(crate)`. **Placement.**
+
+### 114. Mech schema: empty `call: []` deserializes as `Uniform(vec![])` not an error
+mech/src/schema/mod.rs lines 207–216 — Untagged enum discrimination biases empty lists toward `CallSpec::Uniform`. Spec §4.4/§5.2 requires non-empty in practice. Deferred to Deliverable 5 load-time validation. **Correctness (deferred).**
+
+### 115. Mech schema: `extends` permitted on named agents, not just inline
+mech/src/schema/mod.rs lines 266–292 — Per §12.1, `extends` is allowed on inline agent configs only, not on `workflow.agents.<name>` entries. Current single `AgentConfig` type does not enforce this split. Deferred to Deliverable 5, or fix via separate `NamedAgentConfig` / `InlineAgentConfig` types if parse-time enforcement is desired. **Correctness (deferred).**
+
+### 116. Mech schema: single 770-line mod.rs could split into submodules
+mech/src/schema/mod.rs — Spec wording said "src/schema/mod.rs and submodules". Natural seams: `blocks.rs`, `agent.rs`, `schema_ref.rs`, `workflow.rs`. Cheaper to split now, before Deliverables 3–7 add validators that co-locate with each type cluster. **Separation.**

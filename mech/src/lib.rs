@@ -7,9 +7,17 @@
 //! of prompt and call blocks, with CEL expressions for guards, templates, and
 //! state mutations. See `docs/MECH_SPEC.md` for the full specification.
 //!
-//! This crate is under active TDD development. Deliverable 1 (this module)
-//! provides only the crate skeleton and error surface — no execution logic.
+//! This crate is under active TDD development. It currently exposes error
+//! types and parse-only serde schema types for the YAML workflow grammar.
+//! There is no execution or runtime logic yet, and no validation beyond
+//! serde's `deny_unknown_fields`.
 
 pub mod error;
+pub mod schema;
 
 pub use error::{MechError, MechResult};
+pub use schema::{
+    AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,
+    ContextVarDef, FunctionDef, InferLiteral, ParallelStrategy, PromptBlock, SchemaRef,
+    TransitionDef, WorkflowDefaults, WorkflowFile, parse_workflow,
+};
