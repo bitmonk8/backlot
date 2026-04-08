@@ -75,7 +75,7 @@
 
 ## Cue
 
-**Phase:** Complete. 7 tests passing, zero clippy errors. Graph/workflow DSL spec in progress.
+**Phase:** Complete. 7 tests passing, zero clippy errors. Graph/workflow DSL spec drafted, pending review.
 
 **Implemented:**
 - Generic recursive task orchestration framework
@@ -87,16 +87,13 @@
 - `LimitsConfig` (depth, retry budget, fix rounds, recovery rounds, task cap)
 - Depends only on `traits` crate (for `EventEmitter<E>`)
 
+**Graph/Workflow DSL Spec** (`docs/GRAPHS_DSL.md`):
+- All 12 sections drafted. Covers: motivation, design goals, unified CDFG model, conversation model (history scoping, compaction, model selection), block specification (prompt + call blocks, field validity), transitions & guards (CEL, ordered evaluation, self-loops), template variables & scoping (4 namespaces, resolution rules), schema handling (inline + `$ref` + workflow-level shared schemas), context & state (mutable scratchpad, atomic `set_context`, `initial_context`), validation & error handling (18 load-time checks, 5 runtime error types), cue integration (function = leaf task, model escalation interaction), YAML reference grammar with complete worked example.
+- Key design decisions: `set_context` for context writes (CEL, atomic eval); guard errors skip rather than fatal; block-level model overrides preserved through cue escalation; `blocks.*` not in guard scope (pipe through context); `$ref:#name` for workflow-level schemas.
+
 **Next Work:**
-1. **Graph/Workflow DSL spec** — YAML-based workflow DSL for structured agent workflows. Spec in `docs/GRAPHS_DSL.md`. Sections 1–4 drafted (motivation, design goals, core concepts, unified CDFG model including conversation model, system prompts, model selection, history compaction). Remaining sections to reach implementation-ready:
-   - §5 Block Specification — full schema for prompt blocks and call blocks, valid field combinations
-   - §6 Transitions & Guards — CEL expression details, ordered evaluation, self-loops, fallback semantics
-   - §7 Template Variables & Scoping — `{{input.*}}`, `{{output.*}}`, `{{context.*}}`, `{{blocks.<name>.output.*}}` resolution rules
-   - §8 Schema Handling — inline YAML vs `$ref`, load-time vs runtime validation, schema composition
-   - §9 Context & State — mutable scratchpad lifecycle, persistence, interaction with compaction
-   - §10 Validation & Error Handling — load-time checks (cycle detection, CEL compilation, schema resolution, unreachable blocks), runtime errors (schema failures, guard errors, timeout)
-   - §11 Integration with Cue — mapping to `TaskNode`/`TaskStore`/`Orchestrator`, whether a function is one cue task or each block is
-   - §12 YAML Reference Grammar — complete annotated schema for the workflow format
+1. **DSL spec review pass** — Review drafted spec for consistency, gaps, and edge cases before implementation.
+2. **DSL implementation** — Workflow loader (YAML parse, validation, CEL compilation), DSL executor (block scheduling, conversation management, template resolution), `DslTask` `TaskNode` implementation.
 
 ---
 
