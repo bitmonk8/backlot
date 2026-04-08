@@ -107,7 +107,30 @@
   - **Agent configuration block** — mech targets reel (agent runtime) not flick (raw LLM). `model` moved inside `agent` block alongside `grant` (ToolGrant flags), `tools` (custom tool names), `write_paths`, and `timeout`. Three-level cascade (workflow → function → block) with replace semantics. Named agent configs (`agents` map, parallel to `schemas`) with `$ref:#name` and `extends` for inheritance with overrides.
 
 **Next Work:**
-1. **Mech implementation** — Workflow loader (YAML parse, validation, CEL compilation), mech executor (block scheduling, conversation management, template resolution), `MechTask` `TaskNode` implementation.
+
+Mech implementation is broken into 17 incremental TDD deliverables — see `docs/MECH_SPEC.md` §13 for full details (scope, tests-first list, acceptance criteria per deliverable). Per-deliverable cycle: write tests → implement → `cargo test`/`clippy`/`fmt` → `/review` → update STATUS.
+
+Deliverables (strictly sequential except 9↔10 which can overlap):
+
+1. Crate skeleton & error types
+2. YAML schema types (parse-only, serde)
+3. CEL expression compilation & evaluation (5 namespaces, template interpolation)
+4. Schema registry & JSON Schema handling (`$ref` resolution)
+5. Load-time validation (the 24+ checks from §10)
+6. Schema inference for function outputs (`output: infer`)
+7. Workflow loader (end-to-end load pipeline)
+8. Context & state management (workflow/context/block namespaces)
+9. Prompt block executor (agent cascade, structured output)
+10. Call block executor (three input forms, output mapping)
+11. Transitions & block scheduling (imperative mode, guards, self-loops)
+12. Function executor & workflow runtime (imperative + dataflow modes)
+13. Conversation management & history scoping
+14. Cue integration (`MechTask` implementing `cue::TaskNode`)
+15. CLI (`mech run`, `mech validate`)
+16. End-to-end integration test suite (hermetic, fake LLM)
+17. Documentation polish & examples
+
+**Immediate next action:** Deliverable 1 — create the `mech` crate skeleton with error types.
 
 ---
 

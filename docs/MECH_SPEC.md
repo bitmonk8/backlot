@@ -1654,6 +1654,329 @@ functions:
 
 ---
 
+## 13. Implementation Plan
+
+This plan breaks mech implementation into incremental, independently-testable deliverables. Each deliverable will be implemented by a Claude Code agent following strict TDD discipline:
+
+**Per-deliverable TDD cycle:**
+1. **Write tests first.** Cover the deliverable's acceptance criteria as failing unit tests (and integration tests where applicable). Tests must exercise real behavior — no silent skipping, no mocking internal mech types (see CLAUDE.md).
+2. **Implement** the minimum code needed to make the tests pass. Prefer the simplest design that satisfies the contract.
+3. **Verify.** Run `cargo test -p mech`, `cargo clippy -p mech --all-targets -- -D warnings`, and `cargo fmt --check`. All must pass.
+4. **Review.** Run the `/review` slash command on the uncommitted changes (launches the 7-lens review agent fleet in parallel), then `/triage` and `/fix` any MUST-FIX findings. Re-run tests after fixes.
+5. **Update STATUS.md** — mark the deliverable complete, move to the next.
+
+Each deliverable should end in a commit with tests passing and review clean. Later deliverables depend on earlier ones; they must not be parallelized across agents without respecting the dependency order listed below.
+
+---
+
+### Deliverable 1 — Crate skeleton & error types
+
+**Scope:** Create the `mech` crate. Declare dependencies (`cue`, `reel`, `cel-interpreter`, `serde`, `serde_yaml`, `schemars`, `thiserror`, `tokio`). Define the public error enum covering the 5 runtime error categories (§10) and placeholder load-time error variants. Define `MechResult<T>`. No logic yet — just the module shell and error surface.
+
+**Tests first:**
+- `error_display_formats_correctly` — each error variant has a human-readable Display impl.
+- `error_is_send_sync` — compile-time check that errors can cross task boundaries.
+- `crate_builds_clean` — implicit (clippy/fmt).
+
+**Implement:** `src/lib.rs`, `src/error.rs`, `Cargo.toml`.
+
+**Acceptance:** Crate builds, clippy clean, error types documented.
+
+---
+
+### Deliverable 2 — YAML schema types (parse-only, no validation)
+
+**Scope:** Define the serde structs that mirror the §12 YAML grammar: `WorkflowFile`, `FunctionDef`, `BlockDef` (enum: `Prompt`, `Call`), `AgentConfig`, `TransitionDef`, `SchemaRef`, `ContextVarDef`, etc. Use `#[serde(deny_unknown_fields)]`. Parse only — no semantic validation. Support the three `call.input` forms (string, uniform list, per-call object list) via an untagged enum.
+
+**Tests first:**
+- Parse the §12 worked example end-to-end; assert top-level structure matches.
+- Parse each `call.input` form variant.
+- Parse schema `$ref` vs inline vs `infer`.
+- Parse agent config cascade at all three levels (workflow/function/block).
+- Round-trip: parse → re-serialize → parse again yields equal struct.
+- Reject unknown fields with a clear error.
+- Parse every field documented in §5 and §9 at least once.
+
+**Implement:** `src/schema/mod.rs` and submodules.
+
+**Acceptance:** All YAML forms from §12 deserialize; unknown fields rejected.
+
+---
+
+### Deliverable 3 — CEL expression compilation & evaluation
+
+**Scope:** Wrap `cel-interpreter` with mech's five namespaces (`input`, `context`, `workflow`, `block`, `meta`). Provide `CelExpression` (compiled) and `CelEvaluator` (binds namespaces → evaluates). Support `{{...}}` template interpolation in strings: split string into literal + expression segments, evaluate, concatenate. Evaluate bare expressions for guards and `set_*` RHS.
+
+**Tests first:**
+- Compile valid CEL expressions (arithmetic, field access, method calls).
+- Reject invalid CEL at compile time with source-location error.
+- Evaluate with bound namespaces; each namespace independently accessible.
+- Template interpolation: `"hello {{input.name}}"` with `name="world"` → `"hello world"`.
+- Template with multiple expressions, escaped braces, nested field access.
+- Guard evaluation returning non-bool → error.
+- Missing namespace field → clear error naming the path.
+- Type coercion rules (string/number/bool) match CEL spec.
+
+**Implement:** `src/cel.rs`.
+
+**Acceptance:** CEL compiles once per workflow load; evaluation is a pure function of namespace bindings.
+
+---
+
+### Deliverable 4 — Schema registry & JSON Schema handling
+
+**Scope:** Resolve `$ref:#name` against workflow-level `schemas` map. Support inline schemas and `infer` placeholder (inference deferred to deliverable 6). Validate JSON values against resolved schemas using `jsonschema` crate. Provide `SchemaRegistry` with `resolve(ref) → Schema` and `validate(schema, value) → Result`.
+
+**Tests first:**
+- Resolve `$ref:#name` to inline schema.
+- Unresolved `$ref` → load-time error naming the missing schema.
+- Validate a value against a resolved schema (pass + fail cases).
+- Validation error includes JSON path to the failing field.
+- Circular `$ref` detected and rejected.
+- `infer` placeholder accepted at parse, flagged for later resolution.
+
+**Implement:** `src/schema/registry.rs`.
+
+**Acceptance:** Every `$ref` in a workflow resolves or errors at load time.
+
+---
+
+### Deliverable 5 — Load-time validation (the 24+ checks)
+
+**Scope:** Implement the load-time validation pass enumerated in §10. Walks the parsed `WorkflowFile` and emits the complete list of errors (not just the first). Checks include: unique block IDs, transition targets exist, guards are valid CEL, `set_*` targets are declared variables, agent configs reference declared agents, schema refs resolve, call blocks reference declared functions, terminal blocks have no outgoing transitions, workflow has at least one entry, etc.
+
+**Tests first:**
+- Each of the 24+ checks has at least one failing fixture and one passing fixture.
+- Multiple errors in one workflow → all reported in one pass.
+- The §12 worked example validates clean.
+- Error messages include source location (file + block ID).
+
+**Implement:** `src/validate.rs`.
+
+**Acceptance:** Invalid workflows fail fast at load time with a complete error list.
+
+---
+
+### Deliverable 6 — Schema inference for function outputs
+
+**Scope:** When a function declares `output: infer`, derive the schema by walking backward from terminal blocks and unioning their output schemas. Error if terminal blocks have incompatible schemas.
+
+**Tests first:**
+- Single terminal block → function output schema equals block output.
+- Multiple terminal blocks with identical schemas → unified schema.
+- Incompatible terminal schemas → error.
+- Inference interacts correctly with `$ref` and inline schemas.
+- Inference is idempotent (running twice yields same result).
+
+**Implement:** `src/schema/infer.rs`; wire into load pipeline after validation.
+
+**Acceptance:** Every function has a concrete output schema after loading.
+
+---
+
+### Deliverable 7 — Workflow loader (end-to-end load pipeline)
+
+**Scope:** Public `WorkflowLoader::load(path) → Workflow`. Composes parse → resolve schemas → validate → infer → compile CEL. Produces an immutable `Workflow` struct ready for execution. No execution yet.
+
+**Tests first:**
+- Load the §12 worked example; assert function count, block count, agents present.
+- Load failure on missing file, bad YAML, semantic errors — each yields the right error variant.
+- Loaded `Workflow` is `Send + Sync` (multi-threaded execution precondition).
+- Loading is deterministic (same input → same output).
+
+**Implement:** `src/loader.rs`.
+
+**Acceptance:** One call turns a YAML file into a fully-validated, ready-to-run `Workflow`.
+
+---
+
+### Deliverable 8 — Context & state management
+
+**Scope:** Runtime state for a single function invocation. `ExecutionContext` holds: declared `workflow.*` variables (shared, mutex-guarded across functions), declared `context.*` variables (per-invocation), `block.*` outputs keyed by block ID, `input` (function input), `meta` (runtime info). Implements `set_context` / `set_workflow` writes with type checking against declarations.
+
+**Tests first:**
+- Declare variables with initial values; read back.
+- `set_context` assigns a CEL-evaluated value; type-checked against declaration.
+- `set_context` to undeclared variable → error.
+- `set_workflow` writes visible across concurrent function invocations.
+- Reading a block's output before it runs → error.
+- Namespace bindings produced by `ExecutionContext` match CEL evaluator expectations.
+
+**Implement:** `src/context.rs`.
+
+**Acceptance:** Context passes CEL evaluator round-trips cleanly.
+
+---
+
+### Deliverable 9 — Prompt block executor
+
+**Scope:** Execute a single `prompt` block: resolve its agent config (cascade), build a reel `Agent`, render the prompt template, invoke the agent with the declared output schema, store the result in `block.<id>`. Use structured output via reel's schema support. Does *not* yet handle transitions.
+
+**Tests first:**
+- Execute a trivial prompt block against a mock `reel::Agent`; assert output stored in context.
+- Agent config cascade (workflow → function → block) produces the right effective config.
+- Prompt template interpolation evaluates CEL against current context.
+- Output schema mismatch → runtime error.
+- Tool grants and `write_paths` passed through to reel.
+
+**Implement:** `src/exec/prompt.rs`. Use a test-only `AgentExecutor` trait to inject a fake agent without mocking reel internals — the trait lives in mech and has one real impl (reel) + one test impl.
+
+**Acceptance:** Prompt blocks produce schema-conformant outputs.
+
+---
+
+### Deliverable 10 — Call block executor
+
+**Scope:** Execute a `call` block. Resolve called function(s), build per-call input via the input mapping (three forms), invoke the function via a `FunctionExecutor` callback (supplied by the workflow executor in the next deliverable), apply output mapping to produce the block's output. Callee starts with empty conversation history (conversation-transparent).
+
+**Tests first:**
+- Single string form: `call: fn_name` with shared input.
+- Uniform list: `call: [a, b, c]` all receive same input.
+- Per-call list: `call: [{fn: a, input: ...}, {fn: b, input: ...}]` heterogeneous.
+- Output mapping produces expected block output from collected function results.
+- Calling an undeclared function → error (but this should already be caught at load time; runtime check is defense in depth).
+- Callee's conversation does not leak to caller.
+
+**Implement:** `src/exec/call.rs`.
+
+**Acceptance:** All three input forms execute correctly; output mapping works.
+
+---
+
+### Deliverable 11 — Transitions & block scheduling (imperative mode)
+
+**Scope:** Given a function's current block, evaluate outgoing transitions in declared order, pick the first whose guard is true (or the unconditional fallback), advance to the next block. Detect terminal blocks. Implement self-loops. Ordered evaluation stops at first match.
+
+**Tests first:**
+- Linear sequence: block A → B → C terminates at C.
+- Guard selects among multiple outgoing transitions in declared order.
+- Self-loop executes the same block until guard flips.
+- Terminal block ends function execution.
+- No matching transition and no fallback → runtime error.
+- Cycles without self-loop annotation → caught at load time (validation deliverable 5).
+
+**Implement:** `src/exec/schedule.rs`.
+
+**Acceptance:** Imperative-mode functions run to completion.
+
+---
+
+### Deliverable 12 — Function executor & workflow runtime
+
+**Scope:** `FunctionExecutor` runs a single function invocation: initializes context, starts at entry block, drives the block→transition loop, returns the function output (per declared/inferred schema). `WorkflowExecutor` orchestrates the top-level entry function and wires `FunctionExecutor` into call blocks (satisfying deliverable 10's callback). Handles both `imperative` and `dataflow` workflow modes — dataflow mode builds a DAG from `depends_on`, topo-sorts, executes level by level (§12 worked example).
+
+**Tests first:**
+- Run the §12 worked example end-to-end with mock agents; assert final output.
+- Imperative mode: single function, linear flow.
+- Imperative mode: function calls another function; results flow through.
+- Dataflow mode: shared upstream nodes run exactly once.
+- Dataflow mode: unreachable nodes (not backward-reachable from `output`) never execute.
+- Recursive function calls respect depth limits (delegate to cue later; for now, a mech-level cap).
+
+**Implement:** `src/exec/function.rs`, `src/exec/workflow.rs`, `src/exec/dataflow.rs`.
+
+**Acceptance:** Both modes execute the §12 example correctly.
+
+---
+
+### Deliverable 13 — Conversation management & history scoping
+
+**Scope:** Implement the conversation model from §5: per-function conversation history accumulates across prompt blocks within the function; call blocks start fresh (transparent); compaction hooks (placeholder — actual compaction strategy can be a no-op initially, but the extension point must exist).
+
+**Tests first:**
+- Two sequential prompt blocks in one function share conversation history.
+- A call block's callee sees empty history.
+- Compaction hook is invoked at the configured threshold (count it, don't test strategy).
+- History includes tool calls and tool results from the agent's internal loop.
+
+**Implement:** `src/conversation.rs`; integrate into prompt block executor.
+
+**Acceptance:** Conversation scoping matches §5.
+
+---
+
+### Deliverable 14 — Cue integration (`MechTask`)
+
+**Scope:** Implement `MechTask` as a `cue::TaskNode`. A mech function invocation = one cue leaf task. Bridge mech's runtime errors to cue's `TaskOutcome`. Handle cue's model escalation by re-running with a higher-tier agent config (the function's agent cascade supplies the base; escalation bumps the model tier). Expose mech workflows to epic/other cue consumers.
+
+**Tests first:**
+- `MechTask` implements all 28 `TaskNode` methods; compile check.
+- Running a mech workflow via `cue::Orchestrator<MechStore, _>` completes successfully for the §12 example.
+- Task failure maps to the right `TaskOutcome` variant.
+- Model escalation retries with a higher-tier model; final attempt's model matches expectation.
+- State persistence: partially-executed workflow can resume (delegate to cue's resume machinery).
+
+**Implement:** `src/cue_integration.rs`, `MechStore`.
+
+**Acceptance:** Mech workflows run under cue orchestration.
+
+---
+
+### Deliverable 15 — CLI (`mech run`)
+
+**Scope:** Minimal CLI: `mech run <workflow.yaml> --input <json>` loads a workflow, runs it standalone (without cue), prints the output as JSON. Useful for debugging without epic. Add `mech validate <workflow.yaml>` that runs load-time validation and exits non-zero on error.
+
+**Tests first:**
+- `mech validate` on the §12 example exits 0.
+- `mech validate` on a broken workflow exits non-zero and prints all errors.
+- `mech run` on a trivial workflow produces the expected JSON on stdout.
+- CLI argument parsing: missing args, bad input JSON, missing file.
+
+**Implement:** `src/bin/mech.rs`.
+
+**Acceptance:** Developers can iterate on workflows without booting epic.
+
+---
+
+### Deliverable 16 — End-to-end integration test suite
+
+**Scope:** Add `tests/` integration tests that run real workflows end-to-end: the §12 example, a recursive example, a dataflow example with shared nodes, an error-path example, a cue-orchestrated example. These use a deterministic fake LLM (canned responses) to keep tests hermetic and fast — no network, no real models.
+
+**Tests first (this deliverable *is* tests):**
+- Each scenario above, end-to-end, assertions on final output and intermediate state.
+- Error scenarios assert the right error variant surfaces.
+- Concurrent workflow invocations share `workflow.*` state safely.
+
+**Implement:** `tests/fixtures/*.yaml`, `tests/common/fake_agent.rs`, `tests/*.rs`.
+
+**Acceptance:** `cargo test -p mech` exercises every §5, §6, §9, §11 behavior through a real load→run→verify cycle.
+
+---
+
+### Deliverable 17 — Documentation polish & examples
+
+**Scope:** Update `README.md` for the crate with a quickstart. Ensure the §12 worked example is copy-paste runnable. Add 2-3 small example workflows under `examples/` demonstrating imperative, dataflow, and recursive patterns. Update top-level `docs/STATUS.md` to mark mech complete.
+
+**Tests first:**
+- `cargo test --examples` compiles all examples.
+- A doctest on the main `WorkflowLoader::load` shows minimal usage.
+
+**Implement:** docs, examples.
+
+**Acceptance:** A new user can go from zero to running a mech workflow using only the README + examples.
+
+---
+
+### Dependency Graph
+
+```
+1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17
+                                  ↑        ↑
+                                  └────────┘   (9 and 10 can overlap once 8 lands)
+```
+
+Deliverables 9 and 10 can be parallelized if two agents are available — they share only the `ExecutionContext` contract from deliverable 8. All other deliverables are strictly sequential.
+
+### Exit Criteria for Mech v1
+
+- All 17 deliverables complete with passing tests and clean reviews.
+- `cargo test -p mech` green on Linux, macOS, Windows (CI).
+- `cargo clippy -p mech --all-targets -- -D warnings` clean.
+- The §12 worked example runs under both standalone `mech run` and cue-orchestrated modes.
+- `docs/STATUS.md` mech section updated to "Complete".
+
+---
+
 ## Appendix A: Research
 
 Research notes from initial investigation (Perplexity, 2026-04). Raw Q&A format preserved for reference.
