@@ -1,6 +1,8 @@
-# Cue Graph/Workflow DSL Spec
+# Mech — Graph/Workflow DSL Spec
 
 > **Status:** Spec in progress. Not ready for implementation.
+>
+> **Crate:** `mech` — a standalone crate, not part of `cue`. Cue provides generic task orchestration; mech provides the declarative workflow DSL and executor. Mech depends on cue (for `TaskNode` integration) and reel (for agent execution), but is a separate compilation unit.
 
 ## 1. Overview
 
@@ -14,9 +16,14 @@ This DSL occupies the middle ground: **declarative structure with static typing,
 
 The DSL replaces the need to implement task types as Rust code. The cue orchestrator executes DSL functions the same way it executes native tasks — the function is the unit of work, the CDFG is the implementation.
 
-### Relationship to Cue
+### Relationship to Cue and Reel
 
-Cue provides generic recursive task orchestration (`TaskNode`, `TaskStore`, `Orchestrator`). The DSL adds a declarative layer: a DSL function can serve as a cue task's implementation. The orchestrator drives decomposition, retry, escalation; the DSL drives the internal logic of each task.
+Mech is a standalone crate with two key dependencies:
+
+- **Cue** provides generic recursive task orchestration (`TaskNode`, `TaskStore`, `Orchestrator`). A mech DSL function can serve as a cue task's implementation (§11). The orchestrator drives decomposition, retry, escalation; the DSL drives the internal logic of each task.
+- **Reel** provides the agent runtime. Each prompt block executes as a reel agent run — model selection, tool grants, sandbox, tool loop. Mech configures reel via the `agent` block (§5.5).
+
+Mech does not live inside either crate. It is its own compilation unit that bridges cue's orchestration with reel's agent execution through a declarative YAML surface.
 
 ## 2. Design Goals
 
@@ -40,6 +47,7 @@ Cue provides generic recursive task orchestration (`TaskNode`, `TaskStore`, `Orc
 - **Template expression** — `{{...}}` references interpolated into prompt text. The expression inside the braces is a CEL expression evaluated against the available namespaces (`input`, `output`, `context`, `workflow`, `blocks`). Simple paths like `{{input.text}}` and computed values like `{{context.score >= 0.8 ? "high" : "low"}}` both work. Scoping rules defined in §7.
 - **Guard** — A CEL expression on a transition. Evaluated against the current block's output, function context, and workflow context.
 - **Context** — Mutable typed variables declared with initial values. Two levels: **workflow context** (`workflow.*`, shared across all function invocations) and **function context** (`context.*`, scoped to a single invocation). Variables are pre-declared — blocks can only write to declared variables, and all variables always exist.
+- **Agent configuration** — Runtime environment for prompt block execution. Configures the reel agent: model, grant flags (TOOLS/WRITE/NETWORK), custom tool names, writable paths, and timeout. Follows a three-level cascade (workflow → function → block) with replace semantics. Named configurations can be defined at the workflow level and referenced via `$ref:#name` or extended via `extends`.
 
 ## 4. Graph Model — Unified CDFG
 
@@ -284,20 +292,25 @@ compaction:
   fn: custom_summarizer         # a DSL function or registered handler
 ```
 
-**Model selection is per-block.** Each prompt block may specify a `model` field overriding the function or workflow default. Different blocks within the same conversation can use different models — the executor switches models between turns while preserving the shared conversation history. This is supported by flick's architecture: `Context` (message history) is model-agnostic, and model resolution is per-`FlickClient` instance. The executor constructs a new client when the model changes between blocks.
+**Agent configuration is per-block.** Each prompt block executes as a reel agent run — not a raw LLM call. The `agent` block configures the runtime environment: model, grant flags, custom tools, writable paths, and timeout. Agent configuration follows a three-level cascade (workflow → function → block) with replace semantics (§5.5). Different blocks within the same conversation can use different agent configurations — the executor reconfigures the reel agent between turns while preserving the shared conversation history. Conversation history is agent-agnostic; agent configuration is per-block execution.
 
 ```yaml
 blocks:
   draft:
-    model: haiku
+    agent:
+      model: haiku
+      grant: [tools]
     prompt: "Write a first draft of {{input.topic}}"
     schema: { ... }
     transitions:
       - goto: critique
 
   critique:
-    model: opus
-    prompt: "Critique the draft and identify weaknesses."
+    agent:
+      model: opus
+      grant: [write]
+      write_paths: [drafts/]
+    prompt: "Critique the draft and rewrite weak sections."
     schema: { ... }
     transitions:
       - when: 'output.quality < 0.8'
@@ -325,7 +338,7 @@ Invokes an LLM with a rendered prompt template. Validates the response against a
 |---|---|---|---|
 | `prompt` | string | Yes | Template string with `{{...}}` CEL expressions (§7). Becomes the user message in the conversation. |
 | `schema` | object \| string | Yes | JSON Schema for the LLM's structured output. Inline YAML object or `$ref` string path (§8). |
-| `model` | string | No | Model override for this block. Resolves via flick's `ModelRegistry`. If omitted, inherits from function or workflow default. |
+| `agent` | object \| string | No | Agent configuration for this block. Inline object, `$ref:#name`, or `$ref:path`. If omitted, inherits from function or workflow default. See §5.5. |
 | `transitions` | list | No | Outbound control edges. Each entry has `goto` (required) and `when` (optional CEL guard). See §6. |
 | `depends_on` | list of strings | No | Block names whose outputs must be available before this block executes. Acyclic (enforced at load time). |
 | `set_context` | object | No | CEL expressions writing to function context variables. Keys must be declared in the function's `context`. See §9. |
@@ -347,7 +360,9 @@ classify:
 
 ```yaml
 analyze:
-  model: sonnet
+  agent:
+    model: sonnet
+    grant: [tools]
   prompt: |
     Given the classification {{blocks.classify.output.category}},
     analyze the customer's issue in detail.
@@ -450,7 +465,7 @@ analyze:
 |---|---|---|
 | `prompt` | Required | Forbidden |
 | `schema` | Required | Forbidden |
-| `model` | Optional | Forbidden |
+| `agent` | Optional | Forbidden |
 | `call` | Forbidden | Required |
 | `input` | Forbidden | Conditional (required for single/uniform, forbidden for per-call list) |
 | `output` | Forbidden | Optional |
@@ -461,21 +476,152 @@ analyze:
 | `set_context` | Optional | Optional |
 | `set_workflow` | Optional | Optional |
 
-**Load-time enforcement:** A block with both `prompt` and `call` is an error. A block with neither is an error. A block with `schema` or `model` but no `prompt` is an error. A block with `output` but no `call` is an error. A block with `parallel` or `n` but no `call` is an error. A block with `n` but `parallel` not set to `n_of_m` is an error. A per-call list block with a block-level `input` is an error. A single-function or uniform-list block without a block-level `input` is an error. A per-call entry missing `fn` or `input` is an error.
+**Load-time enforcement:** A block with both `prompt` and `call` is an error. A block with neither is an error. A block with `schema` or `agent` but no `prompt` is an error. A block with `output` but no `call` is an error. A block with `parallel` or `n` but no `call` is an error. A block with `n` but `parallel` not set to `n_of_m` is an error. A per-call list block with a block-level `input` is an error. A single-function or uniform-list block without a block-level `input` is an error. A per-call entry missing `fn` or `input` is an error.
 
 ### 5.4 Block Identity and Naming
 
 Block names are the YAML keys under the `blocks:` map. Names must be valid identifiers: `[a-z][a-z0-9_]*` (lowercase, underscore-separated). Names must be unique within a function. Reserved names: `input`, `output`, `context`, `workflow` (these conflict with CEL namespace variables).
 
-### 5.5 Default Model Resolution
+### 5.5 Agent Configuration
 
-Model resolution follows a three-level cascade:
+Each prompt block executes as a reel agent run. The `agent` block configures the runtime environment for that execution. Agent configuration follows a three-level cascade with **replace semantics** — each level fully replaces the level above, with no field-level merging.
 
-1. **Block-level** `model` field (highest priority)
-2. **Function-level** `model` field (declared alongside `input`, `system`, etc.)
-3. **Workflow-level** `model` field (declared at the top level)
+#### 5.5.1 Agent Configuration Fields
 
-If no model is specified at any level, the executor uses the runtime's default model. All model names resolve via flick's `ModelRegistry` at load time — an unresolvable model name is a load-time error.
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `model` | string | No | Model name. Resolves via flick's `ModelRegistry`. |
+| `grant` | list of strings | No | Reel `ToolGrant` flags: `tools`, `write`, `network`. `write` and `network` imply `tools` (auto-normalized). Default: no grants (structured-output-only, no tool loop). |
+| `tools` | list of strings | No | Custom tool names to enable. Must be registered with the executor at runtime. |
+| `write_paths` | list of strings | No | Fine-grained writable paths (relative to project root). Only meaningful when `grant` includes `write`. |
+| `timeout` | string | No | Agent run timeout (e.g., `"30s"`, `"5m"`). If omitted, uses executor default. |
+| `extends` | string | No | Name of a workflow-level named agent config to use as a base. Specified fields override the base; unspecified fields inherit from it. Mutually exclusive with `$ref` string form. |
+
+#### 5.5.2 Three-Level Cascade
+
+Resolution follows a three-level cascade:
+
+1. **Block-level** `agent` field (highest priority)
+2. **Function-level** `agent` field (declared alongside `input`, `system`, etc.)
+3. **Workflow-level** `agent` field (declared at the top level)
+
+If no agent config is specified at any level, the executor uses its runtime defaults (model, no grants, no custom tools).
+
+**Semantics: replace, not merge.** When a lower level declares `agent`, it **completely replaces** the inherited config. A function-level agent config replaces the workflow default entirely; a block-level agent config replaces the function-level config entirely. There is no field-level merge — if a block specifies `agent` with only `model`, the block has only a model (no grants, no tools, no write_paths).
+
+To override specific fields while inheriting the rest, use `extends` (§5.5.4).
+
+#### 5.5.3 Named Agent Configurations
+
+Workflow-level `agents` map defines reusable, named configurations — parallel to `schemas`:
+
+```yaml
+workflow:
+  agents:
+    reader:
+      model: haiku
+      grant: [tools]
+    writer:
+      model: sonnet
+      grant: [write]
+      write_paths: [src/]
+    researcher:
+      model: sonnet
+      grant: [tools, network]
+      tools: [web_search, fetch_url]
+
+  agent: "$ref:#reader"          # workflow default references a named config
+```
+
+Named configs are defined once and referenced by name via `$ref:#name` (inline string form) or `extends` (inside an agent block). External files are also supported: `$ref:agents/reader.yaml`.
+
+Named configs may themselves use `extends` to build on other named configs:
+
+```yaml
+agents:
+  base:
+    model: haiku
+    grant: [tools]
+  writer:
+    extends: base
+    grant: [write]
+    write_paths: [src/]
+```
+
+Here `writer` inherits `model: haiku` from `base` and overrides `grant` and `write_paths`. Circular `extends` chains (e.g., A extends B extends A) are a load-time error.
+
+#### 5.5.4 Reference and Extension
+
+Three forms at any level (workflow, function, block):
+
+**Direct reference** — use a named config as-is:
+
+```yaml
+agent: "$ref:#reader"
+```
+
+**Extend** — start from a named config, override specific fields:
+
+```yaml
+agent:
+  extends: reader
+  model: opus              # override model; grant inherited from 'reader'
+```
+
+`extends` starts from the named config and applies specified fields as overrides. This is the mechanism for "inherit with tweaks" under replace semantics. Only fields explicitly present in the extending block override the base — unspecified fields retain the base's values.
+
+**Fully inline** — no inheritance:
+
+```yaml
+agent:
+  model: haiku
+  grant: [tools]
+```
+
+**External file reference:**
+
+```yaml
+agent: "$ref:agents/reader.yaml"
+```
+
+External files are loaded and inlined at load time, like schema `$ref`. The path is relative to the workflow file's directory.
+
+**Detection:** The deserializer distinguishes forms by type: `string` starting with `$ref:` → reference (named or file); `object` → inline config (check for `extends` field to resolve base).
+
+#### 5.5.5 Grant Semantics
+
+Grant flags map directly to reel's `ToolGrant` bitflags:
+
+| Grant | Reel effect | Tools enabled |
+|---|---|---|
+| `tools` | Read-only codebase access + NuShell sandbox | Read, Glob, Grep, NuShell |
+| `write` | Implies `tools`. Adds write access to `write_paths` (or project root if unspecified). | adds Write, Edit |
+| `network` | Implies `tools`. Enables network access in the sandbox. | (no additional tools) |
+
+**Auto-normalization rules:**
+
+- `write` and `network` imply `tools` (same as reel's `ToolGrant::normalize()`).
+- Specifying `tools` (custom tool names) implies `grant: [tools]` — custom tools require the tool loop.
+
+A prompt block with no `grant`, no `tools`, and no `agent` block runs in **structured-output-only mode** — a single LLM call with no tool loop. This is the default and matches the original spec behavior where prompt blocks were raw LLM calls.
+
+Adding any grant (or any custom `tools`) activates reel's **tool-loop mode** — the agent can use tools across multiple rounds before producing its final structured output.
+
+#### 5.5.6 Tool-Loop Conversation Interaction
+
+When a block runs with grants (tool-loop mode), the reel agent executes an internal multi-turn conversation with tool calls. This internal conversation is **invisible to the function's conversation** (§4.6). From the function's perspective, the block contributes exactly one user/assistant exchange:
+
+1. The rendered `prompt` becomes the **user message** in the function's conversation.
+2. The agent's **final structured output** (validated against `schema`) becomes the **assistant message**.
+3. The agent's internal tool-use turns (tool calls, tool results, intermediate reasoning) are discarded from the function's conversation.
+
+This preserves the conversation model's invariant: each prompt block appends exactly one user message and one assistant message. Downstream blocks that inherit conversation history (via control edges) see only the prompt and final output, not the agent's internal tool interactions.
+
+#### 5.5.7 System Prompt Interaction
+
+`system` remains a separate field at workflow and function level (not inside `agent`). System prompts are a conversational concern — they use template expressions, participate in the conversation model (§4.6), and layer via workflow/function override. Agent configuration is a runtime environment concern — model, permissions, tools.
+
+Both cascades are independent. A function can override `system` without touching `agent`, or override `agent` without touching `system`.
 
 ## 6. Transitions & Guards
 
@@ -1000,7 +1146,14 @@ The loader performs all of the following checks when a workflow file is loaded. 
 | Template reference reachability | Error | The referenced block is guaranteed to have executed before the referencing block (domination or `depends_on`). |
 | CEL compilation | Error | All `when` guards and `set_context` expressions compile as valid CEL. |
 | CEL variable scope | Error | All CEL expressions (guards, `set_context`, template `{{...}}`) only reference variables available in their evaluation context (§6.3). |
-| Model resolution | Error | All `model` fields (block, function, workflow) resolve via flick's `ModelRegistry`. |
+| Agent model resolution | Error | All `agent.model` fields (block, function, workflow) resolve via flick's `ModelRegistry`. |
+| Agent grant validity | Error | `agent.grant` values must be valid: `tools`, `write`, `network`. |
+| Agent grant normalization | — | `write` and `network` imply `tools` (auto-added if missing). Specifying `tools` (custom tool names) implies `grant: [tools]`. |
+| Agent write_paths without write grant | Warning | `agent.write_paths` is specified but `agent.grant` does not include `write`. |
+| Agent extends resolution | Error | `agent.extends` target must exist in workflow-level `agents` map. |
+| Agent `$ref:#name` resolution | Error | `agent: "$ref:#name"` target must exist in workflow-level `agents` map. |
+| Agent `$ref:path` resolution | Error | `agent: "$ref:path"` file must exist and parse as a valid agent config. |
+| Agent `extends` cycle | Error | Circular `extends` chains in named agent configs (e.g., A extends B extends A). |
 | Input schema match | Error | Call block `input` fields must provide all `required` fields declared in the called function's `input` schema. For per-call lists, each entry's `input` is validated against its own target function's schema. |
 | Per-call list consistency | Error | A per-call list block must not have a block-level `input`. A uniform-list or single-function block must have a block-level `input`. Per-call entries must each have `fn` and `input` fields. |
 | Function output schema | Error | If `output` is an explicit schema: must be valid JSON Schema with root type `object`. Terminal block schemas must be compatible with the declared output schema. |
@@ -1126,7 +1279,7 @@ DslTask {
 4. On success: return `TaskOutcome::Success`. The function's output is stored for the parent to access.
 5. On failure (any block fails, template error, schema error): return `TaskOutcome::Failed { reason }`.
 
-**`assess` implementation:** DSL-backed tasks are always leaves. The `assess` method returns `AssessmentResult { path: Leaf, model: <workflow default>, ... }`.
+**`assess` implementation:** DSL-backed tasks are always leaves. The `assess` method returns `AssessmentResult { path: Leaf, model: <workflow agent default model>, ... }`.
 
 **`verify_branch` / `decompose`:** Not applicable — DSL tasks are leaves. These methods should not be called on a DSL task. If they are (implementation error), they return an error.
 
@@ -1136,15 +1289,16 @@ When a DSL function fails (e.g., schema validation failure on a block), cue's ou
 
 1. `execute_leaf()` returns `TaskOutcome::Failed { reason: "Block 'analyze' schema validation failed: ..." }`.
 2. Cue's retry mechanism re-calls `execute_leaf()` — possibly with an escalated model.
-3. The DSL function re-executes from scratch (fresh conversation, fresh context). Model escalation from cue overrides the workflow-level default model, but block-level `model` overrides still take precedence.
+3. The DSL function re-executes from scratch (fresh conversation, fresh context). Model escalation from cue overrides the workflow/function-level default agent model, but block-level agent config is never overridden.
 
-**Model escalation interaction:**
+**Escalation interaction with agent configuration:**
 
 | Level | Source | Overridden by cue escalation? |
 |---|---|---|
-| Workflow default | `workflow.model` | Yes |
-| Function default | `function.model` | Yes |
-| Block override | `block.model` | No — block-level is intentional (e.g., cheap model for triage, expensive model for synthesis) |
+| Workflow default | `workflow.agent.model` | Yes |
+| Function default | `function.agent.model` | Yes |
+| Block override | `block.agent.model` | No — block-level is intentional (e.g., cheap model for triage, expensive model for synthesis) |
+| Grant/tools/write_paths | Any level | No — cue escalation only affects model selection, not runtime permissions |
 
 ### 11.5 Workflow as Branch Task
 
@@ -1183,7 +1337,23 @@ Complete annotated schema for the workflow file format. All fields shown; option
 
 workflow:                                       # optional — workflow-level defaults
   system: <string>                              # optional — default system prompt (template vars allowed)
-  model: <string>                               # optional — default model name (flick ModelRegistry)
+
+  agent: <object | "$ref:#name" | "$ref:path">  # optional — default agent config (§5.5)
+  #   model: <string>                           #   flick model name
+  #   grant: [tools, write, network]            #   ToolGrant flags
+  #   tools: [<tool_name>, ...]                 #   custom tool names (registered by executor)
+  #   write_paths: [<path>, ...]                #   writable paths (relative to project root)
+  #   timeout: <string>                         #   agent run timeout (e.g., "30s", "5m")
+  #   extends: <agent_name>                     #   base named config to extend
+
+  agents:                                       # optional — named agent configurations (like schemas)
+    <agent_name>:
+      model: <string>                           # optional
+      grant: [<grant>, ...]                     # optional
+      tools: [<tool_name>, ...]                 # optional
+      write_paths: [<path>, ...]                # optional
+      timeout: <string>                         # optional
+
   context:                                      # optional — workflow-level context variables
     <variable_name>:                            #   identifier: [a-z][a-z0-9_]*
       type: <string>                            #   JSON Schema type
@@ -1211,7 +1381,7 @@ functions:
     output: <object | "$ref:path" | "$ref:#name" | "infer">  # optional — output schema (default: infer)
 
     system: <string>                            # optional — override workflow system prompt
-    model: <string>                             # optional — override workflow default model
+    agent: <object | "$ref:#name" | "$ref:path">  # optional — override workflow agent config (§5.5)
     terminals: [<block_name>, ...]              # optional — explicit terminal blocks (auto-detected if omitted)
 
     context:                                    # optional — function-level context variables
@@ -1231,7 +1401,7 @@ functions:
       <block_name>:                             # identifier: [a-z][a-z0-9_]*, not input/output/context
         prompt: <string>                        # required — template string ({{CEL}} expressions)
         schema: <object | "$ref:path" | "$ref:#name">  # required — output JSON Schema
-        model: <string>                         # optional — override function/workflow model
+        agent: <object | "$ref:#name" | "$ref:path">   # optional — override function/workflow agent config (§5.5)
 
         depends_on: [<block_name>, ...]         # optional — data edges (must be acyclic)
 
@@ -1295,20 +1465,27 @@ functions:
 | Field | Type | Where |
 |---|---|---|
 | `workflow.system` | Template string | Top-level |
-| `workflow.model` | Model name string | Top-level |
+| `workflow.agent` | Agent config object or `$ref` string | Top-level (optional) |
+| `workflow.agents` | Map of name → agent config object | Top-level (optional) |
 | `workflow.context` | Map of variable name → `{ type, initial }` | Top-level (optional) |
 | `workflow.schemas` | Map of name → JSON Schema object | Top-level |
 | `workflow.compaction` | Compaction config object | Top-level |
 | `function.input` | JSON Schema (root type: object) | Function |
 | `function.output` | JSON Schema object, `$ref` string, or `"infer"` | Function (optional, default: `infer`) |
 | `function.system` | Template string | Function |
-| `function.model` | Model name string | Function |
+| `function.agent` | Agent config object or `$ref` string | Function (optional) |
 | `function.terminals` | List of block name strings | Function |
 | `function.context` | Map of variable name → `{ type, initial }` | Function (optional) |
 | `function.compaction` | Compaction config object | Function |
 | `block.prompt` | Template string | Prompt block |
 | `block.schema` | JSON Schema object or `$ref` string | Prompt block |
-| `block.model` | Model name string | Prompt block |
+| `block.agent` | Agent config object or `$ref` string | Prompt block (optional) |
+| `agent.model` | Model name string | Agent config |
+| `agent.grant` | List of grant strings (`tools`, `write`, `network`) | Agent config (optional) |
+| `agent.tools` | List of tool name strings | Agent config (optional) |
+| `agent.write_paths` | List of path strings | Agent config (optional) |
+| `agent.timeout` | Duration string (e.g., `"30s"`) | Agent config (optional) |
+| `agent.extends` | Agent name string | Agent config (optional, inline only) |
 | `block.call` | String, list of strings, or list of call entries | Call block |
 | `block.input` | Map of field → template/CEL expression | Call block (single/uniform only) |
 | `block.output` | Map of field → template/CEL expression | Call block (optional) |
@@ -1328,7 +1505,18 @@ functions:
 ```yaml
 workflow:
   system: "You are a customer support agent."
-  model: sonnet
+
+  agents:
+    default:
+      model: sonnet
+      grant: [tools]
+    diagnostician:
+      model: opus
+      grant: [tools, network]
+      tools: [web_search]
+
+  agent: "$ref:#default"
+
   schemas:
     resolution:
       type: object
@@ -1377,7 +1565,7 @@ functions:
           - goto: respond
 
       technical:
-        model: opus
+        agent: "$ref:#diagnostician"
         prompt: |
           Diagnose this technical issue.
           Ticket: {{input.ticket_text}}
@@ -1432,6 +1620,10 @@ functions:
         issue: { type: string }
         urgency: { type: string }
     system: "You are a billing specialist. Be precise about amounts and dates."
+    agent:
+      extends: default
+      grant: [write]
+      write_paths: [billing/]
 
     blocks:
       analyze:
