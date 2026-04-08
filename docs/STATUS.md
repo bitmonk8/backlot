@@ -23,7 +23,7 @@
 
 ## Lot
 
-**Phase:** Implementation and audit remediation complete. CI green on Linux, macOS, Windows.
+**Phase:** Implementation and audit remediation complete. 278 tests passing, CI green on Linux, macOS, Windows.
 
 **Implemented:**
 - Cross-platform process sandboxing (Linux namespaces+seccomp, macOS Seatbelt, Windows AppContainer)
@@ -91,7 +91,7 @@
 
 ## Epic
 
-**Phase:** Core orchestration, knowledge layer, file-level review, and cue integration complete. All orchestrator tests exercise `cue::Orchestrator<EpicStore<A>, EventLog>`.
+**Phase:** Core orchestration, knowledge layer, file-level review, and cue integration complete. 251 tests passing. All orchestrator tests exercise `cue::Orchestrator<EpicStore<A>, EventLog>`.
 
 **Implemented:**
 - Recursive problem-solver with DFS execution, retry/escalation, fix loops, recovery re-decomposition
