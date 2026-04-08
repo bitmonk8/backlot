@@ -1,26 +1,28 @@
-# Mech — Graph/Workflow DSL Spec
+# Mech — Workflow Definition Spec
 
 > **Status:** Spec in progress. Not ready for implementation.
 >
-> **Crate:** `mech` — a standalone crate, not part of `cue`. Cue provides generic task orchestration; mech provides the declarative workflow DSL and executor. Mech depends on cue (for `TaskNode` integration) and reel (for agent execution), but is a separate compilation unit.
+> **Crate:** `mech` — a standalone crate, not part of `cue`. Cue provides generic task orchestration; mech provides the declarative workflow definition format and executor. Mech depends on cue (for `TaskNode` integration) and reel (for agent execution), but is a separate compilation unit.
 
 ## 1. Overview
 
-A YAML-based DSL for defining agent workflows as typed, statically-validated graphs. Each workflow file declares one or more **functions** — callable units whose bodies are hybrid control-flow/data-flow graphs (CDFGs). Blocks within a function are LLM prompt calls with JSON Schema typed inputs and outputs, connected by control edges (CEL-guarded transitions) and data edges (`depends_on`).
+A YAML-based workflow definition format for agent workflows expressed as typed, statically-validated graphs. Each workflow file declares one or more **functions** — callable units whose bodies are hybrid control-flow/data-flow graphs (CDFGs). Blocks within a function are LLM prompt calls with JSON Schema typed inputs and outputs, connected by control edges (CEL-guarded transitions) and data edges (`depends_on`).
+
+Mech is not a custom language — there is no bespoke grammar or parser. The workflow format is defined by a YAML schema (§12) with CEL as the embedded expression language for guards, templates, and mappings.
 
 ### Motivation
 
 Rust is the right language for the backlot runtime — type safety, tooling, performance. But Rust is too general-purpose for rapid iteration on task logic. Each new task type requires Rust code changes, recompilation, and the full development cycle. Meanwhile, dynamic languages (Python, JS) offer fast iteration but lack the rigid type systems and validation that LLM orchestration requires — models benefit from structural constraints, not flexibility.
 
-This DSL occupies the middle ground: **declarative structure with static typing, without requiring compilation.** Workflow authors define what each block does (prompt + schema), how blocks connect (transitions + dependencies), and what expressions govern routing (CEL) — all in YAML files that can be modified, reloaded, and tested without touching Rust.
+Mech occupies the middle ground: **declarative structure with static typing, without requiring compilation.** Workflow authors define what each block does (prompt + schema), how blocks connect (transitions + dependencies), and what expressions govern routing (CEL) — all in YAML files that can be modified, reloaded, and tested without touching Rust.
 
-The DSL replaces the need to implement task types as Rust code. The cue orchestrator executes DSL functions the same way it executes native tasks — the function is the unit of work, the CDFG is the implementation.
+Mech replaces the need to implement task types as Rust code. The cue orchestrator executes mech workflow functions the same way it executes native tasks — the function is the unit of work, the CDFG is the implementation.
 
 ### Relationship to Cue and Reel
 
 Mech is a standalone crate with two key dependencies:
 
-- **Cue** provides generic recursive task orchestration (`TaskNode`, `TaskStore`, `Orchestrator`). A mech DSL function can serve as a cue task's implementation (§11). The orchestrator drives decomposition, retry, escalation; the DSL drives the internal logic of each task.
+- **Cue** provides generic recursive task orchestration (`TaskNode`, `TaskStore`, `Orchestrator`). A mech workflow function can serve as a cue task's implementation (§11). The orchestrator drives decomposition, retry, escalation; mech drives the internal logic of each task.
 - **Reel** provides the agent runtime. Each prompt block executes as a reel agent run — model selection, tool grants, sandbox, tool loop. Mech configures reel via the `agent` block (§5.5).
 
 Mech does not live inside either crate. It is its own compilation unit that bridges cue's orchestration with reel's agent execution through a declarative YAML surface.
@@ -33,7 +35,7 @@ Mech does not live inside either crate. It is its own compilation unit that brid
 4. **CEL for all expressions.** Transition guards, template expressions, and any computed values use CEL. No embedded Python, no custom expression language, no eval.
 5. **YAML surface syntax.** Human-readable, LLM-readable, tooling-friendly. No custom parser required for the outer structure.
 6. **Declarative, not imperative.** Workflows describe structure and constraints. The executor decides scheduling, parallelism within dataflow regions, and retry mechanics.
-7. **Embeddable in cue.** A DSL function maps to a cue `TaskNode` implementation. The DSL does not replace cue's orchestration protocol — it provides a declarative way to define what a task does internally.
+7. **Embeddable in cue.** A mech workflow function maps to a cue `TaskNode` implementation. Mech does not replace cue's orchestration protocol — it provides a declarative way to define what a task does internally.
 
 ## 3. Core Concepts
 
@@ -265,7 +267,7 @@ functions:
 
 If neither the function nor the workflow declares a `system` field, the conversation has no system message. Per-block system prompt variation is not supported — per-block instructions belong in the block's `prompt` template. If a block needs a fundamentally different persona, extract it to a separate function.
 
-**History compaction.** Long-running functions (especially those with cycles) accumulate conversation history that may exceed the model's context window. The DSL provides a token-budget compaction mechanism, modeled after Pi Agent's approach.
+**History compaction.** Long-running functions (especially those with cycles) accumulate conversation history that may exceed the model's context window. Mech provides a token-budget compaction mechanism, modeled after Pi Agent's approach.
 
 When a function's conversation exceeds a token threshold, compaction fires: older messages are summarized into a synthetic message that replaces them at the head of the conversation. Recent messages (within `keep_recent_tokens`) are preserved verbatim. The summary is generated by an LLM call using a structured format (goal, progress, decisions, key context), and the previous summary is fed as iterative context so information degrades gracefully rather than being hard-truncated.
 
@@ -283,13 +285,13 @@ functions:
 
 If `compaction` is omitted, the executor uses workflow-level defaults. If no defaults exist, compaction is disabled (the full conversation is sent on every call; the workflow author is responsible for bounding cycles).
 
-**Custom compaction functions.** The `compaction` field accepts an optional `fn` property naming a DSL function (or registered Rust handler) that replaces the built-in summarizer. The custom function receives the messages to summarize as input and returns a summary string. This allows domain-specific compaction logic (e.g., preserving specific structured data, using a cheaper model for summarization, or applying non-LLM compression).
+**Custom compaction functions.** The `compaction` field accepts an optional `fn` property naming a mech workflow function (or registered Rust handler) that replaces the built-in summarizer. The custom function receives the messages to summarize as input and returns a summary string. This allows domain-specific compaction logic (e.g., preserving specific structured data, using a cheaper model for summarization, or applying non-LLM compression).
 
 ```yaml
 compaction:
   keep_recent_tokens: 20000
   reserve_tokens: 16384
-  fn: custom_summarizer         # a DSL function or registered handler
+  fn: custom_summarizer         # a mech workflow function or registered handler
 ```
 
 **Agent configuration is per-block.** Each prompt block executes as a reel agent run — not a raw LLM call. The `agent` block configures the runtime environment: model, grant flags, custom tools, writable paths, and timeout. Agent configuration follows a three-level cascade (workflow → function → block) with replace semantics (§5.5). Different blocks within the same conversation can use different agent configurations — the executor reconfigures the reel agent between turns while preserving the shared conversation history. Conversation history is agent-agnostic; agent configuration is per-block execution.
@@ -657,7 +659,7 @@ Transitions are evaluated **top-to-bottom, first match wins**. This is identical
 
 ### 6.3 CEL Expression Language
 
-[CEL (Common Expression Language)](https://cel.dev/) is the single expression language for the entire DSL — used in `{{...}}` template expressions, `when` guards, `set_context`, call block `input` mappings, and call block `output` mappings. CEL is sandboxed, side-effect-free, and evaluates in constant time (no loops, no I/O).
+[CEL (Common Expression Language)](https://cel.dev/) is the single expression language used throughout mech — in `{{...}}` template expressions, `when` guards, `set_context`, call block `input` mappings, and call block `output` mappings. CEL is sandboxed, side-effect-free, and evaluates in constant time (no loops, no I/O).
 
 **Available variables** depend on evaluation context:
 
@@ -1218,11 +1220,11 @@ All errors (load-time and runtime) include:
 
 ## 11. Integration with Cue
 
-The DSL does not replace cue — it provides a declarative way to define what a cue task does internally. A DSL function is an **implementation strategy** for a `TaskNode`, not a replacement for the orchestration protocol.
+Mech does not replace cue — it provides a declarative way to define what a cue task does internally. A mech workflow function is an **implementation strategy** for a `TaskNode`, not a replacement for the orchestration protocol.
 
 ### 11.1 Mapping: Function = Leaf Task Implementation
 
-A cue leaf task can be implemented by a DSL function instead of a direct agent call. When the orchestrator calls `execute_leaf()` on such a task, the task's implementation loads and executes a DSL function, returning the function's structured output as the leaf result.
+A cue leaf task can be implemented by a mech workflow function instead of a direct agent call. When the orchestrator calls `execute_leaf()` on such a task, the task's implementation loads and executes a mech workflow function, returning the function's structured output as the leaf result.
 
 ```
 Cue Orchestrator
@@ -1232,7 +1234,7 @@ Cue Orchestrator
                     ├── execute_task(subtask_1)
                     │     └── assess → Leaf
                     │           └── execute_leaf()
-                    │                 └── DSL function: "triage_workflow"
+                    │                 └── mech function: "triage_workflow"
                     │                       ├── block: classify
                     │                       ├── block: analyze
                     │                       └── block: respond  ← output
@@ -1240,7 +1242,7 @@ Cue Orchestrator
                     └── execute_task(subtask_3) ...
 ```
 
-**The DSL function is opaque to cue.** Cue sees a leaf task that produces a `TaskOutcome`. The function's internal blocks, transitions, context, and conversation are invisible to the orchestrator. The function either succeeds (returning structured output) or fails (returning a failure reason).
+**The mech function is opaque to cue.** Cue sees a leaf task that produces a `TaskOutcome`. The function's internal blocks, transitions, context, and conversation are invisible to the orchestrator. The function either succeeds (returning structured output) or fails (returning a failure reason).
 
 ### 11.2 Mapping: Each Block is NOT a Cue Task
 
@@ -1250,22 +1252,22 @@ Individual blocks are not modeled as cue tasks. This is deliberate:
 - **Conversation continuity.** Blocks within a function share a conversation (§4.6). Cue tasks are independent — they don't share conversation state. Making each block a separate task would break the conversation model.
 - **Retry semantics differ.** Cue's retry escalates models (Haiku → Sonnet → Opus). Block-level retry is a self-loop with accumulated context. These are different mechanisms for different purposes.
 
-**The DSL executor is a separate execution engine** that runs inside `execute_leaf()`. It handles block scheduling, template resolution, LLM calls, conversation management, and context mutation. Cue handles the outer loop: assessment, decomposition, verification, fix loops, recovery.
+**The mech executor is a separate execution engine** that runs inside `execute_leaf()`. It handles block scheduling, template resolution, LLM calls, conversation management, and context mutation. Cue handles the outer loop: assessment, decomposition, verification, fix loops, recovery.
 
-### 11.3 DSL-Backed TaskNode
+### 11.3 Mech-Backed TaskNode
 
-A `TaskNode` implementation that executes DSL functions needs:
+A `TaskNode` implementation that executes mech workflow functions needs:
 
 ```
-DslTask {
+MechTask {
     // Standard cue fields
     id: TaskId,
     phase: TaskPhase,
     goal: String,
     ...
 
-    // DSL-specific
-    function_name: String,          // which DSL function to execute
+    // Mech-specific
+    function_name: String,          // which mech function to execute
     workflow: Arc<LoadedWorkflow>,   // parsed + validated workflow (shared across tasks)
     input: serde_json::Value,       // input arguments for the function
 }
@@ -1275,21 +1277,21 @@ DslTask {
 
 1. Look up the function by name in the loaded workflow.
 2. Create a new `FunctionExecution` (conversation, context, block states).
-3. Run the DSL executor (§4.3 activation rules, §4.6 conversation model).
+3. Run the mech executor (§4.3 activation rules, §4.6 conversation model).
 4. On success: return `TaskOutcome::Success`. The function's output is stored for the parent to access.
 5. On failure (any block fails, template error, schema error): return `TaskOutcome::Failed { reason }`.
 
-**`assess` implementation:** DSL-backed tasks are always leaves. The `assess` method returns `AssessmentResult { path: Leaf, model: <workflow agent default model>, ... }`.
+**`assess` implementation:** Mech-backed tasks are always leaves. The `assess` method returns `AssessmentResult { path: Leaf, model: <workflow agent default model>, ... }`.
 
-**`verify_branch` / `decompose`:** Not applicable — DSL tasks are leaves. These methods should not be called on a DSL task. If they are (implementation error), they return an error.
+**`verify_branch` / `decompose`:** Not applicable — mech-backed tasks are leaves. These methods should not be called on a mech task. If they are (implementation error), they return an error.
 
-### 11.4 Cue Retry and DSL Failures
+### 11.4 Cue Retry and Mech Failures
 
-When a DSL function fails (e.g., schema validation failure on a block), cue's outer loop handles retry:
+When a mech function fails (e.g., schema validation failure on a block), cue's outer loop handles retry:
 
 1. `execute_leaf()` returns `TaskOutcome::Failed { reason: "Block 'analyze' schema validation failed: ..." }`.
 2. Cue's retry mechanism re-calls `execute_leaf()` — possibly with an escalated model.
-3. The DSL function re-executes from scratch (fresh conversation, fresh context). Model escalation from cue overrides the workflow/function-level default agent model, but block-level agent config is never overridden.
+3. The mech function re-executes from scratch (fresh conversation, fresh context). Model escalation from cue overrides the workflow/function-level default agent model, but block-level agent config is never overridden.
 
 **Escalation interaction with agent configuration:**
 
@@ -1302,9 +1304,9 @@ When a DSL function fails (e.g., schema validation failure on a block), cue's ou
 
 ### 11.5 Workflow as Branch Task
 
-An alternative mapping: a cue branch task uses a DSL function for its **decomposition** — the function's blocks define the subtask structure rather than executing directly.
+An alternative mapping: a cue branch task uses a mech workflow function for its **decomposition** — the function's blocks define the subtask structure rather than executing directly.
 
-This is a future extension. The current design maps DSL functions to leaf execution only. Branch decomposition remains the domain of agent calls (via `TaskNode::decompose`). If this extension proves valuable, a DSL function's terminal blocks would produce `SubtaskSpec` values instead of free-form output.
+This is a future extension. The current design maps mech functions to leaf execution only. Branch decomposition remains the domain of agent calls (via `TaskNode::decompose`). If this extension proves valuable, a mech function's terminal blocks would produce `SubtaskSpec` values instead of free-form output.
 
 ### 11.6 Workflow Loading and Sharing
 
@@ -1312,13 +1314,13 @@ Workflows are loaded once and shared across tasks:
 
 1. **Load phase:** Parse YAML, validate (§10.1), compile CEL expressions, resolve schemas. Produce a `LoadedWorkflow` (immutable, `Arc`-wrapped).
 2. **Execution phase:** Each `execute_leaf()` call creates a fresh `FunctionExecution` referencing the shared `LoadedWorkflow`. No re-parsing or re-validation.
-3. **Registration:** Workflows are registered in the `TaskStore` (or a workflow registry accessible to it) so that DSL-backed tasks can reference them by name.
+3. **Registration:** Workflows are registered in the `TaskStore` (or a workflow registry accessible to it) so that mech-backed tasks can reference them by name.
 
 ### 11.7 Event Integration
 
-DSL block execution emits events that map to the application's event system:
+Mech block execution emits events that map to the application's event system:
 
-| DSL event | Description |
+| Mech event | Description |
 |---|---|
 | `BlockStarted { function, block }` | Block execution begins. |
 | `BlockCompleted { function, block, output }` | Block produced valid output. |

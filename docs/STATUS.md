@@ -95,9 +95,9 @@
 
 **Phase:** Spec review complete. Not yet implemented.
 
-**Spec** (`docs/GRAPHS_DSL.md`):
-- Standalone crate for declarative graph/workflow DSL. Depends on cue (TaskNode integration) and reel (agent execution).
-- All 12 sections drafted and reviewed. Covers: motivation, design goals, unified CDFG model, conversation model (history scoping, compaction, agent configuration), block specification (prompt + call blocks, field validity), transitions & guards (CEL, ordered evaluation, self-loops), template expressions & scoping (5 namespaces, CEL everywhere), schema handling (inline + `$ref` + workflow-level shared schemas), context & state (two-level declared variables, `set_context`/`set_workflow`), validation & error handling (24+ load-time checks, 5 runtime error types), cue integration (function = leaf task, model escalation interaction), YAML reference grammar with complete worked example.
+**Spec** (`docs/MECH_SPEC.md`):
+- Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
+- All 12 sections drafted and reviewed. Covers: motivation, design goals, unified CDFG model, conversation model (history scoping, compaction, agent configuration), block specification (prompt + call blocks, field validity), transitions & guards (CEL, ordered evaluation, self-loops), template expressions & scoping (5 namespaces, CEL everywhere), schema handling (inline + `$ref` + workflow-level shared schemas), context & state (two-level declared variables, `set_context`/`set_workflow`), validation & error handling (24+ load-time checks, 5 runtime error types), cue integration (function = leaf task, model escalation interaction), YAML reference schema with complete worked example.
 - Design decisions resolved during review:
   - **Per-call input on call blocks** — `call` accepts three forms: single string, uniform list (shared `input`), per-call list (`{ fn, input }` objects for heterogeneous function signatures).
   - **Call block output mapping** — optional `output` field on call blocks constructs the block's output from called functions' results (symmetric with `input` mapping).
@@ -105,10 +105,10 @@
   - **CEL as universal expression language** — `{{...}}` template expressions evaluate CEL, not just dotted paths. Unifies guards, `set_context`, `set_workflow`, and templates under one expression language.
   - **Two-level declared context** — workflow context (`workflow.*`, cross-function) and function context (`context.*`, per-invocation). Variables declared with type and initial value. Blocks can only write pre-declared variables. No `has()` boilerplate.
   - **Conversation-transparent call blocks** — callee starts empty conversation, caller's history unchanged (clarified from misleading "reset" language).
-  - **Agent configuration block** — DSL targets reel (agent runtime) not flick (raw LLM). `model` moved inside `agent` block alongside `grant` (ToolGrant flags), `tools` (custom tool names), `write_paths`, and `timeout`. Three-level cascade (workflow → function → block) with replace semantics. Named agent configs (`agents` map, parallel to `schemas`) with `$ref:#name` and `extends` for inheritance with overrides.
+  - **Agent configuration block** — mech targets reel (agent runtime) not flick (raw LLM). `model` moved inside `agent` block alongside `grant` (ToolGrant flags), `tools` (custom tool names), `write_paths`, and `timeout`. Three-level cascade (workflow → function → block) with replace semantics. Named agent configs (`agents` map, parallel to `schemas`) with `$ref:#name` and `extends` for inheritance with overrides.
 
 **Next Work:**
-1. **DSL implementation** — Workflow loader (YAML parse, validation, CEL compilation), DSL executor (block scheduling, conversation management, template resolution), `DslTask` `TaskNode` implementation.
+1. **Mech implementation** — Workflow loader (YAML parse, validation, CEL compilation), mech executor (block scheduling, conversation management, template resolution), `MechTask` `TaskNode` implementation.
 
 ---
 
