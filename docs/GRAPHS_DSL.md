@@ -4,47 +4,163 @@
 
 ## 1. Overview
 
-<!-- What this DSL is, what problem it solves, how it relates to cue's recursive task orchestration. -->
+A YAML-based DSL for defining agent workflows as typed, statically-validated graphs. Each workflow file declares one or more **functions** — callable units whose bodies are hybrid control-flow/data-flow graphs (CDFGs). Blocks within a function are LLM prompt calls with JSON Schema typed inputs and outputs, connected by control edges (CEL-guarded transitions) and data edges (`depends_on`).
 
-TODO
+### Motivation
+
+Rust is the right language for the backlot runtime — type safety, tooling, performance. But Rust is too general-purpose for rapid iteration on task logic. Each new task type requires Rust code changes, recompilation, and the full development cycle. Meanwhile, dynamic languages (Python, JS) offer fast iteration but lack the rigid type systems and validation that LLM orchestration requires — models benefit from structural constraints, not flexibility.
+
+This DSL occupies the middle ground: **declarative structure with static typing, without requiring compilation.** Workflow authors define what each block does (prompt + schema), how blocks connect (transitions + dependencies), and what expressions govern routing (CEL) — all in YAML files that can be modified, reloaded, and tested without touching Rust.
+
+The DSL replaces the need to implement task types as Rust code. The cue orchestrator executes DSL functions the same way it executes native tasks — the function is the unit of work, the CDFG is the implementation.
+
+### Relationship to Cue
+
+Cue provides generic recursive task orchestration (`TaskNode`, `TaskStore`, `Orchestrator`). The DSL adds a declarative layer: a DSL function can serve as a cue task's implementation. The orchestrator drives decomposition, retry, escalation; the DSL drives the internal logic of each task.
 
 ## 2. Design Goals
 
-<!-- Guiding principles: declarative, YAML-native, embeddable, three execution modes in one grammar, etc. -->
-
-TODO
+1. **Single unified graph model.** No mode selection. Control edges and data edges coexist freely in one graph. The executor infers behavior from edge types present on each block.
+2. **Functions as the callable unit.** A workflow file defines named functions. Functions call other functions. Parallelism is expressed at the function-call level (fork/join), not as a graph-level mode.
+3. **Static typing via JSON Schema.** Every block declares its output schema. Type mismatches between a block's output and a downstream block's template references are caught at load time, not runtime.
+4. **CEL for all expressions.** Transition guards, template expressions, and any computed values use CEL. No embedded Python, no custom expression language, no eval.
+5. **YAML surface syntax.** Human-readable, LLM-readable, tooling-friendly. No custom parser required for the outer structure.
+6. **Declarative, not imperative.** Workflows describe structure and constraints. The executor decides scheduling, parallelism within dataflow regions, and retry mechanics.
+7. **Embeddable in cue.** A DSL function maps to a cue `TaskNode` implementation. The DSL does not replace cue's orchestration protocol — it provides a declarative way to define what a task does internally.
 
 ## 3. Core Concepts
 
-<!-- Definitions: workflow, block, prompt, schema, transition, guard, context, template variable. -->
+- **Workflow file** — A YAML file declaring one or more functions.
+- **Function** — A named callable unit. Its body is a CDFG (control-data flow graph) of blocks. Functions can call other functions.
+- **Block** — A node in the graph. Prompt blocks invoke an LLM with a prompt template and validate the output against a JSON Schema. Call blocks invoke another function (with optional fork/join for parallelism).
+- **Control edge** — A `transition` from one block to another, optionally guarded by a CEL expression (`when`). Evaluated in declaration order; first match wins. Supports cycles (self-loops, backward edges).
+- **Data edge** — A `depends_on` declaration. The block cannot execute until all named dependencies have produced output. Acyclic by definition.
+- **Activation rule** — A block with inbound control edges is *activated* when a transition targets it. A block with only data edges is activated implicitly when its dependencies are met. A block with both requires the transition to fire AND all dependencies to be satisfied. (Control gates activation; data gates readiness.)
+- **Schema** — JSON Schema (inline YAML or `$ref` path) declaring the typed output of a block. Used for load-time validation of downstream template references.
+- **Template variable** — Mustache-style references (`{{input.*}}`, `{{output.*}}`, `{{context.*}}`, `{{blocks.<name>.output.*}}`) interpolated into prompt text. Scoping rules defined in §7.
+- **Guard** — A CEL expression on a transition. Evaluated against the current block's output and the workflow context.
+- **Context** — A mutable key-value scratchpad scoped to a function invocation. Used for cross-block state (retry counters, accumulated data).
 
-TODO
+## 4. Graph Model — Unified CDFG
 
-## 4. Workflow Modes
+No mode selection. A function's body is a **Control-Data Flow Graph (CDFG)**: `G = (V, E_control, E_data)`. Both edge types coexist freely on the same graph. The executor infers scheduling from the edges present.
 
-### 4.1 CFG (Control Flow Graph)
+### 4.1 Control Edges (Transitions)
 
-<!-- Sequential with conditional branching and cycles. Blocks connected via `transitions` with CEL guards. -->
+Blocks connected via `transitions` with CEL guards. Evaluated in declaration order; first truthy guard wins. A transition with no `when` is an unconditional fallback. Cycles are permitted (self-loops, backward edges to earlier blocks).
 
-TODO
+Control edges determine **reachability** — whether a block will execute at all.
 
-### 4.2 CTFG (Control Taskflow Graph)
+### 4.2 Data Edges (Dependencies)
 
-<!-- Fork/join parallelism. `fork` control nodes with `branches` + `join` strategy (all/any/n_of_m). -->
+Blocks declare `depends_on: [block_a, block_b]`. The block cannot begin until all named dependencies have produced output. Data edges are acyclic (enforced at load time).
 
-TODO
+Data edges determine **readiness** — when a reachable block may begin executing.
 
-### 4.3 Dataflow
+### 4.3 Activation Rule
 
-<!-- Dependency-driven scheduling. `depends_on` edges, pull-oriented `output` sink declaration, dead node elimination. -->
+How a block fires depends on which inbound edge types it has:
 
-TODO
+| Inbound control edges | Inbound data edges | Activation rule |
+|---|---|---|
+| None | None | Entry point. Fires at function start. |
+| None | Yes | Dataflow node. Fires when all `depends_on` are satisfied. |
+| Yes | None | CFG node. Fires when a transition targets it. |
+| Yes | Yes | Hybrid. Transition must fire (activation), then all `depends_on` must be satisfied (readiness). |
 
-### 4.4 Mixed-Mode
+**Execution model for dataflow regions:**
 
-<!-- Whether/how CFG, CTFG, and dataflow can coexist in a single workflow. -->
+1. **Backward dependency walk.** Starting from terminal blocks (or blocks targeted by outbound control edges), walk `depends_on` edges backward to identify the reachable subgraph.
+2. **Dead node elimination.** Blocks not reachable backward from any terminal or control-edge target are never executed.
+3. **Topological sort.** Reachable blocks are sorted into execution levels by dependency depth.
+4. **Level-parallel scheduling.** Blocks within the same level (no mutual dependencies) execute concurrently. The executor advances level-by-level.
+5. **Multiple sinks.** If multiple terminal blocks exist in a dataflow region, shared upstream blocks execute exactly once.
 
-TODO
+### 4.4 Function Calls
+
+A **call block** invokes one or more functions. `call` accepts a single function name (string) or a list. Execution is **sequential by default**. The optional `parallel` property opts into concurrent execution and specifies the join strategy.
+
+```yaml
+# Sequential, single function
+lookup:
+  call: sentiment_check
+  input: { text: "{{input.text}}" }
+
+# Sequential, multiple functions — executed in list order
+pipeline:
+  call: [extract, validate, transform]
+  input: { text: "{{input.text}}" }
+
+# Parallel, multiple functions
+analyze:
+  call: [sentiment_check, policy_lookup, translation]
+  parallel: all       # all | any | n_of_m
+  input: { text: "{{input.text}}" }
+```
+
+**Sequential list execution:** Functions execute in list order. All receive the same `input`. Each function's output is accessible by name via `{{blocks.<name>.output.*}}` in subsequent blocks. The call block's own `output` is the output of the last function in the list.
+
+**Parallel execution:** Functions execute concurrently as independent CDFGs. Results are collected per the join strategy:
+
+| Strategy | Behavior |
+|---|---|
+| `all` | Wait for every function to complete. |
+| `any` | Resume when the first function completes. Others are cancelled. |
+| `n_of_m` | Resume when `n` functions complete (requires `n:` field). Others are cancelled. |
+
+**Cancellation:** When `any` or `n_of_m` triggers early completion, remaining in-flight functions receive a cancellation signal. A cancelled function's output is not available — template references to cancelled functions are a runtime error. Callers using `any` or `n_of_m` should only reference outputs conditionally or use the join result which identifies which functions completed.
+
+**Result collection:** All completed function outputs are accessible via `{{blocks.<name>.output.*}}` regardless of execution mode. For `any`, only the winning function's output is populated. For `n_of_m`, outputs of the `n` completed functions are populated; the rest are absent.
+
+### 4.5 Function Definitions
+
+A function declares its **input schema** (typed arguments) and zero or more **terminal blocks**.
+
+```yaml
+functions:
+  sentiment_check:
+    input:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+    terminals: [result]    # explicit; omit to auto-detect
+
+    blocks:
+      analyze:
+        prompt: |
+          Rate the sentiment of: {{input.text}}
+        schema:
+          type: object
+          required: [score, label]
+          properties:
+            score: { type: number }
+            label: { type: string, enum: [positive, neutral, negative] }
+        transitions:
+          - goto: result
+
+      result:
+        prompt: |
+          Summarize: score={{blocks.analyze.output.score}}, label={{blocks.analyze.output.label}}
+        schema:
+          type: object
+          required: [summary, label]
+          properties:
+            summary: { type: string }
+            label: { type: string }
+```
+
+**Terminal blocks** determine the function's return value:
+
+- If `terminals` is specified: those blocks are terminal. Validated at load time (must exist, must have no outgoing transitions or data edges).
+- If `terminals` is omitted: terminal blocks are inferred — any block with no outgoing control edges and no outgoing data edges.
+- **Single terminal reached:** the function's output is that block's output.
+- **Multiple terminals (CFG paths):** the function's output is the output of whichever terminal was reached during execution.
+- **Multiple terminals (dataflow sinks):** all terminal outputs are collected into a map keyed by block name.
+
+### 4.6 Theoretical Basis
+
+The CDFG model is well-established in compiler theory (Ferrante et al., 1987 — Program Dependence Graph; Click & Paleczny — Sea of Nodes). The "control dominates, data constrains" resolution used here matches the PDG model: control-dependence edges determine whether a node is reached, data-dependence edges constrain ordering within reachable regions.
 
 ## 5. Block Specification
 
@@ -70,37 +186,25 @@ TODO
 
 TODO
 
-## 9. Fork / Join Semantics
-
-<!-- Fork node structure, join strategies table, cancellation on `any`, result collection. -->
-
-TODO
-
-## 10. Dataflow Execution Model
-
-<!-- Pull vs. push, `workflow.output` sink(s), backward dependency walk, topo-sort, level-parallel scheduling, dead node elimination, multiple outputs. -->
-
-TODO
-
-## 11. Context & State
+## 9. Context & State
 
 <!-- Mutable `context` scratchpad, cross-block state, retry counters. Lifecycle and persistence. -->
 
 TODO
 
-## 12. Validation & Error Handling
+## 10. Validation & Error Handling
 
 <!-- Load-time validation: cycle detection (dataflow), CEL compilation, schema resolution, unreachable blocks. Runtime: schema validation failures, guard evaluation errors, timeout. -->
 
 TODO
 
-## 13. Integration with Cue
+## 11. Integration with Cue
 
 <!-- How workflow execution maps to cue's Orchestrator, TaskNode, TaskStore. Whether a workflow is a single cue task or each block is a cue task. -->
 
 TODO
 
-## 14. YAML Reference Grammar
+## 12. YAML Reference Grammar
 
 <!-- Complete annotated YAML schema for the workflow format. -->
 
