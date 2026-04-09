@@ -697,6 +697,15 @@ No standalone issues. All cue-related findings tracked under Epic (issues 72-91)
 
 ## Mech
 
+### 161. Prompt executor `overlay` treats empty `Vec` as unset; child cannot clear parent grants via `extends`  [impact: medium, fix: medium]
+mech/src/exec/prompt.rs `overlay` — The `extends:` overlay uses `!from.grant.is_empty()` / `!from.tools.is_empty()` / `!from.write_paths.is_empty()` as the "is specified" test, so a child that writes `grant: []` to strip an inherited parent's grants silently inherits the parent's non-empty list instead. Spec §5.5.2 is vague about empty-list semantics. Fix requires changing `AgentConfig` list fields to `Option<Vec<_>>` and threading the distinction through the validator. Deferred because the spec should be clarified first and the refactor ripples through validate.rs. **Correctness.**
+
+### 162. Prompt executor `resolve_prompt_block_schema` does not resolve `$ref:#name` inside shared schemas  [impact: medium, fix: low]
+mech/src/exec/prompt.rs `resolve_prompt_block_schema` — When a prompt block uses `schema: $ref:#name`, the raw `JsonValue` is fetched from `workflow.schemas` and passed straight to `jsonschema::validator_for`. If the shared schema itself contains internal `$ref:#other` entries (mech's hash-ref form), the `jsonschema` crate will not resolve them because they are not standard JSON Pointer `#/…` syntax. Requires auditing `SchemaRegistry` to confirm whether it rewrites internal refs to JSON-Pointer form before storage; if not, add a rewrite pass or resolve at the executor. Deferred pending audit. **Correctness.**
+
+### 163. `AgentRequest.grant` / `ResolvedAgentConfig.grant` singular for list field  [impact: low, fix: medium]
+mech/src/exec/{agent.rs,prompt.rs} — Field is `grant: Vec<String>`, inconsistent with sibling list fields `tools` and `write_paths`. The natural rename is `grants`, but the YAML key is `grant:` per spec §5.5, so a Rust-side rename would split the Rust field name from the serde/YAML binding. Low impact, slight diagnostic friction, rename deferred. **Naming.**
+
 ### 104. mech/Cargo.toml declares unused dependencies  [impact: low, fix: low]
 mech/Cargo.toml — Deliverable 1 only needs `thiserror`, but the manifest already pulls in `cue`, `reel`, `cel-interpreter`, `serde`, `serde_yml`, `schemars`, `jsonschema`, and `tokio`. These should be added in the deliverables that first use them to keep compile times and the dependency surface minimal. **Simplification.**
 

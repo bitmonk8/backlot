@@ -16,12 +16,16 @@
 //! and a `loader` module exposing `WorkflowLoader::load(path) -> Workflow`
 //! which composes parse → resolve schemas → validate → infer outputs →
 //! compile CEL into an immutable, `Send + Sync` [`Workflow`] value ready for
-//! execution. There is no execution or runtime logic yet — block scheduling
-//! and LLM dispatch are still to come.
+//! execution, an `exec` module holding the prompt block executor and the
+//! `AgentExecutor` seam used to inject the agent runtime (reel in
+//! production once wired alongside the workflow driver, a fake in tests), and per-invocation `ExecutionContext` /
+//! shared `WorkflowState` types for runtime state. Block scheduling,
+//! transitions, and the function / workflow drivers are still to come.
 
 pub mod cel;
 pub mod context;
 pub mod error;
+pub mod exec;
 pub mod loader;
 pub mod schema;
 pub mod validate;
