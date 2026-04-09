@@ -1,5 +1,14 @@
 //! Load-time validation of a parsed [`WorkflowFile`] (spec §10.1).
 //!
+//! # Ordering invariant
+//!
+//! This pass runs **before** function output inference. Do not read
+//! resolved/inferred output schemas here — functions declaring `output: infer`
+//! still have an unresolved schema at this point, and any check that peeks at
+//! a concrete output shape would silently skip them. See `loader.rs`
+//! `load_impl` for the ordering contract and how to add a post-inference pass
+//! if one becomes necessary.
+//!
 //! [`validate_workflow`] walks the parsed YAML AST and emits the **complete**
 //! list of errors and warnings — it never short-circuits on the first error.
 //! All checks listed in `docs/MECH_SPEC.md` §10.1 are implemented here:

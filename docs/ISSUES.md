@@ -5,7 +5,7 @@ Last triaged: 2026-04-09.
 
 **Triage summary:** 27 issues removed (16 resolved by codebase changes, 11 false positives after code validation). Surviving issues enriched with impact/fix-cost metadata.
 
-**Medium-impact issues:** Flick 13, Lot 30, Reel 7.2, Vault M3a, Vault N4a, Epic 8, 11, 14, 23, 47, 49, 76, 77, 78, 82, 90, Mech 141, 149.
+**Medium-impact issues:** Flick 13, Lot 30, Reel 7.2, Vault M3a, Vault N4a, Epic 8, 11, 14, 23, 47, 49, 76, 77, 78, 82, 90, Mech 141.
 
 ---
 
@@ -696,9 +696,6 @@ No standalone issues. All cue-related findings tracked under Epic (issues 72-91)
 ---
 
 ## Mech
-
-### 149. mech loader: validation runs before inference  [impact: medium, fix: low]
-mech/src/loader.rs `load_impl` — the §10.1 validation pass runs before `infer_function_outputs`. Today no validator rule inspects concrete function output shape, so nothing is bypassed, but the ordering is fragile: the moment a validator introspects function outputs, functions declaring `output: infer` will silently skip that check. Either re-run a lightweight post-inference validation pass or document/assert that validators must not depend on inferred output shape. **Correctness.**
 
 ### 104. mech/Cargo.toml declares unused dependencies  [impact: low, fix: low]
 mech/Cargo.toml — Deliverable 1 only needs `thiserror`, but the manifest already pulls in `cue`, `reel`, `cel-interpreter`, `serde`, `serde_yml`, `schemars`, `jsonschema`, and `tokio`. These should be added in the deliverables that first use them to keep compile times and the dependency surface minimal. **Simplification.**

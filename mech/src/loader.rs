@@ -163,6 +163,20 @@ impl WorkflowLoader {
             });
         }
 
+        // Ordering invariant:
+        //
+        // Validation (step 3) runs BEFORE inference (step 4). Therefore any
+        // rule added to `validate.rs` MUST NOT inspect concrete / resolved
+        // function output schemas — functions that declare `output: infer`
+        // (or omit `output:` entirely) still have an unresolved schema at
+        // validation time, and such a rule would silently skip them.
+        //
+        // A validator that legitimately needs output-shape information must
+        // either (a) work off the declared schema only, or (b) be split into
+        // a post-inference pass — at which point a second `validate_workflow`
+        // call needs to be added here, after `infer_function_outputs`, with a
+        // documented contract about which errors are authoritative.
+
         // 4. Infer function output schemas (`output: infer` / omitted).
         infer_function_outputs(&mut file)?;
 
@@ -576,6 +590,92 @@ functions:
             matches!(err, MechError::Validation { .. }),
             "expected MechError::Validation, got {err:?}"
         );
+    }
+
+    #[test]
+    fn validation_runs_before_inference() {
+        // Contract: validation runs before inference, and a function declaring
+        // `output: infer` must still pass validation and end up with a concrete
+        // inferred output schema matching its terminal block's schema.
+        use crate::schema::SchemaRef;
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+"#;
+        let loader = WorkflowLoader::new();
+        let wf = loader
+            .load_str(yaml)
+            .expect("validation must succeed and inference must resolve output");
+        let func = wf.file().functions.get("f").expect("function f present");
+        let inline = match &func.output {
+            Some(SchemaRef::Inline(v)) => v,
+            other => panic!("expected inferred inline output schema, got {other:?}"),
+        };
+        // Pin the inferred schema's shape to block `a`'s schema — guards
+        // against regressions where inference leaves a default/empty schema.
+        assert_eq!(inline.get("type").and_then(|v| v.as_str()), Some("object"));
+        let required: Vec<&str> = inline
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(required, vec!["answer"]);
+        assert_eq!(
+            inline
+                .get("properties")
+                .and_then(|p| p.get("answer"))
+                .and_then(|a| a.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("string"),
+        );
+    }
+
+    #[test]
+    fn invalid_infer_output_function_fails_at_validation_not_inference() {
+        // Ordering guard: a function that declares `output: infer` AND has an
+        // independent validation error (undefined transition target) must
+        // surface the validation error — not an inference error and not
+        // success. Pins that validation is not skipped for infer-output
+        // functions.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+        transitions:
+          - goto: nowhere
+"#;
+        let loader = WorkflowLoader::new();
+        let err = loader
+            .load_str(yaml)
+            .expect_err("undefined transition target must fail validation");
+        match err {
+            MechError::Validation { errors } => {
+                assert!(
+                    !errors.is_empty(),
+                    "validation error list must be non-empty"
+                );
+            }
+            other => panic!("expected MechError::Validation, got {other:?}"),
+        }
     }
 
     #[test]
