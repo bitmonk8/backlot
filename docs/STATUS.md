@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Deliverable 7 complete. The end-to-end workflow loader (`mech/src/loader.rs`) composes parse → build `SchemaRegistry` → §10.1 validation → function-output inference → CEL guard/template compilation into an immutable `Workflow` value. `WorkflowLoader::load(path)` (or `load_str` for in-memory use) returns a `Workflow` that holds an `Arc<WorkflowFile>`, `Arc<SchemaRegistry>`, and deduplicated `BTreeMap` caches of compiled `CelExpression` guards and `Template` strings keyed by source text. `Workflow` is `Send + Sync` and loading is deterministic (iteration order over compiled guards and templates is stable run to run). Failure modes map cleanly: missing file → `MechError::Io`, bad YAML → `YamlParse`, semantic errors → `Validation`, bad CEL → `CelCompilation`. 119 tests passing (+8 from Deliverable 7 loader tests), zero clippy warnings. Prior deliverable: function output inference (`mech/src/schema/infer.rs`) resolves every function declaring `output: infer` to a concrete inline JSON Schema by walking its terminal blocks. Prior deliverable: load-time validation pass (`mech/src/validate.rs`) walks a parsed `WorkflowFile` and emits the complete list of errors + warnings per spec §10.1 in a single pass.
+**Phase:** Deliverable 8 complete. Runtime context & state management (`mech/src/context.rs`) introduces `WorkflowState` — a cloneable `Arc<Mutex<…>>` handle to shared `workflow.*` declared variables — and `ExecutionContext`, the per-invocation state for a single function call. Each context holds function `input`, `meta`, initialised `context.*` function-local variables, and a `block.*` output map keyed by block ID. `set_context` / `set_workflow` write-paths reject undeclared variables and type-check values against the declared JSON Schema type names (`string`, `number`, `integer`, `boolean`, `array`, `object`). Reading a block's output before it has been recorded is an error. `ExecutionContext::namespaces()` projects the runtime state into the `Namespaces` binding struct consumed unchanged by the CEL evaluator — so the CEL evaluator's `input`/`context`/`workflow`/`block`/`meta` bindings round-trip cleanly through compiled expressions. Block outputs are write-once per invocation. (The D3 evaluator uses singular `block` for prior block outputs and omits a dedicated top-level `output` binding; spec §7 uses plural `blocks` plus `output`. This D3-era divergence is documented in `mech/src/cel.rs` and deferred to a future CEL-layer refactor.) 137 tests passing (+18 from Deliverable 8), zero clippy warnings. Prior deliverable: workflow loader (`mech/src/loader.rs`) composes parse → `SchemaRegistry` → §10.1 validation → function-output inference → CEL guard/template compilation into an immutable `Workflow` value. Prior deliverable: function output inference (`mech/src/schema/infer.rs`) resolves every function declaring `output: infer` to a concrete inline JSON Schema by walking its terminal blocks. Prior deliverable: load-time validation pass (`mech/src/validate.rs`) walks a parsed `WorkflowFile` and emits the complete list of errors + warnings per spec §10.1 in a single pass.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -119,7 +119,7 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 5. ~~Load-time validation (the 24+ checks from §10)~~ ✅
 6. ~~Schema inference for function outputs (`output: infer`)~~ ✅
 7. ~~Workflow loader (end-to-end load pipeline)~~ ✅
-8. Context & state management (workflow/context/block namespaces)
+8. ~~Context & state management (workflow/context/block namespaces)~~ ✅
 9. Prompt block executor (agent cascade, structured output)
 10. Call block executor (three input forms, output mapping)
 11. Transitions & block scheduling (imperative mode, guards, self-loops)
@@ -130,7 +130,7 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 16. End-to-end integration test suite (hermetic, fake LLM)
 17. Documentation polish & examples
 
-**Immediate next action:** Deliverable 8 — Context & state management (workflow/context/block namespaces).
+**Immediate next action:** Deliverable 9 — Prompt block executor (agent cascade, structured output).
 
 ---
 

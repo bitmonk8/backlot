@@ -20,12 +20,14 @@
 //! and LLM dispatch are still to come.
 
 pub mod cel;
+pub mod context;
 pub mod error;
 pub mod loader;
 pub mod schema;
 pub mod validate;
 
 pub use cel::{CelExpression, Namespaces, Template};
+pub use context::{ExecutionContext, WorkflowState};
 pub use error::{MechError, MechResult};
 pub use loader::{Workflow, WorkflowLoader};
 pub use schema::{

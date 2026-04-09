@@ -823,6 +823,12 @@ mech/src/schema/infer.rs and mech/src/validate.rs both encode "a block with no o
 ### 145. Duplicated `$ref:#name` resolution between SchemaRegistry and schema/infer.rs  [impact: low, fix: low]
 mech/src/schema/infer.rs `resolve_schema_ref` re-implements `$ref:` / `#` prefix stripping and shared-schema lookup that `SchemaRegistry` already owns. Grow a `SchemaRegistry::resolve_to_json(&SchemaRef) -> Option<&JsonValue>` helper and delegate from infer to avoid drift. **Separation.**
 
+### 163. mech context: primitive type-checker reinvents schema validation  [impact: low, fix: medium]
+mech/src/context.rs lines 247–296 — `check_type` hand-rolls a JSON-Schema-lite primitive validator (six `match` arms for `string`/`number`/`integer`/`boolean`/`array`/`object`) while `SchemaRegistry::validate` (mech/src/schema/registry.rs:160) already wraps `jsonschema`. Two sources of truth for the same semantics, with subtly different `integer` handling (as_i64 vs jsonschema's numeric rules). Consider resolving each `ContextVarDef` to a `ResolvedSchema` at load time and routing `set_context`/`set_workflow` through `SchemaRegistry::validate`. Deferred from D8 because the rewrite touches loader + schema wiring and adds risk for negligible functional change. **Separation.**
+
+### 164. mech context: `WorkflowState::from_declarations` and `ExecutionContext::new` duplicate declared-var store setup  [impact: low, fix: low]
+mech/src/context.rs lines 55–69 and 124–145 — both walk `BTreeMap<String, ContextVarDef>`, type-check initial values, and build parallel `declarations` + `values` maps. Extract a `DeclaredVarStore` owning decls/values/read/write, wrap in `Arc<Mutex<…>>` for `WorkflowState` and hold directly in `ExecutionContext`. Would also collapse the duplicated `set` + error logic at lines 79–92 vs 168–180. Deferred because D8 usage of both stores is stable and the D9 executor doesn't depend on the refactor. **Separation.**
+
 ### 135. CEL reference-extraction helpers belong in `mech::cel`  [impact: low, fix: low]
 mech/src/validate.rs — `CollectedRefs`, `collect_references`, `walk`, `walk_member_subexprs`, `flatten_member_chain`, and `extract_template_exprs` operate purely on `cel_parser::Expression` and `${...}` template strings with no validator state. They belong in `mech/src/cel.rs` (or `cel::refs`) where future linters or the runtime renderer could share them. **Placement.**
 
