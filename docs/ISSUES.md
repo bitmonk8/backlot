@@ -700,29 +700,11 @@ No standalone issues. All cue-related findings tracked under Epic (issues 72-91)
 ### 149. mech loader: validation runs before inference  [impact: medium, fix: low]
 mech/src/loader.rs `load_impl` — the §10.1 validation pass runs before `infer_function_outputs`. Today no validator rule inspects concrete function output shape, so nothing is bypassed, but the ordering is fragile: the moment a validator introspects function outputs, functions declaring `output: infer` will silently skip that check. Either re-run a lightweight post-inference validation pass or document/assert that validators must not depend on inferred output shape. **Correctness.**
 
-### 141. Missing dedicated passing fixtures for most §10.1 checks  [impact: medium, fix: medium]
-mech/src/validate.rs — D5 spec requires each check have "at least one failing fixture AND one passing fixture". Many checks have only the failing side and rely on the global worked-example test for positive coverage. Rows lacking a dedicated positive test: invalid block name, reserved name, schema empty-required, context var types, `set_context`/`set_workflow`, dataflow DAG, transition target, call target, `n_of_m` with valid `n`, terminal validation, agent extends/grant/model/`$ref:#name`, input schema match. **Testing.**
-
 ### 104. mech/Cargo.toml declares unused dependencies  [impact: low, fix: low]
 mech/Cargo.toml — Deliverable 1 only needs `thiserror`, but the manifest already pulls in `cue`, `reel`, `cel-interpreter`, `serde`, `serde_yml`, `schemars`, `jsonschema`, and `tokio`. These should be added in the deliverables that first use them to keep compile times and the dependency surface minimal. **Simplification.**
 
 ### 105. `SchemaValidationFailure` Display embeds full raw LLM output  [impact: low, fix: low]
 mech/src/error.rs line 24 — The `#[error(...)]` format includes `{raw_output}`, which for realistic LLM outputs produces unwieldy single-line error messages. Keep the field for programmatic access but drop it from the Display format. **Simplification.**
-
-### 106. `MechError::Validation` variant name conflicts with `SchemaValidationFailure`  [impact: low, fix: low]
-mech/src/error.rs lines 108-115 — `Validation` is a load-time aggregate but its name does not distinguish it from the runtime `SchemaValidationFailure` (§10.2). Rename to `LoadValidation` or `WorkflowValidation` to match the doc comment's stated responsibility. **Naming.**
-
-### 107. Mech schema: `Def` suffix applied inconsistently  [impact: low, fix: low]
-mech/src/schema/mod.rs — Suffix used on `FunctionDef`, `BlockDef`, `TransitionDef`, `ContextVarDef` but not on `PromptBlock`, `CallBlock`, `CallEntry`, `AgentConfig`, `CompactionConfig`, `ParallelStrategy`. Pick one convention — either drop `Def` everywhere or apply it everywhere. Current mix is misleading. **Naming.**
-
-### 108. Mech schema: `WorkflowFile` / `WorkflowDefaults` names misleading  [impact: low, fix: low]
-mech/src/schema/mod.rs lines 44–80 — `WorkflowFile` holds the whole mech document including `functions:`, not a file handle. `WorkflowDefaults` holds the entire `workflow:` section (named agents, schemas, context) — not just "defaults". Consider `MechDocument` / `WorkflowSection` (or similar) for clarity. **Naming.**
-
-### 109. Mech schema: `AgentConfig.grant` is singular but typed as `Vec<String>`  [impact: low, fix: low]
-mech/src/schema/mod.rs lines 273–275 — Field is named `grant` (singular) but holds a list of grant flags. Either pluralize to `grants` or match the underlying `ToolGrant` naming. Verify against MECH_SPEC §5.5.1 YAML keyword before renaming. **Naming.**
-
-### 110. Mech schema: `CallEntry.func` inconsistent with `CompactionConfig::r#fn`  [impact: low, fix: low]
-mech/src/schema/mod.rs line 220 — `CallEntry` uses `func` + `#[serde(rename = "fn")]` while `CompactionConfig` uses `r#fn` directly for the same YAML key. Pick one. **Naming.**
 
 ### 111. Mech schema: `InferLiteral` wrapper type could be collapsed  [impact: low, fix: low]
 mech/src/schema/mod.rs lines 309–315 — Single-variant enum exists only to serialize the string `"infer"`. Can be folded into `SchemaRef::Infer` as a unit variant with `#[serde(rename = "infer")]`, removing a type and the awkward `SchemaRef::Infer(InferLiteral::Infer)` match pattern. **Simplification.**
@@ -730,23 +712,74 @@ mech/src/schema/mod.rs lines 309–315 — Single-variant enum exists only to se
 ### 112. Mech schema: `full_example.yaml` placement under src/  [impact: low, fix: low]
 mech/src/schema/full_example.yaml — Pure test fixture, used only via `include_str!` from `#[cfg(test)]`. Conventional home is `mech/tests/fixtures/` or `mech/src/schema/testdata/` to make non-source nature explicit. **Placement.**
 
-### 113. Mech schema: re-export surface flattens the `schema` module boundary  [impact: low, fix: low]
-mech/src/lib.rs lines 17–21 — 16 schema types are re-exported at the crate root while `pub mod schema` is also exposed, giving two canonical paths for every type. Either re-export only entry points (`WorkflowFile`, `parse_workflow`) or make `schema` `pub(crate)`. **Placement.**
+### 134. Unused `_fn_name` parameter in validate_cel_and_templates  [impact: low, fix: low]
+mech/src/validate.rs (~line 1058) — The `_fn_name: &str` parameter is unused (underscore-prefixed). Remove it rather than keep as dead API surface. **Cruft.**
 
-### 114. Mech schema: empty `call: []` deserializes as `Uniform(vec![])` not an error  [impact: low, fix: low]
-mech/src/schema/mod.rs lines 207–216 — Untagged enum discrimination biases empty lists toward `CallSpec::Uniform`. Spec §4.4/§5.2 requires non-empty in practice. Deferred to Deliverable 5 load-time validation. **Correctness (deferred).**
+### 133. `CollectedRefs.block_refs` has a pointless outer Option  [impact: low, fix: low]
+mech/src/validate.rs (~line 1648) — Field typed `Vec<Option<(String, Option<String>)>>` but the producer only ever pushes `Some(...)`. The outer Option is dead structure misleading readers. Drop to `Vec<(String, Option<String>)>`. **Cruft / simplification.**
 
-### 115. Mech schema: `extends` permitted on named agents, not just inline  [impact: low, fix: low]
-mech/src/schema/mod.rs lines 266–292 — Per §12.1, `extends` is allowed on inline agent configs only, not on `workflow.agents.<name>` entries. Current single `AgentConfig` type does not enforce this split. Deferred to Deliverable 5, or fix via separate `NamedAgentConfig` / `InlineAgentConfig` types if parse-time enforcement is desired. **Correctness (deferred).**
+### 150. mech loader: `MechError::YamlParse.path` is empty for in-memory loads  [impact: low, fix: low]
+mech/src/loader.rs `load_impl` line ~144 — `source_path.clone().unwrap_or_default()` produces an empty PathBuf when loading via `load_str`, which renders as `""` in error messages ("parse error in file ''"). Change `MechError::YamlParse.path` to `Option<PathBuf>` or substitute a `<string>` sentinel for in-memory loads. **Correctness.**
+
+### 160. mech `load_from_disk_roundtrips_via_tempfile` leaks on panic  [impact: low, fix: low]
+mech/src/loader.rs lines ~453–467 — test manually builds a path in `std::env::temp_dir()` keyed by PID and calls `remove_file` only at the end, so a panicking assertion leaves the file behind and a recycled PID could collide with a prior run's leftovers. Use `tempfile::TempDir` for RAII cleanup (per CLAUDE.md guidance, prefer `TempDir::new_in()` with a project-local path). **Testing.**
+
+### 127. Dataflow cycle error message inverts edge direction; duplicate reports possible  [impact: low, fix: low]
+mech/src/validate.rs `detect_dataflow_cycles` — The error message says "`{node}` -> `{next}` closes a cycle in `depends_on`", but `depends_on` points from dependent to prerequisite, so the data edge runs `next → node`. Also, a single cycle may be reported multiple times from different DFS start points. **Correctness (low).**
+
+### 128. `validate_named_agents` duplicate-reports missing extends target  [impact: low, fix: low]
+mech/src/validate.rs — For N agents in a chain whose terminal `extends` points at a missing name, the "extends target not a named agent" error can be pushed up to N times. Dedupe or check each agent's own `extends` once in the top loop. **Correctness (low).**
+
+### 130. Misleading `validate_agent_ref_with_defaults` pair  [impact: low, fix: low]
+mech/src/validate.rs — `validate_agent_ref` takes `&WorkflowDefaults`; `validate_agent_ref_with_defaults` takes `Option<&WorkflowDefaults>`. The `_with_defaults` suffix implies the other is "without defaults" — opposite of reality. Rename or restructure. **Naming.**
+
+### 132. `normalized_grants` name misleads; only caller checks `"write"` membership  [impact: low, fix: low]
+mech/src/validate.rs (~line 1353) — Name suggests normalization but the function also *expands* grants. The sole caller uses only `normalized.contains("write")` which is equivalent to `ac.grant.iter().any(|g| g == "write")`. Inline or rename to `effective_grants`. **Naming / simplification.**
+
+### 137. `check_*` vs `validate_*` naming inconsistency  [impact: low, fix: low]
+mech/src/validate.rs — Most methods are `validate_*` but `check_cel_expr`, `check_template`, `check_call_fn` break the pattern for the same "emit errors into report" responsibility. Rename to `validate_*`. **Naming.**
+
+### 106. `MechError::Validation` variant name conflicts with `SchemaValidationFailure`  [impact: low, fix: low]
+mech/src/error.rs lines 193-198 — `Validation` is a load-time aggregate but its name does not distinguish it from the runtime `SchemaValidationFailure` (§10.2). Rename to `LoadValidation` or `WorkflowValidation` to match the doc comment's stated responsibility. **Naming.**
+
+### 107. Mech schema: `Def` suffix applied inconsistently  [impact: low, fix: low]
+mech/src/schema/mod.rs — Suffix used on `FunctionDef`, `BlockDef`, `TransitionDef`, `ContextVarDef` but not on `PromptBlock`, `CallBlock`, `CallEntry`, `AgentConfig`, `CompactionConfig`, `ParallelStrategy`. Pick one convention — either drop `Def` everywhere or apply it everywhere. **Naming.**
+
+### 108. Mech schema: `WorkflowFile` / `WorkflowDefaults` names misleading  [impact: low, fix: low]
+mech/src/schema/mod.rs lines 52–90 — `WorkflowFile` holds the whole mech document including `functions:`, not a file handle. `WorkflowDefaults` holds the entire `workflow:` section (named agents, schemas, context) — not just "defaults". Consider `MechDocument` / `WorkflowSection`. **Naming.**
+
+### 109. Mech schema: `AgentConfig.grant` is singular but typed as `Vec<String>`  [impact: low, fix: low]
+mech/src/schema/mod.rs lines 287–288 — Field is named `grant` (singular) but holds a list. Either pluralize to `grants` or match the underlying `ToolGrant` naming. Verify against MECH_SPEC §5.5.1 YAML keyword before renaming. **Naming.**
+
+### 110. Mech schema: `CallEntry.func` inconsistent with `CompactionConfig::r#fn`  [impact: low, fix: low]
+mech/src/schema/mod.rs line 236 — `CallEntry` uses `func` + `#[serde(rename = "fn")]` while `CompactionConfig` uses `r#fn` directly for the same YAML key. Pick one. **Naming.**
+
+### 156. mech `Workflow::file()` accessor is a poor name  [impact: low, fix: low]
+mech/src/loader.rs lines 43, 52 — `file()` returning the parsed `WorkflowFile` collides conceptually with `source_path()` (the actual file) and hides that the value is the validated, inferred workflow definition. Rename to `definition()` or `parsed()`. **Naming.**
+
+### 155. mech `Workflow::guards` field is misnamed  [impact: low, fix: low]
+mech/src/loader.rs lines 46, 66–69, 77–79 — the `guards` bucket holds every raw `CelExpression` in the workflow, including `set_context` / `set_workflow` RHS expressions which are assignments, not guards. Per spec §6, "guard" specifically means a transition `when:` clause. Rename field + accessors to `expressions` / `cel_exprs`. Fix the docstring on lines 32–33 which claims the bucket contains "every `when:` clause". **Naming.**
+
+### 142. `ModelChecker::knows` and bare `Location` re-export  [impact: low, fix: low]
+mech/src/validate.rs (~line 42) and mech/src/lib.rs (~line 37) — `knows(...)` reads awkwardly; prefer `is_known` / `contains`. The trait itself might be better named `ModelRegistry` / `ModelResolver`. Separately, `Location` is re-exported unqualified at the crate root where it could collide with future parser/CEL error locations; keep it module-qualified or rename. **Naming / placement.**
+
+### 148. `MechError::InferenceFailed` variant name is generic  [impact: low, fix: low]
+mech/src/error.rs lines 180–191 — `InferenceFailed` does not say *what* was being inferred. The module scope is specifically function output schema inference; rename to `OutputSchemaInferenceFailed`. Also consider reconciling with the pre-existing `SchemaValidationFailure` (runtime) / `SchemaValidationFailed` (load-time) pair, which differ only by tense and are now joined by another `-Failed` load-time variant. **Naming.**
+
+### 124. `SchemaRef::Ref("$ref:path")` external-file case rejected as "malformed"  [impact: low, fix: low]
+mech/src/schema/registry.rs (`parse_named_ref`) — External file refs like `$ref:./foo.json` (reserved for Deliverable 7+) currently produce `SchemaRefMalformed`, but they are not malformed — they are unsupported/deferred. Introduce `SchemaRefUnsupported` or `SchemaRefExternalDeferred` so the diagnostic matches the condition. **Naming.**
+
+### 123. `SchemaInvalid` variant overloaded for inline compile failures and deferred-infer  [impact: low, fix: low]
+mech/src/error.rs — `SchemaInvalid { name, .. }` is used for (a) a named shared schema that fails to compile, (b) an inline schema that fails to compile (sentinel `name: "<inline>"`), and (c) validating against a deferred `Infer` marker (sentinel `name: "<infer>"`). Split into dedicated variants or rename `name` to `source`. **Naming.**
+
+### 122. `ResolvedSchema::Infer` forces fake `SchemaInvalid` error on validate  [impact: low, fix: low]
+mech/src/schema/registry.rs — Mixing a non-validator sentinel (`Infer`) into the same enum as real compiled validators forces `validate()` to synthesize a misleading `SchemaInvalid` error (name `<infer>`) for the deferred case. Cleaner: split into `enum ResolvedSchema { Named{..}, Inline(..) }` plus `enum SchemaResolution { Ready(ResolvedSchema), Deferred }` at the `resolve` boundary, or add a dedicated `SchemaInferDeferred` error variant. **Separation / Naming.**
+
+### 118. Mech cel: `CelEvaluation` variant reused for namespace binding failure  [impact: low, fix: low]
+mech/src/cel.rs — `Namespaces::to_context` converts `serde_json::Value` → `cel_interpreter::Value` via `to_value`, which is effectively infallible for well-formed JSON. The fallible path reports `MechError::CelEvaluation` with a synthetic `source_text: "<namespace {name}>"`, which is a variant shape mismatch. Either use `.expect(...)` or introduce a dedicated `NamespaceBind` variant. **Naming / simplification.**
 
 ### 117. Mech cel: guard error policy not enforced (§10.2)  [impact: low, fix: low]
 mech/src/cel.rs — `CelExpression::evaluate_guard` propagates evaluation errors to the caller. Spec §10.2 says guard runtime errors should be treated as `false` (non-fatal, with a warning). Either add the policy here or document clearly that the D11 transition executor must wrap `evaluate_guard` and apply the false-on-error rule. **Correctness (deferred).**
-
-### 118. Mech cel: `CelEvaluation` variant reused for namespace binding failure  [impact: low, fix: low]
-mech/src/cel.rs — `Namespaces::to_context` converts `serde_json::Value` → `cel_interpreter::Value` via `to_value`, which is effectively infallible for well-formed JSON. The fallible path reports `MechError::CelEvaluation` with a synthetic `source_text: "<namespace {name}>"`, which is a variant shape mismatch. Either use `.expect("JsonValue -> cel Value is infallible")` or introduce a dedicated `NamespaceBind` variant. **Naming / simplification.**
-
-### 119. Mech cel: thin coverage for render branches and multibyte template literals  [impact: low, fix: low]
-mech/src/cel.rs — `append_rendered` branches for `Null`, `UInt`, `Float`, `Map` are untested; no test exercises multi-level nested field access in a template (e.g. `{{block.foo.bar.baz}}`); no test covers multibyte literal text around `{{...}}` (e.g. `"héllo {{input.name}}"`). Add these when convenient. **Testing.**
 
 ### 120. Mech cel: `block`/`meta` namespace names diverge from spec §7 (`blocks` + `output`)  [impact: low, fix: low]
 mech/src/cel.rs — Module doc flags the discrepancy and defers reconciliation to Deliverable 8. Track explicitly so D8 revisits the namespace layout and either updates §7 or renames the fields. **Naming (deferred).**
@@ -754,122 +787,90 @@ mech/src/cel.rs — Module doc flags the discrepancy and defers reconciliation t
 ### 121. `SchemaRegistry::validate` does not use `self`  [impact: low, fix: low]
 mech/src/schema/registry.rs — `validate(&self, ..)` dispatches through `ResolvedSchema::validator()` without touching registry state. Falsely implies the registry is required to validate inline/infer resolutions. Move to a method on `ResolvedSchema` or a free function. **Separation.**
 
-### 122. `ResolvedSchema::Infer` forces fake `SchemaInvalid` error on validate  [impact: low, fix: low]
-mech/src/schema/registry.rs — Mixing a non-validator sentinel (`Infer`) into the same enum as real compiled validators forces `validate()` to synthesize a misleading `SchemaInvalid` error (name `<infer>`) for the deferred case. Cleaner: split into `enum ResolvedSchema { Named{..}, Inline(..) }` plus `enum SchemaResolution { Ready(ResolvedSchema), Deferred }` at the `resolve` boundary, or add a dedicated `SchemaInferDeferred` error variant. **Separation / Naming.**
+### 114. Mech schema: empty `call: []` deserializes as `Uniform(vec![])` not an error  [impact: low, fix: low]
+mech/src/schema/mod.rs lines ~220–229 — Untagged enum discrimination biases empty lists toward `CallSpec::Uniform`. Spec §4.4/§5.2 requires non-empty in practice. Deferred to load-time validation. **Correctness (deferred).**
 
-### 123. `SchemaInvalid` variant overloaded for inline compile failures and deferred-infer  [impact: low, fix: low]
-mech/src/error.rs — `SchemaInvalid { name, .. }` is used for (a) a named shared schema that fails to compile, (b) an inline schema that fails to compile (sentinel `name: "<inline>"`), and (c) validating against a deferred `Infer` marker (sentinel `name: "<infer>"`). The variant's `name` field's stated responsibility is "registered schema name"; sentinels conflate three distinct conditions. Split into dedicated variants or rename `name` to `source`. **Naming.**
-
-### 124. `SchemaRef::Ref("$ref:path")` external-file case rejected as "malformed"  [impact: low, fix: low]
-mech/src/schema/registry.rs (`parse_named_ref`) — External file refs like `$ref:./foo.json` (reserved for Deliverable 7) currently produce `SchemaRefMalformed`, but they are not malformed — they are unsupported/deferred. Introduce `SchemaRefUnsupported` or `SchemaRefExternalDeferred` so the diagnostic matches the condition. Revisit in D7. **Naming.**
-
-### 125. `registry.rs` placement under `mech/src/schema/` conflates two "schema" senses  [impact: low, fix: low]
-mech/src/schema/registry.rs — The file's own module doc explicitly flags the collision: `crate::schema` is the parse-only YAML AST while `registry` implements a JSON Schema runtime concern. Relocating to a sibling top-level module (`mech/src/json_schema.rs` or similar) would match the architectural layering the doc comment describes. **Placement.**
-
-### 126. Registry test coverage gaps  [impact: low, fix: low]
-mech/src/schema/registry.rs tests — Missing: (a) a 3+ node cycle (a→b→c→a) to exercise `chain` accumulation beyond length 2; (b) a multi-hop non-cyclic alias chain (c→b→a) to exercise the `loop { continue }` path in `follow_top_level_ref` more than once; (c) a `$ref:./other.json`-shaped input to pin the current "external file refs are rejected" contract until D7; (d) a cycle test using the string form `"$ref:#a"` (current cycle tests only use the object form). **Testing.**
-
-### 127. Dataflow cycle error message inverts edge direction; duplicate reports possible  [impact: low, fix: low]
-mech/src/validate.rs `detect_dataflow_cycles` (~line 902) — The error message says "`{node}` -> `{next}` closes a cycle in `depends_on`", but `depends_on` points from dependent to prerequisite, so the data edge runs `next → node`. Also, a single cycle may be reported multiple times from different DFS start points. **Correctness (low).**
-
-### 128. `validate_named_agents` duplicate-reports missing extends target  [impact: low, fix: low]
-mech/src/validate.rs (~line 763) — For N agents in a chain whose terminal `extends` points at a missing name, the "extends target not a named agent" error can be pushed up to N times. Dedupe or check each agent's own `extends` once in the top loop. **Correctness (low).**
-
-### 130. Misleading `validate_agent_ref_with_defaults` pair  [impact: low, fix: low]
-mech/src/validate.rs (~line 828 / ~867) — `validate_agent_ref` takes `&WorkflowDefaults`; `validate_agent_ref_with_defaults` takes `Option<&WorkflowDefaults>`. The `_with_defaults` suffix implies the other is "without defaults" — opposite of reality. Rename or restructure. **Naming.**
-
-### 131. Hand-rolled dominator algorithm over-engineered for reverse-reachability need  [impact: low, fix: low]
-mech/src/validate.rs `compute_dominators` (~line 1414) — The sole use is "does target_block reach cur_block through control-flow or depends_on?" which is plain reverse-reachability, not dominance. A combined predecessor-graph BFS from `cur_block` would replace ~60 lines of worklist iteration. **Simplification.**
-
-### 132. `normalized_grants` name misleads; only caller checks `"write"` membership  [impact: low, fix: low]
-mech/src/validate.rs (~line 1335) — Name suggests normalization but the function also *expands* grants (adds `tools` under various conditions). The sole caller uses only `normalized.contains("write")` which is equivalent to `ac.grant.iter().any(|g| g == "write")`. Inline or rename to `effective_grants`. **Naming / simplification.**
-
-### 133. `CollectedRefs.block_refs` has a pointless outer Option  [impact: low, fix: low]
-mech/src/validate.rs (~line 1587) — Field typed `Vec<Option<(String, Option<String>)>>` but the producer at line 1654 only ever pushes `Some(...)`. The outer Option is dead structure misleading readers. Drop to `Vec<(String, Option<String>)>`. **Cruft / simplification.**
-
-### 134. Unused `_fn_name` parameter in validate_cel_and_templates  [impact: low, fix: low]
-mech/src/validate.rs (~line 1038) — The `_fn_name: &str` parameter is unused (underscore-prefixed). Remove it rather than keep as dead API surface. **Cruft.**
-
-### 135. CEL reference-extraction helpers belong in `mech::cel`  [impact: low, fix: low]
-mech/src/validate.rs lines ~1519-1700 — `CollectedRefs`, `collect_references`, `walk`, `walk_member_subexprs`, `flatten_member_chain`, and `extract_template_exprs` operate purely on `cel_parser::Expression` and `${...}` template strings with no validator state. They belong in `mech/src/cel.rs` (or `cel::refs`) where future linters or the runtime renderer could share them. **Placement.**
-
-### 136. `resolve_schema_value` and `value_matches_json_type` belong in schema/registry.rs  [impact: low, fix: low]
-mech/src/validate.rs (~lines 1322 and 1507) — Pure schema-resolution / JSON-Schema predicates are validator-agnostic and mirror functionality already in `mech/src/schema/registry.rs`. Move next to the rest of the JSON Schema machinery. **Placement.**
-
-### 137. `check_*` vs `validate_*` naming inconsistency  [impact: low, fix: low]
-mech/src/validate.rs — Most methods are `validate_*` but `check_cel_expr`, `check_template`, `check_call_fn` break the pattern for the same "emit errors into report" responsibility. Rename to `validate_*`. **Naming.**
-
-### 139. Double CEL parse per expression  [impact: low, fix: low]
-mech/src/validate.rs (~line 1233) — `cel_parser::parse(expr_src)` is called after `CelExpression::compile(expr_src)`. `compile` presumably parses internally; exposing the AST on `CelExpression` would avoid parsing every workflow expression twice. **Simplification / performance.**
-
-### 140. `collects_multiple_errors` test is weak  [impact: low, fix: low]
-mech/src/validate.rs (~line 2525) — Asserts only `r.errors.len() >= 2`. A regression where the same error is reported twice would satisfy this. Use `assert_err_contains` for each of the two specific expected errors, and consider exercising aggregation across different functions + different check categories (structural + graph + type) in one pass. **Testing.**
-
-### 142. `ModelChecker::knows` and bare `Location` re-export  [impact: low, fix: low]
-mech/src/validate.rs (~line 42) and mech/src/lib.rs (~line 29) — `knows(...)` reads awkwardly; prefer `is_known` / `contains`. The trait itself might be better named `ModelRegistry` / `ModelResolver`. Separately, `Location` is re-exported unqualified at the crate root where it could collide with future parser/CEL error locations; keep it module-qualified or rename. **Naming / placement.**
+### 115. Mech schema: `extends` permitted on named agents, not just inline  [impact: low, fix: low]
+mech/src/schema/mod.rs lines ~279–305 — Per §12.1, `extends` is allowed on inline agent configs only, not on `workflow.agents.<name>` entries. Current single `AgentConfig` type does not enforce this split. Fix via separate `NamedAgentConfig` / `InlineAgentConfig` types if parse-time enforcement is desired. **Correctness (deferred).**
 
 ### 143. External `$ref:path` schema/agent file resolution deferred to D7  [impact: low, fix: low]
-mech/src/validate.rs (~line 694 and ~line 862) — `$ref:#name` is checked here; `$ref:path` (external file) is silently accepted. Spec §10.1 requires file existence checks at load time. Tracked to the Deliverable 7 workflow loader. **Tracking.**
+mech/src/validate.rs — `$ref:#name` is checked here; `$ref:path` (external file) is silently accepted. Spec §10.1 requires file existence checks at load time. **Tracking.**
+
+### 113. Mech schema: re-export surface flattens the `schema` module boundary  [impact: low, fix: low]
+mech/src/lib.rs lines 31–36 — 15 schema types are re-exported at the crate root while `pub mod schema` is also exposed, giving two canonical paths for every type. Either re-export only entry points (`WorkflowFile`, `parse_workflow`) or make `schema` `pub(crate)`. **Placement.**
+
+### 162. mech lib.rs module doc is a running changelog  [impact: low, fix: low]
+mech/src/lib.rs lines 10–20 — crate-level doc accretes a prose description of every completed deliverable. By deliverable 17 this will be unreadable. Replace with a short "what the crate does" paragraph and let the per-module docs carry the detail. **Cruft.**
+
+### 151. mech `WorkflowLoader` struct + builder is premature generalization  [impact: low, fix: low]
+mech/src/loader.rs lines 92–120 — `WorkflowLoader` wraps a single `Box<dyn ModelChecker>` with `new`/`default`/`with_model_checker`/custom `Debug`. For one optional dependency this is ceremony. Replace with two free functions (`load(path)`, `load_str(yaml)`) plus `load_with_models(..., &dyn ModelChecker)` for the rare strict-checker override. **Simplification.**
+
+### 152. mech `Workflow` uses redundant outer `Arc` on each field  [impact: low, fix: low]
+mech/src/loader.rs lines 42–48 — `Workflow` holds `Arc<WorkflowFile>`, `Arc<SchemaRegistry>`, `Arc<BTreeMap<...guards>>`, `Arc<BTreeMap<...templates>>`. Since the value is load-once-share-many, the idiomatic shape is `Arc<WorkflowInner>` with plain fields inside. One allocation instead of four. **Simplification.**
+
+### 153. mech loader: interning CEL by source text may constrain executor API  [impact: low, fix: low]
+mech/src/loader.rs lines 170–298 — the loader dedupes compiled CEL / templates keyed by raw source string and exposes `Workflow::guard(&str)` / `Workflow::template(&str)` as the executor contract. An executor walking the AST naturally wants the compiled form attached *to the node*, not a re-hashed source lookup. Consider storing compiled artifacts inline on the `BlockDef` (or a side-table keyed by stable block/transition id) and dropping the interning maps. **Simplification.**
+
+### 139. Double CEL parse per expression  [impact: low, fix: low]
+mech/src/validate.rs — `cel_parser::parse(expr_src)` is called after `CelExpression::compile(expr_src)`. `compile` parses internally; exposing the AST on `CelExpression` would avoid parsing every workflow expression twice. **Simplification / performance.**
+
+### 131. Hand-rolled dominator algorithm over-engineered for reverse-reachability need  [impact: low, fix: low]
+mech/src/validate.rs `compute_dominators` (~line 1455) — The sole use is "does target_block reach cur_block through control-flow or depends_on?" which is plain reverse-reachability, not dominance. A combined predecessor-graph BFS from `cur_block` would replace ~60 lines of worklist iteration. **Simplification.**
+
+### 158. mech `full_example.yaml` crosses module boundary via include_str  [impact: low, fix: low]
+mech/src/loader.rs line ~304 — loader tests load a §12 worked-example fixture via `include_str!("schema/full_example.yaml")`, crossing into a sibling module's directory for test data. A worked example is a fixture, not schema source code. Move to `mech/tests/fixtures/full_example.yaml` (or `mech/examples/`). **Placement.**
 
 ### 144. Duplicated terminal-block detection between validate.rs and schema/infer.rs  [impact: low, fix: low]
-mech/src/schema/infer.rs (~lines 143-151, 244-249) and mech/src/validate.rs (~lines 340-369, `inferred_terminals`) both encode "a block with no outgoing transitions is terminal" and the `func.terminals.is_empty() ? inferred : explicit` fallback. Lift a shared helper (e.g. `FunctionDef::effective_terminals`) so the two sites cannot drift as BlockDef variants evolve. **Separation.**
+mech/src/schema/infer.rs and mech/src/validate.rs both encode "a block with no outgoing transitions is terminal" and the `func.terminals.is_empty() ? inferred : explicit` fallback. Lift a shared helper (e.g. `FunctionDef::effective_terminals`) so the two sites cannot drift as BlockDef variants evolve. **Separation.**
 
 ### 145. Duplicated `$ref:#name` resolution between SchemaRegistry and schema/infer.rs  [impact: low, fix: low]
-mech/src/schema/infer.rs `resolve_schema_ref` (~lines 255-265) re-implements `$ref:` / `#` prefix stripping and shared-schema lookup that `SchemaRegistry` already owns (mech/src/schema/registry.rs). Grow a `SchemaRegistry::resolve_to_json(&SchemaRef) -> Option<&JsonValue>` helper and delegate from infer to avoid drift on what counts as a valid `$ref`. **Separation.**
+mech/src/schema/infer.rs `resolve_schema_ref` re-implements `$ref:` / `#` prefix stripping and shared-schema lookup that `SchemaRegistry` already owns. Grow a `SchemaRegistry::resolve_to_json(&SchemaRef) -> Option<&JsonValue>` helper and delegate from infer to avoid drift. **Separation.**
+
+### 135. CEL reference-extraction helpers belong in `mech::cel`  [impact: low, fix: low]
+mech/src/validate.rs — `CollectedRefs`, `collect_references`, `walk`, `walk_member_subexprs`, `flatten_member_chain`, and `extract_template_exprs` operate purely on `cel_parser::Expression` and `${...}` template strings with no validator state. They belong in `mech/src/cel.rs` (or `cel::refs`) where future linters or the runtime renderer could share them. **Placement.**
+
+### 136. `resolve_schema_value` and `value_matches_json_type` belong in schema/registry.rs  [impact: low, fix: low]
+mech/src/validate.rs — Pure schema-resolution / JSON-Schema predicates are validator-agnostic and mirror functionality already in `mech/src/schema/registry.rs`. Move next to the rest of the JSON Schema machinery. **Placement.**
+
+### 125. `registry.rs` placement under `mech/src/schema/` conflates two "schema" senses  [impact: low, fix: low]
+mech/src/schema/registry.rs — The file's own module doc flags the collision: `crate::schema` is the parse-only YAML AST while `registry` implements a JSON Schema runtime concern. Relocating to a sibling top-level module (`mech/src/json_schema.rs` or similar) would match the architectural layering. **Placement.**
+
+### 157. mech `Workflow` buried in loader.rs  [impact: low, fix: low]
+mech/src/loader.rs lines 42–85 — `Workflow` is the immutable post-load value that later deliverables (execution, scheduling) consume as their primary input. Execution code does not depend on loading, yet will read `use crate::loader::Workflow`. Extract to `mech/src/workflow.rs` containing `Workflow` + accessors; leave `loader.rs` with only `WorkflowLoader` and pipeline helpers. **Placement.**
+
+### 159. mech loader tests should be integration tests  [impact: low, fix: low]
+mech/src/loader.rs lines ~300–609 — most tests exercise only the public API end-to-end. They belong in `mech/tests/loader.rs`. Keep only `workflow_is_send_sync`, `missing_file_yields_io_error`, `bad_yaml_yields_yaml_parse_error` inline if any. **Placement.**
+
+### 141. Missing dedicated passing fixtures for most §10.1 checks  [impact: medium, fix: medium]
+mech/src/validate.rs — D5 spec requires each check have "at least one failing fixture AND one passing fixture". Many checks have only the failing side and rely on the global worked-example test for positive coverage. Rows lacking a dedicated positive test: invalid block name, reserved name, schema empty-required, context var types, `set_context`/`set_workflow`, dataflow DAG, transition target, call target, `n_of_m` with valid `n`, terminal validation, agent extends/grant/model/`$ref:#name`, input schema match. **Testing.**
+
+### 126. Registry test coverage gaps  [impact: low, fix: low]
+mech/src/schema/registry.rs tests — Missing: (a) a 3+ node cycle (a→b→c→a) to exercise `chain` accumulation beyond length 2; (b) a multi-hop non-cyclic alias chain (c→b→a) to exercise the `loop { continue }` path in `follow_top_level_ref` more than once; (c) a `$ref:./other.json`-shaped input to pin the current "external file refs are rejected" contract until D7; (d) a cycle test using the string form `"$ref:#a"`. **Testing.**
 
 ### 146. Weak assertions in mech schema inference tests  [impact: low, fix: low]
-mech/src/schema/infer.rs tests — `multiple_terminals_with_identical_schemas_unify` only asserts `/properties/done` exists; should also assert `/properties/done/type == "boolean"` and that `start` block's `/properties/r` is absent. `ref_and_inline_interact_correctly` does not prove the `$ref` path was hit (same-body inline would also pass); add a variant where one terminal is `$ref` and the other structurally differs and expect an incompatibility error. `terminal_call_block_inferred_callee_resolves_via_fixed_point` does not force fixed-point because `BTreeMap` iteration order happens to visit `callee` before `caller`; rename functions so caller sorts first (e.g. `a_caller` / `z_callee`) to actually exercise the multi-pass loop. **Testing.**
+mech/src/schema/infer.rs tests — `multiple_terminals_with_identical_schemas_unify` only asserts `/properties/done` exists; should also assert `/properties/done/type == "boolean"` and that `start` block's `/properties/r` is absent. `ref_and_inline_interact_correctly` does not prove the `$ref` path was hit; add a variant where one terminal is `$ref` and the other structurally differs and expect an incompatibility error. `terminal_call_block_inferred_callee_resolves_via_fixed_point` does not force fixed-point because `BTreeMap` iteration order happens to visit `callee` before `caller`; rename functions so caller sorts first to actually exercise the multi-pass loop. **Testing.**
 
 ### 147. Missing test coverage for mech infer error branches  [impact: low, fix: low]
 mech/src/schema/infer.rs — no test for a prompt terminal with block-level `schema: infer` (the `SchemaRef::Infer` defensive branch in `terminal_block_output`). No test for list-form call block as terminal (`CallSpec` non-`Single`) hitting the "list-form call block cannot be structurally inferred" branch. No test for explicit `terminals:` field on a function. No test for `$ref:#unknown` terminal prompt (unresolved reference branch). **Testing.**
 
-### 148. `MechError::InferenceFailed` variant name is generic  [impact: low, fix: low]
-mech/src/error.rs (~line 180) — `InferenceFailed` does not say *what* was being inferred. The module scope is specifically function output schema inference; rename to `OutputSchemaInferenceFailed` (or split by kind if mech ever gains input inference) to match the variant's actual responsibility. Also consider reconciling with the pre-existing `SchemaValidationFailure` (runtime) / `SchemaValidationFailed` (load-time) pair, which differ only by tense and are now joined by another `-Failed` load-time variant. **Naming.**
-
-### 150. mech loader: `MechError::YamlParse.path` is empty for in-memory loads  [impact: low, fix: low]
-mech/src/loader.rs `load_impl` line ~144 — `source_path.clone().unwrap_or_default()` produces an empty PathBuf when loading via `load_str`, which renders as `""` in error messages ("parse error in file ''"). Change `MechError::YamlParse.path` to `Option<PathBuf>` or substitute a `<string>` sentinel for in-memory loads. **Correctness.**
-
-### 151. mech `WorkflowLoader` struct + builder is premature generalization  [impact: low, fix: low]
-mech/src/loader.rs lines 92–120 — `WorkflowLoader` wraps a single `Box<dyn ModelChecker>` with `new`/`default`/`with_model_checker`/custom `Debug`. For one optional dependency this is ceremony. Replace with two free functions (`load(path)`, `load_str(yaml)`) plus `load_with_models(..., &dyn ModelChecker)` for the rare strict-checker override. Deletes the struct, `Default`, manual `Debug`, and builder method in one stroke. **Simplification.**
-
-### 152. mech `Workflow` uses redundant outer `Arc` on each field  [impact: low, fix: low]
-mech/src/loader.rs lines 42–48 — `Workflow` holds `Arc<WorkflowFile>`, `Arc<SchemaRegistry>`, `Arc<BTreeMap<...guards>>`, `Arc<BTreeMap<...templates>>`. Since the value is load-once-share-many, the idiomatic shape is `Arc<WorkflowInner>` with plain `BTreeMap`s/`SchemaRegistry` inside. One allocation instead of four; inner `Arc<CelExpression>` / `Arc<Template>` stays because callers hand them to executors. **Simplification.**
-
-### 153. mech loader: interning CEL by source text may constrain executor API  [impact: low, fix: low]
-mech/src/loader.rs lines 170–284 — the loader dedupes compiled CEL / templates keyed by raw source string and exposes `Workflow::guard(&str)` / `Workflow::template(&str)` as the executor contract. An executor walking the AST naturally wants the compiled form attached *to the node*, not a re-hashed source lookup. Before deliverable 8 locks in the contract, consider storing compiled artifacts inline on the `BlockDef` (or a side-table keyed by stable block/transition id) and dropping the interning maps. Dedup is a micro-optimization with no evidence of hot-path pressure. **Simplification.**
-
-### 155. mech `Workflow::guards` field is misnamed  [impact: low, fix: low]
-mech/src/loader.rs lines 46, 66–69, 77–79 — the `guards` bucket holds every raw `CelExpression` in the workflow, including `set_context` / `set_workflow` RHS expressions which are assignments, not guards. Per spec §6, "guard" specifically means a transition `when:` clause. Rename field + accessors to `expressions` / `cel_exprs` (with matching `expression()`, `expression_count()`, `intern_expression`). Fix the docstring on lines 32–33 which claims the bucket contains "every `when:` clause". **Naming.**
-
-### 156. mech `Workflow::file()` accessor is a poor name  [impact: low, fix: low]
-mech/src/loader.rs lines 43, 52 — `file()` returning the parsed `WorkflowFile` collides conceptually with `source_path()` (the actual file) and hides that the value is the validated, inferred workflow definition. Rename to `definition()` or `parsed()`. The underlying `WorkflowFile` type name is also questionable upstream but out of scope for this fix. **Naming.**
-
-### 157. mech `Workflow` buried in loader.rs  [impact: low, fix: low]
-mech/src/loader.rs lines 42–85 — `Workflow` is the immutable post-load value that later deliverables (execution, scheduling) consume as their primary input. Execution code does not depend on loading, yet will read `use crate::loader::Workflow`. Extract to `mech/src/workflow.rs` containing `Workflow` + accessors; leave `loader.rs` with only `WorkflowLoader` and pipeline helpers. Re-export in `lib.rs` keeps the public API unchanged. **Placement.**
-
-### 158. mech `full_example.yaml` crosses module boundary via include_str  [impact: low, fix: low]
-mech/src/loader.rs line ~290 — loader tests load a §12 worked-example fixture via `include_str!("schema/full_example.yaml")`, crossing into a sibling module's directory for test data. A worked example is a fixture, not schema source code. Move to `mech/tests/fixtures/full_example.yaml` (or `mech/examples/`). **Placement.**
-
-### 159. mech loader tests should be integration tests  [impact: low, fix: low]
-mech/src/loader.rs lines 286–459 — most tests (`loads_full_worked_example`, `load_is_deterministic`, `load_from_disk_roundtrips_via_tempfile`, `semantic_error_yields_validation_variant`, `cel_compile_error_surfaces`, the new inference/template-error tests) exercise only the public API end-to-end. They belong in `mech/tests/loader.rs`. Keep only `workflow_is_send_sync`, `missing_file_yields_io_error`, `bad_yaml_yields_yaml_parse_error` inline if any. **Placement.**
-
-### 160. mech `load_from_disk_roundtrips_via_tempfile` leaks on panic  [impact: low, fix: low]
-mech/src/loader.rs lines 407–421 — test manually builds a path in `std::env::temp_dir()` keyed by PID and calls `remove_file` only at the end, so a panicking assertion leaves the file behind and a recycled PID could collide with a prior run's leftovers. Use `tempfile::TempDir` for RAII cleanup (per CLAUDE.md guidance, prefer `TempDir::new_in()` with a project-local path). **Testing.**
+### 119. Mech cel: thin coverage for render branches and multibyte template literals  [impact: low, fix: low]
+mech/src/cel.rs — `append_rendered` branches for `Null`, `UInt`, `Float`, `Map` are untested; no test exercises multi-level nested field access in a template (e.g. `{{block.foo.bar.baz}}`); no test covers multibyte literal text around `{{...}}` (e.g. `"héllo {{input.name}}"`). **Testing.**
 
 ### 161. mech loader: missing test edge cases  [impact: low, fix: low]
 mech/src/loader.rs — no test for: empty `functions: {}` map, workflow file with `workflow:` block omitted (the `unwrap_or(&empty_schemas)` path at line 155 is uncovered), deduplication assertion (two identical `when:` clauses collapse to one interned entry — claimed in Workflow doc but unverified), `with_model_checker` swapping in a strict checker that rejects a model, `resolve_billing` block count (only `support_triage` is spot-checked), and schema-registry build errors at the loader level. **Testing.**
 
-### 162. mech lib.rs module doc is a running changelog  [impact: low, fix: low]
-mech/src/lib.rs lines 10–20 — crate-level doc accretes a prose description of every completed deliverable ("error types, parse-only serde schema types... a CEL compiler... a JSON Schema registry... a validate module... a loader module..."). By deliverable 17 this will be unreadable. Replace with a short "what the crate does" paragraph and let the per-module docs carry the detail. Same pattern in docs/STATUS.md Mech Phase paragraph (Prior deliverable: / Prior deliverable: chain). **Cruft.**
-### 116. Mech schema: single 770-line mod.rs could split into submodules  [impact: low, fix: medium]
-mech/src/schema/mod.rs — Spec wording said "src/schema/mod.rs and submodules". Natural seams: `blocks.rs`, `agent.rs`, `schema_ref.rs`, `workflow.rs`. Cheaper to split now, before Deliverables 3–7 add validators that co-locate with each type cluster. **Separation.**
+### 140. `collects_multiple_errors` test is weak  [impact: low, fix: low]
+mech/src/validate.rs — Asserts only `r.errors.len() >= 2`. A regression where the same error is reported twice would satisfy this. Use `assert_err_contains` for each of the two specific expected errors, and consider exercising aggregation across different functions + different check categories (structural + graph + type) in one pass. **Testing.**
 
 ### 129. Heavy Prompt/Call arm duplication in validate_block and validate_cel_and_templates  [impact: low, fix: medium]
-mech/src/validate.rs lines ~412-559 and ~1038-1215 — The Prompt and Call arms duplicate ~60 lines each iterating `depends_on`, `set_context`, `set_workflow`, and transitions. Extract per-kind helpers or a shared `validate_common_block_fields`. Also bundle `check_cel_expr`'s 8 parameters into a `CelCtx<'_>` struct (removes the `clippy::too_many_arguments` allow). **Simplification.**
+mech/src/validate.rs — The Prompt and Call arms duplicate ~60 lines each iterating `depends_on`, `set_context`, `set_workflow`, and transitions. Extract per-kind helpers or a shared `validate_common_block_fields`. Also bundle `check_cel_expr`'s 8 parameters into a `CelCtx<'_>` struct (removes the `clippy::too_many_arguments` allow). **Simplification.**
 
-### 138. validate.rs (2606 lines) warrants promotion to `validate/` directory  [impact: low, fix: medium]
-mech/src/validate.rs — Single flat file mixes public API types (`ModelChecker`, `Location`, `ValidationIssue`, `ValidationReport`), the `Validator` walker, graph algorithms, CEL ref extraction, schema helpers, and 40+ inline tests. Promote to `validate/mod.rs` + `validate/model.rs` + `validate/report.rs` + `validate/walker.rs` mirroring the `schema/` directory layout. **Placement.**
+### 116. Mech schema: single 889-line mod.rs could split into submodules  [impact: low, fix: medium]
+mech/src/schema/mod.rs — Natural seams: `blocks.rs`, `agent.rs`, `schema_ref.rs`, `workflow.rs`. Cheaper to split now, before later deliverables add validators that co-locate with each type cluster. **Separation.**
 
 ### 154. mech loader: CEL compile pass reaches into block internals  [impact: low, fix: medium]
-mech/src/loader.rs lines 184–263 — `compile_prompt` / `compile_call` enumerate every CEL-bearing field of `PromptBlock` / `CallBlock` / `CallSpec::PerCall`. Adding a new template field to a block type requires changing the loader. Replace with a visitor on the block types (e.g. `BlockDef::visit_cel(&mut dyn CelVisitor)` distinguishing `guard` vs `template` callbacks). The interning/compile pass then lives in a dedicated `mech::compile` or `mech::cel::collect` module and loader.rs loses its `BlockDef` / `CallBlock` / `CallSpec` / `PromptBlock` / `FunctionDef` imports. **Separation.**
+mech/src/loader.rs lines 219–273 — `compile_prompt` / `compile_call` enumerate every CEL-bearing field of `PromptBlock` / `CallBlock` / `CallSpec::PerCall`. Adding a new template field to a block type requires changing the loader. Replace with a visitor on the block types (e.g. `BlockDef::visit_cel(&mut dyn CelVisitor)` distinguishing `guard` vs `template` callbacks). The interning/compile pass then lives in a dedicated `mech::compile` or `mech::cel::collect` module. **Separation.**
+
+### 138. validate.rs (2928 lines) warrants promotion to `validate/` directory  [impact: low, fix: medium]
+mech/src/validate.rs — Single flat file mixes public API types (`ModelChecker`, `Location`, `ValidationIssue`, `ValidationReport`), the `Validator` walker, graph algorithms, CEL ref extraction, schema helpers, and 40+ inline tests. Promote to `validate/mod.rs` + `validate/model.rs` + `validate/report.rs` + `validate/walker.rs` mirroring the `schema/` directory layout. **Placement.**
 
