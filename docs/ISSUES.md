@@ -982,3 +982,45 @@ mech/src/schema/infer.rs — no test for a prompt terminal with block-level `sch
 
 ### 148. `MechError::InferenceFailed` variant name is generic
 mech/src/error.rs (~line 180) — `InferenceFailed` does not say *what* was being inferred. The module scope is specifically function output schema inference; rename to `OutputSchemaInferenceFailed` (or split by kind if mech ever gains input inference) to match the variant's actual responsibility. Also consider reconciling with the pre-existing `SchemaValidationFailure` (runtime) / `SchemaValidationFailed` (load-time) pair, which differ only by tense and are now joined by another `-Failed` load-time variant. **Naming.**
+
+### 149. mech loader: validation runs before inference
+mech/src/loader.rs `load_impl` — the §10.1 validation pass runs before `infer_function_outputs`. Today no validator rule inspects concrete function output shape, so nothing is bypassed, but the ordering is fragile: the moment a validator introspects function outputs, functions declaring `output: infer` will silently skip that check. Either re-run a lightweight post-inference validation pass or document/assert that validators must not depend on inferred output shape. **Correctness.**
+
+### 150. mech loader: `MechError::YamlParse.path` is empty for in-memory loads
+mech/src/loader.rs `load_impl` line ~144 — `source_path.clone().unwrap_or_default()` produces an empty PathBuf when loading via `load_str`, which renders as `""` in error messages ("parse error in file ''"). Change `MechError::YamlParse.path` to `Option<PathBuf>` or substitute a `<string>` sentinel for in-memory loads. **Correctness.**
+
+### 151. mech `WorkflowLoader` struct + builder is premature generalization
+mech/src/loader.rs lines 92–120 — `WorkflowLoader` wraps a single `Box<dyn ModelChecker>` with `new`/`default`/`with_model_checker`/custom `Debug`. For one optional dependency this is ceremony. Replace with two free functions (`load(path)`, `load_str(yaml)`) plus `load_with_models(..., &dyn ModelChecker)` for the rare strict-checker override. Deletes the struct, `Default`, manual `Debug`, and builder method in one stroke. **Simplification.**
+
+### 152. mech `Workflow` uses redundant outer `Arc` on each field
+mech/src/loader.rs lines 42–48 — `Workflow` holds `Arc<WorkflowFile>`, `Arc<SchemaRegistry>`, `Arc<BTreeMap<...guards>>`, `Arc<BTreeMap<...templates>>`. Since the value is load-once-share-many, the idiomatic shape is `Arc<WorkflowInner>` with plain `BTreeMap`s/`SchemaRegistry` inside. One allocation instead of four; inner `Arc<CelExpression>` / `Arc<Template>` stays because callers hand them to executors. **Simplification.**
+
+### 153. mech loader: interning CEL by source text may constrain executor API
+mech/src/loader.rs lines 170–284 — the loader dedupes compiled CEL / templates keyed by raw source string and exposes `Workflow::guard(&str)` / `Workflow::template(&str)` as the executor contract. An executor walking the AST naturally wants the compiled form attached *to the node*, not a re-hashed source lookup. Before deliverable 8 locks in the contract, consider storing compiled artifacts inline on the `BlockDef` (or a side-table keyed by stable block/transition id) and dropping the interning maps. Dedup is a micro-optimization with no evidence of hot-path pressure. **Simplification.**
+
+### 154. mech loader: CEL compile pass reaches into block internals
+mech/src/loader.rs lines 184–263 — `compile_prompt` / `compile_call` enumerate every CEL-bearing field of `PromptBlock` / `CallBlock` / `CallSpec::PerCall`. Adding a new template field to a block type requires changing the loader. Replace with a visitor on the block types (e.g. `BlockDef::visit_cel(&mut dyn CelVisitor)` distinguishing `guard` vs `template` callbacks). The interning/compile pass then lives in a dedicated `mech::compile` or `mech::cel::collect` module and loader.rs loses its `BlockDef` / `CallBlock` / `CallSpec` / `PromptBlock` / `FunctionDef` imports. **Separation.**
+
+### 155. mech `Workflow::guards` field is misnamed
+mech/src/loader.rs lines 46, 66–69, 77–79 — the `guards` bucket holds every raw `CelExpression` in the workflow, including `set_context` / `set_workflow` RHS expressions which are assignments, not guards. Per spec §6, "guard" specifically means a transition `when:` clause. Rename field + accessors to `expressions` / `cel_exprs` (with matching `expression()`, `expression_count()`, `intern_expression`). Fix the docstring on lines 32–33 which claims the bucket contains "every `when:` clause". **Naming.**
+
+### 156. mech `Workflow::file()` accessor is a poor name
+mech/src/loader.rs lines 43, 52 — `file()` returning the parsed `WorkflowFile` collides conceptually with `source_path()` (the actual file) and hides that the value is the validated, inferred workflow definition. Rename to `definition()` or `parsed()`. The underlying `WorkflowFile` type name is also questionable upstream but out of scope for this fix. **Naming.**
+
+### 157. mech `Workflow` buried in loader.rs
+mech/src/loader.rs lines 42–85 — `Workflow` is the immutable post-load value that later deliverables (execution, scheduling) consume as their primary input. Execution code does not depend on loading, yet will read `use crate::loader::Workflow`. Extract to `mech/src/workflow.rs` containing `Workflow` + accessors; leave `loader.rs` with only `WorkflowLoader` and pipeline helpers. Re-export in `lib.rs` keeps the public API unchanged. **Placement.**
+
+### 158. mech `full_example.yaml` crosses module boundary via include_str
+mech/src/loader.rs line ~290 — loader tests load a §12 worked-example fixture via `include_str!("schema/full_example.yaml")`, crossing into a sibling module's directory for test data. A worked example is a fixture, not schema source code. Move to `mech/tests/fixtures/full_example.yaml` (or `mech/examples/`). **Placement.**
+
+### 159. mech loader tests should be integration tests
+mech/src/loader.rs lines 286–459 — most tests (`loads_full_worked_example`, `load_is_deterministic`, `load_from_disk_roundtrips_via_tempfile`, `semantic_error_yields_validation_variant`, `cel_compile_error_surfaces`, the new inference/template-error tests) exercise only the public API end-to-end. They belong in `mech/tests/loader.rs`. Keep only `workflow_is_send_sync`, `missing_file_yields_io_error`, `bad_yaml_yields_yaml_parse_error` inline if any. **Placement.**
+
+### 160. mech `load_from_disk_roundtrips_via_tempfile` leaks on panic
+mech/src/loader.rs lines 407–421 — test manually builds a path in `std::env::temp_dir()` keyed by PID and calls `remove_file` only at the end, so a panicking assertion leaves the file behind and a recycled PID could collide with a prior run's leftovers. Use `tempfile::TempDir` for RAII cleanup (per CLAUDE.md guidance, prefer `TempDir::new_in()` with a project-local path). **Testing.**
+
+### 161. mech loader: missing test edge cases
+mech/src/loader.rs — no test for: empty `functions: {}` map, workflow file with `workflow:` block omitted (the `unwrap_or(&empty_schemas)` path at line 155 is uncovered), deduplication assertion (two identical `when:` clauses collapse to one interned entry — claimed in Workflow doc but unverified), `with_model_checker` swapping in a strict checker that rejects a model, `resolve_billing` block count (only `support_triage` is spot-checked), and schema-registry build errors at the loader level. **Testing.**
+
+### 162. mech lib.rs module doc is a running changelog
+mech/src/lib.rs lines 10–20 — crate-level doc accretes a prose description of every completed deliverable ("error types, parse-only serde schema types... a CEL compiler... a JSON Schema registry... a validate module... a loader module..."). By deliverable 17 this will be unreadable. Replace with a short "what the crate does" paragraph and let the per-module docs carry the detail. Same pattern in docs/STATUS.md Mech Phase paragraph (Prior deliverable: / Prior deliverable: chain). **Cruft.**

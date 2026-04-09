@@ -10,19 +10,24 @@
 //! This crate is under active TDD development. It currently exposes error
 //! types, parse-only serde schema types for the YAML workflow grammar, a CEL
 //! expression compiler/evaluator, a JSON Schema registry with `$ref`
-//! resolution and instance validation, and a `validate` module providing
+//! resolution and instance validation, a `validate` module providing
 //! `validate_workflow(&WorkflowFile, Option<&Path>, &dyn ModelChecker) ->
-//! ValidationReport` which performs the §10.1 single-pass load-time checks.
-//! There is no execution or runtime logic yet — block scheduling and LLM
-//! dispatch are still to come.
+//! ValidationReport` which performs the §10.1 single-pass load-time checks,
+//! and a `loader` module exposing `WorkflowLoader::load(path) -> Workflow`
+//! which composes parse → resolve schemas → validate → infer outputs →
+//! compile CEL into an immutable, `Send + Sync` [`Workflow`] value ready for
+//! execution. There is no execution or runtime logic yet — block scheduling
+//! and LLM dispatch are still to come.
 
 pub mod cel;
 pub mod error;
+pub mod loader;
 pub mod schema;
 pub mod validate;
 
 pub use cel::{CelExpression, Namespaces, Template};
 pub use error::{MechError, MechResult};
+pub use loader::{Workflow, WorkflowLoader};
 pub use schema::{
     AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,
     ContextVarDef, FunctionDef, InferLiteral, ParallelStrategy, PromptBlock, ResolvedSchema,

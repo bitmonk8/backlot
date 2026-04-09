@@ -22,6 +22,7 @@ workflow:
 
 functions:
   support_triage:
+    output: "$ref:#resolution"
     input:
       type: object
       required: [ticket_text]
@@ -115,6 +116,8 @@ functions:
         issue: { type: string }
         urgency: { type: string }
     system: "You are a billing specialist. Be precise about amounts and dates."
+    output: "$ref:#resolution"
+    terminals: [resolve]
     agent:
       extends: default
       grant: [write]
