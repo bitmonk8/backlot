@@ -93,7 +93,7 @@ loop {
   print -e "  Removing issue from ISSUES.md..."
   ^claude -p $remove_prompt
     --max-turns 10
-    --model claude-opus-4-6
+    --model claude-sonnet-4-6
     --tools "Read,Edit"
     --allowedTools "Read,Edit"
     --no-session-persistence
