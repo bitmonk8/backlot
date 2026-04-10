@@ -38,12 +38,7 @@ loop {
 
   # Step 1: Extract + validate + enrich (writes JSON to file)
   print -e $"  Extracting last issue... \(($line_count) lines, offset ($tail_offset)\)"
-  ^claude -p $extract_prompt
-    --max-turns 50
-    --model claude-opus-4-6
-    --tools "Read,Grep,Glob,Write"
-    --allowedTools "Read,Grep,Glob,Write"
-    --no-session-persistence
+  (^claude -p $extract_prompt --max-turns 50 --model claude-opus-4-6 --tools "Read,Grep,Glob,Write" --allowedTools "Read,Grep,Glob,Write" --no-session-persistence)
 
   # Read result from file
   if not ($result_file | path exists) {
@@ -70,12 +65,7 @@ loop {
 
     print -e "  Creating GitHub issue..."
     let label_args = ($labels | each { |l| ["--label" $l] } | flatten)
-    let result = (
-      ^gh issue create
-        --title $title
-        --body $body
-        ...$label_args
-    )
+    let result = (^gh issue create --title $title --body $body ...$label_args)
     print -e $"  Created: ($result)"
     $created = $created + 1
   } else if $status == "resolved" {
@@ -91,12 +81,7 @@ loop {
 
   # Step 3: Remove last issue from ISSUES.md
   print -e "  Removing issue from ISSUES.md..."
-  ^claude -p $remove_prompt
-    --max-turns 10
-    --model claude-sonnet-4-6
-    --tools "Read,Edit"
-    --allowedTools "Read,Edit"
-    --no-session-persistence
+  (^claude -p $remove_prompt --max-turns 10 --model claude-sonnet-4-6 --tools "Read,Edit" --allowedTools "Read,Edit" --no-session-persistence)
 
   # Step 4: Rate limit pause
   print -e "  Sleeping 10s..."

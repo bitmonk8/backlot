@@ -11,15 +11,7 @@ let prompt = (open scripts/remove_prompt.md | str replace "{{LINE_COUNT}}" $"($l
 print -e $"File: ($line_count) lines, reading from offset ($tail_offset)"
 print -e "Running remove prompt..."
 
-let raw = (
-  ^claude -p $prompt
-    --output-format json
-    --max-turns 10
-    --model claude-sonnet-4-6
-    --tools "Read,Edit"
-    --allowedTools "Read,Edit"
-    --no-session-persistence
-)
+let raw = (^claude -p $prompt --output-format json --max-turns 10 --model claude-sonnet-4-6 --tools "Read,Edit" --allowedTools "Read,Edit" --no-session-persistence)
 
 let response = ($raw | from json)
 

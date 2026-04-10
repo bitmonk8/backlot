@@ -11,15 +11,7 @@ rm -f scripts/.extract_result.json
 print -e $"File: ($line_count) lines, reading from offset ($tail_offset)"
 print -e "Running extract prompt..."
 
-let raw = (
-  ^claude -p $prompt
-    --output-format json
-    --max-turns 50
-    --model claude-opus-4-6
-    --tools "Read,Grep,Glob,Write"
-    --allowedTools "Read,Grep,Glob,Write"
-    --no-session-persistence
-)
+let raw = (^claude -p $prompt --output-format json --max-turns 50 --model claude-opus-4-6 --tools "Read,Grep,Glob,Write" --allowedTools "Read,Grep,Glob,Write" --no-session-persistence)
 
 let response = ($raw | from json)
 
