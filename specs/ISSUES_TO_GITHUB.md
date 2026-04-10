@@ -135,7 +135,7 @@ No pre-splitting. No checkpoint file. If interrupted, re-run — remaining issue
 
 **Invocation 1 — Extract + Validate + Enrich (read-only):**
 ```
-claude -p $extract_prompt --output-format json --max-turns 10 --model claude-opus-4-6 --allowedTools "Read,Grep,Glob"
+claude -p $extract_prompt --output-format json --max-turns 50 --model claude-opus-4-6 --tools "Read,Grep,Glob" --allowedTools "Read,Grep,Glob" --no-session-persistence
 ```
 
 Claude reads the tail of ISSUES.md, identifies the last issue, reads the referenced source files to confirm the issue still exists, enriches it with descriptive impact/fix cost paragraphs, assigns labels from the taxonomy, and returns structured JSON.

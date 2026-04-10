@@ -1,19 +1,20 @@
-Follow these instructions exactly. Do not improvise or deviate. Output ONLY a single JSON object — no markdown fences, no commentary, no extra text.
+Follow these instructions exactly. Do not improvise or deviate. You may reason freely in your text output — the downstream script reads your result from a file, not from your text response.
 
 ## Task
 
-Extract the **last issue** from `docs/ISSUES.md`, validate it against the codebase, enrich it, and return structured JSON.
+Extract the **last issue** from `docs/ISSUES.md`, validate it against the codebase, enrich it, and write structured JSON to `scripts/.extract_result.json`.
 
 ## Step 1: Find the last issue
 
-Read the last 80 lines of `docs/ISSUES.md` using the Read tool (use the `offset` parameter to read only the tail).
+IMPORTANT: Do NOT read the entire `docs/ISSUES.md` file. The file is {{LINE_COUNT}} lines long. Use the Read tool with `offset: {{TAIL_OFFSET}}` and `limit: 100` to read only the last 100 lines. If the chunk doesn't contain a complete issue, read the preceding 100 lines for more context. Never read the entire file.
 
 Scan backward from the end to find the last issue entry. Issues are identified by `###` headings (e.g., `### 13. CacheRetention::Long TTL format...`) or table rows within grouped sections. Some issues are inside `| # | File | ... |` tables under a `### Group N` heading — each table row is a separate issue.
 
-If the file contains only the top-level `# ` heading, section `## ` headings, or no issue entries at all, return:
+If the file contains only the top-level `# ` heading, section `## ` headings, or no issue entries at all, write to `scripts/.extract_result.json`:
 ```json
 {"status": "empty"}
 ```
+Then stop.
 
 If the last issue is marked as resolved (~~strikethrough~~ on the heading), skip it — treat it as resolved.
 
@@ -22,18 +23,20 @@ If the last issue is marked as resolved (~~strikethrough~~ on the heading), skip
 Read the source file(s) referenced by the issue using the Read tool. Check whether the issue still exists at or near the stated line numbers (lines may have shifted).
 
 - If the issue **still exists**: proceed to Step 3.
-- If the referenced code **no longer exists** or the issue has been fixed: return:
+- If the referenced code **no longer exists** or the issue has been fixed, write to `scripts/.extract_result.json`:
   ```json
   {"status": "resolved", "title": "<short title from the issue>"}
   ```
-- If the issue was **never valid** (false positive — the code doesn't exhibit the described problem): return:
+  Then stop.
+- If the issue was **never valid** (false positive — the code doesn't exhibit the described problem), write to `scripts/.extract_result.json`:
   ```json
   {"status": "false_positive", "title": "<short title from the issue>"}
   ```
+  Then stop.
 
-## Step 3: Enrich and return
+## Step 3: Enrich and write result
 
-Assign exactly 4 labels from the taxonomy below. Then compose the issue body and return the full JSON object.
+Assign exactly 4 labels from the taxonomy below. Then compose the issue body and write the full JSON object to `scripts/.extract_result.json`.
 
 ### Label Taxonomy
 
@@ -88,9 +91,9 @@ Not a scalar label — full sentences about what goes wrong if this isn't fixed.
 
 If the issue was part of a named group (e.g., "Group 16 — Duplicated platform code patterns"), include the group name at the top of the Issue section for context.
 
-### JSON output
+### JSON schema
 
-Return exactly this structure:
+Write exactly this structure to `scripts/.extract_result.json`:
 
 ```json
 {
@@ -103,4 +106,4 @@ Return exactly this structure:
 
 The `title` should be descriptive and standalone — someone reading just the title in a GitHub issue list should understand what the issue is about.
 
-Output ONLY the JSON object. No markdown fences. No explanation. No trailing text.
+You MUST write the JSON to `scripts/.extract_result.json` using the Write tool before finishing.

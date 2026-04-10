@@ -6,7 +6,7 @@ Remove the **last issue entry** from `docs/ISSUES.md`. Preserve all other conten
 
 ## Steps
 
-1. Read the last 80 lines of `docs/ISSUES.md` using the Read tool (use the `offset` parameter to read only the tail).
+1. IMPORTANT: Do NOT read the entire `docs/ISSUES.md` file. The file is {{LINE_COUNT}} lines long. Use the Read tool with `offset: {{TAIL_OFFSET}}` and `limit: 100` to read only the last 100 lines. Never read the entire file.
 
 2. Identify the last issue entry. Issues take one of these forms:
    - A `###` heading followed by content, terminated by `---` or end of file.

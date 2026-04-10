@@ -8,14 +8,15 @@
 # Usage: nu scripts/migrate_issues.nu
 #
 # The script consumes docs/ISSUES.md from the bottom up. Each iteration:
-#   1. Claude extracts + validates + enriches the last issue (read-only)
+#   1. Claude extracts + validates + enriches the last issue → writes JSON to file
 #   2. If valid, creates a GitHub issue via gh CLI
-#   3. Claude removes the processed issue from the file
+#   3. Claude removes the processed issue from ISSUES.md
 #
 # ISSUES.md itself is the checkpoint. If interrupted, re-run to resume.
 
-let extract_prompt = (open scripts/extract_prompt.md)
-let remove_prompt = (open scripts/remove_prompt.md)
+let extract_template = (open scripts/extract_prompt.md)
+let remove_template = (open scripts/remove_prompt.md)
+let result_file = "scripts/.extract_result.json"
 
 mut created = 0
 mut skipped_resolved = 0
@@ -26,32 +27,31 @@ loop {
   $iteration = $iteration + 1
   print -e $"--- Iteration ($iteration) ---"
 
-  # Step 1: Extract + validate + enrich (read-only)
-  print -e "  Extracting last issue..."
-  let raw = (
-    ^claude -p $extract_prompt
-      --output-format json
-      --max-turns 10
-      --model claude-opus-4-6
-      --tools "Read,Grep,Glob"
-      --allowedTools "Read,Grep,Glob"
-      --bare
-      --no-session-persistence
-  )
+  # Compute line count and inject into prompts
+  let line_count = (open docs/ISSUES.md | lines | length)
+  let tail_offset = [($line_count - 100) 0] | math max
+  let extract_prompt = ($extract_template | str replace "{{LINE_COUNT}}" $"($line_count)" | str replace "{{TAIL_OFFSET}}" $"($tail_offset)")
+  let remove_prompt = ($remove_template | str replace "{{LINE_COUNT}}" $"($line_count)" | str replace "{{TAIL_OFFSET}}" $"($tail_offset)")
 
-  let response = ($raw | from json)
-  let content_text = ($response.result | default "")
+  # Clean up previous result
+  rm -f $result_file
 
-  # Try to parse Claude's text output as JSON
-  let content = try {
-    $content_text | from json
-  } catch {
-    print -e $"  ERROR: Failed to parse Claude output as JSON. Raw output:"
-    print -e $content_text
-    print -e "  Stopping."
+  # Step 1: Extract + validate + enrich (writes JSON to file)
+  print -e $"  Extracting last issue... \(($line_count) lines, offset ($tail_offset)\)"
+  ^claude -p $extract_prompt
+    --max-turns 50
+    --model claude-opus-4-6
+    --tools "Read,Grep,Glob,Write"
+    --allowedTools "Read,Grep,Glob,Write"
+    --no-session-persistence
+
+  # Read result from file
+  if not ($result_file | path exists) {
+    print -e "  ERROR: Claude did not write result file. Stopping."
     break
   }
 
+  let content = (open $result_file)
   let status = ($content.status | default "unknown")
 
   # Check for loop termination
@@ -92,17 +92,19 @@ loop {
   # Step 3: Remove last issue from ISSUES.md
   print -e "  Removing issue from ISSUES.md..."
   ^claude -p $remove_prompt
-    --max-turns 3
+    --max-turns 10
     --model claude-opus-4-6
     --tools "Read,Edit"
     --allowedTools "Read,Edit"
-    --bare
     --no-session-persistence
 
   # Step 4: Rate limit pause
   print -e "  Sleeping 10s..."
   sleep 10sec
 }
+
+# Cleanup
+rm -f $result_file
 
 # Summary
 print ""
