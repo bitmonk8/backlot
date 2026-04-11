@@ -19,7 +19,8 @@ loop {
   $iteration = $iteration + 1
   print -e $"--- Iteration ($iteration) [(date now | format date '%H:%M:%S')] ---"
 
-  let result = (do { nu scripts/migrate_one_issue.nu $iteration } | complete)
+  let iter = $iteration
+  let result = (do { nu scripts/migrate_one_issue.nu $iter } | complete)
 
   if $result.exit_code == 2 {
     print -e "  No more issues. Migration complete."
