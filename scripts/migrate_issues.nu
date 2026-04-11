@@ -25,7 +25,8 @@ mut iteration = 0
 
 loop {
   $iteration = $iteration + 1
-  print -e $"--- Iteration ($iteration) ---"
+  let iter_start = (date now)
+  print -e $"--- Iteration ($iteration) [($iter_start | format date '%H:%M:%S')] ---"
 
   # Compute line count and inject into prompts
   let line_count = (open docs/ISSUES.md | lines | length)
@@ -83,8 +84,10 @@ loop {
   print -e "  Removing issue from ISSUES.md..."
   (^claude -p $remove_prompt --max-turns 10 --model claude-sonnet-4-6 --tools "Read,Edit" --allowedTools "Read,Edit" --no-session-persistence)
 
+  let iter_elapsed = ((date now) - $iter_start)
+  print -e $"  Done in ($iter_elapsed | format duration sec). Sleeping 10s..."
+
   # Step 4: Rate limit pause
-  print -e "  Sleeping 10s..."
   sleep 10sec
 }
 
