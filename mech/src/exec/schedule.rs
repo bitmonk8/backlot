@@ -1,0 +1,1131 @@
+//! Transition evaluation and block scheduling (Deliverable 11).
+//!
+//! Implements imperative-mode function execution: starting at the entry block,
+//! execute block → apply `set_context` / `set_workflow` side-effects →
+//! evaluate transitions → advance to the next block, until a terminal block is
+//! reached.
+//!
+//! Per `docs/MECH_SPEC.md`:
+//! - §6.2: transitions evaluated top-to-bottom, first match wins
+//! - §6.3: guards have access to `output`, `input`, `context`, `workflow`
+//! - §6.4: self-loops and backward edges are permitted
+//! - §6.5: no matching transition → de facto terminal
+//! - §9.3: `set_context` / `set_workflow` evaluated atomically, applied
+//!   before transitions
+//! - §10.2: guard evaluation error → treat as false (non-fatal)
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::Value as JsonValue;
+
+use crate::cel::{Namespaces, cel_value_to_json};
+use crate::context::ExecutionContext;
+use crate::error::{MechError, MechResult};
+use crate::exec::agent::AgentExecutor;
+use crate::exec::call::{FunctionExecutor, execute_call_block};
+use crate::exec::prompt::execute_prompt_block;
+use crate::loader::Workflow;
+use crate::schema::{BlockDef, FunctionDef, TransitionDef};
+
+/// Result of evaluating transitions for a block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransitionResult {
+    /// A transition matched; advance to this block.
+    Goto(String),
+    /// No transition matched (or no transitions declared); block is terminal.
+    Terminal,
+}
+
+/// Build post-block namespaces that include `output` as an extra variable.
+///
+/// Transition guards and `set_context` / `set_workflow` expressions have
+/// access to `output`, `input`, `context`, `workflow`, and `meta` — but NOT
+/// `blocks.*` per §6.3. We keep `block` in the namespaces for simplicity
+/// since the validator already rejects guard references to `blocks.*`.
+fn build_post_block_namespaces(ctx: &ExecutionContext, output: &JsonValue) -> Namespaces {
+    let base = ctx.namespaces();
+    let mut extras = BTreeMap::new();
+    extras.insert("output".to_string(), output.clone());
+    Namespaces::with_extras(
+        base.input,
+        base.context,
+        base.workflow,
+        base.block,
+        base.meta,
+        extras,
+    )
+}
+
+/// Evaluate outgoing transitions for a block in declaration order.
+///
+/// Returns the first matching target or [`TransitionResult::Terminal`].
+/// Guard evaluation errors are treated as false per §10.2 (non-fatal).
+pub fn evaluate_transitions(
+    workflow: &Workflow,
+    _block_id: &str,
+    transitions: &[TransitionDef],
+    output: &JsonValue,
+    ctx: &ExecutionContext,
+) -> TransitionResult {
+    if transitions.is_empty() {
+        return TransitionResult::Terminal;
+    }
+
+    let ns = build_post_block_namespaces(ctx, output);
+
+    for t in transitions {
+        match &t.when {
+            None => {
+                // Unconditional — always matches.
+                return TransitionResult::Goto(t.goto.clone());
+            }
+            Some(guard_src) => {
+                let guard = workflow.guard(guard_src).unwrap_or_else(|| {
+                    unreachable!(
+                        "loader invariant: guard `{guard_src}` should have been compiled at load time"
+                    )
+                });
+                match guard.evaluate_guard(&ns) {
+                    Ok(true) => return TransitionResult::Goto(t.goto.clone()),
+                    Ok(false) => continue,
+                    Err(_) => {
+                        // §10.2: guard evaluation error → treat as false.
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    // No transition matched.
+    TransitionResult::Terminal
+}
+
+/// Apply `set_context` and `set_workflow` side-effects after a block produces
+/// output.
+///
+/// Per §9.3:
+/// 1. Expressions within each field are evaluated atomically (all see
+///    pre-write state).
+/// 2. `set_context` writes are applied first, then `set_workflow` writes.
+pub fn apply_side_effects(
+    workflow: &Workflow,
+    _block_id: &str,
+    set_context: &BTreeMap<String, String>,
+    set_workflow: &BTreeMap<String, String>,
+    output: &JsonValue,
+    ctx: &mut ExecutionContext,
+) -> MechResult<()> {
+    let ns = build_post_block_namespaces(ctx, output);
+
+    // Evaluate all set_context expressions atomically (all see pre-write state).
+    let mut context_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_context.len());
+    for (var_name, expr_src) in set_context {
+        let guard = workflow.guard(expr_src).unwrap_or_else(|| {
+            unreachable!(
+                "loader invariant: set_context expression `{expr_src}` should have been compiled"
+            )
+        });
+        let cel_value = guard.evaluate(&ns)?;
+        let json_value = cel_value_to_json(&cel_value)?;
+        context_writes.push((var_name.clone(), json_value));
+    }
+
+    // Evaluate all set_workflow expressions atomically (all see pre-write state).
+    let mut workflow_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_workflow.len());
+    for (var_name, expr_src) in set_workflow {
+        let guard = workflow.guard(expr_src).unwrap_or_else(|| {
+            unreachable!(
+                "loader invariant: set_workflow expression `{expr_src}` should have been compiled"
+            )
+        });
+        let cel_value = guard.evaluate(&ns)?;
+        let json_value = cel_value_to_json(&cel_value)?;
+        workflow_writes.push((var_name.clone(), json_value));
+    }
+
+    // Apply set_context first.
+    for (name, value) in context_writes {
+        ctx.set_context(&name, value)?;
+    }
+
+    // Then set_workflow.
+    for (name, value) in workflow_writes {
+        ctx.set_workflow(&name, value)?;
+    }
+
+    Ok(())
+}
+
+/// Extract transition list and side-effect maps from a block definition.
+fn block_edges(
+    block: &BlockDef,
+) -> (
+    &[TransitionDef],
+    &BTreeMap<String, String>,
+    &BTreeMap<String, String>,
+) {
+    match block {
+        BlockDef::Prompt(p) => (&p.transitions, &p.set_context, &p.set_workflow),
+        BlockDef::Call(c) => (&c.transitions, &c.set_context, &c.set_workflow),
+    }
+}
+
+/// Find the entry block for imperative-mode execution.
+///
+/// The entry block is the block with no `depends_on` that is not targeted
+/// by any *other* block's transitions (self-loops are excluded). If all
+/// non-depends_on blocks are transition targets (e.g. backward edges), fall
+/// back to the first non-depends_on block in iteration order.
+fn find_entry_block(function: &FunctionDef) -> MechResult<String> {
+    // Collect all blocks that are transition targets from a DIFFERENT block.
+    let mut targeted: BTreeSet<&str> = BTreeSet::new();
+    for (src_name, block) in &function.blocks {
+        let (transitions, _, _) = block_edges(block);
+        for t in transitions {
+            if t.goto != *src_name {
+                targeted.insert(&t.goto);
+            }
+        }
+    }
+
+    // Find blocks with no depends_on.
+    let mut no_deps: Vec<&str> = Vec::new();
+    for (name, block) in &function.blocks {
+        let has_depends = match block {
+            BlockDef::Prompt(p) => !p.depends_on.is_empty(),
+            BlockDef::Call(c) => !c.depends_on.is_empty(),
+        };
+        if !has_depends {
+            no_deps.push(name);
+        }
+    }
+
+    if no_deps.is_empty() {
+        return Err(MechError::Validation {
+            errors: vec!["no entry block found: every block has depends_on".into()],
+        });
+    }
+
+    // Prefer blocks with no inbound transitions from other blocks.
+    let non_targeted: Vec<&str> = no_deps
+        .iter()
+        .filter(|name| !targeted.contains(**name))
+        .copied()
+        .collect();
+
+    if non_targeted.is_empty() {
+        // All non-deps blocks are transition targets (backward edges).
+        // Fall back to first in iteration order.
+        Ok(no_deps[0].to_string())
+    } else {
+        Ok(non_targeted[0].to_string())
+    }
+}
+
+/// Run a single function to completion in imperative mode.
+///
+/// Starts at the entry block, executes block → side effects → transitions →
+/// next block until a terminal block is reached. Returns the terminal block's
+/// output.
+pub async fn run_function_imperative(
+    workflow: &Workflow,
+    function_name: &str,
+    function: &FunctionDef,
+    ctx: &mut ExecutionContext,
+    agent_executor: &dyn AgentExecutor,
+    func_executor: &dyn FunctionExecutor,
+) -> MechResult<JsonValue> {
+    let entry = find_entry_block(function)?;
+    let mut current_block_id = entry;
+
+    loop {
+        let block =
+            function
+                .blocks
+                .get(&current_block_id)
+                .ok_or_else(|| MechError::Validation {
+                    errors: vec![format!(
+                        "function `{function_name}`: block `{current_block_id}` not found"
+                    )],
+                })?;
+
+        // Execute the block.
+        let output = match block {
+            BlockDef::Prompt(p) => {
+                execute_prompt_block(
+                    workflow,
+                    function,
+                    &current_block_id,
+                    p,
+                    ctx,
+                    agent_executor,
+                )
+                .await?
+            }
+            BlockDef::Call(c) => {
+                execute_call_block(workflow, function, &current_block_id, c, ctx, func_executor)
+                    .await?
+            }
+        };
+
+        // Apply side effects (set_context, set_workflow).
+        let (transitions, set_context, set_workflow) = block_edges(block);
+        apply_side_effects(
+            workflow,
+            &current_block_id,
+            set_context,
+            set_workflow,
+            &output,
+            ctx,
+        )?;
+
+        // Evaluate transitions.
+        let result = evaluate_transitions(workflow, &current_block_id, transitions, &output, ctx);
+
+        match result {
+            TransitionResult::Terminal => return Ok(output),
+            TransitionResult::Goto(next) => {
+                // Clear block output for the target so it can re-execute
+                // (needed for self-loops and backward edges).
+                ctx.clear_block_output(&next);
+                current_block_id = next;
+            }
+        }
+    }
+}
+
+// ---- Tests ----------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::{ExecutionContext, WorkflowState};
+    use crate::exec::agent::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};
+    use crate::exec::call::FunctionExecutor;
+    use crate::loader::WorkflowLoader;
+    use crate::schema::ContextVarDef;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    // ---- Test helpers -----------------------------------------------------
+
+    /// Agent that returns responses from a queue in order.
+    struct SequentialAgent {
+        responses: Mutex<Vec<JsonValue>>,
+    }
+
+    impl SequentialAgent {
+        fn new(responses: Vec<JsonValue>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+            }
+        }
+    }
+
+    impl AgentExecutor for SequentialAgent {
+        fn run<'a>(
+            &'a self,
+            _request: AgentRequest,
+        ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
+            let output = self.responses.lock().unwrap().remove(0);
+            Box::pin(async move { Ok(AgentResponse { output }) })
+        }
+    }
+
+    /// Function executor that returns canned responses by name.
+    struct FakeFuncExecutor {
+        responses: BTreeMap<String, JsonValue>,
+    }
+
+    impl FakeFuncExecutor {
+        fn new(responses: BTreeMap<String, JsonValue>) -> Self {
+            Self { responses }
+        }
+    }
+
+    impl FunctionExecutor for FakeFuncExecutor {
+        fn call<'a>(
+            &'a self,
+            function_name: &'a str,
+            _input: JsonValue,
+        ) -> BoxFuture<'a, Result<JsonValue, MechError>> {
+            let result =
+                self.responses
+                    .get(function_name)
+                    .cloned()
+                    .ok_or_else(|| MechError::Validation {
+                        errors: vec![format!("fake: no response for `{function_name}`")],
+                    });
+            Box::pin(async move { result })
+        }
+    }
+
+    fn run_blocking<F: std::future::Future>(fut: F) -> F::Output {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(fut)
+    }
+
+    fn load(yaml: &str) -> Workflow {
+        WorkflowLoader::new().load_str(yaml).expect("load")
+    }
+
+    fn new_ctx(
+        input: JsonValue,
+        fn_decls: &BTreeMap<String, ContextVarDef>,
+        wf_decls: &BTreeMap<String, ContextVarDef>,
+    ) -> ExecutionContext {
+        let ws = WorkflowState::from_declarations(wf_decls).unwrap();
+        ExecutionContext::new(input, json!({ "run_id": "r1" }), fn_decls, ws).unwrap()
+    }
+
+    fn new_ctx_with_workflow(
+        input: JsonValue,
+        fn_decls: &BTreeMap<String, ContextVarDef>,
+        ws: WorkflowState,
+    ) -> ExecutionContext {
+        ExecutionContext::new(input, json!({ "run_id": "r1" }), fn_decls, ws).unwrap()
+    }
+
+    fn decl(ty: &str, initial: JsonValue) -> ContextVarDef {
+        ContextVarDef {
+            ty: ty.to_string(),
+            initial,
+        }
+    }
+
+    fn no_func_executor() -> FakeFuncExecutor {
+        FakeFuncExecutor::new(BTreeMap::new())
+    }
+
+    // ---- T1: Linear sequence A → B → C terminates at C -------------------
+
+    const LINEAR: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "block a"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        transitions:
+          - goto: b
+      b:
+        prompt: "block b"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        transitions:
+          - goto: c
+      c:
+        prompt: "block c"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+"#;
+
+    #[test]
+    fn linear_sequence_terminates_at_c() {
+        let wf = load(LINEAR);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![
+            json!({ "val": "A" }),
+            json!({ "val": "B" }),
+            json!({ "val": "C" }),
+        ]);
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "val": "C" }));
+    }
+
+    // ---- T2: Guard selects among multiple transitions ---------------------
+
+    const GUARDED: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      classify:
+        prompt: "classify"
+        schema:
+          type: object
+          required: [category]
+          properties: { category: { type: string } }
+        transitions:
+          - when: 'output.category == "billing"'
+            goto: billing
+          - when: 'output.category == "technical"'
+            goto: technical
+          - goto: general
+      billing:
+        prompt: "billing"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+      technical:
+        prompt: "technical"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+      general:
+        prompt: "general"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+"#;
+
+    #[test]
+    fn guard_selects_billing_branch() {
+        let wf = load(GUARDED);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![
+            json!({ "category": "billing" }),
+            json!({ "result": "billing handled" }),
+        ]);
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "result": "billing handled" }));
+    }
+
+    #[test]
+    fn guard_selects_technical_branch() {
+        let wf = load(GUARDED);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![
+            json!({ "category": "technical" }),
+            json!({ "result": "tech handled" }),
+        ]);
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "result": "tech handled" }));
+    }
+
+    #[test]
+    fn guard_falls_through_to_unconditional() {
+        let wf = load(GUARDED);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![
+            json!({ "category": "other" }),
+            json!({ "result": "general handled" }),
+        ]);
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "result": "general handled" }));
+    }
+
+    // ---- T3: Self-loop until guard flips ----------------------------------
+
+    const SELF_LOOP: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      attempts: { type: integer, initial: 0 }
+    blocks:
+      draft:
+        prompt: "draft attempt"
+        schema:
+          type: object
+          required: [text, quality]
+          properties:
+            text: { type: string }
+            quality: { type: number }
+        set_context:
+          attempts: "context.attempts + 1"
+        transitions:
+          - when: 'output.quality >= 0.8'
+            goto: done
+          - when: 'context.attempts < 3'
+            goto: draft
+          - goto: done
+      done:
+        prompt: "finalize"
+        schema:
+          type: object
+          required: [final_text]
+          properties: { final_text: { type: string } }
+"#;
+
+    #[test]
+    fn self_loop_executes_until_guard_flips() {
+        let wf = load(SELF_LOOP);
+        let func = wf.file().functions.get("f").unwrap();
+        // Three draft attempts with low quality, then done.
+        let agent = SequentialAgent::new(vec![
+            json!({ "text": "draft 1", "quality": 0.3 }),
+            json!({ "text": "draft 2", "quality": 0.5 }),
+            json!({ "text": "draft 3", "quality": 0.6 }),
+            json!({ "final_text": "final" }),
+        ]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("attempts".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "final_text": "final" }));
+        // Attempts should be 3 (incremented each time draft executed).
+        assert_eq!(ctx.get_context("attempts"), Some(&json!(3)));
+    }
+
+    #[test]
+    fn self_loop_exits_early_on_quality() {
+        let wf = load(SELF_LOOP);
+        let func = wf.file().functions.get("f").unwrap();
+        // First attempt has high quality — exits immediately.
+        let agent = SequentialAgent::new(vec![
+            json!({ "text": "great draft", "quality": 0.9 }),
+            json!({ "final_text": "done" }),
+        ]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("attempts".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "final_text": "done" }));
+        assert_eq!(ctx.get_context("attempts"), Some(&json!(1)));
+    }
+
+    // ---- T4: Terminal block (no transitions) ends function ----------------
+
+    const SINGLE_BLOCK: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      only:
+        prompt: "hello"
+        schema:
+          type: object
+          required: [answer]
+          properties: { answer: { type: string } }
+"#;
+
+    #[test]
+    fn terminal_block_ends_function() {
+        let wf = load(SINGLE_BLOCK);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![json!({ "answer": "42" })]);
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "answer": "42" }));
+    }
+
+    // ---- T5: No matching guard, no fallback → terminal --------------------
+
+    const NO_MATCH: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      check:
+        prompt: "check"
+        schema:
+          type: object
+          required: [status]
+          properties: { status: { type: string } }
+        transitions:
+          - when: 'output.status == "good"'
+            goto: good
+          - when: 'output.status == "bad"'
+            goto: bad
+      good:
+        prompt: "good path"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+      bad:
+        prompt: "bad path"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+"#;
+
+    #[test]
+    fn no_matching_transition_is_terminal() {
+        let wf = load(NO_MATCH);
+        let func = wf.file().functions.get("f").unwrap();
+        // Output status is "unknown" — matches no guard.
+        let agent = SequentialAgent::new(vec![json!({ "status": "unknown" })]);
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        // Block becomes de facto terminal per §6.5.
+        assert_eq!(out, json!({ "status": "unknown" }));
+    }
+
+    // ---- T6: set_context reads output -------------------------------------
+
+    const SET_CONTEXT_OUTPUT: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      score: { type: number, initial: 0.0 }
+    blocks:
+      compute:
+        prompt: "compute"
+        schema:
+          type: object
+          required: [value]
+          properties: { value: { type: number } }
+        set_context:
+          score: "output.value"
+"#;
+
+    #[test]
+    fn set_context_reads_output() {
+        let wf = load(SET_CONTEXT_OUTPUT);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![json!({ "value": 0.95 })]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("score".into(), decl("number", json!(0.0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(ctx.get_context("score"), Some(&json!(0.95)));
+    }
+
+    // ---- T7: set_context atomicity (swap) ---------------------------------
+
+    const ATOMIC_SWAP: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      a: { type: integer, initial: 1 }
+      b: { type: integer, initial: 2 }
+    blocks:
+      swap:
+        prompt: "trigger swap"
+        schema:
+          type: object
+          required: [ok]
+          properties: { ok: { type: boolean } }
+        set_context:
+          a: "context.b"
+          b: "context.a"
+"#;
+
+    #[test]
+    fn set_context_atomicity_swap() {
+        let wf = load(ATOMIC_SWAP);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![json!({ "ok": true })]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("a".into(), decl("integer", json!(1)));
+        fn_decls.insert("b".into(), decl("integer", json!(2)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        // Both see pre-write state, so a gets old b (2) and b gets old a (1).
+        assert_eq!(ctx.get_context("a"), Some(&json!(2)));
+        assert_eq!(ctx.get_context("b"), Some(&json!(1)));
+    }
+
+    // ---- T8: Guard evaluation error treated as false ----------------------
+
+    const GUARD_ERROR: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    output:
+      type: object
+    blocks:
+      check:
+        prompt: "check"
+        schema:
+          type: object
+          required: [status]
+          properties: { status: { type: string } }
+        transitions:
+          - when: 'output.nonexistent.deep.field == "x"'
+            goto: unreachable
+          - goto: fallback
+      unreachable:
+        prompt: "unreachable"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+      fallback:
+        prompt: "fallback"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+"#;
+
+    #[test]
+    fn guard_error_treated_as_false() {
+        let wf = load(GUARD_ERROR);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![
+            json!({ "status": "ok" }),
+            json!({ "result": "fallback reached" }),
+        ]);
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        // The erroring guard is treated as false, fallback fires.
+        assert_eq!(out, json!({ "result": "fallback reached" }));
+    }
+
+    // ---- T9: set_context before set_workflow, transitions after both ------
+
+    const SIDE_EFFECTS_ORDER: &str = r#"
+workflow:
+  context:
+    wf_val: { type: integer, initial: 0 }
+functions:
+  f:
+    input: { type: object }
+    context:
+      fn_val: { type: integer, initial: 0 }
+    blocks:
+      step:
+        prompt: "step"
+        schema:
+          type: object
+          required: [x]
+          properties: { x: { type: integer } }
+        set_context:
+          fn_val: "output.x"
+        set_workflow:
+          wf_val: "output.x + 10"
+        transitions:
+          - when: 'context.fn_val > 0'
+            goto: done
+          - goto: step
+      done:
+        prompt: "done"
+        schema:
+          type: object
+          required: [ok]
+          properties: { ok: { type: boolean } }
+"#;
+
+    #[test]
+    fn side_effects_applied_before_transitions() {
+        let wf = load(SIDE_EFFECTS_ORDER);
+        let func = wf.file().functions.get("f").unwrap();
+        // First execution: output.x = 5. set_context sets fn_val = 5.
+        // Transition sees context.fn_val = 5 > 0, goes to done.
+        let agent = SequentialAgent::new(vec![json!({ "x": 5 }), json!({ "ok": true })]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("fn_val".into(), decl("integer", json!(0)));
+        let mut wf_decls = BTreeMap::new();
+        wf_decls.insert("wf_val".into(), decl("integer", json!(0)));
+        let ws = WorkflowState::from_declarations(&wf_decls).unwrap();
+        let mut ctx = new_ctx_with_workflow(json!({}), &fn_decls, ws.clone());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "ok": true }));
+        assert_eq!(ctx.get_context("fn_val"), Some(&json!(5)));
+        assert_eq!(ws.get("wf_val"), Some(json!(15)));
+    }
+
+    // ---- T10: Backward edge (goto earlier block) --------------------------
+
+    const BACKWARD_EDGE: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      rounds: { type: integer, initial: 0 }
+    blocks:
+      a:
+        prompt: "block a"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        set_context:
+          rounds: "context.rounds + 1"
+        transitions:
+          - goto: b
+      b:
+        prompt: "block b"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        transitions:
+          - when: 'context.rounds < 2'
+            goto: a
+          - goto: c
+      c:
+        prompt: "block c"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+"#;
+
+    #[test]
+    fn backward_edge_re_executes() {
+        let wf = load(BACKWARD_EDGE);
+        let func = wf.file().functions.get("f").unwrap();
+        // Execution: a(round=1) → b → a(round=2) → b → c
+        let agent = SequentialAgent::new(vec![
+            json!({ "val": "a1" }),
+            json!({ "val": "b1" }),
+            json!({ "val": "a2" }),
+            json!({ "val": "b2" }),
+            json!({ "val": "c" }),
+        ]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("rounds".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "val": "c" }));
+        assert_eq!(ctx.get_context("rounds"), Some(&json!(2)));
+    }
+
+    // ---- T11: Entry block detection ---------------------------------------
+
+    #[test]
+    fn entry_block_is_detected_correctly() {
+        // In LINEAR, block "a" has no inbound transitions and no depends_on.
+        let wf = load(LINEAR);
+        let func = wf.file().functions.get("f").unwrap();
+        let entry = find_entry_block(func).unwrap();
+        assert_eq!(entry, "a");
+    }
+
+    #[test]
+    fn entry_block_detection_with_depends_on() {
+        // Block with depends_on is not an entry block.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      entry:
+        prompt: "entry"
+        schema:
+          type: object
+          required: [x]
+          properties: { x: { type: string } }
+        transitions:
+          - goto: dependent
+      dependent:
+        prompt: "dependent"
+        schema:
+          type: object
+          required: [y]
+          properties: { y: { type: string } }
+        depends_on: [entry]
+"#;
+        let wf = load(yaml);
+        let func = wf.file().functions.get("f").unwrap();
+        let entry = find_entry_block(func).unwrap();
+        assert_eq!(entry, "entry");
+    }
+
+    // ---- T12: evaluate_transitions unit tests -----------------------------
+
+    #[test]
+    fn evaluate_transitions_empty_is_terminal() {
+        let wf = load(SINGLE_BLOCK);
+        let ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+        let result = evaluate_transitions(&wf, "only", &[], &json!({}), &ctx);
+        assert_eq!(result, TransitionResult::Terminal);
+    }
+
+    #[test]
+    fn evaluate_transitions_unconditional_matches() {
+        let wf = load(LINEAR);
+        let ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+        let transitions = vec![TransitionDef {
+            when: None,
+            goto: "b".into(),
+        }];
+        let result = evaluate_transitions(&wf, "a", &transitions, &json!({}), &ctx);
+        assert_eq!(result, TransitionResult::Goto("b".into()));
+    }
+
+    // ---- T13: Call block in imperative flow --------------------------------
+
+    const CALL_IN_FLOW: &str = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      step1:
+        prompt: "prompt step"
+        schema:
+          type: object
+          required: [data]
+          properties: { data: { type: string } }
+        transitions:
+          - goto: step2
+      step2:
+        call: helper
+        input:
+          val: "{{input.x}}"
+  helper:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "stub"
+        schema:
+          type: object
+          required: [ok]
+          properties: { ok: { type: boolean } }
+"#;
+
+    #[test]
+    fn call_block_in_imperative_flow() {
+        let wf = load(CALL_IN_FLOW);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![json!({ "data": "from prompt" })]);
+        let mut responses = BTreeMap::new();
+        responses.insert("helper".into(), json!({ "result": "from call" }));
+        let func_exec = FakeFuncExecutor::new(responses);
+        let mut ctx = new_ctx(json!({ "x": "test" }), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf, "f", func, &mut ctx, &agent, &func_exec,
+        ))
+        .unwrap();
+
+        // step2 (call block) is terminal, returns call result.
+        assert_eq!(out, json!({ "result": "from call" }));
+    }
+}

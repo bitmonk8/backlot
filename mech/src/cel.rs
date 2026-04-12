@@ -121,6 +121,7 @@ impl Namespaces {
                 source_text: format!("<namespace {name}>"),
                 message: format!("failed to convert JSON to CEL value: {e}"),
             })?;
+            let value = normalize_uint_to_int(value);
             ctx.add_variable_from_value(name, value);
         }
         for (name, json) in &self.extras {
@@ -128,9 +129,36 @@ impl Namespaces {
                 source_text: format!("<extra {name}>"),
                 message: format!("failed to convert JSON to CEL value: {e}"),
             })?;
+            let value = normalize_uint_to_int(value);
             ctx.add_variable_from_value(name, value);
         }
         Ok(ctx)
+    }
+}
+
+/// Recursively convert `Value::UInt` to `Value::Int` throughout a CEL value
+/// tree. serde_json stores non-negative integers as `u64`, which
+/// `cel_interpreter::to_value` maps to `Value::UInt`. CEL does not support
+/// mixed `UInt`/`Int` arithmetic (e.g. `UInt(0) + Int(1)` errors), so we
+/// normalize everything to `Int` for consistent behavior.
+fn normalize_uint_to_int(value: Value) -> Value {
+    match value {
+        Value::UInt(n) => Value::Int(n as i64),
+        Value::List(items) => {
+            let new_items: Vec<Value> = items.iter().cloned().map(normalize_uint_to_int).collect();
+            Value::List(std::sync::Arc::new(new_items))
+        }
+        Value::Map(map) => {
+            let new_map: std::collections::HashMap<cel_interpreter::objects::Key, Value> = map
+                .map
+                .iter()
+                .map(|(k, v)| (k.clone(), normalize_uint_to_int(v.clone())))
+                .collect();
+            Value::Map(cel_interpreter::objects::Map {
+                map: std::sync::Arc::new(new_map),
+            })
+        }
+        other => other,
     }
 }
 

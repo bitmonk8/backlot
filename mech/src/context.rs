@@ -186,8 +186,8 @@ impl ExecutionContext {
 
     /// Record a block's output under its block ID. Write-once per spec §8:
     /// re-recording the same block ID within one invocation is a runtime
-    /// error. (Loop re-execution is a D11 concern and will need its own
-    /// semantics; for D8 the invariant is strict.)
+    /// error unless the previous recording was cleared via
+    /// [`clear_block_output`] (used by self-loops in D11).
     pub fn record_block_output(&mut self, block_id: &str, value: JsonValue) -> MechResult<()> {
         if self.block_outputs.contains_key(block_id) {
             return Err(MechError::Validation {
@@ -198,6 +198,13 @@ impl ExecutionContext {
         }
         self.block_outputs.insert(block_id.to_string(), value);
         Ok(())
+    }
+
+    /// Remove a previously recorded block output so the block can re-execute
+    /// (e.g. self-loops and backward edges). No-op if the block has no
+    /// recorded output.
+    pub fn clear_block_output(&mut self, block_id: &str) {
+        self.block_outputs.remove(block_id);
     }
 
     /// Read a previously-recorded block output. Errors if the block has not
@@ -471,6 +478,28 @@ mod tests {
             }
             other => panic!("expected Validation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clear_block_output_allows_re_record() {
+        let mut ctx = new_ctx();
+        ctx.record_block_output("classify", json!({ "category": "billing" }))
+            .unwrap();
+        ctx.clear_block_output("classify");
+        // Now we can record again.
+        ctx.record_block_output("classify", json!({ "category": "technical" }))
+            .unwrap();
+        assert_eq!(
+            ctx.get_block_output("classify").unwrap(),
+            &json!({ "category": "technical" })
+        );
+    }
+
+    #[test]
+    fn clear_block_output_noop_if_absent() {
+        let mut ctx = new_ctx();
+        // Must not panic.
+        ctx.clear_block_output("nonexistent");
     }
 
     #[test]

@@ -17,12 +17,12 @@
 //! which composes parse → resolve schemas → validate → infer outputs →
 //! compile CEL into an immutable, `Send + Sync` [`Workflow`] value ready for
 //! execution, an `exec` module holding the prompt block executor, the call
-//! block executor, and the `AgentExecutor` / `FunctionExecutor` seams used
-//! to inject the agent runtime and function dispatch (reel in production
-//! once wired alongside the workflow driver, fakes in tests), and
-//! per-invocation `ExecutionContext` / shared `WorkflowState` types for
-//! runtime state. Block scheduling, transitions, and the function / workflow
-//! drivers are still to come.
+//! block executor, transition evaluation with `set_context`/`set_workflow`
+//! side-effects, imperative-mode function execution, and the
+//! `AgentExecutor` / `FunctionExecutor` seams used to inject the agent
+//! runtime and function dispatch, and per-invocation `ExecutionContext` /
+//! shared `WorkflowState` types for runtime state. The function-level and
+//! workflow-level drivers are still to come.
 
 pub mod cel;
 pub mod context;
@@ -39,6 +39,9 @@ pub use exec::call::FunctionExecutor;
 pub use exec::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};
 pub use exec::{
     ResolvedAgentConfig, execute_call_block, execute_prompt_block, resolve_agent_config,
+};
+pub use exec::{
+    TransitionResult, apply_side_effects, evaluate_transitions, run_function_imperative,
 };
 pub use loader::{Workflow, WorkflowLoader};
 pub use schema::{
