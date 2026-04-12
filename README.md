@@ -36,7 +36,7 @@ Per-crate design documents, status tracking, and issue lists live under [`docs/`
 - [`VAULT_DESIGN.md`](docs/VAULT_DESIGN.md) — Document store design
 - [`EPIC_DESIGN.md`](docs/EPIC_DESIGN.md) — Orchestrator design
 - [`STATUS.md`](docs/STATUS.md) — Cross-crate status and next work
-- [`ISSUES.md`](docs/ISSUES.md) — Tracked issues
+
 
 ## Build
 

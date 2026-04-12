@@ -29,7 +29,7 @@
 - Policy builder API, path grants, stdio management, timeout handling
 - Full test suite running in parallel
 
-**Issues:** 69 NIT-level findings, 0 MUST FIX, 0 NON-CRITICAL. See [ISSUES.md](ISSUES.md).
+**Issues:** 69 NIT-level findings, 0 MUST FIX, 0 NON-CRITICAL. Tracked in GitHub Issues.
 
 **Next Work:** None identified.
 
