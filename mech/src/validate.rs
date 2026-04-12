@@ -38,8 +38,8 @@ use serde_json::Value as JsonValue;
 
 use crate::cel::CelExpression;
 use crate::schema::{
-    AgentConfig, AgentConfigRef, BlockDef, CallSpec, ContextVarDef, FunctionDef, InferLiteral,
-    SchemaRef, TransitionDef, WorkflowFile,
+    AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallSpec, ContextVarDef, FunctionDef,
+    InferLiteral, SchemaRef, TransitionDef, WorkflowFile,
 };
 
 // ---- Public API -----------------------------------------------------------
@@ -1099,6 +1099,7 @@ impl<'a> Validator<'a> {
                             &dep_closure,
                             true,
                             false,
+                            &[],
                         );
                     }
                     for (k, expr) in &p.set_workflow {
@@ -1111,6 +1112,7 @@ impl<'a> Validator<'a> {
                             &dep_closure,
                             true,
                             false,
+                            &[],
                         );
                     }
                     for (i, t) in p.transitions.iter().enumerate() {
@@ -1124,6 +1126,7 @@ impl<'a> Validator<'a> {
                                 &dep_closure,
                                 true,
                                 /*forbid_blocks=*/ true,
+                                &[],
                             );
                         }
                     }
@@ -1158,8 +1161,14 @@ impl<'a> Validator<'a> {
                         }
                     }
                     if let Some(output) = &c.output {
+                        // Call block output mappings can reference called
+                        // function names as top-level variables
+                        // (`<fn_name>.output.*` per spec §4.4).
+                        let called_fn_names = called_function_names(c);
+                        let extra_refs: Vec<&str> =
+                            called_fn_names.iter().map(String::as_str).collect();
                         for (k, expr) in output {
-                            self.check_template(
+                            self.check_template_with_extras(
                                 expr,
                                 &bloc.clone().with_field(format!("output.{k}")),
                                 name,
@@ -1167,6 +1176,7 @@ impl<'a> Validator<'a> {
                                 &dominators,
                                 &dep_closure,
                                 false,
+                                &extra_refs,
                             );
                         }
                     }
@@ -1180,6 +1190,7 @@ impl<'a> Validator<'a> {
                             &dep_closure,
                             true,
                             false,
+                            &[],
                         );
                     }
                     for (k, expr) in &c.set_workflow {
@@ -1192,6 +1203,7 @@ impl<'a> Validator<'a> {
                             &dep_closure,
                             true,
                             false,
+                            &[],
                         );
                     }
                     for (i, t) in c.transitions.iter().enumerate() {
@@ -1205,6 +1217,7 @@ impl<'a> Validator<'a> {
                                 &dep_closure,
                                 true,
                                 /*forbid_blocks=*/ true,
+                                &[],
                             );
                         }
                     }
@@ -1224,6 +1237,33 @@ impl<'a> Validator<'a> {
         dep_closure: &BTreeMap<String, BTreeSet<String>>,
         forbid_blocks: bool,
     ) {
+        self.check_template_with_extras(
+            source,
+            loc,
+            cur_block,
+            block_fields,
+            dominators,
+            dep_closure,
+            forbid_blocks,
+            &[],
+        );
+    }
+
+    /// Like [`check_template`] but accepts additional top-level variable names
+    /// that the CEL expressions may reference. Used for call block output
+    /// mappings where function names are valid top-level identifiers.
+    #[allow(clippy::too_many_arguments)]
+    fn check_template_with_extras(
+        &mut self,
+        source: &str,
+        loc: &Location,
+        cur_block: &str,
+        block_fields: &BTreeMap<String, BTreeSet<String>>,
+        dominators: &BTreeMap<String, BTreeSet<String>>,
+        dep_closure: &BTreeMap<String, BTreeSet<String>>,
+        forbid_blocks: bool,
+        extra_allowed_vars: &[&str],
+    ) {
         // Extract `{{ ... }}` segments and check each as a CEL expression.
         for expr_src in extract_template_exprs(source, loc, &mut self.report.errors) {
             self.check_cel_expr(
@@ -1235,6 +1275,7 @@ impl<'a> Validator<'a> {
                 dep_closure,
                 /*allow_output=*/ false,
                 forbid_blocks,
+                extra_allowed_vars,
             );
         }
     }
@@ -1250,6 +1291,7 @@ impl<'a> Validator<'a> {
         dep_closure: &BTreeMap<String, BTreeSet<String>>,
         allow_output: bool,
         forbid_blocks: bool,
+        extra_allowed_vars: &[&str],
     ) {
         // Compile.
         if let Err(e) = CelExpression::compile(expr_src) {
@@ -1265,12 +1307,16 @@ impl<'a> Validator<'a> {
 
         // Variable scope check.
         for v in &refs.top_idents {
-            if !ALLOWED_NAMESPACES.contains(&v.as_str()) {
+            if !ALLOWED_NAMESPACES.contains(&v.as_str())
+                && !extra_allowed_vars.contains(&v.as_str())
+            {
+                let mut allowed: Vec<&str> = ALLOWED_NAMESPACES.to_vec();
+                allowed.extend_from_slice(extra_allowed_vars);
                 self.err(
                     loc.clone(),
                     format!(
                         "CEL expression references unknown variable `{v}`; allowed: {}",
-                        ALLOWED_NAMESPACES.join(", ")
+                        allowed.join(", ")
                     ),
                 );
             }
@@ -1368,6 +1414,15 @@ fn normalized_grants(ac: &AgentConfig) -> BTreeSet<String> {
         set.insert("tools".to_string());
     }
     set
+}
+
+/// Extract the function names referenced by a call block (all three forms).
+fn called_function_names(c: &CallBlock) -> Vec<String> {
+    match &c.call {
+        CallSpec::Single(name) => vec![name.clone()],
+        CallSpec::Uniform(names) => names.clone(),
+        CallSpec::PerCall(entries) => entries.iter().map(|e| e.func.clone()).collect(),
+    }
 }
 
 fn block_depends_on(b: &BlockDef) -> &[String] {

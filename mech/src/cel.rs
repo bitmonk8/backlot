@@ -31,6 +31,8 @@
 
 use std::fmt;
 
+use std::collections::BTreeMap;
+
 use cel_interpreter::{Context, ExecutionError, Program, Value, to_value};
 use serde_json::Value as JsonValue;
 
@@ -54,6 +56,10 @@ pub struct Namespaces {
     pub block: JsonValue,
     /// `meta` namespace — workflow/run metadata.
     pub meta: JsonValue,
+    /// Additional top-level CEL variables beyond the five standard
+    /// namespaces. Used by call block output mappings to expose
+    /// function results as `<fn_name>.output.*`.
+    pub extras: BTreeMap<String, JsonValue>,
 }
 
 impl Namespaces {
@@ -77,6 +83,26 @@ impl Namespaces {
             workflow,
             block,
             meta,
+            extras: BTreeMap::new(),
+        }
+    }
+
+    /// Construct with additional top-level CEL variables.
+    pub fn with_extras(
+        input: JsonValue,
+        context: JsonValue,
+        workflow: JsonValue,
+        block: JsonValue,
+        meta: JsonValue,
+        extras: BTreeMap<String, JsonValue>,
+    ) -> Self {
+        Self {
+            input,
+            context,
+            workflow,
+            block,
+            meta,
+            extras,
         }
     }
 
@@ -97,7 +123,39 @@ impl Namespaces {
             })?;
             ctx.add_variable_from_value(name, value);
         }
+        for (name, json) in &self.extras {
+            let value = to_value(json).map_err(|e| MechError::CelEvaluation {
+                source_text: format!("<extra {name}>"),
+                message: format!("failed to convert JSON to CEL value: {e}"),
+            })?;
+            ctx.add_variable_from_value(name, value);
+        }
         Ok(ctx)
+    }
+}
+
+/// Convert a [`cel_interpreter::Value`] to a [`serde_json::Value`].
+pub fn cel_value_to_json(value: &Value) -> MechResult<JsonValue> {
+    match value {
+        Value::Null => Ok(JsonValue::Null),
+        Value::Bool(b) => Ok(JsonValue::Bool(*b)),
+        Value::Int(n) => Ok(JsonValue::Number((*n).into())),
+        Value::UInt(n) => Ok(JsonValue::Number((*n).into())),
+        Value::Float(n) => {
+            let num = serde_json::Number::from_f64(*n).ok_or_else(|| MechError::CelEvaluation {
+                source_text: "<value conversion>".into(),
+                message: format!("cannot represent float {n} as JSON number"),
+            })?;
+            Ok(JsonValue::Number(num))
+        }
+        Value::String(s) => Ok(JsonValue::String(s.to_string())),
+        _ => {
+            // Lists, maps, etc. — use the cel Value's .json() method.
+            value.json().map_err(|e| MechError::CelEvaluation {
+                source_text: "<value conversion>".into(),
+                message: format!("cannot convert CEL value to JSON: {e}"),
+            })
+        }
     }
 }
 
@@ -211,6 +269,26 @@ impl Template {
             }
         }
         Ok(out)
+    }
+
+    /// Evaluate the template as a JSON value.
+    ///
+    /// For templates that consist of a single `{{expr}}` expression with no
+    /// surrounding literal text, this returns the CEL expression result
+    /// converted to JSON (preserving its native type: number, boolean,
+    /// object, array, etc.). For mixed or literal-only templates, this
+    /// returns `JsonValue::String` of the rendered output.
+    pub fn evaluate_as_json(&self, namespaces: &Namespaces) -> MechResult<JsonValue> {
+        // Pure single-expression template: preserve the CEL type.
+        if self.segments.len() == 1 {
+            if let Segment::Expr(expr) = &self.segments[0] {
+                let value = expr.evaluate(namespaces)?;
+                return cel_value_to_json(&value);
+            }
+        }
+        // Mixed or literal-only: render as string.
+        let rendered = self.render(namespaces)?;
+        Ok(JsonValue::String(rendered))
     }
 }
 

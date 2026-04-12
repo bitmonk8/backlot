@@ -16,11 +16,13 @@
 //! and a `loader` module exposing `WorkflowLoader::load(path) -> Workflow`
 //! which composes parse → resolve schemas → validate → infer outputs →
 //! compile CEL into an immutable, `Send + Sync` [`Workflow`] value ready for
-//! execution, an `exec` module holding the prompt block executor and the
-//! `AgentExecutor` seam used to inject the agent runtime (reel in
-//! production once wired alongside the workflow driver, a fake in tests), and per-invocation `ExecutionContext` /
-//! shared `WorkflowState` types for runtime state. Block scheduling,
-//! transitions, and the function / workflow drivers are still to come.
+//! execution, an `exec` module holding the prompt block executor, the call
+//! block executor, and the `AgentExecutor` / `FunctionExecutor` seams used
+//! to inject the agent runtime and function dispatch (reel in production
+//! once wired alongside the workflow driver, fakes in tests), and
+//! per-invocation `ExecutionContext` / shared `WorkflowState` types for
+//! runtime state. Block scheduling, transitions, and the function / workflow
+//! drivers are still to come.
 
 pub mod cel;
 pub mod context;
@@ -30,9 +32,14 @@ pub mod loader;
 pub mod schema;
 pub mod validate;
 
-pub use cel::{CelExpression, Namespaces, Template};
+pub use cel::{CelExpression, Namespaces, Template, cel_value_to_json};
 pub use context::{ExecutionContext, WorkflowState};
 pub use error::{MechError, MechResult};
+pub use exec::call::FunctionExecutor;
+pub use exec::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};
+pub use exec::{
+    ResolvedAgentConfig, execute_call_block, execute_prompt_block, resolve_agent_config,
+};
 pub use loader::{Workflow, WorkflowLoader};
 pub use schema::{
     AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,
