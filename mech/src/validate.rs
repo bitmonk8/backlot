@@ -1770,17 +1770,13 @@ fn walk(expr: &Expression, out: &mut CollectedRefs) {
                 out.top_idents.insert(root.clone());
                 if (root == "blocks" || root == "block") && !attrs.is_empty() {
                     let target_block = attrs[0].clone();
-                    let field = if root == "blocks" {
-                        // blocks.NAME.output.FIELD?
-                        if attrs.len() >= 2 && attrs[1] == "output" {
-                            attrs.get(2).cloned()
-                        } else {
-                            // No `output` segment — still record block existence.
-                            None
-                        }
+                    // Both `blocks.NAME.output.FIELD` and `block.NAME.output.FIELD`
+                    // are valid (the `output` wrapper is always present at runtime).
+                    let field = if attrs.len() >= 2 && attrs[1] == "output" {
+                        attrs.get(2).cloned()
                     } else {
-                        // block.NAME.FIELD?
-                        attrs.get(1).cloned()
+                        // No `output` segment — still record block existence.
+                        None
                     };
                     out.block_refs.push(Some((target_block, field)));
                 }

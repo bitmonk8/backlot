@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Deliverable 11 complete. Transition evaluation, `set_context`/`set_workflow` side-effects, and imperative-mode function execution (`mech/src/exec/schedule.rs`). The scheduler finds the entry block, executes block → side effects → transitions → next block until a terminal block is reached. Guard evaluation errors are treated as false per §10.2. `set_context`/`set_workflow` expressions are evaluated atomically (all see pre-write state). Self-loops and backward edges are supported via `clear_block_output` on `ExecutionContext`. CEL `UInt`→`Int` normalization added to `Namespaces::to_context` to fix serde_json's non-negative integer representation. 187 tests passing (+20 in Deliverable 11), zero clippy warnings.
+**Phase:** Deliverable 12 complete. Function executor, workflow runtime, and dataflow scheduler implemented. `block` namespace now wraps outputs under `output` key to align with spec §7 `blocks.<name>.output.<field>` access pattern. `blocks` (plural) registered as CEL alias for `block` (singular). 212 tests passing (+25 in Deliverable 12), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -123,14 +123,14 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 9. ~~Prompt block executor (agent cascade, structured output)~~ ✅
 10. ~~Call block executor (three input forms, output mapping)~~ ✅
 11. ~~Transitions & block scheduling (imperative mode, guards, self-loops)~~ ✅
-12. Function executor & workflow runtime (imperative + dataflow modes)
+12. ~~Function executor & workflow runtime (imperative + dataflow modes)~~ ✅
 13. Conversation management & history scoping
 14. Cue integration (`MechTask` implementing `cue::TaskNode`)
 15. CLI (`mech run`, `mech validate`)
 16. End-to-end integration test suite (hermetic, fake LLM)
 17. Documentation polish & examples
 
-**Immediate next action:** Deliverable 12 — Function executor & workflow runtime (imperative + dataflow modes).
+**Immediate next action:** Deliverable 13 — Conversation management & history scoping.
 
 ---
 

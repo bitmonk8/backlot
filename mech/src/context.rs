@@ -228,7 +228,18 @@ impl ExecutionContext {
     pub fn namespaces(&self) -> Namespaces {
         let context = JsonValue::Object(self.context_values.clone().into_iter().collect());
         let workflow = self.workflow.snapshot();
-        let block = JsonValue::Object(self.block_outputs.clone().into_iter().collect());
+        // Wrap each block output in an `output` sub-object to match the spec's
+        // `blocks.<name>.output.<field>` access pattern (§7.1).
+        let block = JsonValue::Object(
+            self.block_outputs
+                .iter()
+                .map(|(name, val)| {
+                    let mut wrapper = serde_json::Map::new();
+                    wrapper.insert("output".to_string(), val.clone());
+                    (name.clone(), JsonValue::Object(wrapper))
+                })
+                .collect(),
+        );
         Namespaces::new(
             self.input.clone(),
             context,
@@ -578,8 +589,8 @@ mod tests {
         let e = CelExpression::compile("workflow.total_calls == 7").unwrap();
         assert_eq!(e.evaluate(&ns).unwrap(), cel_interpreter::Value::Bool(true));
 
-        // block.*
-        let e = CelExpression::compile("block.classify.category").unwrap();
+        // block.* (with output wrapper per §7.1)
+        let e = CelExpression::compile("block.classify.output.category").unwrap();
         assert_eq!(
             e.evaluate(&ns).unwrap(),
             cel_interpreter::Value::String("billing".to_string().into())

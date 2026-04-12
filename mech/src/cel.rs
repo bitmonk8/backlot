@@ -115,6 +115,9 @@ impl Namespaces {
             ("context", &self.context),
             ("workflow", &self.workflow),
             ("block", &self.block),
+            // Alias: spec §7 uses `blocks` (plural), runtime uses `block`.
+            // Bind both so templates work with either form.
+            ("blocks", &self.block),
             ("meta", &self.meta),
         ] {
             let value = to_value(json).map_err(|e| MechError::CelEvaluation {
@@ -493,7 +496,9 @@ mod tests {
             json!({ "name": "world", "n": 3 }),
             json!({ "count": 7 }),
             json!({ "budget": 100 }),
-            json!({ "extract": { "ok": true, "items": [1, 2, 3] } }),
+            // Block namespace wraps each block's value under `output` to match
+            // the spec's `blocks.<name>.output.<field>` access pattern.
+            json!({ "extract": { "output": { "ok": true, "items": [1, 2, 3] } } }),
             json!({ "run_id": "abc" }),
         )
     }
@@ -506,7 +511,7 @@ mod tests {
         let e = CelExpression::compile("input.n + context.count").unwrap();
         assert_eq!(e.evaluate(&ns()).unwrap(), Value::Int(10));
 
-        let e = CelExpression::compile("size(block.extract.items)").unwrap();
+        let e = CelExpression::compile("size(block.extract.output.items)").unwrap();
         assert_eq!(e.evaluate(&ns()).unwrap(), Value::Int(3));
     }
 
@@ -525,7 +530,7 @@ mod tests {
             ("input.name", Value::String("world".to_string().into())),
             ("context.count", Value::Int(7)),
             ("workflow.budget", Value::Int(100)),
-            ("block.extract.ok", Value::Bool(true)),
+            ("block.extract.output.ok", Value::Bool(true)),
             ("meta.run_id", Value::String("abc".to_string().into())),
         ] {
             let e = CelExpression::compile(src).unwrap();
@@ -555,7 +560,7 @@ mod tests {
 
     #[test]
     fn template_nested_field_access() {
-        let t = Template::compile("items={{block.extract.items}}").unwrap();
+        let t = Template::compile("items={{block.extract.output.items}}").unwrap();
         // List values render as compact JSON.
         assert_eq!(t.render(&ns()).unwrap(), "items=[1,2,3]");
     }

@@ -735,7 +735,7 @@ functions:
       do_call:
         call: callee
         input:
-          prev_result: "{{block.prior.value}}"
+          prev_result: "{{block.prior.output.value}}"
         depends_on: [prior]
   callee:
     input: { type: object }

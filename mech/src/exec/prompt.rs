@@ -963,7 +963,7 @@ functions:
           properties: { val: { type: string } }
       second:
         depends_on: [first]
-        prompt: "u={{input.user}} n={{context.note}} w={{workflow.counter}} b={{block.first.val}}"
+        prompt: "u={{input.user}} n={{context.note}} w={{workflow.counter}} b={{block.first.output.val}}"
         schema:
           type: object
           required: [ok]
