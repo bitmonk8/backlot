@@ -1,4 +1,4 @@
-//! Prompt block executor (Deliverable 9).
+//! Prompt block executor (Deliverable 9, conversation scoping in Deliverable 13).
 //!
 //! Executes a single [`PromptBlock`]:
 //!
@@ -10,16 +10,20 @@
 //!    [`ExecutionContext::namespaces`].
 //! 3. Build an [`AgentRequest`] (model, system prompt, rendered user
 //!    prompt, grant flags, custom tools, write paths, timeout, output
-//!    schema).
+//!    schema, conversation history).
 //! 4. Invoke the injected [`AgentExecutor`].
-//! 5. Validate the returned JSON value against the block's declared output
+//! 5. Append returned messages (or synthesized user+assistant) to the
+//!    function's conversation (§4.6). Check compaction threshold.
+//! 6. Validate the returned JSON value against the block's declared output
 //!    schema.
-//! 6. Record the validated output under the block's ID in the execution
+//! 7. Record the validated output under the block's ID in the execution
 //!    context (write-once per invocation).
 //!
 //! Transitions, `set_context` / `set_workflow` side-effects, and block
 //! scheduling are deliberately out of scope — they land in Deliverable 11
-//! (transitions) and the later driver deliverables.
+//! (transitions) and the later driver deliverables. Conversation
+//! management (Deliverable 13) is integrated: each prompt block receives
+//! and mutates a [`Conversation`] tracking the function’s message history.
 
 use std::time::Duration;
 
@@ -27,8 +31,9 @@ use serde_json::Value as JsonValue;
 
 use crate::cel::{Namespaces, Template};
 use crate::context::ExecutionContext;
+use crate::conversation::Conversation;
 use crate::error::{MechError, MechResult};
-use crate::exec::agent::{AgentExecutor, AgentRequest, AgentResponse};
+use crate::exec::agent::{AgentExecutor, AgentRequest};
 use crate::loader::Workflow;
 #[cfg(test)]
 use crate::schema::BlockDef;
@@ -334,6 +339,11 @@ fn tag_executor_error(err: MechError, block_id: &str) -> MechError {
 /// Rendering, dispatch, validation, and block-output storage all happen
 /// here. Transitions and `set_context` / `set_workflow` writes are a
 /// separate concern (Deliverable 11).
+///
+/// The `conversation` parameter carries the function's accumulated
+/// conversation history (§4.6). The prompt/response and any tool
+/// call/result messages from the agent loop are appended after each
+/// execution.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_prompt_block(
     workflow: &Workflow,
@@ -342,6 +352,7 @@ pub async fn execute_prompt_block(
     block: &PromptBlock,
     ctx: &mut ExecutionContext,
     executor: &dyn AgentExecutor,
+    conversation: &mut Conversation,
 ) -> MechResult<JsonValue> {
     let file = workflow.file();
 
@@ -366,23 +377,38 @@ pub async fn execute_prompt_block(
     // 4. Resolve the output schema to JSON for the agent request.
     let output_schema = resolve_prompt_block_schema(file, block)?;
 
-    // 5. Build the request.
+    // 5. Build the request with conversation history.
     let request = AgentRequest {
         model: resolved_agent.model,
         system: rendered_system,
-        prompt: rendered_prompt,
+        prompt: rendered_prompt.clone(),
         grant: resolved_agent.grant,
         tools: resolved_agent.tools,
         write_paths: resolved_agent.write_paths,
         timeout: resolved_agent.timeout,
         output_schema: output_schema.clone(),
+        history: conversation.messages().to_vec(),
     };
 
     // 6. Dispatch.
-    let AgentResponse { output } = executor
+    let response = executor
         .run(request)
         .await
         .map_err(|e| tag_executor_error(e, block_id))?;
+    let output = response.output;
+
+    // 6b. Append messages to conversation. If the agent returned
+    //     messages, use those (they may include tool call/result pairs).
+    //     Otherwise, synthesize minimal user+assistant messages.
+    if response.messages.is_empty() {
+        conversation.push(crate::conversation::Message::user(rendered_prompt));
+        conversation.push(crate::conversation::Message::assistant(output.to_string()));
+    } else {
+        conversation.push_many(response.messages);
+    }
+
+    // 6c. Check if compaction should fire.
+    conversation.check_compaction();
 
     // 7. Validate against the declared output schema. Surface up to the
     //    first 10 errors so authors see more than the single first failure.
@@ -420,6 +446,7 @@ pub async fn execute_prompt_block(
 mod tests {
     use super::*;
     use crate::context::{ExecutionContext, WorkflowState};
+    use crate::conversation::Conversation;
     use crate::exec::agent::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};
     use crate::loader::WorkflowLoader;
     use serde_json::json;
@@ -450,6 +477,7 @@ mod tests {
             Self::new(move |_| {
                 Ok(AgentResponse {
                     output: output.clone(),
+                    messages: vec![],
                 })
             })
         }
@@ -523,7 +551,13 @@ functions:
         let agent = FakeAgent::fixed(json!({ "category": "billing" }));
 
         let out = run_blocking(execute_prompt_block(
-            &wf, func, "classify", &block, &mut ctx, &agent,
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &agent,
+            &mut Conversation::new(),
         ))
         .expect("execute");
 
@@ -546,7 +580,13 @@ functions:
         let agent = FakeAgent::fixed(json!({ "category": "x" }));
 
         run_blocking(execute_prompt_block(
-            &wf, func, "classify", &block, &mut ctx, &agent,
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &agent,
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -566,7 +606,13 @@ functions:
         let agent = FakeAgent::fixed(json!({ "wrong": 1 }));
 
         let err = run_blocking(execute_prompt_block(
-            &wf, func, "classify", &block, &mut ctx, &agent,
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &agent,
+            &mut Conversation::new(),
         ))
         .expect_err("schema mismatch must error");
         match err {
@@ -739,7 +785,13 @@ functions:
         let mut ctx = new_ctx(&BTreeMap::new());
         let agent = FakeAgent::fixed(json!({ "category": "x" }));
         run_blocking(execute_prompt_block(
-            &wf, func, "classify", &block, &mut ctx, &agent,
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &agent,
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -805,7 +857,13 @@ functions:
         let mut ctx = new_ctx(&BTreeMap::new());
         let agent = FakeAgent::fixed(json!({ "category": "x" }));
         run_blocking(execute_prompt_block(
-            &wf, func, "classify", &block, &mut ctx, &agent,
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &agent,
+            &mut Conversation::new(),
         ))
         .unwrap();
         assert_eq!(agent.last().system.as_deref(), Some("helping ada"));
@@ -832,7 +890,13 @@ functions:
             })
         });
         let err = run_blocking(execute_prompt_block(
-            &wf, func, "classify", &block, &mut ctx, &agent,
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &agent,
+            &mut Conversation::new(),
         ))
         .expect_err("llm failure");
         match err {
@@ -874,7 +938,13 @@ functions:
         let mut ctx = new_ctx(&BTreeMap::new());
         let agent = FakeAgent::fixed(json!({ "category": "ok" }));
         let out = run_blocking(execute_prompt_block(
-            &wf, func, "classify", &block, &mut ctx, &agent,
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &agent,
+            &mut Conversation::new(),
         ))
         .unwrap();
         assert_eq!(out, json!({ "category": "ok" }));
@@ -891,7 +961,13 @@ functions:
         let mut ctx = new_ctx(&BTreeMap::new());
         let agent = FakeAgent::fixed(json!({ "wrong": 1 }));
         let err = run_blocking(execute_prompt_block(
-            &wf, func, "classify", &block, &mut ctx, &agent,
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &agent,
+            &mut Conversation::new(),
         ))
         .expect_err("bad schema");
         assert!(matches!(err, MechError::SchemaValidationFailure { .. }));
@@ -1005,6 +1081,7 @@ functions:
             &first_block,
             &mut ctx,
             &first_agent,
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -1016,6 +1093,7 @@ functions:
             &second_block,
             &mut ctx,
             &second_agent,
+            &mut Conversation::new(),
         ))
         .unwrap();
         let rendered = second_agent.last().prompt;
@@ -1038,7 +1116,13 @@ functions:
         let mut ctx = new_ctx(&BTreeMap::new());
         let agent = FakeAgent::fixed(json!({ "category": "x" }));
         run_blocking(execute_prompt_block(
-            &wf, func, "classify", &block, &mut ctx, &agent,
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &agent,
+            &mut Conversation::new(),
         ))
         .unwrap();
         let req = agent.last();

@@ -128,7 +128,12 @@ mod tests {
             _request: AgentRequest,
         ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
             let output = self.responses.lock().unwrap().remove(0);
-            Box::pin(async move { Ok(AgentResponse { output }) })
+            Box::pin(async move {
+                Ok(AgentResponse {
+                    output,
+                    messages: vec![],
+                })
+            })
         }
     }
 

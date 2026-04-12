@@ -1,4 +1,5 @@
-//! Transition evaluation and block scheduling (Deliverable 11).
+//! Transition evaluation and block scheduling (Deliverable 11, conversation
+//! scoping in Deliverable 13).
 //!
 //! Implements imperative-mode function execution: starting at the entry block,
 //! execute block → apply `set_context` / `set_workflow` side-effects →
@@ -20,6 +21,7 @@ use serde_json::Value as JsonValue;
 
 use crate::cel::{Namespaces, cel_value_to_json};
 use crate::context::ExecutionContext;
+use crate::conversation::Conversation;
 use crate::error::{MechError, MechResult};
 use crate::exec::agent::AgentExecutor;
 use crate::exec::call::{FunctionExecutor, execute_call_block};
@@ -228,6 +230,10 @@ fn find_entry_block(function: &FunctionDef) -> MechResult<String> {
 /// Starts at the entry block, executes block → side effects → transitions →
 /// next block until a terminal block is reached. Returns the terminal block's
 /// output.
+///
+/// Per §4.6, a function's conversation is created fresh at invocation and
+/// accumulates across prompt blocks along control-flow paths. Call blocks
+/// are conversation-transparent.
 pub async fn run_function_imperative(
     workflow: &Workflow,
     function_name: &str,
@@ -235,6 +241,7 @@ pub async fn run_function_imperative(
     ctx: &mut ExecutionContext,
     agent_executor: &dyn AgentExecutor,
     func_executor: &dyn FunctionExecutor,
+    conversation: &mut Conversation,
 ) -> MechResult<JsonValue> {
     let entry = find_entry_block(function)?;
     let mut current_block_id = entry;
@@ -260,10 +267,12 @@ pub async fn run_function_imperative(
                     p,
                     ctx,
                     agent_executor,
+                    conversation,
                 )
                 .await?
             }
             BlockDef::Call(c) => {
+                // Call blocks are conversation-transparent (§4.6 rule 4).
                 execute_call_block(workflow, function, &current_block_id, c, ctx, func_executor)
                     .await?
             }
@@ -301,6 +310,7 @@ pub async fn run_function_imperative(
 mod tests {
     use super::*;
     use crate::context::{ExecutionContext, WorkflowState};
+    use crate::conversation::Conversation;
     use crate::exec::agent::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};
     use crate::exec::call::FunctionExecutor;
     use crate::loader::WorkflowLoader;
@@ -329,7 +339,12 @@ mod tests {
             _request: AgentRequest,
         ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
             let output = self.responses.lock().unwrap().remove(0);
-            Box::pin(async move { Ok(AgentResponse { output }) })
+            Box::pin(async move {
+                Ok(AgentResponse {
+                    output,
+                    messages: vec![],
+                })
+            })
         }
     }
 
@@ -450,6 +465,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -512,6 +528,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -535,6 +552,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -558,6 +576,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -619,6 +638,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -647,6 +667,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -683,6 +704,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -736,6 +758,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -778,6 +801,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -822,6 +846,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -880,6 +905,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -942,6 +968,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -1010,6 +1037,7 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
+            &mut Conversation::new(),
         ))
         .unwrap();
 
@@ -1121,11 +1149,373 @@ functions:
         let mut ctx = new_ctx(json!({ "x": "test" }), &BTreeMap::new(), &BTreeMap::new());
 
         let out = run_blocking(run_function_imperative(
-            &wf, "f", func, &mut ctx, &agent, &func_exec,
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &func_exec,
+            &mut Conversation::new(),
         ))
         .unwrap();
 
         // step2 (call block) is terminal, returns call result.
         assert_eq!(out, json!({ "result": "from call" }));
+    }
+
+    // ---- D13: Conversation management tests --------------------------------
+
+    // D13/T1: Two sequential prompt blocks share conversation history.
+    #[test]
+    fn sequential_prompt_blocks_share_conversation_history() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "first prompt"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        transitions:
+          - goto: b
+      b:
+        prompt: "second prompt"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.file().functions.get("f").unwrap();
+
+        // Capture all requests to verify history.
+        let all_requests: std::sync::Arc<Mutex<Vec<AgentRequest>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let reqs = all_requests.clone();
+        struct CapturingAgent {
+            responses: Mutex<Vec<JsonValue>>,
+            requests: std::sync::Arc<Mutex<Vec<AgentRequest>>>,
+        }
+        impl AgentExecutor for CapturingAgent {
+            fn run<'a>(
+                &'a self,
+                request: AgentRequest,
+            ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
+                self.requests.lock().unwrap().push(request);
+                let output = self.responses.lock().unwrap().remove(0);
+                Box::pin(async move {
+                    Ok(AgentResponse {
+                        output,
+                        messages: vec![],
+                    })
+                })
+            }
+        }
+        let agent = CapturingAgent {
+            responses: Mutex::new(vec![json!({ "val": "A" }), json!({ "result": "B" })]),
+            requests: reqs,
+        };
+
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+        let mut conversation = Conversation::new();
+
+        run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut conversation,
+        ))
+        .unwrap();
+
+        let requests = all_requests.lock().unwrap();
+        // First prompt block should have empty history.
+        assert!(
+            requests[0].history.is_empty(),
+            "first block should have empty history"
+        );
+        // Second prompt block should have history from first block
+        // (user + assistant messages synthesized by execute_prompt_block).
+        assert!(
+            requests[1].history.len() >= 2,
+            "second block should see history from first block, got {} messages",
+            requests[1].history.len()
+        );
+
+        // Conversation should have all messages accumulated.
+        assert!(
+            conversation.len() >= 4,
+            "conversation should have 4+ messages (user+assistant x2), got {}",
+            conversation.len()
+        );
+    }
+
+    // D13/T2: History includes tool calls and tool results from agent loop.
+    #[test]
+    fn history_includes_tool_calls_and_results() {
+        use crate::conversation::{Message, Role};
+
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "use tools"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        transitions:
+          - goto: b
+      b:
+        prompt: "after tools"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.file().functions.get("f").unwrap();
+
+        // Agent that returns tool call/result messages.
+        let all_requests: std::sync::Arc<Mutex<Vec<AgentRequest>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let reqs = all_requests.clone();
+        struct ToolAgent {
+            call_count: Mutex<usize>,
+            requests: std::sync::Arc<Mutex<Vec<AgentRequest>>>,
+        }
+        impl AgentExecutor for ToolAgent {
+            fn run<'a>(
+                &'a self,
+                request: AgentRequest,
+            ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
+                self.requests.lock().unwrap().push(request.clone());
+                let mut count = self.call_count.lock().unwrap();
+                let n = *count;
+                *count += 1;
+                Box::pin(async move {
+                    if n == 0 {
+                        // First call: return messages with tool calls.
+                        Ok(AgentResponse {
+                            output: serde_json::json!({ "val": "tool_result" }),
+                            messages: vec![
+                                Message::user(request.prompt),
+                                Message::tool_call("search(query)"),
+                                Message::tool_result("search result data"),
+                                Message::assistant("{\"val\": \"tool_result\"}"),
+                            ],
+                        })
+                    } else {
+                        Ok(AgentResponse {
+                            output: serde_json::json!({ "result": "done" }),
+                            messages: vec![],
+                        })
+                    }
+                })
+            }
+        }
+        let agent = ToolAgent {
+            call_count: Mutex::new(0),
+            requests: reqs,
+        };
+
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+        let mut conversation = Conversation::new();
+
+        run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut conversation,
+        ))
+        .unwrap();
+
+        // After first block: 4 messages (user, tool_call, tool_result, assistant).
+        // Second block should see those in its history.
+        let requests = all_requests.lock().unwrap();
+        assert_eq!(
+            requests[1].history.len(),
+            4,
+            "second block should see 4 messages from first block (incl tool calls)"
+        );
+        assert_eq!(requests[1].history[1].role, Role::ToolCall);
+        assert_eq!(requests[1].history[2].role, Role::ToolResult);
+
+        // Total conversation: 4 (from first block) + 2 (from second block, synthesized).
+        assert_eq!(conversation.len(), 6);
+    }
+
+    // D13/T3: Self-loop accumulates conversation history.
+    #[test]
+    fn self_loop_accumulates_conversation_history() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      attempts: { type: integer, initial: 0 }
+    blocks:
+      draft:
+        prompt: "draft attempt"
+        schema:
+          type: object
+          required: [quality]
+          properties: { quality: { type: number } }
+        set_context:
+          attempts: "context.attempts + 1"
+        transitions:
+          - when: 'output.quality >= 0.8'
+            goto: done
+          - when: 'context.attempts < 3'
+            goto: draft
+          - goto: done
+      done:
+        prompt: "finalize"
+        schema:
+          type: object
+          required: [ok]
+          properties: { ok: { type: boolean } }
+"#;
+        let wf = load(yaml);
+        let func = wf.file().functions.get("f").unwrap();
+
+        let all_requests: std::sync::Arc<Mutex<Vec<AgentRequest>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let reqs = all_requests.clone();
+        struct CapturingAgent2 {
+            responses: Mutex<Vec<JsonValue>>,
+            requests: std::sync::Arc<Mutex<Vec<AgentRequest>>>,
+        }
+        impl AgentExecutor for CapturingAgent2 {
+            fn run<'a>(
+                &'a self,
+                request: AgentRequest,
+            ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
+                self.requests.lock().unwrap().push(request);
+                let output = self.responses.lock().unwrap().remove(0);
+                Box::pin(async move {
+                    Ok(AgentResponse {
+                        output,
+                        messages: vec![],
+                    })
+                })
+            }
+        }
+        let agent = CapturingAgent2 {
+            responses: Mutex::new(vec![
+                json!({ "quality": 0.3 }), // attempt 1
+                json!({ "quality": 0.5 }), // attempt 2
+                json!({ "quality": 0.9 }), // attempt 3 → goes to done
+                json!({ "ok": true }),     // done
+            ]),
+            requests: reqs,
+        };
+
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("attempts".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+        let mut conversation = Conversation::new();
+
+        run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut conversation,
+        ))
+        .unwrap();
+
+        let requests = all_requests.lock().unwrap();
+        // First draft attempt: empty history.
+        assert_eq!(requests[0].history.len(), 0);
+        // Second draft attempt: 2 messages from first attempt.
+        assert_eq!(requests[1].history.len(), 2);
+        // Third draft attempt: 4 messages from first two attempts.
+        assert_eq!(requests[2].history.len(), 4);
+        // Done block: 6 messages from three draft attempts.
+        assert_eq!(requests[3].history.len(), 6);
+    }
+
+    // D13/T4: Compaction hook invoked at threshold (schedule level).
+    #[test]
+    fn compaction_hook_invoked_at_threshold() {
+        use crate::conversation::ResolvedCompaction;
+
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output:
+      type: object
+      required: [val]
+      properties: { val: { type: string } }
+    context:
+      rounds: { type: integer, initial: 0 }
+    blocks:
+      step:
+        prompt: "round {{context.rounds}}"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        set_context:
+          rounds: "context.rounds + 1"
+        transitions:
+          - when: 'context.rounds < 5'
+            goto: step
+"#;
+        let wf = load(yaml);
+        let func = wf.file().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![
+            json!({ "val": "r0" }),
+            json!({ "val": "r1" }),
+            json!({ "val": "r2" }),
+            json!({ "val": "r3" }),
+            json!({ "val": "r4" }),
+        ]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("rounds".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        // Low threshold: 100 tokens keep + 100 tokens reserve = 200 total.
+        // At ~100 tokens/message, 3+ messages should trigger.
+        let mut conversation = Conversation::new().with_compaction(Some(ResolvedCompaction {
+            keep_recent_tokens: 100,
+            reserve_tokens: 100,
+            custom_fn: None,
+        }));
+
+        run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut conversation,
+        ))
+        .unwrap();
+
+        // After 5 rounds: 10 messages (user+assistant per round).
+        // Compaction should have been triggered multiple times.
+        assert!(
+            conversation.compaction_count() > 0,
+            "compaction should have been triggered, got count={}",
+            conversation.compaction_count()
+        );
+        // Messages are NOT modified (placeholder compaction).
+        assert_eq!(conversation.len(), 10);
     }
 }

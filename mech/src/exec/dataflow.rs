@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value as JsonValue;
 
 use crate::context::ExecutionContext;
+use crate::conversation::Conversation;
 use crate::error::{MechError, MechResult};
 use crate::exec::agent::AgentExecutor;
 use crate::exec::call::{FunctionExecutor, execute_call_block};
@@ -164,6 +165,9 @@ pub fn topo_sort_levels(
 }
 
 /// Execute a single block (prompt or call) and record its output.
+///
+/// Dataflow blocks are single-turn per §4.6 rule 3: each gets a fresh
+/// conversation with no shared history.
 async fn execute_block(
     workflow: &Workflow,
     function: &FunctionDef,
@@ -181,7 +185,19 @@ async fn execute_block(
 
     let output = match block {
         BlockDef::Prompt(p) => {
-            execute_prompt_block(workflow, function, block_id, p, ctx, agent_executor).await?
+            // Each dataflow prompt block gets a fresh single-turn
+            // conversation (§4.6 rule 3: data edges do not carry history).
+            let mut conversation = Conversation::new();
+            execute_prompt_block(
+                workflow,
+                function,
+                block_id,
+                p,
+                ctx,
+                agent_executor,
+                &mut conversation,
+            )
+            .await?
         }
         BlockDef::Call(c) => {
             execute_call_block(workflow, function, block_id, c, ctx, func_executor).await?
@@ -282,7 +298,12 @@ mod tests {
             _request: AgentRequest,
         ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
             let output = self.responses.lock().unwrap().remove(0);
-            Box::pin(async move { Ok(AgentResponse { output }) })
+            Box::pin(async move {
+                Ok(AgentResponse {
+                    output,
+                    messages: vec![],
+                })
+            })
         }
     }
 

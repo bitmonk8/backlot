@@ -22,6 +22,7 @@
 
 pub mod cel;
 pub mod context;
+pub mod conversation;
 pub mod error;
 pub mod exec;
 pub mod loader;
@@ -30,6 +31,7 @@ pub mod validate;
 
 pub use cel::{CelExpression, Namespaces, Template, cel_value_to_json};
 pub use context::{ExecutionContext, WorkflowState};
+pub use conversation::{Conversation, Message, ResolvedCompaction, Role, resolve_compaction};
 pub use error::{MechError, MechResult};
 pub use exec::call::FunctionExecutor;
 pub use exec::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};

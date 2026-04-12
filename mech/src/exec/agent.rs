@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use serde_json::Value as JsonValue;
 
+use crate::conversation::Message;
 use crate::error::MechError;
 
 /// Owned boxed future alias used by [`AgentExecutor::run`]. A local alias
@@ -51,6 +52,9 @@ pub struct AgentRequest {
     /// JSON Schema document the output must conform to. Mech validates the
     /// returned value against this schema after the executor returns.
     pub output_schema: JsonValue,
+    /// Conversation history from prior prompt blocks in the same function.
+    /// Empty for the first prompt block or for dataflow blocks.
+    pub history: Vec<Message>,
 }
 
 /// Response returned by an [`AgentExecutor`].
@@ -60,6 +64,10 @@ pub struct AgentResponse {
     /// schema; a mismatch is surfaced as
     /// [`MechError::SchemaValidationFailure`].
     pub output: JsonValue,
+    /// Messages generated during this agent turn: at minimum the user
+    /// prompt and assistant response. May include tool call/result pairs
+    /// from the agent's internal loop (reel tool loop).
+    pub messages: Vec<Message>,
 }
 
 /// The agent-runtime seam. Implementors dispatch an [`AgentRequest`] and
