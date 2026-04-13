@@ -35,7 +35,9 @@ impl AgentExecutor for EscalatingExecutor<'_> {
             None => true,
             // A block explicitly set the same model as the workflow default — treat as "no block override"
             // and apply escalation.
-            Some(m) => self.workflow_default_model.is_some_and(|d| model_name(d) == m.as_str()),
+            Some(m) => self
+                .workflow_default_model
+                .is_some_and(|d| model_name(d) == m.as_str()),
         };
         if should_override {
             request.model = Some(self.override_model.clone());
@@ -67,7 +69,6 @@ fn parse_model(s: &str) -> Option<Model> {
         _ => None,
     }
 }
-
 
 /// A [`cue::TaskNode`] that executes a single named mech workflow function.
 ///
@@ -126,7 +127,9 @@ impl MechTask {
             .as_ref()
             .and_then(|w| w.agent.as_ref())
             .and_then(|a| match a {
-                crate::schema::AgentConfigRef::Inline(cfg) => cfg.model.as_deref().and_then(parse_model),
+                crate::schema::AgentConfigRef::Inline(cfg) => {
+                    cfg.model.as_deref().and_then(parse_model)
+                }
                 // LIMITATION: $ref-based workflow-level agent configs cannot be resolved at
                 // construction time (no schema registry access here). If the workflow uses
                 // `agent: "$ref:#named_config"` at the workflow level, model escalation comparison
@@ -164,14 +167,30 @@ impl MechTask {
 }
 
 impl cue::TaskNode for MechTask {
-    fn id(&self) -> TaskId { self.id }
-    fn parent_id(&self) -> Option<TaskId> { self.parent_id }
-    fn goal(&self) -> &str { &self.goal }
-    fn depth(&self) -> u32 { self.depth }
-    fn phase(&self) -> TaskPhase { self.phase }
-    fn subtask_ids(&self) -> &[TaskId] { &self.subtask_ids }
-    fn discoveries(&self) -> &[String] { &self.discoveries }
-    fn recovery_rounds(&self) -> u32 { self.recovery_rounds }
+    fn id(&self) -> TaskId {
+        self.id
+    }
+    fn parent_id(&self) -> Option<TaskId> {
+        self.parent_id
+    }
+    fn goal(&self) -> &str {
+        &self.goal
+    }
+    fn depth(&self) -> u32 {
+        self.depth
+    }
+    fn phase(&self) -> TaskPhase {
+        self.phase
+    }
+    fn subtask_ids(&self) -> &[TaskId] {
+        &self.subtask_ids
+    }
+    fn discoveries(&self) -> &[String] {
+        &self.discoveries
+    }
+    fn recovery_rounds(&self) -> u32 {
+        self.recovery_rounds
+    }
 
     fn is_terminal(&self) -> bool {
         matches!(self.phase, TaskPhase::Completed | TaskPhase::Failed)
@@ -198,8 +217,12 @@ impl cue::TaskNode for MechTask {
         })
     }
 
-    fn needs_decomposition(&self) -> bool { false }
-    fn decompose_model(&self) -> Model { self.assessment_model }
+    fn needs_decomposition(&self) -> bool {
+        false
+    }
+    fn decompose_model(&self) -> Model {
+        self.assessment_model
+    }
 
     fn registration_info(&self) -> RegistrationInfo {
         RegistrationInfo {
@@ -210,7 +233,9 @@ impl cue::TaskNode for MechTask {
         }
     }
 
-    fn set_phase(&mut self, phase: TaskPhase) { self.phase = phase; }
+    fn set_phase(&mut self, phase: TaskPhase) {
+        self.phase = phase;
+    }
 
     fn set_assessment(
         &mut self,
@@ -288,7 +313,9 @@ impl cue::TaskNode for MechTask {
         &mut self,
         _ctx: &TreeContext,
     ) -> Result<BranchVerifyOutcome, OrchestratorError> {
-        panic!("MechTask::verify_branch: mech tasks are always leaves — this method must not be called")
+        panic!(
+            "MechTask::verify_branch: mech tasks are always leaves — this method must not be called"
+        )
     }
 
     fn fix_round_budget_check(&self, _limits: &LimitsConfig) -> FixBudgetCheck {
@@ -306,7 +333,9 @@ impl cue::TaskNode for MechTask {
         _round: u32,
         _model: Model,
     ) -> Result<Result<Vec<SubtaskSpec>, String>, OrchestratorError> {
-        panic!("MechTask::design_fix: mech tasks are always leaves — this method must not be called")
+        panic!(
+            "MechTask::design_fix: mech tasks are always leaves — this method must not be called"
+        )
     }
 
     async fn handle_checkpoint(
@@ -314,7 +343,9 @@ impl cue::TaskNode for MechTask {
         _ctx: &TreeContext,
         _discoveries: &[String],
     ) -> Result<ChildResponse, OrchestratorError> {
-        panic!("MechTask::handle_checkpoint: mech tasks are always leaves — this method must not be called")
+        panic!(
+            "MechTask::handle_checkpoint: mech tasks are always leaves — this method must not be called"
+        )
     }
 
     fn can_attempt_recovery(&self, _limits: &LimitsConfig) -> RecoveryEligibility {
@@ -329,7 +360,9 @@ impl cue::TaskNode for MechTask {
         _failure_reason: &str,
         _round: u32,
     ) -> Result<RecoveryDecision, OrchestratorError> {
-        panic!("MechTask::assess_and_design_recovery: mech tasks are always leaves — this method must not be called")
+        panic!(
+            "MechTask::assess_and_design_recovery: mech tasks are always leaves — this method must not be called"
+        )
     }
 
     async fn assess(&mut self, _ctx: &TreeContext) -> Result<AssessmentResult, OrchestratorError> {
@@ -415,16 +448,30 @@ impl Default for MechStore {
 impl cue::TaskStore for MechStore {
     type Task = MechTask;
 
-    fn get(&self, id: TaskId) -> Option<&Self::Task> { self.tasks.get(&id) }
-    fn get_mut(&mut self, id: TaskId) -> Option<&mut Self::Task> { self.tasks.get_mut(&id) }
-    fn task_count(&self) -> usize { self.tasks.len() }
-
-    fn dfs_order(&self, root: TaskId) -> Vec<TaskId> {
-        if self.tasks.contains_key(&root) { vec![root] } else { vec![] }
+    fn get(&self, id: TaskId) -> Option<&Self::Task> {
+        self.tasks.get(&id)
+    }
+    fn get_mut(&mut self, id: TaskId) -> Option<&mut Self::Task> {
+        self.tasks.get_mut(&id)
+    }
+    fn task_count(&self) -> usize {
+        self.tasks.len()
     }
 
-    fn set_root_id(&mut self, id: TaskId) { self.root_id = Some(id); }
-    fn save(&self, _path: &Path) -> anyhow::Result<()> { Ok(()) }
+    fn dfs_order(&self, root: TaskId) -> Vec<TaskId> {
+        if self.tasks.contains_key(&root) {
+            vec![root]
+        } else {
+            vec![]
+        }
+    }
+
+    fn set_root_id(&mut self, id: TaskId) {
+        self.root_id = Some(id);
+    }
+    fn save(&self, _path: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     fn bind_runtime(&mut self) {
         if let Some(agent) = self.agent.clone() {
@@ -444,7 +491,9 @@ impl cue::TaskStore for MechStore {
         panic!("MechStore::create_subtask: mech tasks are always leaves");
     }
 
-    fn any_non_fix_child_succeeded(&self, _parent_id: TaskId) -> bool { false }
+    fn any_non_fix_child_succeeded(&self, _parent_id: TaskId) -> bool {
+        false
+    }
 
     fn build_tree_context(&self, id: TaskId) -> Result<TreeContext, OrchestratorError> {
         if !self.tasks.contains_key(&id) {
@@ -491,7 +540,9 @@ mod tests {
     }
     impl SeqAgent {
         fn new(responses: Vec<JsonValue>) -> Self {
-            Self { responses: Mutex::new(responses) }
+            Self {
+                responses: Mutex::new(responses),
+            }
         }
     }
     impl AgentExecutor for SeqAgent {
@@ -501,7 +552,10 @@ mod tests {
         ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
             let output = self.responses.lock().unwrap().remove(0);
             Box::pin(async move {
-                Ok(AgentResponse { output, messages: vec![] })
+                Ok(AgentResponse {
+                    output,
+                    messages: vec![],
+                })
             })
         }
     }
@@ -513,7 +567,10 @@ mod tests {
     impl RecordingAgent {
         fn new(responses: Vec<JsonValue>) -> (Self, Arc<Mutex<Vec<Option<String>>>>) {
             let log = Arc::new(Mutex::new(Vec::new()));
-            let agent = Self { models_seen: Arc::clone(&log), inner: SeqAgent::new(responses) };
+            let agent = Self {
+                models_seen: Arc::clone(&log),
+                inner: SeqAgent::new(responses),
+            };
             (agent, log)
         }
     }
@@ -535,7 +592,12 @@ mod tests {
     impl EventLog {
         fn new() -> (Self, Arc<Mutex<Vec<cue::CueEvent>>>) {
             let log = Arc::new(Mutex::new(Vec::new()));
-            (Self { log: Arc::clone(&log) }, log)
+            (
+                Self {
+                    log: Arc::clone(&log),
+                },
+                log,
+            )
         }
     }
     impl EventEmitter<cue::CueEvent> for EventLog {
@@ -641,20 +703,41 @@ functions:
         };
         let schema = json!({ "type": "object", "required": ["greeting"], "properties": { "greeting": { "type": "string" } } });
         run_blocking(escalating.run(AgentRequest {
-            model: None, system: None, prompt: "t".into(), grant: vec![],
-            tools: vec![], write_paths: vec![], timeout: None,
-            output_schema: schema.clone(), history: vec![],
-        })).unwrap();
+            model: None,
+            system: None,
+            prompt: "t".into(),
+            grant: vec![],
+            tools: vec![],
+            write_paths: vec![],
+            timeout: None,
+            output_schema: schema.clone(),
+            history: vec![],
+        }))
+        .unwrap();
         run_blocking(escalating.run(AgentRequest {
-            model: Some("haiku".to_owned()), system: None, prompt: "t".into(), grant: vec![],
-            tools: vec![], write_paths: vec![], timeout: None,
-            output_schema: schema.clone(), history: vec![],
-        })).unwrap();
+            model: Some("haiku".to_owned()),
+            system: None,
+            prompt: "t".into(),
+            grant: vec![],
+            tools: vec![],
+            write_paths: vec![],
+            timeout: None,
+            output_schema: schema.clone(),
+            history: vec![],
+        }))
+        .unwrap();
         run_blocking(escalating.run(AgentRequest {
-            model: Some("my-block-model".to_owned()), system: None, prompt: "t".into(), grant: vec![],
-            tools: vec![], write_paths: vec![], timeout: None,
-            output_schema: schema, history: vec![],
-        })).unwrap();
+            model: Some("my-block-model".to_owned()),
+            system: None,
+            prompt: "t".into(),
+            grant: vec![],
+            tools: vec![],
+            write_paths: vec![],
+            timeout: None,
+            output_schema: schema,
+            history: vec![],
+        }))
+        .unwrap();
         let log = models_log.lock().unwrap().clone();
         assert_eq!(log[0], Some("opus".to_owned()));
         assert_eq!(log[1], Some("opus".to_owned()));
@@ -684,7 +767,12 @@ functions:
         let (recording_agent, models_log) = RecordingAgent::new(vec![json!({ "greeting": "hi" })]);
         let agent_arc: Arc<dyn AgentExecutor> = Arc::new(recording_agent);
         let mut task = MechTask::new(
-            TaskId(0), "run main", Arc::clone(&wf), "main", json!({}), Some(Arc::clone(&agent_arc)),
+            TaskId(0),
+            "run main",
+            Arc::clone(&wf),
+            "main",
+            json!({}),
+            Some(Arc::clone(&agent_arc)),
         );
         // Set assessment model to Opus to simulate cue escalation via set_assessment.
         task.set_assessment(TaskPath::Leaf, Model::Opus, None);
@@ -699,7 +787,10 @@ functions:
             checkpoint_guidance: None,
         };
         assert_eq!(run_blocking(task.execute_leaf(&ctx)), TaskOutcome::Success);
-        assert_eq!(models_log.lock().unwrap().clone()[0], Some("opus".to_owned()));
+        assert_eq!(
+            models_log.lock().unwrap().clone()[0],
+            Some("opus".to_owned())
+        );
     }
 
     #[test]
@@ -726,7 +817,12 @@ functions:
         let (recording_agent, models_log) = RecordingAgent::new(vec![json!({ "greeting": "hi" })]);
         let agent_arc: Arc<dyn AgentExecutor> = Arc::new(recording_agent);
         let mut task = MechTask::new(
-            TaskId(0), "run main", Arc::clone(&wf), "main", json!({}), Some(Arc::clone(&agent_arc)),
+            TaskId(0),
+            "run main",
+            Arc::clone(&wf),
+            "main",
+            json!({}),
+            Some(Arc::clone(&agent_arc)),
         );
         task.set_assessment(TaskPath::Leaf, Model::Sonnet, None);
         let ctx = TreeContext {
@@ -740,14 +836,24 @@ functions:
             checkpoint_guidance: None,
         };
         assert_eq!(run_blocking(task.execute_leaf(&ctx)), TaskOutcome::Success);
-        assert_eq!(models_log.lock().unwrap().clone()[0], Some("sonnet".to_owned()));
+        assert_eq!(
+            models_log.lock().unwrap().clone()[0],
+            Some("sonnet".to_owned())
+        );
     }
 
     #[test]
     #[should_panic(expected = "agent not bound")]
     fn execute_leaf_panics_when_no_agent() {
         let wf = load(SIMPLE_YAML);
-        let mut task = MechTask::new(TaskId(0), "run main", Arc::clone(&wf), "main", json!({}), None);
+        let mut task = MechTask::new(
+            TaskId(0),
+            "run main",
+            Arc::clone(&wf),
+            "main",
+            json!({}),
+            None,
+        );
         let ctx = TreeContext {
             parent_goal: None,
             parent_decomposition_rationale: None,
@@ -913,9 +1019,15 @@ functions:
         task.phase = TaskPhase::Verifying;
         assert_eq!(task.resume_point(), ResumePoint::LeafVerifying);
         task.phase = TaskPhase::Completed;
-        assert_eq!(task.resume_point(), ResumePoint::Terminal(TaskOutcome::Success));
+        assert_eq!(
+            task.resume_point(),
+            ResumePoint::Terminal(TaskOutcome::Success)
+        );
         task.phase = TaskPhase::Failed;
-        assert!(matches!(task.resume_point(), ResumePoint::Terminal(TaskOutcome::Failed { .. })));
+        assert!(matches!(
+            task.resume_point(),
+            ResumePoint::Terminal(TaskOutcome::Failed { .. })
+        ));
     }
 
     #[test]
@@ -951,7 +1063,10 @@ functions:
         let mut task = MechTask::new(TaskId(0), "run", wf, "main", json!({}), None);
         task.phase = TaskPhase::Completed;
         assert!(task.is_terminal());
-        assert_eq!(task.resume_point(), ResumePoint::Terminal(TaskOutcome::Success));
+        assert_eq!(
+            task.resume_point(),
+            ResumePoint::Terminal(TaskOutcome::Success)
+        );
     }
 
     #[test]
