@@ -208,7 +208,6 @@ pub enum MechError {
     },
 }
 
-
 /// Convenience `Result` alias for fallible mech operations.
 pub type MechResult<T> = Result<T, MechError>;
 

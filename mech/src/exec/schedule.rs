@@ -30,7 +30,6 @@ use crate::loader::Workflow;
 use crate::schema::{BlockDef, FunctionDef, TransitionDef};
 const MAX_IMPERATIVE_STEPS: usize = 10_000;
 
-
 /// Result of evaluating transitions for a block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionResult {
@@ -125,11 +124,13 @@ pub fn apply_side_effects(
     // Evaluate all set_context expressions atomically (all see pre-write state).
     let mut context_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_context.len());
     for (var_name, expr_src) in set_context {
-        let guard = workflow.guard(expr_src).ok_or_else(|| MechError::InternalInvariant {
-            message: format!(
-                "set_context expression `{expr_src}` should have been compiled at load time"
-            ),
-        })?;
+        let guard = workflow
+            .guard(expr_src)
+            .ok_or_else(|| MechError::InternalInvariant {
+                message: format!(
+                    "set_context expression `{expr_src}` should have been compiled at load time"
+                ),
+            })?;
         let cel_value = guard.evaluate(&ns)?;
         let json_value = cel_value_to_json(&cel_value)?;
         context_writes.push((var_name.clone(), json_value));
@@ -138,11 +139,13 @@ pub fn apply_side_effects(
     // Evaluate all set_workflow expressions atomically (all see pre-write state).
     let mut workflow_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_workflow.len());
     for (var_name, expr_src) in set_workflow {
-        let guard = workflow.guard(expr_src).ok_or_else(|| MechError::InternalInvariant {
-            message: format!(
-                "set_workflow expression `{expr_src}` should have been compiled at load time"
-            ),
-        })?;
+        let guard = workflow
+            .guard(expr_src)
+            .ok_or_else(|| MechError::InternalInvariant {
+                message: format!(
+                    "set_workflow expression `{expr_src}` should have been compiled at load time"
+                ),
+            })?;
         let cel_value = guard.evaluate(&ns)?;
         let json_value = cel_value_to_json(&cel_value)?;
         workflow_writes.push((var_name.clone(), json_value));

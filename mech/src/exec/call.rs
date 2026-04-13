@@ -57,11 +57,11 @@ fn render_mapping(
 ) -> MechResult<JsonValue> {
     let mut obj = serde_json::Map::with_capacity(mapping.len());
     for (key, expr) in mapping {
-        let tmpl = workflow.template(expr).ok_or_else(|| MechError::InternalInvariant {
-            message: format!(
-                "template `{expr}` should have been interned at load time"
-            ),
-        })?;
+        let tmpl = workflow
+            .template(expr)
+            .ok_or_else(|| MechError::InternalInvariant {
+                message: format!("template `{expr}` should have been interned at load time"),
+            })?;
         let value = tmpl.evaluate_as_json(namespaces)?;
         obj.insert(key.clone(), value);
     }
