@@ -21,7 +21,7 @@ anyhow.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt"] }
 serde_json = { workspace = true }
 cue = { workspace = true }
 traits = { workspace = true }

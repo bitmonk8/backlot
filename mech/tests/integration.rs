@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 use mech::{
     AgentExecutor, AgentRequest, AgentResponse, BoxFuture, MechError, MechStore, Workflow,
@@ -74,43 +74,11 @@ impl RecordingAgent {
 }
 
 impl AgentExecutor for RecordingAgent {
-    fn run<'a>(
-        &'a self,
-        request: AgentRequest,
-    ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
+    fn run<'a>(&'a self, request: AgentRequest) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
         self.requests.lock().unwrap().push(request.clone());
         self.inner.run(request)
     }
 }
-
-/// Counts total agent invocations.
-struct CountingAgent {
-    call_count: Arc<Mutex<usize>>,
-    inner: SequentialAgent,
-}
-
-impl CountingAgent {
-    fn new(responses: Vec<JsonValue>) -> (Self, Arc<Mutex<usize>>) {
-        let count = Arc::new(Mutex::new(0));
-        let agent = Self {
-            call_count: Arc::clone(&count),
-            inner: SequentialAgent::new(responses),
-        };
-        (agent, count)
-    }
-}
-
-impl AgentExecutor for CountingAgent {
-    fn run<'a>(
-        &'a self,
-        request: AgentRequest,
-    ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
-        *self.call_count.lock().unwrap() += 1;
-        self.inner.run(request)
-    }
-}
-
-// ---- §12 Worked Example — All Paths --------------------------------------
 
 const FULL_EXAMPLE: &str = include_str!("../src/schema/full_example.yaml");
 
@@ -177,9 +145,9 @@ fn worked_example_technical_escalation() {
     // classify → technical (×3, always empty steps, attempts reaches 3) → escalate
     let agent = SequentialAgent::new(vec![
         json!({ "category": "technical", "urgency": "high" }),
-        json!({ "diagnosis": "unknown", "steps": [] }),  // attempts=1
-        json!({ "diagnosis": "unknown", "steps": [] }),  // attempts=2
-        json!({ "diagnosis": "unknown", "steps": [] }),  // attempts=3, guard context.attempts < 3 is false
+        json!({ "diagnosis": "unknown", "steps": [] }), // attempts=1
+        json!({ "diagnosis": "unknown", "steps": [] }), // attempts=2
+        json!({ "diagnosis": "unknown", "steps": [] }), // attempts=3, guard context.attempts < 3 is false
         json!({ "notice": "Escalated to engineering.", "suggested_team": "platform" }),
     ]);
     let rt = WorkflowRuntime::new(&wf, &agent);
@@ -328,7 +296,7 @@ functions:
 fn dataflow_diamond_runs_extract_once() {
     let wf = load(DIAMOND_DATAFLOW);
     // 4 blocks, 4 agent calls: extract, then classify+score (alphabetical within level), then synthesize.
-    let (agent, call_count) = CountingAgent::new(vec![
+    let (agent, requests) = RecordingAgent::new(vec![
         json!({ "facts": ["fact1", "fact2"] }),
         json!({ "labels": ["positive", "neutral"] }),
         json!({ "scores": [0.9, 0.5] }),
@@ -337,7 +305,7 @@ fn dataflow_diamond_runs_extract_once() {
     let rt = WorkflowRuntime::new(&wf, &agent);
     let out = run_blocking(rt.run("analyze", json!({ "text": "test input" }))).unwrap();
     assert_eq!(out["report"], json!("Analysis complete."));
-    assert_eq!(*call_count.lock().unwrap(), 4, "exactly 4 agent calls");
+    assert_eq!(requests.lock().unwrap().len(), 4, "exactly 4 agent calls");
 }
 
 #[test]
@@ -464,6 +432,49 @@ functions:
     assert!(matches!(err, MechError::Validation { .. }));
 }
 
+#[test]
+fn error_llm_call_failure_propagates() {
+    let yaml = r#"
+functions:
+  main:
+    input: { type: object }
+    blocks:
+      step:
+        prompt: "go"
+        schema:
+          type: object
+          required: [ok]
+          properties:
+            ok: { type: boolean }
+"#;
+    let wf = load(yaml);
+    // Agent that always fails with LlmCallFailure.
+    struct FailingAgent;
+    impl AgentExecutor for FailingAgent {
+        fn run<'a>(
+            &'a self,
+            _request: AgentRequest,
+        ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
+            Box::pin(async move {
+                Err(MechError::LlmCallFailure {
+                    block: String::new(),
+                    message: "provider returned 500".into(),
+                })
+            })
+        }
+    }
+    let agent = FailingAgent;
+    let rt = WorkflowRuntime::new(&wf, &agent);
+    let err = run_blocking(rt.run("main", json!({}))).unwrap_err();
+    match err {
+        MechError::LlmCallFailure { block, message } => {
+            assert_eq!(block, "step");
+            assert!(message.contains("500"));
+        }
+        other => panic!("expected LlmCallFailure, got {other:?}"),
+    }
+}
+
 // ---- Cue-orchestrated execution -------------------------------------------
 
 struct EventLog {
@@ -473,7 +484,12 @@ struct EventLog {
 impl EventLog {
     fn new() -> (Self, Arc<Mutex<Vec<cue::CueEvent>>>) {
         let log = Arc::new(Mutex::new(Vec::new()));
-        (Self { log: Arc::clone(&log) }, log)
+        (
+            Self {
+                log: Arc::clone(&log),
+            },
+            log,
+        )
     }
 }
 
@@ -717,9 +733,9 @@ functions:
 "#;
     let wf = load(yaml);
     let (agent, requests) = RecordingAgent::new(vec![
-        json!({ "x": "A" }),       // main.a
-        json!({ "ok": true }),      // sub.inner
-        json!({ "z": "C" }),        // main.c
+        json!({ "x": "A" }),   // main.a
+        json!({ "ok": true }), // sub.inner
+        json!({ "z": "C" }),   // main.c
     ]);
     let rt = WorkflowRuntime::new(&wf, &agent);
     run_blocking(rt.run("main", json!({}))).unwrap();
@@ -871,6 +887,35 @@ functions:
     assert_eq!(req.write_paths, vec!["out/".to_string()]);
 }
 
+#[test]
+fn system_prompt_rendered_through_runtime() {
+    let yaml = r#"
+workflow:
+  system: "You help {{input.user}}."
+functions:
+  main:
+    input:
+      type: object
+      required: [user]
+      properties:
+        user: { type: string }
+    blocks:
+      step:
+        prompt: "go"
+        schema:
+          type: object
+          required: [ok]
+          properties:
+            ok: { type: boolean }
+"#;
+    let wf = load(yaml);
+    let (agent, requests) = RecordingAgent::new(vec![json!({ "ok": true })]);
+    let rt = WorkflowRuntime::new(&wf, &agent);
+    run_blocking(rt.run("main", json!({ "user": "Ada" }))).unwrap();
+
+    let req = &requests.lock().unwrap()[0];
+    assert_eq!(req.system.as_deref(), Some("You help Ada."));
+}
 // ---- Context isolation per function invocation ----------------------------
 
 #[test]
@@ -904,17 +949,22 @@ functions:
           seen: "context.seen + 1"
 "#;
     let wf = load(yaml);
-    let (agent, requests) = RecordingAgent::new(vec![
-        json!({ "ok": true }),
-        json!({ "ok": true }),
-    ]);
+    let (agent, requests) = RecordingAgent::new(vec![json!({ "ok": true }), json!({ "ok": true })]);
     let rt = WorkflowRuntime::new(&wf, &agent);
     run_blocking(rt.run("main", json!({}))).unwrap();
 
     let reqs = requests.lock().unwrap();
     // Both worker invocations should start with seen=0 (fresh context).
-    assert!(reqs[0].prompt.contains("seen=0"), "first call: {}", reqs[0].prompt);
-    assert!(reqs[1].prompt.contains("seen=0"), "second call: {}", reqs[1].prompt);
+    assert!(
+        reqs[0].prompt.contains("seen=0"),
+        "first call: {}",
+        reqs[0].prompt
+    );
+    assert!(
+        reqs[1].prompt.contains("seen=0"),
+        "second call: {}",
+        reqs[1].prompt
+    );
 }
 
 // ---- Mixed imperative+dataflow in same workflow ---------------------------
@@ -1011,10 +1061,8 @@ functions:
             ok: { type: boolean }
 "#;
     let wf = load(yaml);
-    let (agent, requests) = RecordingAgent::new(vec![
-        json!({ "val": "FIRST" }),
-        json!({ "ok": true }),
-    ]);
+    let (agent, requests) =
+        RecordingAgent::new(vec![json!({ "val": "FIRST" }), json!({ "ok": true })]);
     let rt = WorkflowRuntime::new(&wf, &agent);
     run_blocking(rt.run("main", json!({ "user": "Ada" }))).unwrap();
 

@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Deliverable 16 complete. CLI binary (mech validate, mech run) added as mech-cli crate. 273 tests passing (249 unit + 24 integration), zero clippy warnings.
+**Phase:** Deliverable 16 complete. CLI binary (mech validate, mech run) added as mech-cli crate. 275 tests passing (249 unit + 26 integration), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
