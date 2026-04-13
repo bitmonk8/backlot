@@ -164,11 +164,14 @@ impl<'w> FunctionRunner<'w> {
         let rendered_system = match system_source {
             Some(src) => {
                 let ns = ctx.namespaces();
-                let tmpl = self.workflow.template(src).unwrap_or_else(|| {
-                    unreachable!(
-                        "loader invariant: system template `{src}` should have been interned"
-                    )
-                });
+                let tmpl =
+                    self.workflow
+                        .template(src)
+                        .ok_or_else(|| MechError::InternalInvariant {
+                            message: format!(
+                                "system template `{src}` should have been interned at load time"
+                            ),
+                        })?;
                 Some(tmpl.render(&ns)?)
             }
             None => None,
@@ -833,11 +836,11 @@ functions:
         );
     }
 
-    // D13/T3: Compaction hook is invoked at configured threshold.
+    // D13/T3: Compaction config is wired through FunctionRunner.
+    // Actual compaction trigger count is asserted in schedule-level tests
+    // (schedule::tests::compaction_hook_invoked_at_threshold).
     #[test]
-    fn compaction_hook_invoked_at_threshold() {
-        // Use a workflow with very low compaction threshold.
-        // Execute enough blocks to trigger compaction.
+    fn compaction_config_wired_through_runner() {
         let yaml = r#"
 workflow:
   compaction:

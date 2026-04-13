@@ -28,6 +28,8 @@ use crate::exec::call::{FunctionExecutor, execute_call_block};
 use crate::exec::prompt::execute_prompt_block;
 use crate::loader::Workflow;
 use crate::schema::{BlockDef, FunctionDef, TransitionDef};
+const MAX_IMPERATIVE_STEPS: usize = 10_000;
+
 
 /// Result of evaluating transitions for a block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,11 +84,11 @@ pub fn evaluate_transitions(
                 return TransitionResult::Goto(t.goto.clone());
             }
             Some(guard_src) => {
-                let guard = workflow.guard(guard_src).unwrap_or_else(|| {
-                    unreachable!(
-                        "loader invariant: guard `{guard_src}` should have been compiled at load time"
-                    )
-                });
+                let Some(guard) = workflow.guard(guard_src) else {
+                    // Loader invariant violated: guard was not compiled at load time.
+                    // Treat as false per §10.2 (non-fatal guard semantics).
+                    continue;
+                };
                 match guard.evaluate_guard(&ns) {
                     Ok(true) => return TransitionResult::Goto(t.goto.clone()),
                     Ok(false) => continue,
@@ -123,11 +125,11 @@ pub fn apply_side_effects(
     // Evaluate all set_context expressions atomically (all see pre-write state).
     let mut context_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_context.len());
     for (var_name, expr_src) in set_context {
-        let guard = workflow.guard(expr_src).unwrap_or_else(|| {
-            unreachable!(
-                "loader invariant: set_context expression `{expr_src}` should have been compiled"
-            )
-        });
+        let guard = workflow.guard(expr_src).ok_or_else(|| MechError::InternalInvariant {
+            message: format!(
+                "set_context expression `{expr_src}` should have been compiled at load time"
+            ),
+        })?;
         let cel_value = guard.evaluate(&ns)?;
         let json_value = cel_value_to_json(&cel_value)?;
         context_writes.push((var_name.clone(), json_value));
@@ -136,11 +138,11 @@ pub fn apply_side_effects(
     // Evaluate all set_workflow expressions atomically (all see pre-write state).
     let mut workflow_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_workflow.len());
     for (var_name, expr_src) in set_workflow {
-        let guard = workflow.guard(expr_src).unwrap_or_else(|| {
-            unreachable!(
-                "loader invariant: set_workflow expression `{expr_src}` should have been compiled"
-            )
-        });
+        let guard = workflow.guard(expr_src).ok_or_else(|| MechError::InternalInvariant {
+            message: format!(
+                "set_workflow expression `{expr_src}` should have been compiled at load time"
+            ),
+        })?;
         let cel_value = guard.evaluate(&ns)?;
         let json_value = cel_value_to_json(&cel_value)?;
         workflow_writes.push((var_name.clone(), json_value));
@@ -246,7 +248,17 @@ pub async fn run_function_imperative(
     let entry = find_entry_block(function)?;
     let mut current_block_id = entry;
 
+    let mut step_count: usize = 0;
     loop {
+        step_count += 1;
+        if step_count > MAX_IMPERATIVE_STEPS {
+            return Err(MechError::Validation {
+                errors: vec![format!(
+                    "function `{function_name}`: exceeded maximum step count of \n                     {MAX_IMPERATIVE_STEPS}; possible infinite loop (self-loop guard never terminates)"
+                )],
+            });
+        }
+
         let block =
             function
                 .blocks

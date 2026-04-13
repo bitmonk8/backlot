@@ -196,7 +196,18 @@ pub enum MechError {
         /// All validation error messages collected during loading.
         errors: Vec<String>,
     },
+
+    /// An internal loader invariant was violated at runtime.
+    ///
+    /// This indicates a bug in the loader or a corrupted [`Workflow`] handle,
+    /// not a user-visible workflow error.
+    #[error("internal invariant violated: {message}")]
+    InternalInvariant {
+        /// Description of the violated invariant.
+        message: String,
+    },
 }
+
 
 /// Convenience `Result` alias for fallible mech operations.
 pub type MechResult<T> = Result<T, MechError>;

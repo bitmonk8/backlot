@@ -146,7 +146,7 @@ impl Namespaces {
 /// normalize everything to `Int` for consistent behavior.
 fn normalize_uint_to_int(value: Value) -> Value {
     match value {
-        Value::UInt(n) => Value::Int(n as i64),
+        Value::UInt(n) => i64::try_from(n).map_or(Value::UInt(n), Value::Int),
         Value::List(items) => {
             let new_items: Vec<Value> = items.iter().cloned().map(normalize_uint_to_int).collect();
             Value::List(std::sync::Arc::new(new_items))

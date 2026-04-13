@@ -283,9 +283,13 @@ fn render_template(
     source: &str,
     namespaces: &Namespaces,
 ) -> MechResult<String> {
-    let tmpl: &Template = workflow.template(source).unwrap_or_else(|| {
-        unreachable!("loader invariant: template `{source}` should have been interned at load time")
-    });
+    let tmpl: &Template = workflow
+        .template(source)
+        .ok_or_else(|| MechError::InternalInvariant {
+            message: format!(
+                "template `{source}` should have been interned at load time"
+            ),
+        })?;
     tmpl.render(namespaces)
 }
 
