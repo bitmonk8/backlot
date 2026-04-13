@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Deliverable 15 complete. CLI binary (mech validate, mech run) added as mech-cli crate. 256 tests passing, zero clippy warnings.
+**Phase:** Deliverable 16 complete. CLI binary (mech validate, mech run) added as mech-cli crate. 273 tests passing (249 unit + 24 integration), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -127,10 +127,10 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 13. ~~Conversation management & history scoping~~ ✅
 14. ~~Cue integration (`MechTask` implementing `cue::TaskNode`)~~ ✅
 15. ~~CLI (`mech run`, `mech validate`)~~ ✅
-16. End-to-end integration test suite (hermetic, fake LLM)
+16. ~~End-to-end integration test suite (hermetic, fake LLM)~~ ✅
 17. Documentation polish & examples
 
-**Immediate next action:** Deliverable 16 — End-to-end integration test suite (hermetic, fake LLM).
+**Immediate next action:** Deliverable 17 — Documentation polish & examples.
 
 ---
 

@@ -20,6 +20,12 @@ traits.workspace = true
 anyhow.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+serde_json = { workspace = true }
+cue = { workspace = true }
+traits = { workspace = true }
+
 [lints.rust]
 unsafe_code = "deny"
 
