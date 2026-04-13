@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Deliverable 14 complete. MechTask implementing cue::TaskNode, MechStore implementing cue::TaskStore, EscalatingExecutor for model escalation (spec §11.4). 249 tests passing (+22 in Deliverable 14), zero clippy warnings.
+**Phase:** Deliverable 15 complete. CLI binary (mech validate, mech run) added as mech-cli crate. 256 tests passing, zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -126,11 +126,11 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 12. ~~Function executor & workflow runtime (imperative + dataflow modes)~~ ✅
 13. ~~Conversation management & history scoping~~ ✅
 14. ~~Cue integration (`MechTask` implementing `cue::TaskNode`)~~ ✅
-15. CLI (`mech run`, `mech validate`)
+15. ~~CLI (`mech run`, `mech validate`)~~ ✅
 16. End-to-end integration test suite (hermetic, fake LLM)
 17. Documentation polish & examples
 
-**Immediate next action:** Deliverable 15 — CLI (`mech run`, `mech validate`).
+**Immediate next action:** Deliverable 16 — End-to-end integration test suite (hermetic, fake LLM).
 
 ---
 

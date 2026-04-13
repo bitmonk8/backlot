@@ -1,0 +1,22 @@
+[package]
+name = "mech-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mech"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+mech.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

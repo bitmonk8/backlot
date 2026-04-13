@@ -6,6 +6,7 @@ members = [
     "lot/lot",
     "lot/lot-cli",
     "mech",
+    "mech-cli",
     "reel/reel",
     "reel/reel-cli",
     "epic",
