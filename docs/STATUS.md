@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Deliverable 13 complete. Function executor, workflow runtime, dataflow scheduler, and conversation management implemented. `block` namespace now wraps outputs under `output` key to align with spec §7 `blocks.<name>.output.<field>` access pattern. `blocks` (plural) registered as CEL alias for `block` (singular). 227 tests passing (+15 in Deliverable 13), zero clippy warnings.
+**Phase:** Deliverable 14 complete. MechTask implementing cue::TaskNode, MechStore implementing cue::TaskStore, EscalatingExecutor for model escalation (spec §11.4). 249 tests passing (+22 in Deliverable 14), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -125,12 +125,12 @@ Deliverables (strictly sequential except 9↔10 which can overlap):
 11. ~~Transitions & block scheduling (imperative mode, guards, self-loops)~~ ✅
 12. ~~Function executor & workflow runtime (imperative + dataflow modes)~~ ✅
 13. ~~Conversation management & history scoping~~ ✅
-14. Cue integration (`MechTask` implementing `cue::TaskNode`)
+14. ~~Cue integration (`MechTask` implementing `cue::TaskNode`)~~ ✅
 15. CLI (`mech run`, `mech validate`)
 16. End-to-end integration test suite (hermetic, fake LLM)
 17. Documentation polish & examples
 
-**Immediate next action:** Deliverable 14 — Cue integration (`MechTask` implementing `cue::TaskNode`).
+**Immediate next action:** Deliverable 15 — CLI (`mech run`, `mech validate`).
 
 ---
 

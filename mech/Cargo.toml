@@ -16,6 +16,8 @@ serde_yml.workspace = true
 schemars.workspace = true
 jsonschema.workspace = true
 thiserror.workspace = true
+traits.workspace = true
+anyhow.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
 
 [lints.rust]

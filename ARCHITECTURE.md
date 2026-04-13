@@ -7,7 +7,7 @@ decomposition. The stack is layered: low-level LLM calls and process sandboxing
 at the bottom, an agent runtime with tools in the middle, a knowledge store, and
 a recursive task orchestrator at the top.
 
-The codebase is ~30k lines across six crates, each with a library and (except
+The codebase is ~30k lines across seven crates, each with a library and (except
 epic and cue) a thin CLI binary. All crates follow the same pattern: the library owns
 all logic; the CLI parses config, calls the library, and formats output.
 
@@ -219,6 +219,53 @@ After deserialization, `TaskStore::bind_runtime()` re-injects non-serializable d
 
 ---
 
+### mech — Declarative workflow definition and cue integration
+
+Provides a YAML-based workflow format for LLM-driven control and dataflow graphs.
+Workflows are loaded once, validated, and executed by a runtime that bridges cue
+orchestration with reel agent execution. See [docs/MECH_SPEC.md](docs/MECH_SPEC.md)
+for the full specification.
+
+| Module | Purpose |
+|--------|---------|
+| `lib.rs` | Public API re-exports |
+| `loader.rs` | `WorkflowLoader::load(path) → Workflow` — parse → validate → infer → compile CEL |
+| `schema/mod.rs` | Serde types: `WorkflowFile`, `FunctionDef`, `BlockDef`, `AgentConfig`, etc. |
+| `schema/registry.rs` | `SchemaRegistry` — compile and validate JSON Schemas, resolve `$ref` |
+| `schema/infer.rs` | Output schema inference (`output: infer`) from terminal block schemas |
+| `validate.rs` | `validate_workflow` — 24+ load-time checks (§10.1 of spec) |
+| `cel.rs` | CEL compilation (`CelExpression`) and template interpolation (`Template`) |
+| `context.rs` | `ExecutionContext` (per-invocation), `WorkflowState` (workflow-lifetime) |
+| `conversation.rs` | `Conversation` — per-function message history, compaction hook |
+| `exec/prompt.rs` | `execute_prompt_block` — agent cascade, template render, LLM dispatch |
+| `exec/call.rs` | `execute_call_block` — single/uniform/per-call forms, output mapping |
+| `exec/schedule.rs` | `run_function_imperative` — transition evaluation, side-effects |
+| `exec/dataflow.rs` | `run_function_dataflow` — topo-sort, level-parallel scheduling |
+| `exec/function.rs` | `FunctionRunner` — per-invocation dispatch, mode detection, depth limit |
+| `exec/workflow.rs` | `WorkflowRuntime` — top-level entry point, workflow-state initialisation |
+| `exec/agent.rs` | `AgentExecutor` trait, `AgentRequest`, `AgentResponse` — agent seam for testing |
+| `cue_integration.rs` | `MechTask` (`cue::TaskNode`) and `MechStore` (`cue::TaskStore`) — bridges mech to cue orchestration |
+| `error.rs` | `MechError` — all load-time and runtime error variants |
+
+**`AgentExecutor` seam:** Mech never calls reel directly. The `AgentExecutor` trait
+(`exec/agent.rs`) is the seam between prompt block execution and the agent runtime.
+The production impl wraps reel; tests inject a deterministic fake. This keeps
+all tests hermetic and fast — no network, no real models.
+
+**Cue integration:** `MechTask` implements `cue::TaskNode` as a leaf-only task.
+`forced_assessment` always returns `TaskPath::Leaf`. `execute_leaf` runs
+`WorkflowRuntime` over the named function and maps `MechError` to `TaskOutcome`.
+When `set_assessment` stores an escalated model (Sonnet or Opus), `execute_leaf`
+wraps the executor with `EscalatingExecutor` to override the model at the
+workflow/function level while preserving block-level agent configs. `MechStore`
+is a minimal `HashMap`-backed `TaskStore` for leaf-only scenarios.
+
+See [docs/MECH_SPEC.md](docs/MECH_SPEC.md) for the workflow format, §11 for the
+cue integration design, and [docs/STATUS.md](docs/STATUS.md) for implementation
+status.
+
+---
+
 ### epic -- Recursive problem-solver orchestrator
 
 Top-level consumer. Implements cue's `TaskNode` and `TaskStore` traits with AI
@@ -303,6 +350,9 @@ Key types and functions to start navigating the codebase. Names are greppable.
 | Branch decisions | `EpicTask::verify_branch()`, `EpicTask::design_fix()` | `epic/src/task/node_impl.rs` |
 | Research pipeline | `ResearchQuery` (ToolHandler impl) | `epic/src/knowledge.rs` |
 | State persistence | `EpicState::save()`, `EpicState::load()` | `epic/src/state.rs` |
+| Workflow load | `WorkflowLoader::load()` | `mech/src/loader.rs` |
+| Run mech workflow | `WorkflowRuntime::run()` | `mech/src/exec/workflow.rs` |
+| Mech cue integration | `MechTask`, `MechStore` | `mech/src/cue_integration.rs` |
 
 ## Architecture Invariants
 
