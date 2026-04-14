@@ -23,7 +23,7 @@ epic    → cue, reel, vault, traits   Recursive problem-solver orchestrator
 | [reel](reel/) | Agent session runtime. Owns the tool loop (50 rounds / 200 tool calls), a sandboxed NuShell MCP session via lot, and 6 built-in tools (Read, Write, Edit, Glob, Grep, NuShell). Library + CLI. | [reel/README.md](reel/README.md) |
 | [vault](vault/) | Persistent file-based knowledge store. Accumulates project knowledge through four operations (bootstrap, record, query, reorganize) backed by a reel agent. Library + CLI. | [vault/README.md](vault/README.md) |
 | [cue](cue/) | Generic recursive task orchestration framework. Defines the `TaskNode` and `TaskStore` traits, coordination algorithm (DFS traversal, retry, escalation, fix loops, recovery), `CueEvent` enum, and shared orchestration types. Orchestrator is generic over `EventEmitter<CueEvent>`. No AI dependencies. | |
-| [mech](mech/) | Declarative YAML-based workflow definition format targeting cue (orchestration) and reel (agent runtime). Unified CDFG of prompt and call blocks with CEL expressions for guards, templates, and state. Under active TDD development — see `docs/MECH_SPEC.md`. | |
+| [mech](mech/) | Declarative YAML workflow engine for LLM-driven control and dataflow. Prompt and call blocks in a unified CDFG, CEL expressions for guards and templates, reel agent execution, cue integration for retry and escalation. See `docs/MECH_SPEC.md` for the full specification. | [mech/README.md](mech/README.md) |
 | [epic](epic/) | Recursive problem-solver. Implements cue's `TaskNode` and `TaskStore` traits with AI agent calls (via reel), vault knowledge persistence, prompts, wire formats, `EventLog` (append-only event store with subscriptions), and TUI. | [epic/README.md](epic/README.md) |
 
 ## Documentation

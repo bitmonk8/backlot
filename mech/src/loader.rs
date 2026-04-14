@@ -706,4 +706,40 @@ functions:
             wf.templates.keys().collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn example_imperative_routing_loads() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/imperative_routing.yaml");
+        let result = WorkflowLoader::new().load(&path);
+        assert!(
+            result.is_ok(),
+            "imperative_routing.yaml failed to load: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn example_dataflow_pipeline_loads() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/dataflow_pipeline.yaml");
+        let result = WorkflowLoader::new().load(&path);
+        assert!(
+            result.is_ok(),
+            "dataflow_pipeline.yaml failed to load: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn example_function_composition_loads() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/function_composition.yaml");
+        let result = WorkflowLoader::new().load(&path);
+        assert!(
+            result.is_ok(),
+            "function_composition.yaml failed to load: {:?}",
+            result.err()
+        );
+    }
 }

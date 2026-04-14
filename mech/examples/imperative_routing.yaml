@@ -1,0 +1,82 @@
+# imperative_routing.yaml
+#
+# Demonstrates imperative mode: blocks execute one at a time, driven by
+# transitions and guards. An initial classify block routes to one of two
+# handler blocks based on the question type. Each handler produces the
+# final answer independently.
+#
+# Key concepts shown:
+#   - prompt blocks with `schema:` for structured LLM output
+#   - `transitions:` with `when:` guards (CEL expressions)
+#   - default transition (no `when:`) as an unconditional fallback route
+#   - `depends_on:` for explicit predecessor ordering within a branch
+#   - workflow-level `system` prompt shared across all blocks
+
+workflow:
+  system: "You are a helpful assistant that answers questions concisely."
+
+functions:
+  answer_question:
+    # Input schema declares what callers must provide.
+    input:
+      type: object
+      required: [question]
+      properties:
+        question: { type: string }
+
+    blocks:
+      # Step 1: classify the question so we can pick the right handler.
+      classify:
+        prompt: |
+          Classify the following question as either "technical" or "general".
+          Question: {{input.question}}
+        schema:
+          type: object
+          required: [category]
+          properties:
+            category:
+              type: string
+              enum: [technical, general]
+
+        # Guards are CEL expressions evaluated against the block output.
+        # The first matching transition is taken; the last (no `when:`) is
+        # the unconditional fallback.
+        transitions:
+          - when: 'output.category == "technical"'
+            goto: technical_answer
+          - goto: general_answer   # fallback — catches "general" and any
+                                   # unexpected category value
+
+      # Step 2a: handle technical questions with precise detail.
+      technical_answer:
+        prompt: |
+          The question has been classified as technical.
+          Give a precise, technically accurate answer:
+          {{input.question}}
+        schema:
+          type: object
+          required: [answer, confidence]
+          properties:
+            answer:     { type: string }
+            confidence: { type: string, enum: [high, medium, low] }
+        # The transition from classify already guarantees ordering;
+        # depends_on is declared to make blocks.classify.output.*
+        # accessible in template interpolation.
+        depends_on: [classify]
+
+      # Step 2b: handle general questions with a friendlier tone.
+      general_answer:
+        prompt: |
+          The question has been classified as general.
+          Give a friendly, easy-to-understand answer:
+          {{input.question}}
+        schema:
+          type: object
+          required: [answer, confidence]
+          properties:
+            answer:     { type: string }
+            confidence: { type: string, enum: [high, medium, low] }
+        # The transition from classify already guarantees ordering;
+        # depends_on is declared to make blocks.classify.output.*
+        # accessible in template interpolation.
+        depends_on: [classify]

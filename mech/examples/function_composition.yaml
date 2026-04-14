@@ -1,0 +1,99 @@
+# function_composition.yaml
+#
+# Demonstrates function composition via call blocks. An outer function
+# decomposes a task into two sub-tasks and delegates each to an inner
+# function. The outer function then aggregates the results.
+#
+# Key concepts shown:
+#   - `call:` blocks that invoke another function by name
+#   - `input:` mapping — CEL templates that supply the callee's input fields
+#   - `output:` mapping — extracts fields from the callee's result using
+#     `<callee_name>.output.<field>` syntax
+#   - explicit function `output:` schema (required when call blocks with
+#     output mappings are terminal — cannot be structurally inferred)
+#   - callee starts a fresh conversation (caller's history is unaffected)
+#   - function `input` / `output` schemas document the contract between caller
+#     and callee
+
+functions:
+  # Inner function: translates a single sentence into the target language.
+  # Called by `translate_document` for each chunk.
+  translate_sentence:
+    input:
+      type: object
+      required: [sentence, target_language]
+      properties:
+        sentence:        { type: string }
+        target_language: { type: string }
+
+    blocks:
+      translate:
+        prompt: |
+          Translate the following sentence into {{input.target_language}}.
+          Do not add explanations — output only the translation.
+          Sentence: {{input.sentence}}
+        schema:
+          type: object
+          required: [translation]
+          properties:
+            translation: { type: string }
+
+  # Outer function: splits a short document into two sentences, translates
+  # each by calling `translate_sentence`, then combines the results.
+  translate_document:
+    input:
+      type: object
+      required: [first_sentence, second_sentence, target_language]
+      properties:
+        first_sentence:  { type: string }
+        second_sentence: { type: string }
+        target_language: { type: string }
+
+    # Explicit output schema: required because `combine` is the terminal block
+    # and its schema fully describes the function's return value.
+    output:
+      type: object
+      required: [document]
+      properties:
+        document: { type: string }
+
+    blocks:
+      # Call block — invokes `translate_sentence` for the first sentence.
+      # `input:` maps this function's fields into the callee's input schema.
+      # `output:` extracts fields from the callee's result; the callee's name
+      # (`translate_sentence`) is the top-level variable in output expressions.
+      translate_first:
+        call: translate_sentence
+        input:
+          sentence:        "{{input.first_sentence}}"
+          target_language: "{{input.target_language}}"
+        # The output mapping references the callee result as
+        # `translate_sentence.output.<field>`. Downstream blocks access this
+        # block's result as `blocks.translate_first.output.translated_first`.
+        output:
+          translated_first: "{{translate_sentence.output.translation}}"
+
+      # Call block — invokes `translate_sentence` for the second sentence.
+      # Runs independently of `translate_first` (dataflow scheduling).
+      translate_second:
+        call: translate_sentence
+        input:
+          sentence:        "{{input.second_sentence}}"
+          target_language: "{{input.target_language}}"
+        output:
+          translated_second: "{{translate_sentence.output.translation}}"
+
+      # Final block: join the two translated sentences into a document.
+      # `depends_on` ensures both call blocks have completed before this runs.
+      combine:
+        prompt: |
+          Join these two translated sentences into a coherent short paragraph
+          in {{input.target_language}}:
+          1. {{blocks.translate_first.output.translated_first}}
+          2. {{blocks.translate_second.output.translated_second}}
+        schema:
+          type: object
+          required: [document]
+          properties:
+            document: { type: string }
+        depends_on: [translate_first, translate_second]
