@@ -117,7 +117,11 @@ fn resolve_calls(
 
 /// Check that every called function exists in the workflow. Defense in depth —
 /// the loader should have caught this, but runtime guards are cheap.
-fn validate_function_exists(workflow: &Workflow, fn_name: &str, block_id: &str) -> MechResult<()> {
+pub(crate) fn validate_function_exists(
+    workflow: &Workflow,
+    fn_name: &str,
+    block_id: &str,
+) -> MechResult<()> {
     if !workflow.file().functions.contains_key(fn_name) {
         return Err(MechError::Validation {
             errors: vec![format!(
@@ -867,5 +871,29 @@ functions:
         .expect_err("should error");
 
         assert!(matches!(err, MechError::Validation { .. }));
+    }
+
+    // ---- T13: validate_function_exists accepts/rejects functions -----------
+
+    #[test]
+    fn validate_function_exists_rejects_missing_function() {
+        let wf = load(SINGLE_CALL);
+        let err = validate_function_exists(&wf, "ghost", "do_call").expect_err("must reject ghost");
+        match err {
+            MechError::Validation { errors } => {
+                assert!(
+                    errors.iter().any(|e| e.contains("ghost")),
+                    "error should mention `ghost`: {errors:?}"
+                );
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_function_exists_passes_for_declared_function() {
+        let wf = load(SINGLE_CALL);
+        validate_function_exists(&wf, "callee", "do_call")
+            .expect("callee exists and must be accepted");
     }
 }

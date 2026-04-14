@@ -353,6 +353,15 @@ functions:
         infer_function_outputs(&mut wf).unwrap();
         let out = inferred_output(&wf, "f");
         assert!(out.pointer("/properties/done").is_some());
+        assert_eq!(
+            out.pointer("/properties/done/type")
+                .and_then(|v| v.as_str()),
+            Some("boolean")
+        );
+        assert!(
+            out.pointer("/properties/r").is_none(),
+            "non-terminal property must not leak into inferred output"
+        );
     }
 
     #[test]
@@ -436,6 +445,53 @@ functions:
     }
 
     #[test]
+    fn ref_and_inline_with_different_schemas_errors() {
+        // A $ref terminal and an inline terminal with DIFFERENT schemas must
+        // produce an InferenceFailed error, proving the $ref path is exercised.
+        let yaml = r#"
+workflow:
+  schemas:
+    result:
+      type: object
+      properties:
+        value: { type: integer }
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      start:
+        prompt: "route"
+        schema: { type: object }
+        transitions:
+          - when: "true"
+            goto: a
+          - goto: b
+      a:
+        prompt: "a"
+        schema: "$ref:#result"
+      b:
+        prompt: "b"
+        schema:
+          type: object
+          properties:
+            other: { type: string }
+"#;
+        let mut wf = parse_workflow(yaml).unwrap();
+        let err = infer_function_outputs(&mut wf).expect_err("must error");
+        match err {
+            MechError::InferenceFailed { function, message } => {
+                assert_eq!(function, "f");
+                assert!(
+                    message.contains("incompatible"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InferenceFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn inference_is_idempotent() {
         let yaml = r#"
 functions:
@@ -490,26 +546,32 @@ functions:
         // Both functions are infer; callee's schema is itself inferred from
         // its one terminal prompt block. caller delegates to callee via a
         // bare single-fn call block with no output mapping.
+        //
+        // The caller sorts alphabetically BEFORE the callee (a_caller < z_callee),
+        // forcing a real second fixed-point pass: on the first pass a_caller
+        // is visited before z_callee has been resolved, so it defers;
+        // z_callee resolves from its prompt block; the second pass resolves
+        // a_caller.
         let yaml = r#"
 functions:
-  callee:
+  z_callee:
     input: { type: object }
     output: infer
     blocks:
       only:
         prompt: "hi"
         schema: { type: object, properties: { q: { type: integer } } }
-  caller:
+  a_caller:
     input: { type: object }
     output: infer
     blocks:
       go:
-        call: callee
+        call: z_callee
         input: {}
 "#;
         let mut wf = parse_workflow(yaml).unwrap();
         infer_function_outputs(&mut wf).unwrap();
-        let out = inferred_output(&wf, "caller");
+        let out = inferred_output(&wf, "a_caller");
         assert_eq!(
             out.pointer("/properties/q/type").and_then(|v| v.as_str()),
             Some("integer")
@@ -567,6 +629,148 @@ functions:
         let mut wf = parse_workflow(yaml).unwrap();
         let err = infer_function_outputs(&mut wf).expect_err("must error");
         assert!(matches!(err, MechError::InferenceFailed { .. }));
+    }
+
+    #[test]
+    fn prompt_block_with_infer_schema_errors() {
+        // A terminal prompt block that declares schema: infer triggers
+        // the SchemaRef::Infer arm, which is not allowed on blocks.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      only:
+        prompt: "hi"
+        schema: infer
+"#;
+        let mut wf = parse_workflow(yaml).unwrap();
+        let err = infer_function_outputs(&mut wf).expect_err("must error");
+        match err {
+            MechError::InferenceFailed { function, message } => {
+                assert_eq!(function, "f");
+                assert!(
+                    message.contains("not allowed on blocks"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InferenceFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_form_call_block_as_terminal_errors() {
+        // A terminal call block using a uniform list form cannot be
+        // structurally inferred.
+        let yaml = r#"
+functions:
+  fn_a:
+    input: { type: object }
+    output:
+      type: object
+      properties:
+        x: { type: string }
+    blocks:
+      b:
+        prompt: "stub"
+        schema: { type: object, properties: { x: { type: string } } }
+  fn_b:
+    input: { type: object }
+    output:
+      type: object
+      properties:
+        x: { type: string }
+    blocks:
+      b:
+        prompt: "stub"
+        schema: { type: object, properties: { x: { type: string } } }
+  caller:
+    input: { type: object }
+    output: infer
+    blocks:
+      go:
+        call: [fn_a, fn_b]
+        input:
+          v: "{{input.v}}"
+"#;
+        let mut wf = parse_workflow(yaml).unwrap();
+        let err = infer_function_outputs(&mut wf).expect_err("must error");
+        match err {
+            MechError::InferenceFailed { function, message } => {
+                assert_eq!(function, "caller");
+                assert!(
+                    message.contains("list-form call block"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InferenceFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_terminals_field_selects_declared_terminals() {
+        // When a function explicitly declares terminals: [t], only block t
+        // is used for inference even though block other also has no transitions.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    terminals: [t]
+    blocks:
+      t:
+        prompt: "terminal"
+        schema:
+          type: object
+          properties:
+            chosen: { type: boolean }
+      other:
+        prompt: "not a terminal"
+        schema:
+          type: object
+          properties:
+            ignored: { type: string }
+"#;
+        let mut wf = parse_workflow(yaml).unwrap();
+        infer_function_outputs(&mut wf).unwrap();
+        let out = inferred_output(&wf, "f");
+        assert!(
+            out.pointer("/properties/chosen").is_some(),
+            "expected terminal t's schema"
+        );
+        assert!(
+            out.pointer("/properties/ignored").is_none(),
+            "non-terminal block's schema must not leak"
+        );
+    }
+
+    #[test]
+    fn ref_to_unknown_shared_schema_on_terminal_prompt_errors() {
+        // A terminal prompt block whose schema references a shared schema
+        // that doesn't exist triggers the unresolved-ref error path.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      only:
+        prompt: "hi"
+        schema: "$ref:#nonexistent"
+"#;
+        let mut wf = parse_workflow(yaml).unwrap();
+        let err = infer_function_outputs(&mut wf).expect_err("must error");
+        match err {
+            MechError::InferenceFailed { function, message } => {
+                assert_eq!(function, "f");
+                assert!(
+                    message.contains("unresolved"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InferenceFailed, got {other:?}"),
+        }
     }
 
     #[test]
