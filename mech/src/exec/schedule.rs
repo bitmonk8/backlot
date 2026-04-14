@@ -886,7 +886,10 @@ functions:
           required: [status]
           properties: { status: { type: string } }
         transitions:
-          - when: 'output.nonexistent.deep.field == "x"'
+          # Uses `status` (a required string field) so the guard passes load-time
+          # optional-field-safety validation; `.deep.field` still errors at runtime
+          # because strings have no attributes.
+          - when: 'output.status.deep.field == "x"'
             goto: unreachable
           - goto: fallback
       unreachable:

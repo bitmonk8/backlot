@@ -15,7 +15,7 @@
 //! structural (block discrimination, name format, context declarations, …),
 //! graph (DAG check on `depends_on`, transition target existence, dominator-
 //! based template reachability, …), and type (schema validity, CEL
-//! compilation + variable scope, agent model resolution, input-schema match
+//! compilation + variable scope, CEL optional field safety, agent model resolution, input-schema match
 //! against callee, …).
 //!
 //! # Hermetic agent model resolution
@@ -1074,6 +1074,8 @@ impl<'a> Validator<'a> {
         let block_fields = collect_block_fields(func, wf);
         let dominators = compute_dominators(func);
         let dep_closure = transitive_depends_on(func);
+        let block_required_fields = collect_block_required_fields(func, wf);
+        let input_required = schema_required_fields(&func.input);
 
         for (name, block) in &func.blocks {
             let bloc = floc.clone().with_block(name);
@@ -1090,9 +1092,10 @@ impl<'a> Validator<'a> {
                         false,
                     );
                     for (k, expr) in &p.set_context {
+                        let field_loc = bloc.clone().with_field(format!("set_context.{k}"));
                         self.check_cel_expr(
                             expr,
-                            &bloc.clone().with_field(format!("set_context.{k}")),
+                            &field_loc,
                             name,
                             &block_fields,
                             &dominators,
@@ -1101,11 +1104,19 @@ impl<'a> Validator<'a> {
                             false,
                             &[],
                         );
+                        self.check_cel_optional_field_safety(
+                            expr,
+                            &field_loc,
+                            name,
+                            &block_required_fields,
+                            &input_required,
+                        );
                     }
                     for (k, expr) in &p.set_workflow {
+                        let field_loc = bloc.clone().with_field(format!("set_workflow.{k}"));
                         self.check_cel_expr(
                             expr,
-                            &bloc.clone().with_field(format!("set_workflow.{k}")),
+                            &field_loc,
                             name,
                             &block_fields,
                             &dominators,
@@ -1113,13 +1124,22 @@ impl<'a> Validator<'a> {
                             true,
                             false,
                             &[],
+                        );
+                        self.check_cel_optional_field_safety(
+                            expr,
+                            &field_loc,
+                            name,
+                            &block_required_fields,
+                            &input_required,
                         );
                     }
                     for (i, t) in p.transitions.iter().enumerate() {
                         if let Some(when) = &t.when {
+                            let field_loc =
+                                bloc.clone().with_field(format!("transitions[{i}].when"));
                             self.check_cel_expr(
                                 when,
-                                &bloc.clone().with_field(format!("transitions[{i}].when")),
+                                &field_loc,
                                 name,
                                 &block_fields,
                                 &dominators,
@@ -1127,6 +1147,13 @@ impl<'a> Validator<'a> {
                                 true,
                                 /*forbid_blocks=*/ true,
                                 &[],
+                            );
+                            self.check_cel_optional_field_safety(
+                                when,
+                                &field_loc,
+                                name,
+                                &block_required_fields,
+                                &input_required,
                             );
                         }
                     }
@@ -1181,9 +1208,10 @@ impl<'a> Validator<'a> {
                         }
                     }
                     for (k, expr) in &c.set_context {
+                        let field_loc = bloc.clone().with_field(format!("set_context.{k}"));
                         self.check_cel_expr(
                             expr,
-                            &bloc.clone().with_field(format!("set_context.{k}")),
+                            &field_loc,
                             name,
                             &block_fields,
                             &dominators,
@@ -1192,11 +1220,19 @@ impl<'a> Validator<'a> {
                             false,
                             &[],
                         );
+                        self.check_cel_optional_field_safety(
+                            expr,
+                            &field_loc,
+                            name,
+                            &block_required_fields,
+                            &input_required,
+                        );
                     }
                     for (k, expr) in &c.set_workflow {
+                        let field_loc = bloc.clone().with_field(format!("set_workflow.{k}"));
                         self.check_cel_expr(
                             expr,
-                            &bloc.clone().with_field(format!("set_workflow.{k}")),
+                            &field_loc,
                             name,
                             &block_fields,
                             &dominators,
@@ -1204,13 +1240,22 @@ impl<'a> Validator<'a> {
                             true,
                             false,
                             &[],
+                        );
+                        self.check_cel_optional_field_safety(
+                            expr,
+                            &field_loc,
+                            name,
+                            &block_required_fields,
+                            &input_required,
                         );
                     }
                     for (i, t) in c.transitions.iter().enumerate() {
                         if let Some(when) = &t.when {
+                            let field_loc =
+                                bloc.clone().with_field(format!("transitions[{i}].when"));
                             self.check_cel_expr(
                                 when,
-                                &bloc.clone().with_field(format!("transitions[{i}].when")),
+                                &field_loc,
                                 name,
                                 &block_fields,
                                 &dominators,
@@ -1218,6 +1263,13 @@ impl<'a> Validator<'a> {
                                 true,
                                 /*forbid_blocks=*/ true,
                                 &[],
+                            );
+                            self.check_cel_optional_field_safety(
+                                when,
+                                &field_loc,
+                                name,
+                                &block_required_fields,
+                                &input_required,
                             );
                         }
                     }
@@ -1374,6 +1426,82 @@ impl<'a> Validator<'a> {
                     format!(
                         "template reference to `blocks.{target_block}` is not statically reachable: \
                          add `depends_on: [{target_block}]` or ensure it dominates `{cur_block}`"
+                    ),
+                );
+            }
+        }
+    }
+
+    // ---- CEL optional field safety (MECH_SPEC §10.1) ----------------------
+
+    fn check_cel_optional_field_safety(
+        &mut self,
+        expr_src: &str,
+        loc: &Location,
+        cur_block: &str,
+        block_required_fields: &BTreeMap<String, BTreeSet<String>>,
+        input_required: &BTreeSet<String>,
+    ) {
+        let ast = match cel_parser::parse(expr_src) {
+            Ok(a) => a,
+            Err(_) => return, // parse error already reported by check_cel_expr
+        };
+
+        let protected = collect_has_protected_paths(&ast);
+        let accesses = collect_field_access_paths(&ast);
+
+        for path in &accesses {
+            if path.len() < 2 {
+                continue;
+            }
+            let namespace = &path[0];
+
+            // context and workflow namespaces: all fields are effectively
+            // required (initialized with `initial` values) — skip.
+            if namespace == "context" || namespace == "workflow" {
+                continue;
+            }
+
+            let (field_name, required_set) = if namespace == "output" {
+                let field = &path[1];
+                let req = block_required_fields.get(cur_block);
+                (field.as_str(), req)
+            } else if namespace == "input" {
+                let field = &path[1];
+                (field.as_str(), Some(input_required))
+            } else if namespace == "blocks" || namespace == "block" {
+                if path.len() >= 4 && path[2] == "output" {
+                    let block_name = &path[1];
+                    let field = &path[3];
+                    let req = block_required_fields.get(block_name.as_str());
+                    (field.as_str(), req)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
+
+            let Some(req_set) = required_set else {
+                continue;
+            };
+
+            if req_set.contains(field_name) {
+                continue;
+            }
+
+            // Field is optional (not in required). Check if protected by has().
+            let is_protected = protected.iter().any(|hp| {
+                hp.len() <= path.len() && hp.iter().zip(path.iter()).all(|(a, b)| a == b)
+            });
+
+            if !is_protected {
+                let path_str = path.join(".");
+                self.err(
+                    loc.clone(),
+                    format!(
+                        "CEL optional field safety: `{path_str}` accesses field `{field_name}` \
+                         which is not in `required` — add `has({path_str})` guard"
                     ),
                 );
             }
@@ -1644,6 +1772,194 @@ fn resolve_schema_value(s: &SchemaRef, wf: &WorkflowFile) -> Option<JsonValue> {
             wf.workflow.as_ref()?.schemas.get(name).cloned()
         }
         SchemaRef::Infer(_) => None,
+    }
+}
+
+// ---- Schema required-field helpers ----------------------------------------
+
+/// Extract the `required` array from a JSON Schema object.
+fn schema_required_fields(schema: &JsonValue) -> BTreeSet<String> {
+    schema
+        .get("required")
+        .and_then(JsonValue::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(JsonValue::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Like [`collect_block_fields`] but returns the `required` set per block.
+fn collect_block_required_fields(
+    func: &FunctionDef,
+    wf: &WorkflowFile,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (name, block) in &func.blocks {
+        let schema_value = match block {
+            BlockDef::Prompt(p) => Some(resolve_schema_value(&p.schema, wf)),
+            BlockDef::Call(c) => match &c.call {
+                CallSpec::Single(fname) => wf
+                    .functions
+                    .get(fname)
+                    .and_then(|f| f.output.as_ref())
+                    .map(|s| resolve_schema_value(s, wf)),
+                _ => None,
+            },
+        };
+        let required = match schema_value {
+            Some(Some(ref v)) => schema_required_fields(v),
+            _ => BTreeSet::new(),
+        };
+        out.insert(name.clone(), required);
+    }
+    out
+}
+
+// ---- CEL AST walking for has()-protected paths and field accesses ---------
+
+fn collect_has_protected_paths(expr: &Expression) -> BTreeSet<Vec<String>> {
+    let mut out = BTreeSet::new();
+    walk_for_has(expr, &mut out);
+    out
+}
+
+fn walk_for_has(expr: &Expression, out: &mut BTreeSet<Vec<String>>) {
+    match expr {
+        Expression::FunctionCall(name_expr, target, args) => {
+            if let Expression::Ident(name) = name_expr.as_ref() {
+                if name.as_ref() == "has" {
+                    for arg in args {
+                        if let Some((root, attrs)) = flatten_member_chain(arg) {
+                            let mut path = vec![root];
+                            path.extend(attrs);
+                            out.insert(path);
+                        }
+                    }
+                }
+            }
+            walk_for_has(name_expr, out);
+            if let Some(t) = target {
+                walk_for_has(t, out);
+            }
+            for a in args {
+                walk_for_has(a, out);
+            }
+        }
+        Expression::Arithmetic(a, _, b)
+        | Expression::Relation(a, _, b)
+        | Expression::Or(a, b)
+        | Expression::And(a, b) => {
+            walk_for_has(a, out);
+            walk_for_has(b, out);
+        }
+        Expression::Ternary(a, b, c) => {
+            walk_for_has(a, out);
+            walk_for_has(b, out);
+            walk_for_has(c, out);
+        }
+        Expression::Unary(_, a) => walk_for_has(a, out),
+        Expression::Member(inner, member) => {
+            walk_for_has(inner, out);
+            if let Member::Index(idx) = member.as_ref() {
+                walk_for_has(idx, out);
+            }
+            if let Member::Fields(fields) = member.as_ref() {
+                for (_, e) in fields {
+                    walk_for_has(e, out);
+                }
+            }
+        }
+        Expression::List(items) => {
+            for it in items {
+                walk_for_has(it, out);
+            }
+        }
+        Expression::Map(entries) => {
+            for (k, v) in entries {
+                walk_for_has(k, out);
+                walk_for_has(v, out);
+            }
+        }
+        Expression::Atom(_) | Expression::Ident(_) => {}
+    }
+}
+
+fn collect_field_access_paths(expr: &Expression) -> BTreeSet<Vec<String>> {
+    let mut out = BTreeSet::new();
+    walk_for_field_access(expr, &mut out);
+    out
+}
+
+fn walk_for_field_access(expr: &Expression, out: &mut BTreeSet<Vec<String>>) {
+    match expr {
+        Expression::Member(_, _) => {
+            if let Some((root, attrs)) = flatten_member_chain(expr) {
+                if !attrs.is_empty() {
+                    let mut path = vec![root];
+                    path.extend(attrs);
+                    out.insert(path);
+                }
+            }
+            walk_member_field_access(expr, out);
+        }
+        Expression::FunctionCall(name_expr, target, args) => {
+            let is_has = matches!(name_expr.as_ref(), Expression::Ident(n) if n.as_ref() == "has");
+            walk_for_field_access(name_expr, out);
+            if let Some(t) = target {
+                walk_for_field_access(t, out);
+            }
+            if !is_has {
+                for a in args {
+                    walk_for_field_access(a, out);
+                }
+            }
+        }
+        Expression::Arithmetic(a, _, b)
+        | Expression::Relation(a, _, b)
+        | Expression::Or(a, b)
+        | Expression::And(a, b) => {
+            walk_for_field_access(a, out);
+            walk_for_field_access(b, out);
+        }
+        Expression::Ternary(a, b, c) => {
+            walk_for_field_access(a, out);
+            walk_for_field_access(b, out);
+            walk_for_field_access(c, out);
+        }
+        Expression::Unary(_, a) => walk_for_field_access(a, out),
+        Expression::List(items) => {
+            for it in items {
+                walk_for_field_access(it, out);
+            }
+        }
+        Expression::Map(entries) => {
+            for (k, v) in entries {
+                walk_for_field_access(k, out);
+                walk_for_field_access(v, out);
+            }
+        }
+        Expression::Atom(_) | Expression::Ident(_) => {}
+    }
+}
+
+fn walk_member_field_access(expr: &Expression, out: &mut BTreeSet<Vec<String>>) {
+    if let Expression::Member(inner, member) = expr {
+        match member.as_ref() {
+            Member::Attribute(_) => walk_member_field_access(inner, out),
+            Member::Index(idx) => {
+                walk_for_field_access(inner, out);
+                walk_for_field_access(idx, out);
+            }
+            Member::Fields(fields) => {
+                walk_for_field_access(inner, out);
+                for (_, e) in fields {
+                    walk_for_field_access(e, out);
+                }
+            }
+        }
     }
 }
 
@@ -2984,5 +3300,334 @@ functions:
             "expected parallel-write warning, got warnings: {:#?}",
             r.warnings
         );
+    }
+
+    // ---- CEL optional field safety tests -----------------------------------
+
+    #[test]
+    fn optional_field_safety_required_field_clean() {
+        // Access to required field should not error.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      n: { type: integer, initial: 0 }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [category]
+          properties:
+            category: { type: string }
+        set_context:
+          n: "output.category"
+"#;
+        let r = ok(yaml);
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| e.message.contains("optional field safety")),
+            "required field access should not trigger optional field safety; errors: {:#?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn optional_field_safety_optional_without_has_errors() {
+        // Access to optional field without has() should error.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      n: { type: integer, initial: 0 }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [category]
+          properties:
+            category: { type: string }
+            x: { type: integer }
+        set_context:
+          n: "output.x"
+"#;
+        let r = ok(yaml);
+        assert_err_contains(&r, "optional field safety");
+        assert_err_contains(&r, "output.x");
+    }
+
+    #[test]
+    fn optional_field_safety_has_guard_clean() {
+        // Access to optional field with has() guard should be clean.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      n: { type: integer, initial: 0 }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [category]
+          properties:
+            category: { type: string }
+            x: { type: integer }
+        set_context:
+          n: "has(output.x) && output.x > 0"
+"#;
+        let r = ok(yaml);
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| e.message.contains("optional field safety")),
+            "has()-guarded access should not trigger optional field safety; errors: {:#?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn optional_field_safety_direct_has_clean() {
+        // Expression using has(output.x) directly in the same expression.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [category]
+          properties:
+            category: { type: string }
+            x: { type: integer }
+        transitions:
+          - when: "has(output.x) && output.x > 0"
+            goto: done
+          - goto: done
+      done:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+"#;
+        let r = ok(yaml);
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| e.message.contains("optional field safety")),
+            "has()-guarded access should not error; errors: {:#?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn optional_field_safety_input_namespace_errors() {
+        // Access to optional field in input namespace should error.
+        let yaml = r#"
+functions:
+  f:
+    input:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        optional_field: { type: string }
+    context:
+      v: { type: string, initial: "" }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+        set_context:
+          v: "input.optional_field"
+"#;
+        let r = ok(yaml);
+        assert_err_contains(&r, "optional field safety");
+        assert_err_contains(&r, "input.optional_field");
+    }
+
+    #[test]
+    fn optional_field_safety_blocks_namespace_errors() {
+        // Access to optional field via blocks.NAME.output.FIELD should error.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      v: { type: integer, initial: 0 }
+    blocks:
+      prev:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [category]
+          properties:
+            category: { type: string }
+            opt_field: { type: integer }
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+        depends_on: [prev]
+        set_context:
+          v: "blocks.prev.output.opt_field"
+"#;
+        let r = ok(yaml);
+        assert_err_contains(&r, "optional field safety");
+        assert_err_contains(&r, "opt_field");
+    }
+
+    #[test]
+    fn optional_field_safety_nested_has_protection() {
+        // has(output.x) protects output.x.y via prefix match.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      v: { type: string, initial: "" }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [category]
+          properties:
+            category: { type: string }
+            x: { type: object }
+        set_context:
+          v: "has(output.x) && output.x.y"
+"#;
+        let r = ok(yaml);
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| e.message.contains("optional field safety")),
+            "prefix has() should protect deeper access; errors: {:#?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn optional_field_safety_context_workflow_no_check() {
+        // context and workflow namespaces should not trigger the check.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      count: { type: integer, initial: 0 }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+        transitions:
+          - when: "context.count > 0"
+            goto: done
+          - goto: done
+      done:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+"#;
+        let r = ok(yaml);
+        assert!(
+            !r.errors
+                .iter()
+                .any(|e| e.message.contains("optional field safety")),
+            "context/workflow namespaces should not trigger safety check; errors: {:#?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn optional_field_safety_mixed_protected_and_unprotected() {
+        // has(output.a) protects a; output.b is unprotected -> error only for b.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      v: { type: integer, initial: 0 }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [category]
+          properties:
+            category: { type: string }
+            a: { type: integer }
+            b: { type: integer }
+        set_context:
+          v: "has(output.a) && output.a > 0 && output.b > 0"
+"#;
+        let r = ok(yaml);
+        let safety_errors: Vec<_> = r
+            .errors
+            .iter()
+            .filter(|e| e.message.contains("optional field safety"))
+            .collect();
+        assert_eq!(
+            safety_errors.len(),
+            1,
+            "expected exactly 1 optional field safety error, got: {:#?}",
+            safety_errors
+        );
+        assert!(
+            safety_errors[0].message.contains("output.b"),
+            "error should be about output.b, got: {}",
+            safety_errors[0].message
+        );
+    }
+
+    #[test]
+    fn optional_field_safety_when_guard_optional_errors() {
+        // when guard accessing optional field without has() should error.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [category]
+          properties:
+            category: { type: string }
+            x: { type: integer }
+        transitions:
+          - when: "output.x > 0"
+            goto: done
+          - goto: done
+      done:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+"#;
+        let r = ok(yaml);
+        assert_err_contains(&r, "optional field safety");
+        assert_err_contains(&r, "output.x");
     }
 }

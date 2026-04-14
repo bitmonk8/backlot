@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Complete. 278 tests passing (252 unit + 26 integration), zero clippy warnings.
+**Phase:** Complete. 288 tests passing (262 unit + 26 integration), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
