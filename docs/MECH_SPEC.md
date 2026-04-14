@@ -1148,6 +1148,7 @@ The loader performs all of the following checks when a workflow file is loaded. 
 | Template reference reachability | Error | The referenced block is guaranteed to have executed before the referencing block (domination or `depends_on`). |
 | CEL compilation | Error | All `when` guards and `set_context` expressions compile as valid CEL. |
 | CEL variable scope | Error | All CEL expressions (guards, `set_context`, template `{{...}}`) only reference variables available in their evaluation context (§6.3). |
+| CEL optional field safety | Error | CEL expressions in `when` guards, `set_context`, and `set_workflow` that access fields not in the source schema's `required` list without a `has()` guard are rejected. The check walks the parsed CEL AST (`cel_parser::parse`), extracts `Member`/`Ident` field-access paths, resolves each path's root namespace (`output`, `input`, `context`, `workflow`) and schema, and verifies that any field not in `required` is accessed only inside a `has()` call or behind a `has()` check in a short-circuit expression (e.g., `has(output.x) && output.x > 0`). |
 | Agent model resolution | Error | All `agent.model` fields (block, function, workflow) resolve via flick's `ModelRegistry`. |
 | Agent grant validity | Error | `agent.grant` values must be valid: `tools`, `write`, `network`. |
 | Agent grant normalization | — | `write` and `network` imply `tools` (auto-added if missing). Specifying `tools` (custom tool names) implies `grant: [tools]`. |
@@ -1175,12 +1176,12 @@ The LLM returned output that does not validate against the block's JSON Schema.
 
 #### Guard Evaluation Error
 
-A CEL guard expression raises a runtime error (e.g., type mismatch, accessing a field on null).
+A CEL guard expression raises a runtime error (e.g., type mismatch, division by zero).
 
-- **Behavior:** The transition is treated as non-matching (guard is false). Evaluation continues to the next transition. If no transitions match, the block becomes a de facto terminal (§6.5).
-- **Reporting:** A warning is emitted with the block name, the guard expression, and the CEL error. This is not a fatal error — the workflow continues.
+- **Behavior:** The block fails. The error message includes the block name, the guard expression, and the CEL error.
+- **Propagation:** Block failure → function failure → cue retry/escalation if orchestrated.
 
-**Rationale:** Treating guard errors as false (skip) rather than fatal keeps the workflow running. The unconditional fallback (if present) catches the case. If no fallback exists, the block terminates the path — which is visible in the function's output.
+**Rationale:** Mech's static validation (§10.1) catches the vast majority of guard errors at load time — variable scope, field existence, type compatibility, and optional-field safety (`has()` requirement). A guard error that survives load-time checks indicates a bug in the workflow or the executor, not a recoverable condition. Failing loudly makes these bugs visible immediately rather than masking them behind a silent false evaluation and unpredictable control flow.
 
 #### Template Resolution Error
 
