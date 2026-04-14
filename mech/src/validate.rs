@@ -766,6 +766,16 @@ impl<'a> Validator<'a> {
             let loc = self
                 .root_loc()
                 .with_field(format!("workflow.agents.{name}"));
+            // §12.1: `extends` is only permitted on inline agent configs, not
+            // on named entries in `workflow.agents`.
+            if ac.extends.is_some() {
+                self.err(
+                    loc.clone().with_field("extends"),
+                    format!(
+                        "named agent `{name}` must not use `extends` (extends is only permitted on inline agent configs)"
+                    ),
+                );
+            }
             self.validate_agent_inline(ac, models, loc);
         }
         // Cycle detection on extends chains.
@@ -2898,7 +2908,9 @@ functions:
         schema: { type: object, required: [k], properties: { k: { type: string } } }
 "#;
         let r = ok(yaml);
-        assert_err_contains(&r, "is not a named agent");
+        // Named agent with extends is rejected by the inline-only rule
+        // before the target-resolution check fires.
+        assert_err_contains(&r, "must not use `extends`");
     }
 
     #[test]
@@ -2919,7 +2931,129 @@ functions:
         schema: { type: object, required: [k], properties: { k: { type: string } } }
 "#;
         let r = ok(yaml);
-        assert_err_contains(&r, "cyclic `extends`");
+        // Both named agents use extends, rejected by the inline-only rule.
+        assert_err_contains(&r, "must not use `extends`");
+    }
+
+    #[test]
+    fn named_agent_extends_rejected() {
+        // A named agent entry in workflow.agents must not specify extends.
+        let yaml = r#"
+workflow:
+  agents:
+    base:
+      model: sonnet
+    derived:
+      extends: base
+      grant: [write]
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+        let r = ok(yaml);
+        assert!(!r.is_ok(), "validation must fail");
+        assert_err_contains(&r, "must not use `extends`");
+        // The error should mention the offending agent name.
+        assert_err_contains(&r, "derived");
+    }
+
+    #[test]
+    fn named_agent_no_extends_ok() {
+        // Named agents that do not use extends must still validate cleanly.
+        let yaml = r#"
+workflow:
+  agents:
+    reader:
+      model: sonnet
+      grant: [tools]
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+        let r = ok(yaml);
+        assert_clean(&r);
+    }
+
+    #[test]
+    fn inline_agent_extends_still_accepted() {
+        // Inline agent configs (function-level, block-level) may still use
+        // extends; only named agents are forbidden.
+        let yaml = r#"
+workflow:
+  agents:
+    base:
+      model: sonnet
+      grant: [tools]
+functions:
+  f:
+    input: { type: object }
+    agent:
+      extends: base
+      model: opus
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+        agent:
+          extends: base
+          grant: [write]
+"#;
+        let r = ok(yaml);
+        assert_clean(&r);
+    }
+
+    #[test]
+    fn inline_extends_unknown_target() {
+        // An inline agent config (function-level) with extends pointing to a
+        // nonexistent named agent must be rejected.
+        let yaml = r#"
+workflow:
+  agents:
+    base:
+      model: sonnet
+functions:
+  f:
+    input: { type: object }
+    agent:
+      extends: nonexistent
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+        let r = ok(yaml);
+        assert_err_contains(&r, "is not a named agent");
+    }
+
+    #[test]
+    fn named_agent_extends_cycle_detected() {
+        // Named agents that form an extends cycle trigger both the inline-only
+        // rejection and cycle detection (validator is non-short-circuiting).
+        let yaml = r#"
+workflow:
+  agents:
+    a:
+      extends: b
+    b:
+      extends: a
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      c:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+        let r = ok(yaml);
+        assert_err_contains(&r, "cyclic");
     }
 
     #[test]

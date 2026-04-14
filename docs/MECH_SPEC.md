@@ -535,22 +535,9 @@ workflow:
   agent: "$ref:#reader"          # workflow default references a named config
 ```
 
-Named configs are defined once and referenced by name via `$ref:#name` (inline string form) or `extends` (inside an agent block). External files are also supported: `$ref:agents/reader.yaml`.
+Named configs are base definitions only. They are defined once and referenced by name via `$ref:#name` (inline string form) or `extends` (inside an inline agent block at function or block level). External files are also supported: `$ref:agents/reader.yaml`.
 
-Named configs may themselves use `extends` to build on other named configs:
-
-```yaml
-agents:
-  base:
-    model: haiku
-    grant: [tools]
-  writer:
-    extends: base
-    grant: [write]
-    write_paths: [src/]
-```
-
-Here `writer` inherits `model: haiku` from `base` and overrides `grant` and `write_paths`. Circular `extends` chains (e.g., A extends B extends A) are a load-time error.
+Named configs may **not** use `extends` themselves — `extends` is only permitted on inline agent configs (function-level or block-level). A named agent entry in `workflow.agents` that contains an `extends` field is a load-time error (see §12.1).
 
 #### 5.5.4 Reference and Extension
 
