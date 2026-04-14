@@ -92,13 +92,15 @@
 
 ## Mech
 
-**Phase:** Complete. 288 tests passing (262 unit + 26 integration), zero clippy warnings.
+**Phase:** Complete. 295 tests passing (269 unit + 26 integration), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
 - All 12 sections drafted and reviewed. Covers: motivation, design goals, unified CDFG model, conversation model (history scoping, compaction, agent configuration), block specification (prompt + call blocks, field validity), transitions & guards (CEL, ordered evaluation, self-loops), template expressions & scoping (5 namespaces, CEL everywhere), schema handling (inline + `$ref` + workflow-level shared schemas), context & state (two-level declared variables, `set_context`/`set_workflow`), validation & error handling (24+ load-time checks, 5 runtime error types), cue integration (function = leaf task, model escalation interaction), YAML reference schema with complete worked example.
 
 **Next Work:** None identified.
+
+**Recent:** Issue #62 fixed — `resolve_prompt_block_schema` and `SchemaRegistry::build` now recursively resolve nested `$ref:#name` references within shared schema bodies. Issue #288 filed for follow-up refactor (thread `SchemaRegistry` through to prompt executor to eliminate duplicate resolution).
 
 ---
 

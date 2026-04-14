@@ -32,7 +32,7 @@ pub mod infer;
 pub mod registry;
 
 pub use infer::infer_function_outputs;
-pub use registry::{ResolvedSchema, SchemaRegistry};
+pub use registry::{ResolvedSchema, SchemaRegistry, resolve_nested_refs};
 
 use std::collections::BTreeMap;
 

@@ -37,6 +37,7 @@ use crate::exec::agent::{AgentExecutor, AgentRequest};
 use crate::loader::Workflow;
 #[cfg(test)]
 use crate::schema::BlockDef;
+use crate::schema::resolve_nested_refs;
 use crate::schema::{
     AgentConfig, AgentConfigRef, FunctionDef, PromptBlock, SchemaRef, WorkflowFile,
 };
@@ -248,8 +249,10 @@ fn parse_timeout(s: &str) -> MechResult<Duration> {
 /// Extract the inline JSON Schema for a prompt block's output.
 ///
 /// Inline schemas return their body directly; `$ref:#name` schemas are
-/// looked up in the workflow-level shared schemas map. `output: infer` is
-/// forbidden at the block level — by the time the loader is done, every
+/// looked up in the workflow-level shared schemas map.  Nested `$ref:#name`
+/// references within the looked-up schema body are recursively resolved
+/// via [`resolve_nested_refs`].  `output: infer` is forbidden at the block
+/// level — by the time the loader is done, every
 /// prompt block has a concrete schema.
 fn resolve_prompt_block_schema(
     workflow: &WorkflowFile,
@@ -259,14 +262,19 @@ fn resolve_prompt_block_schema(
         SchemaRef::Inline(v) => Ok(v.clone()),
         SchemaRef::Ref(raw) => {
             let name = parse_hash_ref(raw)?;
-            let shared = workflow
+            let schemas_map = workflow
                 .workflow
                 .as_ref()
-                .and_then(|w| w.schemas.get(name))
+                .map(|w| &w.schemas)
                 .ok_or_else(|| MechError::SchemaRefUnresolved {
                     name: name.to_string(),
                 })?;
-            Ok(shared.clone())
+            let shared = schemas_map
+                .get(name)
+                .ok_or_else(|| MechError::SchemaRefUnresolved {
+                    name: name.to_string(),
+                })?;
+            resolve_nested_refs(shared, schemas_map)
         }
         SchemaRef::Infer(_) => Err(MechError::Validation {
             errors: vec!["prompt block schema cannot be `infer`".into()],
@@ -1134,5 +1142,76 @@ functions:
         assert!(req.tools.is_empty());
         assert!(req.write_paths.is_empty());
         assert_eq!(req.timeout, None);
+    }
+
+    // ---- Issue #62: nested $ref:#name in shared schemas -------------------
+
+    #[test]
+    fn shared_schema_with_nested_ref_validates_correctly() {
+        let yaml = r#"
+workflow:
+  schemas:
+    Inner:
+      type: object
+      required: [value]
+      properties:
+        value: { type: integer, minimum: 1 }
+    Outer:
+      type: object
+      required: [inner]
+      properties:
+        inner:
+          $ref: '#Inner'
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "go"
+        schema: "$ref:#Outer"
+"#;
+        let wf = load(yaml);
+        let func = wf.file().functions.get("f").unwrap();
+        let block = match &func.blocks["b"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+
+        // Conforming output passes.
+        {
+            let mut ctx = new_ctx(&BTreeMap::new());
+            let agent = FakeAgent::fixed(json!({ "inner": { "value": 5 } }));
+            let out = run_blocking(execute_prompt_block(
+                &wf,
+                func,
+                "b",
+                &block,
+                &mut ctx,
+                &agent,
+                &mut Conversation::new(),
+            ))
+            .expect("conforming output must pass");
+            assert_eq!(out, json!({ "inner": { "value": 5 } }));
+        }
+
+        // Non-conforming output (value below minimum) fails.
+        {
+            let mut ctx = new_ctx(&BTreeMap::new());
+            let agent = FakeAgent::fixed(json!({ "inner": { "value": 0 } }));
+            let err = run_blocking(execute_prompt_block(
+                &wf,
+                func,
+                "b",
+                &block,
+                &mut ctx,
+                &agent,
+                &mut Conversation::new(),
+            ))
+            .expect_err("non-conforming output must fail");
+            assert!(
+                matches!(err, MechError::SchemaValidationFailure { .. }),
+                "expected SchemaValidationFailure, got {err:?}"
+            );
+        }
     }
 }

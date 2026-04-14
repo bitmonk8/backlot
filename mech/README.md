@@ -145,6 +145,12 @@ JSON Schema objects or `$ref:#<name>` references to the workflow-level
 `schemas:` map. The function's return schema can be declared as `output:`,
 as a `$ref:#<name>`, or left as `infer` (mech derives it from terminal blocks).
 
+Shared schemas may themselves contain nested `$ref:#<name>` references in their
+properties, array items, or combinator members (`allOf`/`anyOf`/`oneOf`). These
+are resolved recursively at registry build time and at prompt-block schema
+lookup time, with cycle detection (returns `SchemaRefCircular`) and missing-ref
+detection (returns `SchemaRefUnresolved`).
+
 ### Agent configuration
 
 Each function and block can specify an `agent:` block overriding the model,

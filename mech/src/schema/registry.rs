@@ -16,6 +16,8 @@
 //! * Build a [`SchemaRegistry`] from the workflow-level `schemas:` map.
 //! * Detect cycles among shared schemas (a schema referencing another via
 //!   `$ref:#name` at its top level) and reject them at construction time.
+//! * Recursively resolve nested `$ref:#name` references within schema
+//!   bodies (any nested JSON objects and arrays) via [`resolve_nested_refs`].
 //! * Compile every named schema with the `jsonschema` crate, producing a
 //!   reusable [`jsonschema::Validator`] per name.
 //! * Resolve any [`SchemaRef`] used inside a workflow to a [`ResolvedSchema`]
@@ -107,11 +109,13 @@ impl SchemaRegistry {
             let mut chain: Vec<String> = Vec::new();
             let mut seen: BTreeSet<String> = BTreeSet::new();
             let body = follow_top_level_ref(name, schemas, &mut chain, &mut seen)?;
-            let validator =
-                jsonschema::validator_for(body).map_err(|e| MechError::SchemaInvalid {
+            let resolved_body = resolve_nested_refs(body, schemas)?;
+            let validator = jsonschema::validator_for(&resolved_body).map_err(|e| {
+                MechError::SchemaInvalid {
                     name: name.clone(),
                     message: e.to_string(),
-                })?;
+                }
+            })?;
             validators.insert(name.clone(), validator);
         }
 
@@ -232,6 +236,81 @@ fn follow_top_level_ref<'a>(
             continue;
         }
         return Ok(body);
+    }
+}
+
+/// Recursively resolve all nested `$ref:#name` references in a JSON Schema value,
+/// replacing them with the corresponding schema body from the shared schemas map.
+///
+/// A `$ref` object is recognised when it is a JSON object with exactly one key
+/// `"$ref"` whose string value matches `#name` (no `/`). Standard JSON Schema
+/// `$ref` values containing `/` are left untouched.
+///
+/// Detects circular references and returns [`MechError::SchemaRefCircular`] if
+/// a cycle is found. Returns [`MechError::SchemaRefUnresolved`] if a target
+/// name does not exist in the schemas map.
+pub fn resolve_nested_refs(
+    schema: &JsonValue,
+    schemas: &BTreeMap<String, JsonValue>,
+) -> MechResult<JsonValue> {
+    let mut seen = BTreeSet::new();
+    let mut chain = Vec::new();
+    resolve_nested_walk(schema, schemas, &mut seen, &mut chain)
+}
+
+fn resolve_nested_walk(
+    schema: &JsonValue,
+    schemas: &BTreeMap<String, JsonValue>,
+    seen: &mut BTreeSet<String>,
+    chain: &mut Vec<String>,
+) -> MechResult<JsonValue> {
+    match schema {
+        Value::Object(map) => {
+            // Check if this object is a `{"$ref": "#name"}` hash-ref.
+            if map.len() == 1 {
+                if let Some(Value::String(ref_str)) = map.get("$ref") {
+                    if let Some(name) = ref_str
+                        .strip_prefix('#')
+                        .filter(|n| !n.is_empty() && !n.contains('/'))
+                    {
+                        // Cycle detection.
+                        if !seen.insert(name.to_string()) {
+                            chain.push(name.to_string());
+                            return Err(MechError::SchemaRefCircular {
+                                chain: chain.clone(),
+                            });
+                        }
+                        chain.push(name.to_string());
+                        let target =
+                            schemas
+                                .get(name)
+                                .ok_or_else(|| MechError::SchemaRefUnresolved {
+                                    name: name.to_string(),
+                                })?;
+                        // Recursively resolve the target body as well.
+                        let result = resolve_nested_walk(target, schemas, seen, chain);
+                        seen.remove(name);
+                        chain.pop();
+                        return result;
+                    }
+                }
+            }
+            // Not a hash-ref — recurse into all values.
+            let mut new_map = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                new_map.insert(k.clone(), resolve_nested_walk(v, schemas, seen, chain)?);
+            }
+            Ok(Value::Object(new_map))
+        }
+        Value::Array(arr) => {
+            let new_arr: Result<Vec<_>, _> = arr
+                .iter()
+                .map(|v| resolve_nested_walk(v, schemas, seen, chain))
+                .collect();
+            Ok(Value::Array(new_arr?))
+        }
+        // Scalars (string, number, bool, null) pass through unchanged.
+        other => Ok(other.clone()),
     }
 }
 
@@ -474,5 +553,207 @@ mod tests {
             MechError::SchemaInvalid { name, .. } => assert_eq!(name, "bad"),
             other => panic!("expected SchemaInvalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn nested_ref_in_property_is_resolved() {
+        let s = schemas(&[
+            (
+                "Inner",
+                json!({
+                    "type": "object",
+                    "required": ["value"],
+                    "properties": { "value": { "type": "integer", "minimum": 1 } }
+                }),
+            ),
+            (
+                "Outer",
+                json!({
+                    "type": "object",
+                    "required": ["inner"],
+                    "properties": {
+                        "inner": { "$ref": "#Inner" }
+                    }
+                }),
+            ),
+        ]);
+        let reg = SchemaRegistry::build(&s).expect("registry must build");
+        let resolved = reg
+            .resolve(&SchemaRef::Ref("$ref:#Outer".to_string()))
+            .unwrap();
+
+        // Conforming value passes.
+        reg.validate(&resolved, &json!({ "inner": { "value": 5 } }))
+            .expect("valid value must pass");
+
+        // Non-conforming value fails on the inner schema constraint.
+        let err = reg
+            .validate(&resolved, &json!({ "inner": { "value": 0 } }))
+            .expect_err("value below minimum must fail");
+        assert!(matches!(err, MechError::SchemaValidationFailed { .. }));
+    }
+
+    #[test]
+    fn nested_ref_missing_target_errors() {
+        let s = schemas(&[(
+            "Broken",
+            json!({
+                "type": "object",
+                "properties": {
+                    "child": { "$ref": "#Missing" }
+                }
+            }),
+        )]);
+        let err = SchemaRegistry::build(&s).expect_err("missing nested ref must error");
+        match err {
+            MechError::SchemaRefUnresolved { name } => assert_eq!(name, "Missing"),
+            other => panic!("expected SchemaRefUnresolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_ref_circular_is_detected() {
+        let s = schemas(&[
+            (
+                "A",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "b": { "$ref": "#B" }
+                    }
+                }),
+            ),
+            (
+                "B",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "a": { "$ref": "#A" }
+                    }
+                }),
+            ),
+        ]);
+        let err = SchemaRegistry::build(&s).expect_err("circular nested ref must error");
+        match err {
+            MechError::SchemaRefCircular { chain } => {
+                assert!(
+                    chain.contains(&"A".to_string()),
+                    "chain should contain A: {chain:?}"
+                );
+                assert!(
+                    chain.contains(&"B".to_string()),
+                    "chain should contain B: {chain:?}"
+                );
+            }
+            other => panic!("expected SchemaRefCircular, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_ref_diamond_does_not_false_cycle() {
+        let s = schemas(&[
+            (
+                "Inner",
+                json!({
+                    "type": "object",
+                    "required": ["v"],
+                    "properties": { "v": { "type": "integer" } }
+                }),
+            ),
+            (
+                "Outer",
+                json!({
+                    "type": "object",
+                    "required": ["a", "b"],
+                    "properties": {
+                        "a": { "$ref": "#Inner" },
+                        "b": { "$ref": "#Inner" }
+                    }
+                }),
+            ),
+        ]);
+        let reg = SchemaRegistry::build(&s).expect("diamond must not trigger false cycle");
+        let resolved = reg
+            .resolve(&SchemaRef::Ref("$ref:#Outer".to_string()))
+            .unwrap();
+        reg.validate(&resolved, &json!({ "a": { "v": 1 }, "b": { "v": 2 } }))
+            .expect("conforming diamond value must pass");
+        reg.validate(&resolved, &json!({ "a": { "v": 1 }, "b": { "v": "bad" } }))
+            .expect_err("non-conforming diamond value must fail");
+    }
+
+    #[test]
+    fn nested_ref_inside_allof_is_resolved() {
+        let s = schemas(&[
+            (
+                "Name",
+                json!({
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": { "name": { "type": "string" } }
+                }),
+            ),
+            (
+                "Age",
+                json!({
+                    "type": "object",
+                    "required": ["age"],
+                    "properties": { "age": { "type": "integer", "minimum": 0 } }
+                }),
+            ),
+            (
+                "Person",
+                json!({
+                    "allOf": [
+                        { "$ref": "#Name" },
+                        { "$ref": "#Age" }
+                    ]
+                }),
+            ),
+        ]);
+        let reg = SchemaRegistry::build(&s).expect("allOf refs must resolve");
+        let resolved = reg
+            .resolve(&SchemaRef::Ref("$ref:#Person".to_string()))
+            .unwrap();
+        reg.validate(&resolved, &json!({ "name": "Ada", "age": 36 }))
+            .expect("conforming allOf value must pass");
+        reg.validate(&resolved, &json!({ "name": "Ada" }))
+            .expect_err("missing age must fail allOf");
+    }
+
+    #[test]
+    fn nested_ref_three_level_chain() {
+        let s = schemas(&[
+            (
+                "C",
+                json!({
+                    "type": "object",
+                    "required": ["val"],
+                    "properties": { "val": { "type": "integer", "minimum": 1 } }
+                }),
+            ),
+            (
+                "B",
+                json!({
+                    "type": "object",
+                    "required": ["c"],
+                    "properties": { "c": { "$ref": "#C" } }
+                }),
+            ),
+            (
+                "A",
+                json!({
+                    "type": "object",
+                    "required": ["b"],
+                    "properties": { "b": { "$ref": "#B" } }
+                }),
+            ),
+        ]);
+        let reg = SchemaRegistry::build(&s).expect("3-level chain must resolve");
+        let resolved = reg.resolve(&SchemaRef::Ref("$ref:#A".to_string())).unwrap();
+        reg.validate(&resolved, &json!({ "b": { "c": { "val": 5 } } }))
+            .expect("conforming 3-level value must pass");
+        reg.validate(&resolved, &json!({ "b": { "c": { "val": 0 } } }))
+            .expect_err("val below minimum must fail through 3-level chain");
     }
 }
