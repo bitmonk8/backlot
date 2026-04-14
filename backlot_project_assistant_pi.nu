@@ -9,4 +9,4 @@ cd $script_dir
 print "Starting Backlot Project Assistant..."
 print ""
 
-pi --provider unity-pilot --model claude-opus-4-6 --append-system-prompt prompts/project_assistant.md "/bm8:new_assistant_session"
+pi --provider unity-pilot --model claude-opus-4-6 --append-system-prompt prompts/project_assistant.md /new-session

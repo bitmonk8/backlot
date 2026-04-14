@@ -65,9 +65,9 @@ impl ResolvedAgentConfig {
     fn from_inline(inline: &AgentConfig) -> MechResult<Self> {
         Ok(Self {
             model: inline.model.clone(),
-            grant: inline.grant.clone(),
-            tools: inline.tools.clone(),
-            write_paths: inline.write_paths.clone(),
+            grant: inline.grant_list().to_vec(),
+            tools: inline.tool_list().to_vec(),
+            write_paths: inline.write_path_list().to_vec(),
             timeout: inline.timeout.as_deref().map(parse_timeout).transpose()?,
         })
     }
@@ -185,14 +185,14 @@ fn overlay(into: &mut ResolvedAgentConfig, from: &AgentConfig) -> MechResult<()>
     if from.model.is_some() {
         into.model = from.model.clone();
     }
-    if !from.grant.is_empty() {
-        into.grant = from.grant.clone();
+    if let Some(grant) = &from.grant {
+        into.grant = grant.clone();
     }
-    if !from.tools.is_empty() {
-        into.tools = from.tools.clone();
+    if let Some(tools) = &from.tools {
+        into.tools = tools.clone();
     }
-    if !from.write_paths.is_empty() {
-        into.write_paths = from.write_paths.clone();
+    if let Some(write_paths) = &from.write_paths {
+        into.write_paths = write_paths.clone();
     }
     if let Some(raw) = from.timeout.as_deref() {
         into.timeout = Some(parse_timeout(raw)?);
@@ -761,6 +761,138 @@ functions:
         assert_eq!(r.model.as_deref(), Some("haiku"));
         assert_eq!(r.grant, vec!["tools".to_string()]);
         assert_eq!(r.write_paths, vec!["base_path/".to_string()]);
+    }
+
+    #[test]
+    fn extends_empty_grant_clears_parent() {
+        let yaml = r#"
+workflow:
+  agents:
+    base:
+      model: sonnet
+      grant: [tools, write]
+      write_paths: [src/]
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "p"
+        schema:
+          type: object
+          required: [x]
+          properties: { x: { type: string } }
+        agent:
+          extends: base
+          grant: []
+          tools: []
+          write_paths: []
+"#;
+        let wf = load(yaml);
+        let func = wf.file().functions.get("f").unwrap();
+        let block = match &func.blocks["b"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt block"),
+        };
+        let r = resolve_agent_config(wf.file(), func, &block).unwrap();
+        assert!(
+            r.grant.is_empty(),
+            "grant: [] should clear inherited grants"
+        );
+        assert!(r.tools.is_empty(), "tools: [] should clear inherited tools");
+        assert!(
+            r.write_paths.is_empty(),
+            "write_paths: [] should clear inherited write_paths"
+        );
+    }
+
+    #[test]
+    fn cascade_block_empty_grant_replaces_function_level() {
+        let yaml = r#"
+workflow:
+  agent:
+    model: sonnet
+    grant: [network]
+functions:
+  f:
+    input: { type: object }
+    agent:
+      grant: [tools, write]
+      write_paths: [src/]
+    blocks:
+      b:
+        prompt: "p"
+        schema:
+          type: object
+          required: [x]
+          properties: { x: { type: string } }
+        agent:
+          model: haiku
+          grant: []
+"#;
+        let wf = load(yaml);
+        let func = wf.file().functions.get("f").unwrap();
+        let block = match &func.blocks["b"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt block"),
+        };
+        let r = resolve_agent_config(wf.file(), func, &block).unwrap();
+        // Block-level replaces function-level entirely; workflow default does not leak.
+        assert_eq!(r.model.as_deref(), Some("haiku"), "block model wins");
+        assert!(
+            r.grant.is_empty(),
+            "grant: [] at block level must clear, not inherit function grants"
+        );
+        // write_paths was only on function level; block replaces entirely so it must be empty.
+        assert!(
+            r.write_paths.is_empty(),
+            "write_paths from function level must not leak into block"
+        );
+    }
+
+    #[test]
+    fn extends_omitted_fields_inherit_parent() {
+        let yaml = r#"
+workflow:
+  agents:
+    base:
+      model: sonnet
+      grant: [tools, write]
+      tools: [web_search]
+      write_paths: [src/]
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "p"
+        schema:
+          type: object
+          required: [x]
+          properties: { x: { type: string } }
+        agent:
+          extends: base
+          model: opus
+"#;
+        let wf = load(yaml);
+        let func = wf.file().functions.get("f").unwrap();
+        let block = match &func.blocks["b"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt block"),
+        };
+        let r = resolve_agent_config(wf.file(), func, &block).unwrap();
+        assert_eq!(r.model.as_deref(), Some("opus"), "model overridden");
+        assert_eq!(
+            r.grant,
+            vec!["tools", "write"],
+            "grant inherited from parent"
+        );
+        assert_eq!(r.tools, vec!["web_search"], "tools inherited from parent");
+        assert_eq!(
+            r.write_paths,
+            vec!["src/"],
+            "write_paths inherited from parent"
+        );
     }
 
     #[test]

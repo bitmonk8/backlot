@@ -158,6 +158,11 @@ grant flags, custom tools, write paths, and timeout. Named agent configurations
 live in `workflow.agents` and are reused via `agent: "$ref:#<name>"`. An
 `extends:` key copies a named config and applies only the listed overrides.
 
+The `grant`, `tools`, and `write_paths` fields support a three-way distinction
+when using `extends:`. Omitting a field in the child config inherits the
+parent's values. Setting it to an explicit empty list (`[]`) clears the
+inherited values. Setting it to a non-empty list replaces them entirely.
+
 ### Execution modes
 
 | Mode | Trigger | Behaviour |

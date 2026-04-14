@@ -284,16 +284,16 @@ pub struct AgentConfig {
     pub model: Option<String>,
 
     /// ToolGrant flags (`tools`, `write`, `network`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grant: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<Vec<String>>,
 
     /// Custom tool names (must be registered with the executor).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
 
     /// Writable paths (relative to project root).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub write_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_paths: Option<Vec<String>>,
 
     /// Agent-run timeout (e.g. `"30s"`, `"5m"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -302,6 +302,23 @@ pub struct AgentConfig {
     /// Name of a workflow-level named agent config to use as a base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extends: Option<String>,
+}
+
+impl AgentConfig {
+    /// Returns the grant list, or an empty slice if unset.
+    pub fn grant_list(&self) -> &[String] {
+        self.grant.as_deref().unwrap_or_default()
+    }
+
+    /// Returns the tools list, or an empty slice if unset.
+    pub fn tool_list(&self) -> &[String] {
+        self.tools.as_deref().unwrap_or_default()
+    }
+
+    /// Returns the write_paths list, or an empty slice if unset.
+    pub fn write_path_list(&self) -> &[String] {
+        self.write_paths.as_deref().unwrap_or_default()
+    }
 }
 
 // ─── Schemas ────────────────────────────────────────────────────────────────
@@ -451,8 +468,8 @@ mod tests {
         match &rb.agent {
             Some(AgentConfigRef::Inline(a)) => {
                 assert_eq!(a.extends.as_deref(), Some("default"));
-                assert_eq!(a.grant, vec!["write".to_string()]);
-                assert_eq!(a.write_paths, vec!["billing/".to_string()]);
+                assert_eq!(a.grant, Some(vec!["write".to_string()]));
+                assert_eq!(a.write_paths, Some(vec!["billing/".to_string()]));
             }
             other => panic!("expected inline agent with extends, got {other:?}"),
         }
@@ -633,7 +650,7 @@ functions:
         match &wf.workflow.as_ref().unwrap().agent {
             Some(AgentConfigRef::Inline(a)) => {
                 assert_eq!(a.model.as_deref(), Some("haiku"));
-                assert_eq!(a.grant, vec!["tools".to_string()]);
+                assert_eq!(a.grant, Some(vec!["tools".to_string()]));
             }
             other => panic!("expected inline agent at workflow level, got {other:?}"),
         }

@@ -816,7 +816,7 @@ impl<'a> Validator<'a> {
                 format!("agent model `{model}` is not known to the model registry"),
             );
         }
-        for g in &ac.grant {
+        for g in ac.grant_list() {
             if !VALID_GRANTS.contains(&g.as_str()) {
                 self.err(
                     loc.clone().with_field("grant"),
@@ -826,7 +826,7 @@ impl<'a> Validator<'a> {
         }
         // Normalization warning: write_paths without write grant.
         let normalized = normalized_grants(ac);
-        if !ac.write_paths.is_empty() && !normalized.contains("write") {
+        if !ac.write_path_list().is_empty() && !normalized.contains("write") {
             self.warn(
                 loc.with_field("write_paths"),
                 "`write_paths` is set but `write` grant is not present (write_paths will be ignored)",
@@ -1534,11 +1534,11 @@ fn value_matches_json_type(v: &JsonValue, ty: &str) -> bool {
 }
 
 fn normalized_grants(ac: &AgentConfig) -> BTreeSet<String> {
-    let mut set: BTreeSet<String> = ac.grant.iter().cloned().collect();
+    let mut set: BTreeSet<String> = ac.grant_list().iter().cloned().collect();
     if set.contains("write") || set.contains("network") {
         set.insert("tools".to_string());
     }
-    if !ac.tools.is_empty() {
+    if !ac.tool_list().is_empty() {
         set.insert("tools".to_string());
     }
     set
@@ -3212,6 +3212,40 @@ functions:
         assert!(
             !r.warnings.iter().any(|w| w.message.contains("write_paths")),
             "write_paths warning should NOT fire when `write` grant is present and write_paths is empty; got warnings: {:#?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn agent_empty_grant_and_write_paths_pass_validation() {
+        // `grant: []` should not produce "invalid grant" errors (zero iterations).
+        // `write_paths: []` should not trigger the "write_paths is set but write
+        // grant is not present" warning (empty vec → is_empty() == true).
+        let yaml = r#"
+workflow:
+  agents:
+    a:
+      grant: []
+      write_paths: []
+functions:
+  f:
+    input: { type: object }
+    agent: "$ref:#a"
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+        let r = ok(yaml);
+        assert_clean(&r);
+        assert!(
+            !r.errors.iter().any(|e| e.message.contains("invalid grant")),
+            "empty grant list should not produce invalid-grant errors; got: {:#?}",
+            r.errors
+        );
+        assert!(
+            !r.warnings.iter().any(|w| w.message.contains("write_paths")),
+            "empty write_paths should not trigger write_paths warning; got: {:#?}",
             r.warnings
         );
     }
