@@ -742,7 +742,7 @@ impl<'a> Validator<'a> {
                 );
                 continue;
             }
-            if !value_matches_json_type(&def.initial, &def.ty) {
+            if !crate::schema::value_matches_json_type(&def.initial, &def.ty) {
                 self.err(
                     loc.clone().with_field(format!("{name}.initial")),
                     format!(
@@ -928,7 +928,7 @@ impl<'a> Validator<'a> {
             let mut stack: Vec<(&str, usize)> = vec![(start.as_str(), 0)];
             color.insert(start.as_str(), 1);
             while let Some(&(node, idx)) = stack.last() {
-                let deps = block_depends_on(func.blocks.get(node).unwrap());
+                let deps = func.blocks.get(node).unwrap().depends_on();
                 if idx < deps.len() {
                     let next = deps[idx].as_str();
                     let last_idx = stack.len() - 1;
@@ -969,12 +969,12 @@ impl<'a> Validator<'a> {
         // depend on dep (i.e., forward dataflow successors of dep).
         let mut rev_deps: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for (name, block) in &func.blocks {
-            for t in block_transitions(block) {
+            for t in block.transitions() {
                 if let Some(c) = inbound.get_mut(t.goto.as_str()) {
                     *c += 1;
                 }
             }
-            for d in block_depends_on(block) {
+            for d in block.depends_on() {
                 if func.blocks.contains_key(d) {
                     if let Some(c) = inbound.get_mut(name.as_str()) {
                         *c += 1;
@@ -1002,7 +1002,7 @@ impl<'a> Validator<'a> {
         }
         while let Some(node) = queue.pop_front() {
             let block = func.blocks.get(node).unwrap();
-            for t in block_transitions(block) {
+            for t in block.transitions() {
                 if reachable.insert(t.goto.as_str()) {
                     if let Some((k, _)) = func.blocks.get_key_value(&t.goto) {
                         queue.push_back(k.as_str());
@@ -1530,19 +1530,6 @@ fn is_valid_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-fn value_matches_json_type(v: &JsonValue, ty: &str) -> bool {
-    match ty {
-        "string" => v.is_string(),
-        "number" => v.is_number(),
-        "integer" => v.is_i64() || v.is_u64(),
-        "boolean" => v.is_boolean(),
-        "array" => v.is_array(),
-        "object" => v.is_object(),
-        "null" => v.is_null(),
-        _ => false,
-    }
-}
-
 fn normalized_grants(ac: &AgentConfig) -> BTreeSet<String> {
     let mut set: BTreeSet<String> = ac.grant_list().iter().cloned().collect();
     if set.contains("write") || set.contains("network") {
@@ -1560,20 +1547,6 @@ fn called_function_names(c: &CallBlock) -> Vec<String> {
         CallSpec::Single(name) => vec![name.clone()],
         CallSpec::Uniform(names) => names.clone(),
         CallSpec::PerCall(entries) => entries.iter().map(|e| e.func.clone()).collect(),
-    }
-}
-
-fn block_depends_on(b: &BlockDef) -> &[String] {
-    match b {
-        BlockDef::Prompt(p) => &p.depends_on,
-        BlockDef::Call(c) => &c.depends_on,
-    }
-}
-
-fn block_transitions(b: &BlockDef) -> &[TransitionDef] {
-    match b {
-        BlockDef::Prompt(p) => &p.transitions,
-        BlockDef::Call(c) => &c.transitions,
     }
 }
 
@@ -1597,7 +1570,7 @@ fn inferred_terminals(func: &FunctionDef) -> Vec<String> {
     // dependency by other blocks.
     func.blocks
         .iter()
-        .filter(|(_, b)| block_transitions(b).is_empty())
+        .filter(|(_, b)| b.transitions().is_empty())
         .map(|(name, _)| name.clone())
         .collect()
 }
@@ -1606,7 +1579,11 @@ fn transitive_depends_on(func: &FunctionDef) -> BTreeMap<String, BTreeSet<String
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for name in func.blocks.keys() {
         let mut acc: BTreeSet<String> = BTreeSet::new();
-        let mut stack: Vec<&str> = block_depends_on(func.blocks.get(name).unwrap())
+        let mut stack: Vec<&str> = func
+            .blocks
+            .get(name)
+            .unwrap()
+            .depends_on()
             .iter()
             .map(String::as_str)
             .collect();
@@ -1614,7 +1591,7 @@ fn transitive_depends_on(func: &FunctionDef) -> BTreeMap<String, BTreeSet<String
             if acc.insert(n.to_string())
                 && let Some(b) = func.blocks.get(n)
             {
-                for d in block_depends_on(b) {
+                for d in b.depends_on() {
                     stack.push(d.as_str());
                 }
             }
@@ -1632,7 +1609,7 @@ fn transitive_ctrl_reach(func: &FunctionDef) -> BTreeMap<String, BTreeSet<String
         let mut acc: BTreeSet<String> = BTreeSet::new();
         let mut queue: VecDeque<&str> = VecDeque::new();
         if let Some(b) = func.blocks.get(name) {
-            for t in block_transitions(b) {
+            for t in b.transitions() {
                 queue.push_back(t.goto.as_str());
             }
         }
@@ -1640,7 +1617,7 @@ fn transitive_ctrl_reach(func: &FunctionDef) -> BTreeMap<String, BTreeSet<String
             if acc.insert(n.to_string())
                 && let Some(b) = func.blocks.get(n)
             {
-                for t in block_transitions(b) {
+                for t in b.transitions() {
                     if !acc.contains(t.goto.as_str()) {
                         queue.push_back(t.goto.as_str());
                     }
@@ -1662,7 +1639,7 @@ fn compute_dominators(func: &FunctionDef) -> BTreeMap<String, BTreeSet<String>> 
     let mut preds: BTreeMap<String, BTreeSet<String>> =
         names.iter().map(|n| (n.clone(), BTreeSet::new())).collect();
     for (src, b) in &func.blocks {
-        for t in block_transitions(b) {
+        for t in b.transitions() {
             if let Some(e) = preds.get_mut(&t.goto) {
                 e.insert(src.clone());
             }
@@ -1723,7 +1700,7 @@ fn compute_dominators(func: &FunctionDef) -> BTreeMap<String, BTreeSet<String>> 
             continue;
         }
         if let Some(b) = func.blocks.get(&n) {
-            for t in block_transitions(b) {
+            for t in b.transitions() {
                 if !visited.contains(t.goto.as_str()) {
                     queue.push_back(t.goto.clone());
                 }
@@ -1747,7 +1724,7 @@ fn collect_block_fields(
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, block) in &func.blocks {
         let schema_value = match block {
-            BlockDef::Prompt(p) => Some(resolve_schema_value(&p.schema, wf)),
+            BlockDef::Prompt(p) => Some(crate::schema::resolve_schema_value(&p.schema, wf)),
             BlockDef::Call(c) => {
                 // Use the called function's output schema, if known and inline.
                 match &c.call {
@@ -1755,7 +1732,7 @@ fn collect_block_fields(
                         .functions
                         .get(fname)
                         .and_then(|f| f.output.as_ref())
-                        .map(|s| resolve_schema_value(s, wf)),
+                        .map(|s| crate::schema::resolve_schema_value(s, wf)),
                     _ => None,
                 }
             }
@@ -1771,18 +1748,6 @@ fn collect_block_fields(
         out.insert(name.clone(), fields);
     }
     out
-}
-
-fn resolve_schema_value(s: &SchemaRef, wf: &WorkflowFile) -> Option<JsonValue> {
-    match s {
-        SchemaRef::Inline(v) => Some(v.clone()),
-        SchemaRef::Ref(raw) => {
-            let rest = raw.strip_prefix("$ref:")?;
-            let name = rest.strip_prefix('#')?;
-            wf.workflow.as_ref()?.schemas.get(name).cloned()
-        }
-        SchemaRef::Infer(_) => None,
-    }
 }
 
 // ---- Schema required-field helpers ----------------------------------------
@@ -1809,13 +1774,13 @@ fn collect_block_required_fields(
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, block) in &func.blocks {
         let schema_value = match block {
-            BlockDef::Prompt(p) => Some(resolve_schema_value(&p.schema, wf)),
+            BlockDef::Prompt(p) => Some(crate::schema::resolve_schema_value(&p.schema, wf)),
             BlockDef::Call(c) => match &c.call {
                 CallSpec::Single(fname) => wf
                     .functions
                     .get(fname)
                     .and_then(|f| f.output.as_ref())
-                    .map(|s| resolve_schema_value(s, wf)),
+                    .map(|s| crate::schema::resolve_schema_value(s, wf)),
                 _ => None,
             },
         };

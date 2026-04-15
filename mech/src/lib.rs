@@ -51,7 +51,8 @@ pub use schema::{
     AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,
     ContextVarDef, FunctionDef, InferLiteral, ParallelStrategy, PromptBlock, ResolvedSchema,
     SchemaRef, SchemaRegistry, TransitionDef, WorkflowDefaults, WorkflowFile,
-    infer_function_outputs, parse_workflow,
+    infer_function_outputs, parse_named_ref, parse_workflow, resolve_schema_value,
+    try_parse_named_ref, value_matches_json_type,
 };
 pub use validate::{
     AnyModel, KnownModels, Location, ModelChecker, ValidationIssue, ValidationReport,

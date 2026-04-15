@@ -37,7 +37,6 @@ use crate::exec::agent::{AgentExecutor, AgentRequest};
 use crate::loader::Workflow;
 #[cfg(test)]
 use crate::schema::BlockDef;
-use crate::schema::resolve_nested_refs;
 use crate::schema::{
     AgentConfig, AgentConfigRef, FunctionDef, PromptBlock, SchemaRef, WorkflowFile,
 };
@@ -116,7 +115,9 @@ fn resolve_agent_ref(
 ) -> MechResult<ResolvedAgentConfig> {
     match reference {
         AgentConfigRef::Ref(raw) => {
-            let name = parse_hash_ref(raw)?;
+            let name = crate::schema::parse_named_ref(raw).map_err(|_| MechError::Validation {
+                errors: vec![format!("malformed agent $ref: `{raw}`")],
+            })?;
             let base = agents.get(name).ok_or_else(|| MechError::Validation {
                 errors: vec![format!(
                     "agent $ref:#{name} does not exist in workflow.agents"
@@ -200,19 +201,6 @@ fn overlay(into: &mut ResolvedAgentConfig, from: &AgentConfig) -> MechResult<()>
     Ok(())
 }
 
-fn parse_hash_ref(raw: &str) -> MechResult<&str> {
-    let body = raw
-        .strip_prefix("$ref:")
-        .ok_or_else(|| MechError::Validation {
-            errors: vec![format!("malformed agent $ref: `{raw}`")],
-        })?;
-    body.strip_prefix('#')
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| MechError::Validation {
-            errors: vec![format!("malformed agent $ref: `{raw}`")],
-        })
-}
-
 /// Parse a timeout string like `"30s"`, `"5m"`, `"250ms"`.
 fn parse_timeout(s: &str) -> MechResult<Duration> {
     let s = s.trim();
@@ -244,42 +232,6 @@ fn parse_timeout(s: &str) -> MechResult<Duration> {
         "h" => Duration::from_secs(n * 3600),
         _ => unreachable!(),
     })
-}
-
-/// Extract the inline JSON Schema for a prompt block's output.
-///
-/// Inline schemas return their body directly; `$ref:#name` schemas are
-/// looked up in the workflow-level shared schemas map.  Nested `$ref:#name`
-/// references within the looked-up schema body are recursively resolved
-/// via [`resolve_nested_refs`].  `output: infer` is forbidden at the block
-/// level — by the time the loader is done, every
-/// prompt block has a concrete schema.
-fn resolve_prompt_block_schema(
-    workflow: &WorkflowFile,
-    block: &PromptBlock,
-) -> MechResult<JsonValue> {
-    match &block.schema {
-        SchemaRef::Inline(v) => Ok(v.clone()),
-        SchemaRef::Ref(raw) => {
-            let name = parse_hash_ref(raw)?;
-            let schemas_map = workflow
-                .workflow
-                .as_ref()
-                .map(|w| &w.schemas)
-                .ok_or_else(|| MechError::SchemaRefUnresolved {
-                    name: name.to_string(),
-                })?;
-            let shared = schemas_map
-                .get(name)
-                .ok_or_else(|| MechError::SchemaRefUnresolved {
-                    name: name.to_string(),
-                })?;
-            resolve_nested_refs(shared, schemas_map)
-        }
-        SchemaRef::Infer(_) => Err(MechError::Validation {
-            errors: vec!["prompt block schema cannot be `infer`".into()],
-        }),
-    }
 }
 
 /// Fetch an interned compiled template from the loader cache and render it
@@ -385,8 +337,30 @@ pub async fn execute_prompt_block(
         None => None,
     };
 
-    // 4. Resolve the output schema to JSON for the agent request.
-    let output_schema = resolve_prompt_block_schema(file, block)?;
+    // 4. Resolve the output schema via the compiled registry.
+    let registry = workflow.schemas();
+    let resolved_schema = registry.resolve(&block.schema)?;
+
+    // 4b. Extract the raw JSON schema body for the agent request.
+    //     The registry has already compiled and validated this schema;
+    //     we just need the JSON representation for the LLM.
+    let output_schema_json = match &block.schema {
+        SchemaRef::Inline(v) => v.clone(),
+        SchemaRef::Ref(raw) => {
+            let name = crate::schema::parse_named_ref(raw)?;
+            registry
+                .resolved_body(name)
+                .cloned()
+                .ok_or_else(|| MechError::SchemaRefUnresolved {
+                    name: name.to_string(),
+                })?
+        }
+        SchemaRef::Infer(_) => {
+            return Err(MechError::Validation {
+                errors: vec!["prompt block schema cannot be `infer`".into()],
+            });
+        }
+    };
 
     // 5. Build the request with conversation history.
     let request = AgentRequest {
@@ -397,7 +371,7 @@ pub async fn execute_prompt_block(
         tools: resolved_agent.tools,
         write_paths: resolved_agent.write_paths,
         timeout: resolved_agent.timeout,
-        output_schema: output_schema.clone(),
+        output_schema: output_schema_json,
         history: conversation.messages().to_vec(),
     };
 
@@ -421,12 +395,13 @@ pub async fn execute_prompt_block(
     // 6c. Check if compaction should fire.
     conversation.check_compaction();
 
-    // 7. Validate against the declared output schema. Surface up to the
+    // 7. Validate against the declared output schema using the
+    //    pre-compiled validator from the registry. Surface up to the
     //    first 10 errors so authors see more than the single first failure.
-    let validator =
-        jsonschema::validator_for(&output_schema).map_err(|e| MechError::SchemaInvalid {
-            name: format!("<block {block_id}>"),
-            message: e.to_string(),
+    let validator = resolved_schema
+        .validator()
+        .ok_or_else(|| MechError::Validation {
+            errors: vec!["prompt block schema cannot be `infer`".into()],
         })?;
     let errors: Vec<String> = validator
         .iter_errors(&output)

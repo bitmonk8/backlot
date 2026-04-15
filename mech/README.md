@@ -147,9 +147,18 @@ as a `$ref:#<name>`, or left as `infer` (mech derives it from terminal blocks).
 
 Shared schemas may themselves contain nested `$ref:#<name>` references in their
 properties, array items, or combinator members (`allOf`/`anyOf`/`oneOf`). These
-are resolved recursively at registry build time and at prompt-block schema
-lookup time, with cycle detection (returns `SchemaRefCircular`) and missing-ref
-detection (returns `SchemaRefUnresolved`).
+are resolved recursively at registry build time, with cycle detection (returns
+`SchemaRefCircular`) and missing-ref detection (returns `SchemaRefUnresolved`).
+
+At runtime, the `SchemaRegistry` holds pre-compiled `jsonschema::Validator`
+instances for every shared schema. The prompt executor resolves block schemas
+via the registry and validates LLM output using the pre-compiled validators,
+avoiding redundant recompilation. `ResolvedSchema::validate()` provides a
+convenience method; callers that need multi-error collection can access the
+underlying `Validator` directly via `ResolvedSchema::validator()`.
+
+`$ref:#name` parsing is consolidated in `parse_named_ref` (returns `MechResult`)
+and `try_parse_named_ref` (returns `Option`), both re-exported from `mech::schema`.
 
 ### Agent configuration
 

@@ -145,7 +145,7 @@ fn try_infer_function(
     } else {
         func.blocks
             .iter()
-            .filter(|(_, b)| block_has_no_transitions(b))
+            .filter(|(_, b)| b.transitions().is_empty())
             .map(|(n, _)| n)
             .collect()
     };
@@ -248,13 +248,6 @@ fn terminal_block_output(
     }
 }
 
-fn block_has_no_transitions(b: &BlockDef) -> bool {
-    match b {
-        BlockDef::Prompt(p) => p.transitions.is_empty(),
-        BlockDef::Call(c) => c.transitions.is_empty(),
-    }
-}
-
 /// Resolve a [`SchemaRef`] to a concrete JSON body, or `None` if it is
 /// `infer` or refers to an unknown shared schema. Only follows one hop of
 /// `$ref:#name`; deeper chains were already collapsed by
@@ -263,8 +256,7 @@ fn resolve_schema_ref(s: &SchemaRef, shared: &BTreeMap<String, JsonValue>) -> Op
     match s {
         SchemaRef::Inline(v) => Some(v.clone()),
         SchemaRef::Ref(raw) => {
-            let rest = raw.strip_prefix("$ref:")?;
-            let name = rest.strip_prefix('#')?;
+            let name = crate::schema::try_parse_named_ref(raw)?;
             shared.get(name).cloned()
         }
         SchemaRef::Infer(_) => None,

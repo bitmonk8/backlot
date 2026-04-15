@@ -92,7 +92,7 @@
 
 ## Mech
 
-**Phase:** Complete. 302 tests passing (276 unit + 26 integration), zero clippy warnings.
+**Phase:** Complete. 326 tests passing (300 unit + 26 integration), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -100,7 +100,7 @@
 
 **Next Work:** None identified.
 
-**Recent:** Issue #30 fixed (validation-only: named agents now reject `extends` at validation time per §12.1 inline-only rule).
+**Recent:** Schema subsystem consolidation — 10 issues closed (#3, #14, #15, #19, #20, #28, #32, #36, #46, #288). `SchemaRegistry` now stores resolved JSON bodies; prompt executor uses pre-compiled validators; `$ref:#name` parsing consolidated into `parse_named_ref`/`try_parse_named_ref`; `ResolvedSchema::validate` replaces `SchemaRegistry::validate`; `SchemaInferDeferred` error variant; `BlockDef::transitions()`/`depends_on()` accessors; `schema/mod.rs` split into submodules.
 
 ---
 

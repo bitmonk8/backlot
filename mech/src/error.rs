@@ -177,6 +177,11 @@ pub enum MechError {
         message: String,
     },
 
+    /// Attempted to validate against a deferred `infer` schema that has not
+    /// yet been resolved to a concrete JSON Schema.
+    #[error("cannot validate against deferred `infer` schema")]
+    SchemaInferDeferred,
+
     /// Function output schema inference failed (§13 Deliverable 6).
     ///
     /// Raised when a function declares `output: infer` (or omits `output:`)

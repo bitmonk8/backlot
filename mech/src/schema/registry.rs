@@ -1,8 +1,8 @@
-//! JSON Schema registry and `$ref` resolution.
+//! JSON Schema registry: compiled validators and `$ref` resolution utilities.
 //!
-//! This module is intentionally named **registry** rather than "schema" to
-//! avoid colliding with the parent [`crate::schema`] module, which holds the
-//! parse-only YAML grammar AST. The two senses of "schema" in mech are:
+//! This module holds the compiled JSON Schema validators and `$ref:#name`
+//! resolution logic, distinct from the parent [`crate::schema`] module which
+//! defines the parse-only YAML grammar AST. The two senses of "schema" in mech are:
 //!
 //! * **YAML schema** (parent module) — the struct shapes a workflow file
 //!   deserialises into.
@@ -28,7 +28,7 @@
 //!   path of the first failing field.
 //!
 //! `infer` is accepted at parse and resolution time but is **not** a callable
-//! validator: calling [`SchemaRegistry::validate`] on an `Infer` resolution
+//! validator: calling [`ResolvedSchema::validate`] on an `Infer` resolution
 //! returns an error so callers must explicitly handle the deferred case.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,11 +37,11 @@ use jsonschema::Validator;
 use serde_json::Value;
 
 use crate::error::{MechError, MechResult};
-use crate::schema::{InferLiteral, JsonValue, SchemaRef};
+use crate::schema::{InferLiteral, JsonValue, SchemaRef, WorkflowFile};
 
 /// Prefix that marks a `$ref` string. Both `$ref:#name` (workflow-level shared
 /// schema) and `$ref:path` (external file, deferred) start with this prefix.
-const REF_PREFIX: &str = "$ref:";
+pub const REF_PREFIX: &str = "$ref:";
 
 /// A schema reference that has been resolved against the registry.
 ///
@@ -60,7 +60,7 @@ pub enum ResolvedSchema<'r> {
     /// at arbitrary points in a workflow and are not stored in the registry.
     Inline(Box<Validator>),
     /// The literal `infer` placeholder. Inference is deferred to Deliverable
-    /// 6; calling [`SchemaRegistry::validate`] on this variant errors.
+    /// 6; calling [`ResolvedSchema::validate`] on this variant errors.
     Infer,
 }
 
@@ -80,15 +80,38 @@ impl<'r> ResolvedSchema<'r> {
     pub fn is_infer(&self) -> bool {
         matches!(self, ResolvedSchema::Infer)
     }
+
+    /// Validate a JSON `value` against this resolved schema.
+    ///
+    /// Returns the first validation error, with its JSON Pointer path
+    /// (`""` for the root). For [`ResolvedSchema::Infer`] returns
+    /// [`MechError::SchemaInferDeferred`].
+    pub fn validate(&self, value: &Value) -> MechResult<()> {
+        let validator = self.validator().ok_or(MechError::SchemaInferDeferred)?;
+
+        if let Some(err) = validator.iter_errors(value).next() {
+            return Err(MechError::SchemaValidationFailed {
+                path: err.instance_path.to_string(),
+                message: err.to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Compiled, cycle-checked registry of workflow-level shared JSON Schemas.
 ///
 /// Built from the `workflow.schemas` map of a parsed [`crate::WorkflowFile`].
+/// Also stores fully-resolved JSON bodies for each schema, accessible via
+/// [`SchemaRegistry::resolved_body`].
 #[derive(Debug)]
 pub struct SchemaRegistry {
     /// Compiled validators keyed by registered schema name.
     validators: BTreeMap<String, Validator>,
+    /// Fully resolved JSON bodies keyed by registered schema name.
+    /// Stored at build time so callers can retrieve the resolved JSON
+    /// without re-resolving `$ref` chains.
+    resolved_bodies: BTreeMap<String, Value>,
 }
 
 impl SchemaRegistry {
@@ -105,6 +128,7 @@ impl SchemaRegistry {
         // Resolve top-level $ref-only documents to their concrete bodies
         // (detecting cycles along the way) and compile each in a single pass.
         let mut validators = BTreeMap::new();
+        let mut resolved_bodies = BTreeMap::new();
         for name in schemas.keys() {
             let mut chain: Vec<String> = Vec::new();
             let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -116,10 +140,14 @@ impl SchemaRegistry {
                     message: e.to_string(),
                 }
             })?;
+            resolved_bodies.insert(name.clone(), resolved_body);
             validators.insert(name.clone(), validator);
         }
 
-        Ok(SchemaRegistry { validators })
+        Ok(SchemaRegistry {
+            validators,
+            resolved_bodies,
+        })
     }
 
     /// Resolve a [`SchemaRef`] to a [`ResolvedSchema`].
@@ -156,26 +184,12 @@ impl SchemaRegistry {
         }
     }
 
-    /// Validate a JSON `value` against a resolved `schema`.
+    /// Return the fully resolved JSON body for a named schema.
     ///
-    /// Returns the first validation error, with its JSON Pointer path
-    /// (`""` for the root). For [`ResolvedSchema::Infer`] returns an error,
-    /// since inference is deferred to Deliverable 6.
-    pub fn validate(&self, schema: &ResolvedSchema<'_>, value: &Value) -> MechResult<()> {
-        let validator = schema.validator().ok_or_else(|| MechError::SchemaInvalid {
-            name: "<infer>".to_string(),
-            message:
-                "cannot validate against an unresolved `infer` schema (deferred to Deliverable 6)"
-                    .to_string(),
-        })?;
-
-        if let Some(err) = validator.iter_errors(value).next() {
-            return Err(MechError::SchemaValidationFailed {
-                path: err.instance_path.to_string(),
-                message: err.to_string(),
-            });
-        }
-        Ok(())
+    /// The body has all `$ref:#name` references recursively expanded and
+    /// top-level alias chains followed, exactly as compiled by [`Self::build`].
+    pub fn resolved_body(&self, name: &str) -> Option<&Value> {
+        self.resolved_bodies.get(name)
     }
 }
 
@@ -183,7 +197,7 @@ impl SchemaRegistry {
 ///
 /// `$ref:path` (no leading `#`) is reserved for external file references and
 /// is rejected here as malformed for the purposes of Deliverable 4.
-fn parse_named_ref(raw: &str) -> MechResult<&str> {
+pub fn parse_named_ref(raw: &str) -> MechResult<&str> {
     let body = raw
         .strip_prefix(REF_PREFIX)
         .ok_or_else(|| MechError::SchemaRefMalformed {
@@ -200,6 +214,14 @@ fn parse_named_ref(raw: &str) -> MechResult<&str> {
         });
     }
     Ok(name)
+}
+
+/// Parse a `$ref:#name` string and return the bare `name`, or `None` if the
+/// string does not match the expected form.
+pub fn try_parse_named_ref(raw: &str) -> Option<&str> {
+    let body = raw.strip_prefix(REF_PREFIX)?;
+    let name = body.strip_prefix('#').filter(|s| !s.is_empty())?;
+    Some(name)
 }
 
 /// Follow a chain of top-level `$ref:#name` documents until reaching a
@@ -249,7 +271,7 @@ fn follow_top_level_ref<'a>(
 /// Detects circular references and returns [`MechError::SchemaRefCircular`] if
 /// a cycle is found. Returns [`MechError::SchemaRefUnresolved`] if a target
 /// name does not exist in the schemas map.
-pub fn resolve_nested_refs(
+fn resolve_nested_refs(
     schema: &JsonValue,
     schemas: &BTreeMap<String, JsonValue>,
 ) -> MechResult<JsonValue> {
@@ -323,10 +345,7 @@ fn resolve_nested_walk(
 ///   pointer (no `/`), interpreted as a workflow-level alias.
 fn top_level_ref_target(body: &JsonValue) -> Option<&str> {
     match body {
-        Value::String(s) => s
-            .strip_prefix(REF_PREFIX)
-            .and_then(|rest| rest.strip_prefix('#'))
-            .filter(|n| !n.is_empty()),
+        Value::String(s) => try_parse_named_ref(s),
         Value::Object(map) if map.len() == 1 => {
             let r = map.get("$ref")?.as_str()?;
             // Only treat plain `#name` (no slash) as a workflow alias; any
@@ -335,6 +354,47 @@ fn top_level_ref_target(body: &JsonValue) -> Option<&str> {
                 .filter(|n| !n.is_empty() && !n.contains('/'))
         }
         _ => None,
+    }
+}
+
+/// Resolve a [`SchemaRef`] to its raw JSON Schema body.
+///
+/// Returns `None` for `infer` or when a `$ref:#name` target is missing.
+pub fn resolve_schema_value(s: &SchemaRef, wf: &WorkflowFile) -> Option<Value> {
+    match s {
+        SchemaRef::Inline(v) => Some(v.clone()),
+        SchemaRef::Ref(raw) => {
+            let name = try_parse_named_ref(raw)?;
+            let schemas = &wf.workflow.as_ref()?.schemas;
+            let mut body = schemas.get(name)?;
+            let mut visited = BTreeSet::new();
+            visited.insert(name);
+            // Follow top-level string-form aliases ($ref:#name).
+            while let Value::String(s) = body {
+                let next = try_parse_named_ref(s)?;
+                if !visited.insert(next) {
+                    return None; // cycle detected
+                }
+                body = schemas.get(next)?;
+            }
+            Some(body.clone())
+        }
+
+        SchemaRef::Infer(_) => None,
+    }
+}
+
+/// Check whether a JSON value matches the given JSON Schema type name.
+pub fn value_matches_json_type(v: &Value, ty: &str) -> bool {
+    match ty {
+        "string" => v.is_string(),
+        "number" => v.is_number(),
+        "integer" => v.is_i64() || v.is_u64(),
+        "boolean" => v.is_boolean(),
+        "array" => v.is_array(),
+        "object" => v.is_object(),
+        "null" => v.is_null(),
+        _ => false,
     }
 }
 
@@ -371,7 +431,8 @@ mod tests {
             _ => panic!("expected Named resolution"),
         }
         // And it can validate something.
-        reg.validate(&resolved, &json!({ "name": "Ada" }))
+        resolved
+            .validate(&json!({ "name": "Ada" }))
             .expect("valid value passes");
     }
 
@@ -406,11 +467,12 @@ mod tests {
             .resolve(&SchemaRef::Ref("$ref:#person".to_string()))
             .unwrap();
 
-        reg.validate(&resolved, &json!({ "name": "Ada", "age": 36 }))
+        resolved
+            .validate(&json!({ "name": "Ada", "age": 36 }))
             .expect("valid passes");
 
-        let err = reg
-            .validate(&resolved, &json!({ "name": "Ada", "age": -1 }))
+        let err = resolved
+            .validate(&json!({ "name": "Ada", "age": -1 }))
             .expect_err("invalid age must fail");
         match err {
             MechError::SchemaValidationFailed { path, .. } => {
@@ -444,8 +506,8 @@ mod tests {
             .resolve(&SchemaRef::Ref("$ref:#wrap".to_string()))
             .unwrap();
 
-        let err = reg
-            .validate(&resolved, &json!({ "inner": { "v": "not-an-int" } }))
+        let err = resolved
+            .validate(&json!({ "inner": { "v": "not-an-int" } }))
             .expect_err("type mismatch must fail");
         match err {
             MechError::SchemaValidationFailed { path, .. } => {
@@ -490,9 +552,9 @@ mod tests {
         let s = schemas(&[("a", json!({ "type": "string" })), ("b", json!("$ref:#a"))]);
         let reg = SchemaRegistry::build(&s).expect("alias must resolve");
         let resolved = reg.resolve(&SchemaRef::Ref("$ref:#b".to_string())).unwrap();
-        reg.validate(&resolved, &json!("hello")).unwrap();
-        let err = reg
-            .validate(&resolved, &json!(42))
+        resolved.validate(&json!("hello")).unwrap();
+        let err = resolved
+            .validate(&json!(42))
             .expect_err("int against string schema must fail");
         assert!(matches!(err, MechError::SchemaValidationFailed { .. }));
     }
@@ -506,10 +568,10 @@ mod tests {
         assert!(resolved.is_infer());
         // And validating against it errors loudly so callers cannot pretend
         // an unresolved `infer` schema accepted a value.
-        let err = reg
-            .validate(&resolved, &json!({}))
+        let err = resolved
+            .validate(&json!({}))
             .expect_err("validate(infer) must error");
-        assert!(matches!(err, MechError::SchemaInvalid { .. }));
+        assert!(matches!(err, MechError::SchemaInferDeferred));
     }
 
     #[test]
@@ -521,8 +583,9 @@ mod tests {
             "properties": { "x": { "type": "integer" } }
         }));
         let resolved = reg.resolve(&inline).unwrap();
-        reg.validate(&resolved, &json!({ "x": 1 })).unwrap();
-        reg.validate(&resolved, &json!({ "x": "no" }))
+        resolved.validate(&json!({ "x": 1 })).unwrap();
+        resolved
+            .validate(&json!({ "x": "no" }))
             .expect_err("type mismatch must fail");
     }
 
@@ -583,12 +646,13 @@ mod tests {
             .unwrap();
 
         // Conforming value passes.
-        reg.validate(&resolved, &json!({ "inner": { "value": 5 } }))
+        resolved
+            .validate(&json!({ "inner": { "value": 5 } }))
             .expect("valid value must pass");
 
         // Non-conforming value fails on the inner schema constraint.
-        let err = reg
-            .validate(&resolved, &json!({ "inner": { "value": 0 } }))
+        let err = resolved
+            .validate(&json!({ "inner": { "value": 0 } }))
             .expect_err("value below minimum must fail");
         assert!(matches!(err, MechError::SchemaValidationFailed { .. }));
     }
@@ -676,9 +740,11 @@ mod tests {
         let resolved = reg
             .resolve(&SchemaRef::Ref("$ref:#Outer".to_string()))
             .unwrap();
-        reg.validate(&resolved, &json!({ "a": { "v": 1 }, "b": { "v": 2 } }))
+        resolved
+            .validate(&json!({ "a": { "v": 1 }, "b": { "v": 2 } }))
             .expect("conforming diamond value must pass");
-        reg.validate(&resolved, &json!({ "a": { "v": 1 }, "b": { "v": "bad" } }))
+        resolved
+            .validate(&json!({ "a": { "v": 1 }, "b": { "v": "bad" } }))
             .expect_err("non-conforming diamond value must fail");
     }
 
@@ -715,9 +781,11 @@ mod tests {
         let resolved = reg
             .resolve(&SchemaRef::Ref("$ref:#Person".to_string()))
             .unwrap();
-        reg.validate(&resolved, &json!({ "name": "Ada", "age": 36 }))
+        resolved
+            .validate(&json!({ "name": "Ada", "age": 36 }))
             .expect("conforming allOf value must pass");
-        reg.validate(&resolved, &json!({ "name": "Ada" }))
+        resolved
+            .validate(&json!({ "name": "Ada" }))
             .expect_err("missing age must fail allOf");
     }
 
@@ -751,9 +819,191 @@ mod tests {
         ]);
         let reg = SchemaRegistry::build(&s).expect("3-level chain must resolve");
         let resolved = reg.resolve(&SchemaRef::Ref("$ref:#A".to_string())).unwrap();
-        reg.validate(&resolved, &json!({ "b": { "c": { "val": 5 } } }))
+        resolved
+            .validate(&json!({ "b": { "c": { "val": 5 } } }))
             .expect("conforming 3-level value must pass");
-        reg.validate(&resolved, &json!({ "b": { "c": { "val": 0 } } }))
+        resolved
+            .validate(&json!({ "b": { "c": { "val": 0 } } }))
             .expect_err("val below minimum must fail through 3-level chain");
+    }
+
+    #[test]
+    fn parse_named_ref_valid() {
+        assert_eq!(parse_named_ref("$ref:#person").unwrap(), "person");
+        assert_eq!(parse_named_ref("$ref:#a_b").unwrap(), "a_b");
+    }
+
+    #[test]
+    fn parse_named_ref_rejects_malformed() {
+        // Missing prefix
+        assert!(matches!(
+            parse_named_ref("person"),
+            Err(MechError::SchemaRefMalformed { .. })
+        ));
+        // Missing hash
+        assert!(matches!(
+            parse_named_ref("$ref:person"),
+            Err(MechError::SchemaRefMalformed { .. })
+        ));
+        // Empty name
+        assert!(matches!(
+            parse_named_ref("$ref:#"),
+            Err(MechError::SchemaRefMalformed { .. })
+        ));
+    }
+
+    #[test]
+    fn try_parse_named_ref_valid() {
+        assert_eq!(try_parse_named_ref("$ref:#person"), Some("person"));
+    }
+
+    #[test]
+    fn try_parse_named_ref_returns_none_for_malformed() {
+        assert_eq!(try_parse_named_ref("person"), None);
+        assert_eq!(try_parse_named_ref("$ref:person"), None);
+        assert_eq!(try_parse_named_ref("$ref:#"), None);
+        assert_eq!(try_parse_named_ref(""), None);
+    }
+
+    #[test]
+    fn value_matches_json_type_all_types() {
+        assert!(value_matches_json_type(&json!("hello"), "string"));
+        assert!(value_matches_json_type(&json!(1.5), "number"));
+        assert!(value_matches_json_type(&json!(42), "integer"));
+        assert!(value_matches_json_type(&json!(true), "boolean"));
+        assert!(value_matches_json_type(&json!([1]), "array"));
+        assert!(value_matches_json_type(&json!({"a": 1}), "object"));
+        assert!(value_matches_json_type(&json!(null), "null"));
+        assert!(!value_matches_json_type(&json!("hello"), "integer"));
+        assert!(!value_matches_json_type(&json!(42), "string"));
+        assert!(!value_matches_json_type(&json!(true), "unknown_type"));
+    }
+
+    #[test]
+    fn resolve_schema_value_inline() {
+        let wf = WorkflowFile {
+            workflow: None,
+            functions: Default::default(),
+        };
+        let schema = SchemaRef::Inline(json!({"type": "string"}));
+        assert_eq!(
+            resolve_schema_value(&schema, &wf),
+            Some(json!({"type": "string"}))
+        );
+    }
+
+    #[test]
+    fn resolve_schema_value_ref_resolves() {
+        let wf = WorkflowFile {
+            workflow: Some(crate::schema::WorkflowDefaults {
+                schemas: [("person".to_string(), json!({"type": "object"}))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            }),
+            functions: Default::default(),
+        };
+        let schema = SchemaRef::Ref("$ref:#person".to_string());
+        assert_eq!(
+            resolve_schema_value(&schema, &wf),
+            Some(json!({"type": "object"}))
+        );
+    }
+
+    #[test]
+    fn resolve_schema_value_infer_returns_none() {
+        let wf = WorkflowFile {
+            workflow: None,
+            functions: Default::default(),
+        };
+        let schema = SchemaRef::Infer(crate::schema::InferLiteral::Infer);
+        assert_eq!(resolve_schema_value(&schema, &wf), None);
+    }
+
+    #[test]
+    fn resolve_schema_value_follows_alias_chain() {
+        let wf = WorkflowFile {
+            workflow: Some(crate::schema::WorkflowDefaults {
+                schemas: [
+                    ("alias".to_string(), json!("$ref:#real")),
+                    (
+                        "real".to_string(),
+                        json!({"type": "object", "properties": {"x": {"type": "integer"}}}),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            }),
+            functions: Default::default(),
+        };
+        let schema = SchemaRef::Ref("$ref:#alias".to_string());
+        assert_eq!(
+            resolve_schema_value(&schema, &wf),
+            Some(json!({"type": "object", "properties": {"x": {"type": "integer"}}}))
+        );
+    }
+
+    #[test]
+    fn resolved_body_returns_expanded_json() {
+        let s = schemas(&[
+            (
+                "Inner",
+                json!({
+                    "type": "object",
+                    "required": ["v"],
+                    "properties": { "v": { "type": "integer" } }
+                }),
+            ),
+            (
+                "Outer",
+                json!({
+                    "type": "object",
+                    "required": ["inner"],
+                    "properties": {
+                        "inner": { "$ref": "#Inner" }
+                    }
+                }),
+            ),
+        ]);
+        let reg = SchemaRegistry::build(&s).expect("registry must build");
+        let body = reg.resolved_body("Outer").expect("body must exist");
+        // The nested $ref:#Inner must be expanded to the actual Inner schema,
+        // not left as a {"$ref": "#Inner"} object.
+        let inner_prop = body
+            .get("properties")
+            .and_then(|p| p.get("inner"))
+            .expect("inner property must exist");
+        assert_eq!(
+            inner_prop,
+            &json!({
+                "type": "object",
+                "required": ["v"],
+                "properties": { "v": { "type": "integer" } }
+            }),
+            "nested $ref must be fully expanded in resolved_body"
+        );
+    }
+
+    #[test]
+    fn resolve_schema_value_circular_alias_returns_none() {
+        let wf = WorkflowFile {
+            workflow: Some(crate::schema::WorkflowDefaults {
+                schemas: [
+                    ("a".to_string(), json!("$ref:#b")),
+                    ("b".to_string(), json!("$ref:#a")),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            }),
+            functions: Default::default(),
+        };
+        let schema = SchemaRef::Ref("$ref:#a".to_string());
+        assert_eq!(
+            resolve_schema_value(&schema, &wf),
+            None,
+            "circular alias chain must return None"
+        );
     }
 }

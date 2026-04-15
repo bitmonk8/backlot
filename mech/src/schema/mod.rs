@@ -27,16 +27,31 @@
 //! validity (e.g. "a prompt block must not have `call`") is enforced by
 //! [`crate::validate::validate_workflow`]; this module only rejects genuinely
 //! unknown fields.
+//!
+//! ## Naming convention
+//!
+//! Types that represent keyed definition entries in YAML maps carry a `Def`
+//! suffix (`FunctionDef`, `BlockDef`, `TransitionDef`, `ContextVarDef`).
+//! Structural/config types that appear as fields within definitions do not
+//! (`PromptBlock`, `CallBlock`, `AgentConfig`, `CompactionConfig`).
 
+mod agent;
+mod blocks;
 pub mod infer;
 pub mod registry;
+mod schema_ref;
+mod workflow;
+
+pub use agent::*;
+pub use blocks::*;
+pub use schema_ref::*;
+pub use workflow::*;
 
 pub use infer::infer_function_outputs;
-pub use registry::{ResolvedSchema, SchemaRegistry, resolve_nested_refs};
-
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
+pub use registry::{
+    ResolvedSchema, SchemaRegistry, parse_named_ref, resolve_schema_value, try_parse_named_ref,
+    value_matches_json_type,
+};
 
 /// A raw, template-bearing string (CEL / `{{...}}`). Kept as-is at parse time.
 pub type Expr = String;
@@ -45,333 +60,6 @@ pub type Expr = String;
 /// [`crate::schema::registry`]; this type alias remains `serde_json::Value`
 /// because inline schemas in the YAML grammar can be any JSON value.
 pub type JsonValue = serde_json::Value;
-
-// ─── Top-level ──────────────────────────────────────────────────────────────
-
-/// Root document: a parsed mech workflow file.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowFile {
-    /// Workflow-level defaults (system prompt, agents, context, schemas, …).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<WorkflowDefaults>,
-
-    /// Function definitions, keyed by function name.
-    pub functions: BTreeMap<String, FunctionDef>,
-}
-
-/// Contents of the top-level `workflow:` block.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowDefaults {
-    /// Default system prompt (template string).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
-
-    /// Default agent config (inline or `$ref:...`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<AgentConfigRef>,
-
-    /// Named, reusable agent configurations.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub agents: BTreeMap<String, AgentConfig>,
-
-    /// Workflow-level context variable declarations.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub context: BTreeMap<String, ContextVarDef>,
-
-    /// Named, reusable JSON-Schema definitions (values are raw JSON).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub schemas: BTreeMap<String, JsonValue>,
-
-    /// Default conversation compaction config.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<CompactionConfig>,
-}
-
-// ─── Functions ──────────────────────────────────────────────────────────────
-
-/// A single function definition under `functions:`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FunctionDef {
-    /// Input JSON Schema (root type: object).
-    pub input: JsonValue,
-
-    /// Output schema: inline, `$ref:...`, or the literal `"infer"`. Defaults
-    /// to `"infer"` if omitted (resolved by
-    /// [`crate::schema::infer::infer_function_outputs`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<SchemaRef>,
-
-    /// Function-level system prompt override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
-
-    /// Function-level agent config override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<AgentConfigRef>,
-
-    /// Explicit terminal block names. Auto-detected when omitted.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub terminals: Vec<String>,
-
-    /// Function-level context variable declarations.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub context: BTreeMap<String, ContextVarDef>,
-
-    /// Compaction override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<CompactionConfig>,
-
-    /// Block definitions, keyed by block name.
-    pub blocks: BTreeMap<String, BlockDef>,
-}
-
-// ─── Blocks ─────────────────────────────────────────────────────────────────
-
-/// A prompt or call block. Discrimination is by presence of `prompt` or
-/// `call`. Full validity rules (§5.3) are enforced by
-/// [`crate::validate::validate_workflow`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum BlockDef {
-    /// LLM-invoking block.
-    Prompt(PromptBlock),
-    /// Function-invoking block.
-    Call(CallBlock),
-}
-
-/// A prompt block (§5.1).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PromptBlock {
-    /// Prompt template string.
-    pub prompt: String,
-
-    /// Output schema (inline or `$ref:...`).
-    pub schema: SchemaRef,
-
-    /// Optional agent config override for this block.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<AgentConfigRef>,
-
-    /// Data-edge predecessors.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
-
-    /// Writes to function context variables.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub set_context: BTreeMap<String, Expr>,
-
-    /// Writes to workflow context variables.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub set_workflow: BTreeMap<String, Expr>,
-
-    /// Outbound control edges.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub transitions: Vec<TransitionDef>,
-}
-
-/// A call block (§5.2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CallBlock {
-    /// Function(s) to invoke.
-    pub call: CallSpec,
-
-    /// Shared input mapping. Required for single-function and uniform-list
-    /// calls; forbidden for per-call list calls. Parse-time we accept any
-    /// combination; validity is enforced by
-    /// [`crate::validate::validate_workflow`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<BTreeMap<String, Expr>>,
-
-    /// Output mapping.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<BTreeMap<String, Expr>>,
-
-    /// Parallel join strategy for list calls.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parallel: Option<ParallelStrategy>,
-
-    /// Required completions for `n_of_m`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub n: Option<u32>,
-
-    /// Data-edge predecessors.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
-
-    /// Writes to function context variables.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub set_context: BTreeMap<String, Expr>,
-
-    /// Writes to workflow context variables.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub set_workflow: BTreeMap<String, Expr>,
-
-    /// Outbound control edges.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub transitions: Vec<TransitionDef>,
-}
-
-/// The three shapes of `call:` (§4.4, §5.2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum CallSpec {
-    /// Single function name: `call: my_fn`.
-    Single(String),
-    /// Uniform list (shared input): `call: [a, b, c]`.
-    Uniform(Vec<String>),
-    /// Per-call list: `call: [{ fn: a, input: { ... } }, ...]`.
-    PerCall(Vec<CallEntry>),
-}
-
-/// A single entry in a per-call list.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CallEntry {
-    /// Function name.
-    #[serde(rename = "fn")]
-    pub func: String,
-    /// Input mapping for this specific call.
-    pub input: BTreeMap<String, Expr>,
-}
-
-/// Parallel join strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ParallelStrategy {
-    /// Wait for every call to complete.
-    All,
-    /// Resume as soon as any call completes.
-    Any,
-    /// Resume when `n` of the calls complete.
-    NOfM,
-}
-
-/// A single outbound control edge.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TransitionDef {
-    /// Optional CEL guard (`when:`). Omit for an unconditional edge.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub when: Option<Expr>,
-    /// Target block name.
-    pub goto: String,
-}
-
-// ─── Agent configuration ────────────────────────────────────────────────────
-
-/// `agent:` reference at any level: an inline [`AgentConfig`] or a `$ref:...`
-/// string (`$ref:#name` or `$ref:path`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum AgentConfigRef {
-    /// `$ref:#name` or `$ref:path`.
-    Ref(String),
-    /// Inline agent configuration object.
-    Inline(AgentConfig),
-}
-
-/// Inline agent configuration (§5.5.1).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentConfig {
-    /// flick model name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-
-    /// ToolGrant flags (`tools`, `write`, `network`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grant: Option<Vec<String>>,
-
-    /// Custom tool names (must be registered with the executor).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<String>>,
-
-    /// Writable paths (relative to project root).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub write_paths: Option<Vec<String>>,
-
-    /// Agent-run timeout (e.g. `"30s"`, `"5m"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<String>,
-
-    /// Name of a workflow-level named agent config to use as a base.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extends: Option<String>,
-}
-
-impl AgentConfig {
-    /// Returns the grant list, or an empty slice if unset.
-    pub fn grant_list(&self) -> &[String] {
-        self.grant.as_deref().unwrap_or_default()
-    }
-
-    /// Returns the tools list, or an empty slice if unset.
-    pub fn tool_list(&self) -> &[String] {
-        self.tools.as_deref().unwrap_or_default()
-    }
-
-    /// Returns the write_paths list, or an empty slice if unset.
-    pub fn write_path_list(&self) -> &[String] {
-        self.write_paths.as_deref().unwrap_or_default()
-    }
-}
-
-// ─── Schemas ────────────────────────────────────────────────────────────────
-
-/// A JSON Schema reference: inline, external/named ref, or the literal
-/// `"infer"` (function output only).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum SchemaRef {
-    /// The string `"infer"` — requests automatic inference (function output).
-    Infer(InferLiteral),
-    /// `$ref:#name` or `$ref:path`.
-    Ref(String),
-    /// Inline JSON Schema object.
-    Inline(JsonValue),
-}
-
-/// Serialises as the literal string `"infer"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InferLiteral {
-    /// The one and only inhabitant.
-    #[serde(rename = "infer")]
-    Infer,
-}
-
-// ─── Context & misc ─────────────────────────────────────────────────────────
-
-/// A single context variable declaration (§9.1).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextVarDef {
-    /// JSON Schema type name (`string`, `number`, `integer`, `boolean`,
-    /// `array`, `object`).
-    #[serde(rename = "type")]
-    pub ty: String,
-    /// Literal initial value, compatible with `ty`.
-    pub initial: JsonValue,
-}
-
-/// Conversation compaction configuration (§4.6).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompactionConfig {
-    /// Tokens of recent history to preserve verbatim.
-    pub keep_recent_tokens: u32,
-    /// Trigger threshold (fire when `used > context_window - reserve`).
-    pub reserve_tokens: u32,
-    /// Optional custom compaction function name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#fn: Option<String>,
-}
-
-// ─── Parse helper ───────────────────────────────────────────────────────────
 
 /// Parse a [`WorkflowFile`] from a YAML string.
 ///
