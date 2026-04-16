@@ -232,7 +232,7 @@ without touching the filesystem — useful for tests and embedded callers.
 
 | Module | Description |
 |--------|-------------|
-| `schema/` | Serde parse types for YAML grammar, schema registry, output inference |
+| `schema/` | Serde parse types for YAML grammar, schema registry, output inference, `CelSourceKind` visitor |
 | `validate/` | Load-time validation (§10.1): structural, graph, type, and agent checks |
 | `validate/mod.rs` | Entry point (`validate_workflow`), `Validator` struct, top-level orchestration |
 | `validate/model.rs` | `ModelChecker` trait, `AnyModel`, `KnownModels` |
@@ -242,10 +242,10 @@ without touching the filesystem — useful for tests and embedded callers.
 | `validate/cel_check.rs` | CEL/template validation: scope, reachability, optional field safety |
 | `validate/graph.rs` | Dataflow cycles, unreachable blocks, dominator computation, parallel conflicts |
 | `validate/helpers.rs` | Free functions: identifier checks, schema field collection, AST walkers |
-| `cel.rs` | CEL compilation/evaluation, template interpolation, reference extraction |
+| `cel.rs` | CEL compilation/evaluation, template interpolation, namespace bindings (`blocks`/`block` alias), reference extraction |
 | `context.rs` | `ExecutionContext`, `WorkflowState`, runtime type checking |
 | `exec/` | Block executors, transition evaluation, function runners, workflow runtime |
-| `loader.rs` | `WorkflowLoader` — parse → validate → infer → compile pipeline |
+| `loader.rs` | `WorkflowLoader` — parse → validate → infer → compile pipeline (uses `visit_cel_sources` visitor) |
 
 ## Full specification
 

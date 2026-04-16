@@ -160,7 +160,7 @@ fn build_output_mapping_namespaces(
         base.input,
         base.context,
         base.workflow,
-        base.block,
+        base.blocks,
         base.meta,
         extras,
     )

@@ -53,7 +53,7 @@ fn build_post_block_namespaces(ctx: &ExecutionContext, output: &JsonValue) -> Na
         base.input,
         base.context,
         base.workflow,
-        base.block,
+        base.blocks,
         base.meta,
         extras,
     )

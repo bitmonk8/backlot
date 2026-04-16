@@ -16,8 +16,8 @@ use std::sync::Arc;
 use crate::cel::{CelExpression, Template};
 use crate::error::{MechError, MechResult};
 use crate::schema::{
-    BlockDef, CallBlock, CallSpec, FunctionDef, MechDocument, PromptBlock, SchemaRegistry,
-    infer_function_outputs, parse_workflow,
+    CelSourceKind, FunctionDef, MechDocument, SchemaRegistry, infer_function_outputs,
+    parse_workflow,
 };
 use crate::validate::{AnyModel, ModelChecker, validate_workflow};
 
@@ -222,65 +222,21 @@ fn compile_function(
     templates: &mut BTreeMap<String, Arc<Template>>,
 ) -> MechResult<()> {
     for block in func.blocks.values() {
-        match block {
-            BlockDef::Prompt(p) => compile_prompt(p, guards, templates)?,
-            BlockDef::Call(c) => compile_call(c, guards, templates)?,
-        }
-    }
-    Ok(())
-}
-
-fn compile_prompt(
-    p: &PromptBlock,
-    guards: &mut BTreeMap<String, Arc<CelExpression>>,
-    templates: &mut BTreeMap<String, Arc<Template>>,
-) -> MechResult<()> {
-    intern_template(&p.prompt, templates)?;
-    for expr in p.set_context.values() {
-        intern_guard(expr, guards)?;
-    }
-    for expr in p.set_workflow.values() {
-        intern_guard(expr, guards)?;
-    }
-    for t in &p.transitions {
-        if let Some(w) = &t.when {
-            intern_guard(w, guards)?;
-        }
-    }
-    Ok(())
-}
-
-fn compile_call(
-    c: &CallBlock,
-    guards: &mut BTreeMap<String, Arc<CelExpression>>,
-    templates: &mut BTreeMap<String, Arc<Template>>,
-) -> MechResult<()> {
-    if let Some(input) = &c.input {
-        for expr in input.values() {
-            intern_template(expr, templates)?;
-        }
-    }
-    if let CallSpec::PerCall(entries) = &c.call {
-        for entry in entries {
-            for expr in entry.input.values() {
-                intern_template(expr, templates)?;
+        let mut first_err: Option<MechError> = None;
+        block.visit_cel_sources(&mut |source, kind| {
+            if first_err.is_some() {
+                return;
             }
-        }
-    }
-    if let Some(output) = &c.output {
-        for expr in output.values() {
-            intern_template(expr, templates)?;
-        }
-    }
-    for expr in c.set_context.values() {
-        intern_guard(expr, guards)?;
-    }
-    for expr in c.set_workflow.values() {
-        intern_guard(expr, guards)?;
-    }
-    for t in &c.transitions {
-        if let Some(w) = &t.when {
-            intern_guard(w, guards)?;
+            let result = match kind {
+                CelSourceKind::Guard => intern_guard(source, guards),
+                CelSourceKind::Template => intern_template(source, templates),
+            };
+            if let Err(e) = result {
+                first_err = Some(e);
+            }
+        });
+        if let Some(e) = first_err {
+            return Err(e);
         }
     }
     Ok(())

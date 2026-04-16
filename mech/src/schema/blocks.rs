@@ -9,6 +9,15 @@ use super::Expr;
 use super::agent::AgentConfigRef;
 use super::schema_ref::SchemaRef;
 
+/// Whether a CEL source string is a guard expression or a template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CelSourceKind {
+    /// A CEL expression used in `set_context`, `set_workflow`, or `when` guards.
+    Guard,
+    /// A template string that may contain `{{...}}` CEL interpolations.
+    Template,
+}
+
 /// A prompt or call block. Discrimination is by presence of `prompt` or
 /// `call`. Full validity rules (§5.3) are enforced by
 /// [`crate::validate::validate_workflow`].
@@ -51,6 +60,51 @@ impl BlockDef {
         match self {
             BlockDef::Prompt(p) => &p.set_workflow,
             BlockDef::Call(c) => &c.set_workflow,
+        }
+    }
+
+    /// Visit all CEL expression source strings in this block.
+    /// Calls `visitor` with each (source_text, kind) pair.
+    /// This covers: set_context values (Guard), set_workflow values (Guard),
+    /// transition when clauses (Guard), prompt text (Template), call input/output
+    /// mappings (Template), and per-call input mappings (Template).
+    pub fn visit_cel_sources(&self, visitor: &mut impl FnMut(&str, CelSourceKind)) {
+        // Shared fields across both block types
+        for expr in self.set_context().values() {
+            visitor(expr, CelSourceKind::Guard);
+        }
+        for expr in self.set_workflow().values() {
+            visitor(expr, CelSourceKind::Guard);
+        }
+        for t in self.transitions() {
+            if let Some(w) = &t.when {
+                visitor(w, CelSourceKind::Guard);
+            }
+        }
+        // Block-type-specific
+        match self {
+            BlockDef::Prompt(p) => {
+                visitor(&p.prompt, CelSourceKind::Template);
+            }
+            BlockDef::Call(c) => {
+                if let Some(input) = &c.input {
+                    for expr in input.values() {
+                        visitor(expr, CelSourceKind::Template);
+                    }
+                }
+                if let CallSpec::PerCall(entries) = &c.call {
+                    for entry in entries {
+                        for expr in entry.input.values() {
+                            visitor(expr, CelSourceKind::Template);
+                        }
+                    }
+                }
+                if let Some(output) = &c.output {
+                    for expr in output.values() {
+                        visitor(expr, CelSourceKind::Template);
+                    }
+                }
+            }
         }
     }
 }
@@ -231,5 +285,58 @@ mod tests {
     fn depends_on_call_block() {
         let b = call_block(vec![], vec!["x".into()]);
         assert_eq!(b.depends_on(), &["x".to_string()]);
+    }
+
+    #[test]
+    fn visit_cel_sources_prompt_block() {
+        let b = BlockDef::Prompt(PromptBlock {
+            prompt: "prompt template".into(),
+            schema: SchemaRef::Inline(serde_json::json!({"type": "object"})),
+            agent: None,
+            depends_on: vec![],
+            set_context: BTreeMap::from([("var1".into(), "ctx_expr".into())]),
+            set_workflow: BTreeMap::from([("var2".into(), "wf_expr".into())]),
+            transitions: vec![TransitionDef {
+                when: Some("guard_expr".into()),
+                goto: "next".into(),
+            }],
+        });
+        let mut sources = Vec::new();
+        b.visit_cel_sources(&mut |src, kind| sources.push((src.to_string(), kind)));
+        assert!(sources.contains(&("prompt template".into(), CelSourceKind::Template)));
+        assert!(sources.contains(&("ctx_expr".into(), CelSourceKind::Guard)));
+        assert!(sources.contains(&("wf_expr".into(), CelSourceKind::Guard)));
+        assert!(sources.contains(&("guard_expr".into(), CelSourceKind::Guard)));
+        assert_eq!(sources.len(), 4);
+    }
+
+    #[test]
+    fn visit_cel_sources_call_block() {
+        let b = BlockDef::Call(CallBlock {
+            call: CallSpec::PerCall(vec![CallEntry {
+                func: "f".into(),
+                input: BTreeMap::from([("k".into(), "percall_expr".into())]),
+            }]),
+            input: Some(BTreeMap::from([("x".into(), "input_expr".into())])),
+            output: Some(BTreeMap::from([("y".into(), "output_expr".into())])),
+            parallel: None,
+            n: None,
+            depends_on: vec![],
+            set_context: BTreeMap::from([("c".into(), "ctx_expr2".into())]),
+            set_workflow: BTreeMap::from([("w".into(), "wf_expr2".into())]),
+            transitions: vec![TransitionDef {
+                when: Some("guard2".into()),
+                goto: "b".into(),
+            }],
+        });
+        let mut sources = Vec::new();
+        b.visit_cel_sources(&mut |src, kind| sources.push((src.to_string(), kind)));
+        assert!(sources.contains(&("input_expr".into(), CelSourceKind::Template)));
+        assert!(sources.contains(&("percall_expr".into(), CelSourceKind::Template)));
+        assert!(sources.contains(&("output_expr".into(), CelSourceKind::Template)));
+        assert!(sources.contains(&("ctx_expr2".into(), CelSourceKind::Guard)));
+        assert!(sources.contains(&("wf_expr2".into(), CelSourceKind::Guard)));
+        assert!(sources.contains(&("guard2".into(), CelSourceKind::Guard)));
+        assert_eq!(sources.len(), 6);
     }
 }

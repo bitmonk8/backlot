@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cel::{self, CelExpression};
+use crate::cel;
 use crate::schema::{BlockDef, CallSpec, FunctionDef, MechDocument};
 
 use super::Validator;
@@ -215,13 +215,14 @@ impl Validator<'_> {
         cur_block: &str,
         ctx: &CelCheckCtx<'_>,
     ) {
-        if let Err(e) = CelExpression::compile(expr_src) {
-            self.err(loc.clone(), format!("CEL compile error: {e}"));
-            return;
-        }
+        // Single parse — cel_parser::parse is the same parse that
+        // CelExpression::compile calls internally.
         let ast = match cel_parser::parse(expr_src) {
             Ok(a) => a,
-            Err(_) => return,
+            Err(e) => {
+                self.err(loc.clone(), format!("CEL compile error: {e}"));
+                return;
+            }
         };
         let refs = cel::collect_references(&ast);
 

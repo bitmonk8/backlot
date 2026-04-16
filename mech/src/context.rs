@@ -221,7 +221,7 @@ impl ExecutionContext {
 
     /// Produce the five-namespace binding struct the CEL evaluator expects.
     ///
-    /// The `block` namespace is a JSON object keyed by block ID mapping to the
+    /// The `blocks` namespace is a JSON object keyed by block ID mapping to the
     /// recorded output. The `context` and `workflow` namespaces are JSON
     /// objects keyed by declared variable name. `meta` and `input` pass
     /// through untouched.
@@ -230,7 +230,7 @@ impl ExecutionContext {
         let workflow = self.workflow.snapshot();
         // Wrap each block output in an `output` sub-object to match the spec's
         // `blocks.<name>.output.<field>` access pattern (§7.1).
-        let block = JsonValue::Object(
+        let blocks = JsonValue::Object(
             self.block_outputs
                 .iter()
                 .map(|(name, val)| {
@@ -244,7 +244,7 @@ impl ExecutionContext {
             self.input.clone(),
             context,
             workflow,
-            block,
+            blocks,
             self.meta.clone(),
         )
     }

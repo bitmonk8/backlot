@@ -12,15 +12,8 @@
 //! * `input`     — function or block input
 //! * `context`   — function-local declared variables
 //! * `workflow`  — workflow-level declared variables
-//! * `block`     — prior block outputs keyed by block name
+//! * `blocks`    — prior block outputs keyed by block name
 //! * `meta`      — workflow/run metadata
-//!
-//! Note: the canonical spec §7 uses `blocks` (plural) and a separate
-//! post-execution `output` namespace for the *current* block. D3's scope
-//! collapses those into `block` (singular, prior outputs) plus `meta`, which
-//! is what this module implements. Deliverable 8 (context & state
-//! management) will reconcile the two names; this comment exists to keep the
-//! discrepancy visible until then.
 //!
 //! # Compilation is once, evaluation is pure
 //!
@@ -52,8 +45,8 @@ pub struct Namespaces {
     pub context: JsonValue,
     /// `workflow` namespace — workflow-level declared variables.
     pub workflow: JsonValue,
-    /// `block` namespace — prior block outputs keyed by block name.
-    pub block: JsonValue,
+    /// `blocks` namespace — prior block outputs keyed by block name.
+    pub blocks: JsonValue,
     /// `meta` namespace — workflow/run metadata.
     pub meta: JsonValue,
     /// Additional top-level CEL variables beyond the five standard
@@ -74,14 +67,14 @@ impl Namespaces {
         input: JsonValue,
         context: JsonValue,
         workflow: JsonValue,
-        block: JsonValue,
+        blocks: JsonValue,
         meta: JsonValue,
     ) -> Self {
         Self {
             input,
             context,
             workflow,
-            block,
+            blocks,
             meta,
             extras: BTreeMap::new(),
         }
@@ -92,7 +85,7 @@ impl Namespaces {
         input: JsonValue,
         context: JsonValue,
         workflow: JsonValue,
-        block: JsonValue,
+        blocks: JsonValue,
         meta: JsonValue,
         extras: BTreeMap<String, JsonValue>,
     ) -> Self {
@@ -100,7 +93,7 @@ impl Namespaces {
             input,
             context,
             workflow,
-            block,
+            blocks,
             meta,
             extras,
         }
@@ -114,10 +107,10 @@ impl Namespaces {
             ("input", &self.input),
             ("context", &self.context),
             ("workflow", &self.workflow),
-            ("block", &self.block),
-            // Alias: spec §7 uses `blocks` (plural), runtime uses `block`.
-            // Bind both so templates work with either form.
-            ("blocks", &self.block),
+            ("block", &self.blocks),
+            // Alias: spec §7 uses `blocks` (plural). Bind both so
+            // templates work with either form.
+            ("blocks", &self.blocks),
             ("meta", &self.meta),
         ] {
             let value = to_value(json).map_err(|e| MechError::CelNamespaceBind {
@@ -884,5 +877,83 @@ mod tests {
     fn template_with_single_quoted_string_containing_braces() {
         let t = Template::compile("{{'{{'}}").unwrap();
         assert_eq!(t.render(&Namespaces::empty()).unwrap(), "{{");
+    }
+
+    #[test]
+    fn template_renders_null() {
+        let ns = Namespaces::new(
+            json!({"val": null}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+        );
+        let t = Template::compile("result={{input.val}}").unwrap();
+        assert_eq!(t.render(&ns).unwrap(), "result=null");
+    }
+
+    #[test]
+    fn template_renders_float() {
+        let ns = Namespaces::new(
+            json!({"pi": 2.72}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+        );
+        let t = Template::compile("val={{input.pi}}").unwrap();
+        assert_eq!(t.render(&ns).unwrap(), "val=2.72");
+    }
+
+    #[test]
+    fn template_renders_bool() {
+        let ns = Namespaces::new(
+            json!({"flag": true}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+        );
+        let t = Template::compile("ok={{input.flag}}").unwrap();
+        assert_eq!(t.render(&ns).unwrap(), "ok=true");
+    }
+
+    #[test]
+    fn template_renders_map() {
+        let ns = Namespaces::new(
+            json!({"obj": {"a": 1}}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+        );
+        let t = Template::compile("data={{input.obj}}").unwrap();
+        assert_eq!(t.render(&ns).unwrap(), r#"data={"a":1}"#);
+    }
+
+    #[test]
+    fn template_three_level_nesting() {
+        let ns = Namespaces::new(
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({"deep": {"output": {"a": {"b": {"c": "found"}}}}}),
+            json!({}),
+        );
+        let t = Template::compile("val={{blocks.deep.output.a.b.c}}").unwrap();
+        assert_eq!(t.render(&ns).unwrap(), "val=found");
+    }
+
+    #[test]
+    fn template_multibyte_literal() {
+        let ns = Namespaces::new(
+            json!({"name": "wörld"}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+        );
+        let t = Template::compile("Ärger: {{input.name}} — fertig").unwrap();
+        assert_eq!(t.render(&ns).unwrap(), "Ärger: wörld — fertig");
     }
 }
