@@ -16,6 +16,8 @@
 - CLI: `provider add/list`, `model add/list/remove`, `init`, `run`
 - CLI input hardening (stdin cap, key validation, whitespace rejection)
 
+**Issues:** 15 open (tracked in GitHub Issues).
+
 **Next Work:** None identified.
 
 ---
@@ -29,7 +31,7 @@
 - Policy builder API, path grants, stdio management, timeout handling
 - Full test suite running in parallel
 
-**Issues:** 69 NIT-level findings, 0 MUST FIX, 0 NON-CRITICAL. Tracked in GitHub Issues.
+**Issues:** 55 open (NIT-level, tracked in GitHub Issues).
 
 **Next Work:** None identified.
 
@@ -47,6 +49,8 @@
 - `ToolGrant` bitflags (WRITE/TOOLS/NETWORK)
 - CLI binary, build infrastructure, CI pipeline
 - `RunResult` with `Usage` (tokens + cost), `TurnRecord` transcript, per-call API latency
+
+**Issues:** 22 open (tracked in GitHub Issues).
 
 **Not Implemented:**
 - `ToolHandler` consumer — trait exists but no real consumer yet (epic's Research Service is first consumer)
@@ -67,6 +71,8 @@
 - CLI with YAML config, JSON output, `--verbose` transcripts
 - Observability: `SessionMetadata`, `TranscriptTurn`, `TurnUsage` types
 - 121 tests
+
+**Issues:** 55 open (tracked in GitHub Issues).
 
 **Next Work:** None identified.
 
@@ -97,6 +103,8 @@
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
 - All 12 sections drafted and reviewed. Covers: motivation, design goals, unified CDFG model, conversation model (history scoping, compaction, agent configuration), block specification (prompt + call blocks, field validity), transitions & guards (CEL, ordered evaluation, self-loops), template expressions & scoping (5 namespaces, CEL everywhere), schema handling (inline + `$ref` + workflow-level shared schemas), context & state (two-level declared variables, `set_context`/`set_workflow`), validation & error handling (24+ load-time checks, 5 runtime error types), cue integration (function = leaf task, model escalation interaction), YAML reference schema with complete worked example.
+
+**Issues:** 52 open (tracked in GitHub Issues).
 
 **Next Work:** None identified.
 
@@ -129,6 +137,8 @@
 
 **Not Implemented:**
 - User-level config fallback (`~/.config/epic/config.toml`)
+
+**Issues:** 74 open (tracked in GitHub Issues).
 
 **Next Work:**
 1. **User-level config fallback** — `~/.config/epic/config.toml` resolution for user defaults.
