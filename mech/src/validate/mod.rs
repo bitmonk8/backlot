@@ -1,4 +1,4 @@
-//! Load-time validation of a parsed [`WorkflowFile`] (spec §10.1).
+//! Load-time validation of a parsed [`MechDocument`] (spec §10.1).
 //!
 //! # Ordering invariant
 //!
@@ -45,14 +45,14 @@ pub use report::{Location, ValidationIssue, ValidationReport};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::schema::WorkflowFile;
+use crate::schema::MechDocument;
 
 /// Validate a parsed workflow against the §10.1 checklist.
 ///
 /// `file_path` is folded into the source location of every emitted issue.
 /// `models` is consulted for `agent.model` resolution.
 pub fn validate_workflow(
-    workflow: &WorkflowFile,
+    workflow: &MechDocument,
     file_path: Option<&Path>,
     models: &dyn ModelChecker,
 ) -> ValidationReport {
@@ -88,7 +88,7 @@ impl<'a> Validator<'a> {
         Location::root(self.file)
     }
 
-    fn run(&mut self, wf: &WorkflowFile, models: &dyn ModelChecker) {
+    fn run(&mut self, wf: &MechDocument, models: &dyn ModelChecker) {
         // Top-level
         if wf.functions.is_empty() {
             self.err(

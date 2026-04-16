@@ -38,7 +38,7 @@ use crate::loader::Workflow;
 #[cfg(test)]
 use crate::schema::BlockDef;
 use crate::schema::{
-    AgentConfig, AgentConfigRef, FunctionDef, PromptBlock, SchemaRef, WorkflowFile,
+    AgentConfig, AgentConfigRef, FunctionDef, MechDocument, PromptBlock, SchemaRef,
 };
 
 /// Resolved agent configuration: the three-level cascade with `extends:` and
@@ -49,7 +49,7 @@ pub struct ResolvedAgentConfig {
     /// Model name.
     pub model: Option<String>,
     /// ToolGrant flag strings.
-    pub grant: Vec<String>,
+    pub grants: Vec<String>,
     /// Custom tool names.
     pub tools: Vec<String>,
     /// Writable paths.
@@ -64,7 +64,7 @@ impl ResolvedAgentConfig {
     fn from_inline(inline: &AgentConfig) -> MechResult<Self> {
         Ok(Self {
             model: inline.model.clone(),
-            grant: inline.grant_list().to_vec(),
+            grants: inline.grants_list().to_vec(),
             tools: inline.tool_list().to_vec(),
             write_paths: inline.write_path_list().to_vec(),
             timeout: inline.timeout.as_deref().map(parse_timeout).transpose()?,
@@ -81,7 +81,7 @@ impl ResolvedAgentConfig {
 /// Returns `ResolvedAgentConfig::default()` when no level specified an
 /// `agent:` field — the executor falls back to its runtime defaults.
 pub fn resolve_agent_config(
-    workflow: &WorkflowFile,
+    workflow: &MechDocument,
     function: &FunctionDef,
     block: &PromptBlock,
 ) -> MechResult<ResolvedAgentConfig> {
@@ -189,8 +189,8 @@ fn overlay(into: &mut ResolvedAgentConfig, from: &AgentConfig) -> MechResult<()>
     if from.model.is_some() {
         into.model = from.model.clone();
     }
-    if let Some(grant) = &from.grant {
-        into.grant = grant.clone();
+    if let Some(grant) = &from.grants {
+        into.grants = grant.clone();
     }
     if let Some(tools) = &from.tools {
         into.tools = tools.clone();
@@ -358,7 +358,7 @@ pub async fn execute_prompt_block(
                     name: name.to_string(),
                 })?
         }
-        SchemaRef::Infer(_) => {
+        SchemaRef::Infer => {
             return Err(MechError::WorkflowValidation {
                 errors: vec!["prompt block schema cannot be `infer`".into()],
             });
@@ -370,7 +370,7 @@ pub async fn execute_prompt_block(
         model: resolved_agent.model,
         system: rendered_system,
         prompt: rendered_prompt.clone(),
-        grant: resolved_agent.grant,
+        grants: resolved_agent.grants,
         tools: resolved_agent.tools,
         write_paths: resolved_agent.write_paths,
         timeout: resolved_agent.timeout,
@@ -704,16 +704,16 @@ functions:
     fn cascade_function_replaces_workflow_default() {
         let r = get_resolved("wins_function");
         assert_eq!(r.model.as_deref(), Some("opus"));
-        assert_eq!(r.grant, vec!["tools".to_string()]);
+        assert_eq!(r.grants, vec!["tools".to_string()]);
         // `network` from workflow default must NOT leak in (replace semantics).
-        assert!(!r.grant.contains(&"network".to_string()));
+        assert!(!r.grants.contains(&"network".to_string()));
     }
 
     #[test]
     fn cascade_block_replaces_function_and_workflow() {
         let r = get_resolved("wins_block");
         assert_eq!(r.model.as_deref(), Some("claude-3-5"));
-        assert_eq!(r.grant, vec!["write".to_string()]);
+        assert_eq!(r.grants, vec!["write".to_string()]);
         assert_eq!(r.write_paths, vec!["out/".to_string()]);
     }
 
@@ -721,7 +721,7 @@ functions:
     fn cascade_workflow_default_used_when_no_override() {
         let r = get_resolved("uses_workflow_default");
         assert_eq!(r.model.as_deref(), Some("sonnet"));
-        assert_eq!(r.grant, vec!["network".to_string()]);
+        assert_eq!(r.grants, vec!["network".to_string()]);
     }
 
     #[test]
@@ -729,7 +729,7 @@ functions:
         let r = get_resolved("uses_extends");
         // model from inline override, grant + write_paths inherited from base.
         assert_eq!(r.model.as_deref(), Some("opus"));
-        assert_eq!(r.grant, vec!["tools".to_string()]);
+        assert_eq!(r.grants, vec!["tools".to_string()]);
         assert_eq!(r.write_paths, vec!["base_path/".to_string()]);
     }
 
@@ -737,7 +737,7 @@ functions:
     fn cascade_ref_resolves_named_config() {
         let r = get_resolved("uses_ref");
         assert_eq!(r.model.as_deref(), Some("haiku"));
-        assert_eq!(r.grant, vec!["tools".to_string()]);
+        assert_eq!(r.grants, vec!["tools".to_string()]);
         assert_eq!(r.write_paths, vec!["base_path/".to_string()]);
     }
 
@@ -774,7 +774,7 @@ functions:
         };
         let r = resolve_agent_config(wf.file(), func, &block).unwrap();
         assert!(
-            r.grant.is_empty(),
+            r.grants.is_empty(),
             "grant: [] should clear inherited grants"
         );
         assert!(r.tools.is_empty(), "tools: [] should clear inherited tools");
@@ -818,7 +818,7 @@ functions:
         // Block-level replaces function-level entirely; workflow default does not leak.
         assert_eq!(r.model.as_deref(), Some("haiku"), "block model wins");
         assert!(
-            r.grant.is_empty(),
+            r.grants.is_empty(),
             "grant: [] at block level must clear, not inherit function grants"
         );
         // write_paths was only on function level; block replaces entirely so it must be empty.
@@ -861,7 +861,7 @@ functions:
         let r = resolve_agent_config(wf.file(), func, &block).unwrap();
         assert_eq!(r.model.as_deref(), Some("opus"), "model overridden");
         assert_eq!(
-            r.grant,
+            r.grants,
             vec!["tools", "write"],
             "grant inherited from parent"
         );
@@ -918,7 +918,7 @@ functions:
 
         let req = agent.last();
         assert_eq!(req.model.as_deref(), Some("sonnet"));
-        assert_eq!(req.grant, vec!["write".to_string(), "network".to_string()]);
+        assert_eq!(req.grants, vec!["write".to_string(), "network".to_string()]);
         assert_eq!(req.tools, vec!["web_search".to_string()]);
         assert_eq!(
             req.write_paths,
@@ -1248,7 +1248,7 @@ functions:
         .unwrap();
         let req = agent.last();
         assert_eq!(req.model, None);
-        assert!(req.grant.is_empty());
+        assert!(req.grants.is_empty());
         assert!(req.tools.is_empty());
         assert!(req.write_paths.is_empty());
         assert_eq!(req.timeout, None);

@@ -1674,7 +1674,7 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 
 ### Deliverable 2 — YAML schema types (parse-only, no validation)
 
-**Scope:** Define the serde structs that mirror the §12 YAML grammar: `WorkflowFile`, `FunctionDef`, `BlockDef` (enum: `Prompt`, `Call`), `AgentConfig`, `TransitionDef`, `SchemaRef`, `ContextVarDef`, etc. Use `#[serde(deny_unknown_fields)]`. Parse only — no semantic validation. Support the three `call.input` forms (string, uniform list, per-call object list) via an untagged enum.
+**Scope:** Define the serde structs that mirror the §12 YAML grammar: `MechDocument`, `FunctionDef`, `BlockDef` (enum: `Prompt`, `Call`), `AgentConfig`, `TransitionDef`, `SchemaRef`, `ContextVarDef`, etc. Use `#[serde(deny_unknown_fields)]`. Parse only — no semantic validation. Support the three `call.input` forms (string, uniform list, per-call object list) via an untagged enum.
 
 **Tests first:**
 - Parse the §12 worked example end-to-end; assert top-level structure matches.
@@ -1731,7 +1731,7 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 
 ### Deliverable 5 — Load-time validation (the 24+ checks)
 
-**Scope:** Implement the load-time validation pass enumerated in §10. Walks the parsed `WorkflowFile` and emits the complete list of errors (not just the first). Checks include: unique block IDs, transition targets exist, guards are valid CEL, `set_*` targets are declared variables, agent configs reference declared agents, schema refs resolve, call blocks reference declared functions, terminal blocks have no outgoing transitions, workflow has at least one entry, etc.
+**Scope:** Implement the load-time validation pass enumerated in §10. Walks the parsed `MechDocument` and emits the complete list of errors (not just the first). Checks include: unique block IDs, transition targets exist, guards are valid CEL, `set_*` targets are declared variables, agent configs reference declared agents, schema refs resolve, call blocks reference declared functions, terminal blocks have no outgoing transitions, workflow has at least one entry, etc.
 
 **Tests first:**
 - Each of the 24+ checks has at least one failing fixture and one passing fixture.
@@ -1764,7 +1764,7 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 - "Union" is narrow: structural equality on resolved JSON bodies. Non-matching terminals error (`MechError::InferenceFailed`); no `oneOf`/`anyOf` synthesis is attempted.
 - Terminal prompt blocks contribute their resolved `schema:` (inline or `$ref:#name`). Terminal call blocks contribute the callee's output schema only when the block is a single-function call with no `output:` mapping; list-form calls or call blocks that declare an `output:` mapping cannot be structurally inferred and must live under a function with an explicit `output:` schema.
 - A fixed-point pass resolves chains of `infer` functions (A's terminal calls B, B's output also `infer`). Functions still unresolved after the fixed point error out.
-- Inference mutates the parsed `WorkflowFile` in place, replacing `SchemaRef::Infer` with `SchemaRef::Inline`, and is idempotent on a second run. Public entry point: `mech::infer_function_outputs(&mut WorkflowFile)`.
+- Inference mutates the parsed `MechDocument` in place, replacing `SchemaRef::Infer` with `SchemaRef::Inline`, and is idempotent on a second run. Public entry point: `mech::infer_function_outputs(&mut MechDocument)`.
 
 ---
 

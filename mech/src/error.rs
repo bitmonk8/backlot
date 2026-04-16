@@ -160,6 +160,14 @@ pub enum MechError {
         raw: String,
     },
 
+    /// A schema `$ref` is syntactically valid but uses an unsupported form
+    /// (e.g. `$ref:./foo.json` — external file references).
+    #[error("unsupported schema $ref form: '{raw}'")]
+    SchemaRefUnsupported {
+        /// The raw $ref string as it appeared in the workflow file.
+        raw: String,
+    },
+
     /// A workflow-level shared schema (or chain of `extends`-style refs) forms
     /// a cycle. Detected at registry construction time.
     #[error("circular schema $ref involving: {chain}", chain = chain.join(" -> "))]
@@ -321,6 +329,13 @@ mod tests {
         };
         let s = format!("{e}");
         assert!(s.contains("Person"));
+
+        let e = MechError::SchemaRefUnsupported {
+            raw: "$ref:./external.json".into(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("$ref:./external.json"));
+        assert!(s.contains("unsupported"));
 
         let e = MechError::WorkflowValidation {
             errors: vec!["bad guard".into(), "missing block".into()],

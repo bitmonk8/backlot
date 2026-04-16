@@ -42,7 +42,7 @@ pub struct AgentRequest {
     /// interpolation against the current execution context).
     pub prompt: String,
     /// ToolGrant flag strings (`tools`, `write`, `network`).
-    pub grant: Vec<String>,
+    pub grants: Vec<String>,
     /// Custom tool names to enable.
     pub tools: Vec<String>,
     /// Writable paths (relative to project root).

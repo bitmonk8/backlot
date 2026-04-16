@@ -4,9 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value as JsonValue;
 
-use crate::schema::{
-    BlockDef, CallSpec, ContextVarDef, FunctionDef, InferLiteral, SchemaRef, WorkflowFile,
-};
+use crate::schema::{BlockDef, CallSpec, ContextVarDef, FunctionDef, MechDocument, SchemaRef};
 
 use super::Validator;
 use super::helpers::{RESERVED_BLOCK_NAMES, inferred_terminals, is_valid_identifier};
@@ -18,7 +16,7 @@ impl Validator<'_> {
         &mut self,
         fn_name: &str,
         func: &FunctionDef,
-        wf: &WorkflowFile,
+        wf: &MechDocument,
         function_names: &BTreeSet<String>,
         models: &dyn ModelChecker,
     ) {
@@ -43,7 +41,7 @@ impl Validator<'_> {
                 SchemaRef::Ref(raw) => {
                     self.validate_schema_ref_resolves(raw, wf, floc.clone().with_field("output"));
                 }
-                SchemaRef::Infer(InferLiteral::Infer) => {}
+                SchemaRef::Infer => {}
             }
         }
 
@@ -107,10 +105,7 @@ impl Validator<'_> {
         };
 
         // Function output inference precondition
-        let needs_inference = matches!(
-            func.output,
-            None | Some(SchemaRef::Infer(InferLiteral::Infer))
-        );
+        let needs_inference = matches!(func.output, None | Some(SchemaRef::Infer));
         if needs_inference && effective_terminals.is_empty() && !func.blocks.is_empty() {
             self.err(
                 floc.clone().with_field("output"),
@@ -135,7 +130,7 @@ impl Validator<'_> {
         &mut self,
         block: &BlockDef,
         func: &FunctionDef,
-        wf: &WorkflowFile,
+        wf: &MechDocument,
         function_names: &BTreeSet<String>,
         models: &dyn ModelChecker,
         bloc: &Location,
@@ -187,7 +182,7 @@ impl Validator<'_> {
                             bloc.clone().with_field("schema"),
                         );
                     }
-                    SchemaRef::Infer(_) => {
+                    SchemaRef::Infer => {
                         self.err(
                             bloc.clone().with_field("schema"),
                             "prompt block schema cannot be `infer`",
@@ -281,7 +276,7 @@ impl Validator<'_> {
         &mut self,
         c: &crate::schema::CallBlock,
         function_names: &BTreeSet<String>,
-        wf: &WorkflowFile,
+        wf: &MechDocument,
         bloc: &Location,
     ) {
         match &c.call {
@@ -319,7 +314,7 @@ impl Validator<'_> {
         name: &str,
         input: Option<&BTreeMap<String, String>>,
         function_names: &BTreeSet<String>,
-        wf: &WorkflowFile,
+        wf: &MechDocument,
         bloc: &Location,
     ) {
         if !function_names.contains(name) {
@@ -388,7 +383,7 @@ impl Validator<'_> {
     pub(crate) fn validate_schema_ref_resolves(
         &mut self,
         raw: &str,
-        wf: &WorkflowFile,
+        wf: &MechDocument,
         loc: Location,
     ) {
         let Some(rest) = raw.strip_prefix("$ref:") else {

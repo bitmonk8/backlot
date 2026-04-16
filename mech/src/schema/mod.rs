@@ -49,8 +49,8 @@ pub use workflow::*;
 
 pub use infer::infer_function_outputs;
 pub use registry::{
-    ResolvedSchema, SchemaRegistry, parse_named_ref, resolve_schema_value, try_parse_named_ref,
-    value_matches_json_type,
+    ResolvedSchema, SchemaRegistry, parse_named_ref, resolve_schema_ref_in_map,
+    resolve_schema_value, try_parse_named_ref, value_matches_json_type,
 };
 
 /// A raw, template-bearing string (CEL / `{{...}}`). Kept as-is at parse time.
@@ -61,12 +61,12 @@ pub type Expr = String;
 /// because inline schemas in the YAML grammar can be any JSON value.
 pub type JsonValue = serde_json::Value;
 
-/// Parse a [`WorkflowFile`] from a YAML string.
+/// Parse a [`MechDocument`] from a YAML string.
 ///
 /// This is a thin wrapper around `serde_yml::from_str` that exists to give the
 /// rest of the crate a single entry point. No semantic validation is
 /// performed.
-pub fn parse_workflow(yaml: &str) -> Result<WorkflowFile, serde_yml::Error> {
+pub fn parse_workflow(yaml: &str) -> Result<MechDocument, serde_yml::Error> {
     serde_yml::from_str(yaml)
 }
 
@@ -156,7 +156,7 @@ mod tests {
         match &rb.agent {
             Some(AgentConfigRef::Inline(a)) => {
                 assert_eq!(a.extends.as_deref(), Some("default"));
-                assert_eq!(a.grant, Some(vec!["write".to_string()]));
+                assert_eq!(a.grants, Some(vec!["write".to_string()]));
                 assert_eq!(a.write_paths, Some(vec!["billing/".to_string()]));
             }
             other => panic!("expected inline agent with extends, got {other:?}"),
@@ -308,7 +308,7 @@ functions:
 "#;
         let wf = parse_workflow(yaml).unwrap();
         match &wf.functions["f"].output {
-            Some(SchemaRef::Infer(InferLiteral::Infer)) => {}
+            Some(SchemaRef::Infer) => {}
             other => panic!("expected Infer, got {other:?}"),
         }
     }
@@ -338,7 +338,7 @@ functions:
         match &wf.workflow.as_ref().unwrap().agent {
             Some(AgentConfigRef::Inline(a)) => {
                 assert_eq!(a.model.as_deref(), Some("haiku"));
-                assert_eq!(a.grant, Some(vec!["tools".to_string()]));
+                assert_eq!(a.grants, Some(vec!["tools".to_string()]));
             }
             other => panic!("expected inline agent at workflow level, got {other:?}"),
         }
@@ -472,7 +472,7 @@ functions:
         let comp = wdef.compaction.as_ref().unwrap();
         assert_eq!(comp.keep_recent_tokens, 2000);
         assert_eq!(comp.reserve_tokens, 4000);
-        assert_eq!(comp.r#fn.as_deref(), Some("my_compactor"));
+        assert_eq!(comp.func.as_deref(), Some("my_compactor"));
 
         let f = &wf.functions["f"];
         assert_eq!(f.terminals, vec!["done".to_string()]);

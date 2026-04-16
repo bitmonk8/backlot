@@ -22,8 +22,8 @@ pub struct AgentConfig {
     pub model: Option<String>,
 
     /// ToolGrant flags (`tools`, `write`, `network`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grant: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "grant")]
+    pub grants: Option<Vec<String>>,
 
     /// Custom tool names (must be registered with the executor).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,9 +43,9 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    /// Returns the grant list, or an empty slice if unset.
-    pub fn grant_list(&self) -> &[String] {
-        self.grant.as_deref().unwrap_or_default()
+    /// Returns the grants list, or an empty slice if unset.
+    pub fn grants_list(&self) -> &[String] {
+        self.grants.as_deref().unwrap_or_default()
     }
 
     /// Returns the tools list, or an empty slice if unset.

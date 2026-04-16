@@ -37,7 +37,7 @@ use jsonschema::Validator;
 use serde_json::Value;
 
 use crate::error::{MechError, MechResult};
-use crate::schema::{InferLiteral, JsonValue, SchemaRef, WorkflowFile};
+use crate::schema::{JsonValue, SchemaRef};
 
 /// Prefix that marks a `$ref` string. Both `$ref:#name` (workflow-level shared
 /// schema) and `$ref:path` (external file, deferred) start with this prefix.
@@ -101,7 +101,7 @@ impl<'r> ResolvedSchema<'r> {
 
 /// Compiled, cycle-checked registry of workflow-level shared JSON Schemas.
 ///
-/// Built from the `workflow.schemas` map of a parsed [`crate::WorkflowFile`].
+/// Built from the `workflow.schemas` map of a parsed [`crate::MechDocument`].
 /// Also stores fully-resolved JSON bodies for each schema, accessible via
 /// [`SchemaRegistry::resolved_body`].
 #[derive(Debug)]
@@ -155,11 +155,11 @@ impl SchemaRegistry {
     /// * `SchemaRef::Inline(v)` compiles `v` as a fresh JSON Schema.
     /// * `SchemaRef::Ref("$ref:#name")` looks `name` up in the registry.
     /// * `SchemaRef::Ref("$ref:path")` is reserved for external files
-    ///   (Deliverable 7) and currently errors with [`MechError::SchemaRefMalformed`].
-    /// * `SchemaRef::Infer(_)` returns [`ResolvedSchema::Infer`].
+    ///   (Deliverable 7) and currently errors with [`MechError::SchemaRefUnsupported`].
+    /// * `SchemaRef::Infer` returns [`ResolvedSchema::Infer`].
     pub fn resolve<'r>(&'r self, schema_ref: &SchemaRef) -> MechResult<ResolvedSchema<'r>> {
         match schema_ref {
-            SchemaRef::Infer(InferLiteral::Infer) => Ok(ResolvedSchema::Infer),
+            SchemaRef::Infer => Ok(ResolvedSchema::Infer),
             SchemaRef::Ref(raw) => {
                 let name = parse_named_ref(raw)?;
                 let validator =
@@ -196,16 +196,21 @@ impl SchemaRegistry {
 /// Parse a `$ref:#name` string and return the bare `name`.
 ///
 /// `$ref:path` (no leading `#`) is reserved for external file references and
-/// is rejected here as malformed for the purposes of Deliverable 4.
+/// is rejected here as unsupported (not malformed).
 pub fn parse_named_ref(raw: &str) -> MechResult<&str> {
     let body = raw
         .strip_prefix(REF_PREFIX)
         .ok_or_else(|| MechError::SchemaRefMalformed {
             raw: raw.to_string(),
         })?;
+    if body.is_empty() {
+        return Err(MechError::SchemaRefMalformed {
+            raw: raw.to_string(),
+        });
+    }
     let name = body
         .strip_prefix('#')
-        .ok_or_else(|| MechError::SchemaRefMalformed {
+        .ok_or_else(|| MechError::SchemaRefUnsupported {
             raw: raw.to_string(),
         })?;
     if name.is_empty() {
@@ -357,15 +362,17 @@ fn top_level_ref_target(body: &JsonValue) -> Option<&str> {
     }
 }
 
-/// Resolve a [`SchemaRef`] to its raw JSON Schema body.
+/// Resolve a [`SchemaRef`] to its raw JSON Schema body, following
+/// alias chains.
 ///
-/// Returns `None` for `infer` or when a `$ref:#name` target is missing.
-pub fn resolve_schema_value(s: &SchemaRef, wf: &WorkflowFile) -> Option<Value> {
+/// For `$ref:#name` references, follows top-level string-form aliases
+/// (`$ref:#name` → `$ref:#other` → …) with cycle detection. Returns `None`
+/// for `infer`, when a target is missing, or on a circular alias chain.
+pub fn resolve_schema_value(s: &SchemaRef, schemas: &BTreeMap<String, JsonValue>) -> Option<Value> {
     match s {
         SchemaRef::Inline(v) => Some(v.clone()),
         SchemaRef::Ref(raw) => {
             let name = try_parse_named_ref(raw)?;
-            let schemas = &wf.workflow.as_ref()?.schemas;
             let mut body = schemas.get(name)?;
             let mut visited = BTreeSet::new();
             visited.insert(name);
@@ -380,7 +387,26 @@ pub fn resolve_schema_value(s: &SchemaRef, wf: &WorkflowFile) -> Option<Value> {
             Some(body.clone())
         }
 
-        SchemaRef::Infer(_) => None,
+        SchemaRef::Infer => None,
+    }
+}
+
+/// Resolve a [`SchemaRef`] to its raw JSON body using only a flat schemas map.
+///
+/// Returns `None` for `infer` or when a `$ref:#name` target is missing.
+/// Only follows one hop of `$ref:#name`; deeper chains must be pre-collapsed
+/// by [`SchemaRegistry::build`].
+pub fn resolve_schema_ref_in_map(
+    s: &SchemaRef,
+    schemas: &BTreeMap<String, JsonValue>,
+) -> Option<JsonValue> {
+    match s {
+        SchemaRef::Inline(v) => Some(v.clone()),
+        SchemaRef::Ref(raw) => {
+            let name = try_parse_named_ref(raw)?;
+            schemas.get(name).cloned()
+        }
+        SchemaRef::Infer => None,
     }
 }
 
@@ -401,7 +427,7 @@ pub fn value_matches_json_type(v: &Value, ty: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{InferLiteral, SchemaRef};
+    use crate::schema::SchemaRef;
     use serde_json::json;
 
     fn schemas(pairs: &[(&str, JsonValue)]) -> BTreeMap<String, JsonValue> {
@@ -562,9 +588,7 @@ mod tests {
     #[test]
     fn infer_placeholder_resolves_to_deferred_marker() {
         let reg = SchemaRegistry::build(&BTreeMap::new()).unwrap();
-        let resolved = reg
-            .resolve(&SchemaRef::Infer(InferLiteral::Infer))
-            .expect("infer must resolve");
+        let resolved = reg.resolve(&SchemaRef::Infer).expect("infer must resolve");
         assert!(resolved.is_infer());
         // And validating against it errors loudly so callers cannot pretend
         // an unresolved `infer` schema accepted a value.
@@ -599,8 +623,8 @@ mod tests {
 
         let err = reg
             .resolve(&SchemaRef::Ref("$ref:no-hash".to_string()))
-            .expect_err("malformed");
-        assert!(matches!(err, MechError::SchemaRefMalformed { .. }));
+            .expect_err("unsupported");
+        assert!(matches!(err, MechError::SchemaRefUnsupported { .. }));
 
         let err = reg
             .resolve(&SchemaRef::Ref("$ref:#".to_string()))
@@ -856,9 +880,14 @@ mod tests {
             parse_named_ref("person"),
             Err(MechError::SchemaRefMalformed { .. })
         ));
-        // Missing hash
+        // Missing hash — valid $ref prefix but unsupported form (external file ref)
         assert!(matches!(
             parse_named_ref("$ref:person"),
+            Err(MechError::SchemaRefUnsupported { .. })
+        ));
+        // Empty body after prefix
+        assert!(matches!(
+            parse_named_ref("$ref:"),
             Err(MechError::SchemaRefMalformed { .. })
         ));
         // Empty name
@@ -897,65 +926,43 @@ mod tests {
 
     #[test]
     fn resolve_schema_value_inline() {
-        let wf = WorkflowFile {
-            workflow: None,
-            functions: Default::default(),
-        };
+        let empty = BTreeMap::new();
         let schema = SchemaRef::Inline(json!({"type": "string"}));
         assert_eq!(
-            resolve_schema_value(&schema, &wf),
+            resolve_schema_value(&schema, &empty),
             Some(json!({"type": "string"}))
         );
     }
 
     #[test]
     fn resolve_schema_value_ref_resolves() {
-        let wf = WorkflowFile {
-            workflow: Some(crate::schema::WorkflowDefaults {
-                schemas: [("person".to_string(), json!({"type": "object"}))]
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            }),
-            functions: Default::default(),
-        };
+        let s = schemas(&[("person", json!({"type": "object"}))]);
         let schema = SchemaRef::Ref("$ref:#person".to_string());
         assert_eq!(
-            resolve_schema_value(&schema, &wf),
+            resolve_schema_value(&schema, &s),
             Some(json!({"type": "object"}))
         );
     }
 
     #[test]
     fn resolve_schema_value_infer_returns_none() {
-        let wf = WorkflowFile {
-            workflow: None,
-            functions: Default::default(),
-        };
-        let schema = SchemaRef::Infer(crate::schema::InferLiteral::Infer);
-        assert_eq!(resolve_schema_value(&schema, &wf), None);
+        let empty = BTreeMap::new();
+        let schema = SchemaRef::Infer;
+        assert_eq!(resolve_schema_value(&schema, &empty), None);
     }
 
     #[test]
     fn resolve_schema_value_follows_alias_chain() {
-        let wf = WorkflowFile {
-            workflow: Some(crate::schema::WorkflowDefaults {
-                schemas: [
-                    ("alias".to_string(), json!("$ref:#real")),
-                    (
-                        "real".to_string(),
-                        json!({"type": "object", "properties": {"x": {"type": "integer"}}}),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            }),
-            functions: Default::default(),
-        };
+        let s = schemas(&[
+            ("alias", json!("$ref:#real")),
+            (
+                "real",
+                json!({"type": "object", "properties": {"x": {"type": "integer"}}}),
+            ),
+        ]);
         let schema = SchemaRef::Ref("$ref:#alias".to_string());
         assert_eq!(
-            resolve_schema_value(&schema, &wf),
+            resolve_schema_value(&schema, &s),
             Some(json!({"type": "object", "properties": {"x": {"type": "integer"}}}))
         );
     }
@@ -1003,23 +1010,46 @@ mod tests {
 
     #[test]
     fn resolve_schema_value_circular_alias_returns_none() {
-        let wf = WorkflowFile {
-            workflow: Some(crate::schema::WorkflowDefaults {
-                schemas: [
-                    ("a".to_string(), json!("$ref:#b")),
-                    ("b".to_string(), json!("$ref:#a")),
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            }),
-            functions: Default::default(),
-        };
+        let s = schemas(&[("a", json!("$ref:#b")), ("b", json!("$ref:#a"))]);
         let schema = SchemaRef::Ref("$ref:#a".to_string());
         assert_eq!(
-            resolve_schema_value(&schema, &wf),
+            resolve_schema_value(&schema, &s),
             None,
             "circular alias chain must return None"
         );
+    }
+
+    #[test]
+    fn resolve_schema_ref_in_map_inline_returns_value() {
+        let empty = BTreeMap::new();
+        let schema = SchemaRef::Inline(json!({"type": "string"}));
+        assert_eq!(
+            resolve_schema_ref_in_map(&schema, &empty),
+            Some(json!({"type": "string"}))
+        );
+    }
+
+    #[test]
+    fn resolve_schema_ref_in_map_ref_existing_returns_body() {
+        let s = schemas(&[("person", json!({"type": "object"}))]);
+        let schema = SchemaRef::Ref("$ref:#person".to_string());
+        assert_eq!(
+            resolve_schema_ref_in_map(&schema, &s),
+            Some(json!({"type": "object"}))
+        );
+    }
+
+    #[test]
+    fn resolve_schema_ref_in_map_ref_missing_returns_none() {
+        let s = schemas(&[("person", json!({"type": "object"}))]);
+        let schema = SchemaRef::Ref("$ref:#missing".to_string());
+        assert_eq!(resolve_schema_ref_in_map(&schema, &s), None);
+    }
+
+    #[test]
+    fn resolve_schema_ref_in_map_infer_returns_none() {
+        let empty = BTreeMap::new();
+        let schema = SchemaRef::Infer;
+        assert_eq!(resolve_schema_ref_in_map(&schema, &empty), None);
     }
 }

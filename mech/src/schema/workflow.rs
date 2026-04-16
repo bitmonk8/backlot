@@ -1,4 +1,4 @@
-//! Workflow-level types: [`WorkflowFile`], [`WorkflowDefaults`], [`FunctionDef`],
+//! Workflow-level types: [`MechDocument`], [`WorkflowSection`], [`FunctionDef`],
 //! [`ContextVarDef`], [`CompactionConfig`].
 
 use std::collections::BTreeMap;
@@ -13,10 +13,10 @@ use super::schema_ref::SchemaRef;
 /// Root document: a parsed mech workflow file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowFile {
+pub struct MechDocument {
     /// Workflow-level defaults (system prompt, agents, context, schemas, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<WorkflowDefaults>,
+    pub workflow: Option<WorkflowSection>,
 
     /// Function definitions, keyed by function name.
     pub functions: BTreeMap<String, FunctionDef>,
@@ -25,7 +25,7 @@ pub struct WorkflowFile {
 /// Contents of the top-level `workflow:` block.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowDefaults {
+pub struct WorkflowSection {
     /// Default system prompt (template string).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
@@ -109,6 +109,6 @@ pub struct CompactionConfig {
     /// Trigger threshold (fire when `used > context_window - reserve`).
     pub reserve_tokens: u32,
     /// Optional custom compaction function name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#fn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "fn")]
+    pub func: Option<String>,
 }

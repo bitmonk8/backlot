@@ -13,7 +13,7 @@ impl Validator<'_> {
     /// Validate the named-agents map from `workflow.agents`.
     pub(crate) fn validate_named_agents(
         &mut self,
-        defaults: &crate::schema::WorkflowDefaults,
+        defaults: &crate::schema::WorkflowSection,
         models: &dyn ModelChecker,
     ) {
         // Per-agent validity
@@ -88,7 +88,7 @@ impl Validator<'_> {
                 format!("agent model `{model}` is not known to the model registry"),
             );
         }
-        for g in ac.grant_list() {
+        for g in ac.grants_list() {
             if !VALID_GRANTS.contains(&g.as_str()) {
                 self.err(
                     loc.clone().with_field("grant"),
@@ -105,14 +105,14 @@ impl Validator<'_> {
         }
     }
 
-    /// Validate an agent reference that requires `WorkflowDefaults`.
+    /// Validate an agent reference that requires `WorkflowSection`.
     ///
     /// Renamed from `validate_agent_ref` → `validate_agent_ref_strict` for
     /// clarity (Issue #50): this form requires defaults to be present.
     pub(crate) fn validate_agent_ref_strict(
         &mut self,
         agent_ref: &AgentConfigRef,
-        defaults: &crate::schema::WorkflowDefaults,
+        defaults: &crate::schema::WorkflowSection,
         models: &dyn ModelChecker,
         loc: Location,
     ) {
@@ -155,7 +155,7 @@ impl Validator<'_> {
     pub(crate) fn validate_agent_ref(
         &mut self,
         agent_ref: &AgentConfigRef,
-        defaults: Option<&crate::schema::WorkflowDefaults>,
+        defaults: Option<&crate::schema::WorkflowSection>,
         models: &dyn ModelChecker,
         loc: Location,
     ) {

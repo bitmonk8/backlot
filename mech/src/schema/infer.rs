@@ -11,7 +11,7 @@
 //!
 //! This module runs **after** load-time validation (§13 Deliverable 5) and
 //! **before** the end-to-end loader (Deliverable 7). It mutates the parsed
-//! [`WorkflowFile`] in place, replacing every `output: infer` with a concrete
+//! [`MechDocument`] in place, replacing every `output: infer` with a concrete
 //! inline schema.
 //!
 //! ### Terminal output extraction
@@ -27,9 +27,8 @@
 use std::collections::BTreeMap;
 
 use crate::error::{MechError, MechResult};
-use crate::schema::{
-    BlockDef, CallSpec, FunctionDef, InferLiteral, JsonValue, SchemaRef, WorkflowFile,
-};
+use crate::schema::registry::resolve_schema_ref_in_map;
+use crate::schema::{BlockDef, CallSpec, FunctionDef, JsonValue, MechDocument, SchemaRef};
 
 /// Infer concrete output schemas for every function that declares
 /// `output: infer` (or omits `output:`).
@@ -37,7 +36,7 @@ use crate::schema::{
 /// Idempotent: running twice on the same workflow produces the same result,
 /// because the first pass replaces every inferred schema with
 /// [`SchemaRef::Inline`], which the second pass leaves untouched.
-pub fn infer_function_outputs(wf: &mut WorkflowFile) -> MechResult<()> {
+pub fn infer_function_outputs(wf: &mut MechDocument) -> MechResult<()> {
     // Snapshot the shared schemas map so we can resolve `$ref:#name` bodies
     // without borrowing `wf` mutably and immutably at the same time.
     let shared: BTreeMap<String, JsonValue> = wf
@@ -104,13 +103,13 @@ pub fn infer_function_outputs(wf: &mut WorkflowFile) -> MechResult<()> {
 
 /// True if `output` is absent or the literal `infer`.
 fn needs_inference(output: &Option<SchemaRef>) -> bool {
-    matches!(output, None | Some(SchemaRef::Infer(InferLiteral::Infer)),)
+    matches!(output, None | Some(SchemaRef::Infer),)
 }
 
 /// Build a map of `function name -> concrete inline output schema JSON` for
 /// every function whose output is currently inline (post-resolution of a
 /// `$ref:#name`). Functions whose output is still `infer` are omitted.
-fn snapshot_concrete_outputs(wf: &WorkflowFile) -> BTreeMap<String, JsonValue> {
+fn snapshot_concrete_outputs(wf: &MechDocument) -> BTreeMap<String, JsonValue> {
     let mut out = BTreeMap::new();
     let shared = wf
         .workflow
@@ -120,7 +119,7 @@ fn snapshot_concrete_outputs(wf: &WorkflowFile) -> BTreeMap<String, JsonValue> {
         .unwrap_or_default();
     for (name, func) in &wf.functions {
         if let Some(s) = &func.output
-            && let Some(v) = resolve_schema_ref(s, &shared)
+            && let Some(v) = resolve_schema_ref_in_map(s, &shared)
         {
             out.insert(name.clone(), v);
         }
@@ -214,14 +213,14 @@ fn terminal_block_output(
     match block {
         BlockDef::Prompt(p) => match &p.schema {
             SchemaRef::Inline(v) => TerminalOutput::Concrete(v.clone()),
-            SchemaRef::Ref(raw) => match resolve_schema_ref(&p.schema, shared) {
+            SchemaRef::Ref(raw) => match resolve_schema_ref_in_map(&p.schema, shared) {
                 Some(v) => TerminalOutput::Concrete(v),
                 None => TerminalOutput::Error(format!(
                     "prompt block schema reference `{raw}` is unresolved \
                      (unknown shared schema or unsupported form)"
                 )),
             },
-            SchemaRef::Infer(_) => TerminalOutput::Error(
+            SchemaRef::Infer => TerminalOutput::Error(
                 "prompt block schema is `infer` (not allowed on blocks)".to_string(),
             ),
         },
@@ -248,27 +247,12 @@ fn terminal_block_output(
     }
 }
 
-/// Resolve a [`SchemaRef`] to a concrete JSON body, or `None` if it is
-/// `infer` or refers to an unknown shared schema. Only follows one hop of
-/// `$ref:#name`; deeper chains were already collapsed by
-/// [`crate::schema::SchemaRegistry::build`].
-fn resolve_schema_ref(s: &SchemaRef, shared: &BTreeMap<String, JsonValue>) -> Option<JsonValue> {
-    match s {
-        SchemaRef::Inline(v) => Some(v.clone()),
-        SchemaRef::Ref(raw) => {
-            let name = crate::schema::try_parse_named_ref(raw)?;
-            shared.get(name).cloned()
-        }
-        SchemaRef::Infer(_) => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::parse_workflow;
 
-    fn inferred_output(wf: &WorkflowFile, func: &str) -> JsonValue {
+    fn inferred_output(wf: &MechDocument, func: &str) -> JsonValue {
         match wf.functions[func].output.as_ref().unwrap() {
             SchemaRef::Inline(v) => v.clone(),
             other => panic!("expected inline schema, got {other:?}"),

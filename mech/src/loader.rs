@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::cel::{CelExpression, Template};
 use crate::error::{MechError, MechResult};
 use crate::schema::{
-    BlockDef, CallBlock, CallSpec, FunctionDef, PromptBlock, SchemaRegistry, WorkflowFile,
+    BlockDef, CallBlock, CallSpec, FunctionDef, MechDocument, PromptBlock, SchemaRegistry,
     infer_function_outputs, parse_workflow,
 };
 use crate::validate::{AnyModel, ModelChecker, validate_workflow};
@@ -26,7 +26,7 @@ use crate::validate::{AnyModel, ModelChecker, validate_workflow};
 /// Produced by [`WorkflowLoader::load`] (or [`WorkflowLoader::load_str`] for
 /// in-memory tests). Holds:
 ///
-/// * The parsed and inference-resolved [`WorkflowFile`].
+/// * The parsed and inference-resolved [`MechDocument`].
 /// * A compiled [`SchemaRegistry`] covering every workflow-level shared
 ///   schema.
 /// * A deduplicated cache of compiled [`CelExpression`] guards (keyed by
@@ -40,7 +40,7 @@ use crate::validate::{AnyModel, ModelChecker, validate_workflow};
 /// is deterministic.
 #[derive(Debug, Clone)]
 pub struct Workflow {
-    file: Arc<WorkflowFile>,
+    file: Arc<MechDocument>,
     source_path: Option<PathBuf>,
     schemas: Arc<SchemaRegistry>,
     guards: Arc<BTreeMap<String, Arc<CelExpression>>>,
@@ -49,7 +49,7 @@ pub struct Workflow {
 
 impl Workflow {
     /// The parsed, validated, inference-resolved workflow file.
-    pub fn file(&self) -> &WorkflowFile {
+    pub fn file(&self) -> &MechDocument {
         &self.file
     }
 
@@ -196,7 +196,7 @@ impl WorkflowLoader {
 }
 
 fn compile_all(
-    file: &WorkflowFile,
+    file: &MechDocument,
     guards: &mut BTreeMap<String, Arc<CelExpression>>,
     templates: &mut BTreeMap<String, Arc<Template>>,
 ) -> MechResult<()> {

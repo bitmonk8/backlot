@@ -883,7 +883,7 @@ functions:
 
     let req = &requests.lock().unwrap()[0];
     assert_eq!(req.model.as_deref(), Some("opus"));
-    assert_eq!(req.grant, vec!["write".to_string()]);
+    assert_eq!(req.grants, vec!["write".to_string()]);
     assert_eq!(req.write_paths, vec!["out/".to_string()]);
 }
 

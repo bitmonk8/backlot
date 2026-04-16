@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::schema::{AgentConfig, BlockDef, CallBlock, CallSpec, FunctionDef, WorkflowFile};
+use crate::schema::{AgentConfig, BlockDef, CallBlock, CallSpec, FunctionDef, MechDocument};
 use serde_json::Value as JsonValue;
 
 /// Returns `true` if `s` matches the identifier pattern `[a-z][a-z0-9_]*`.
@@ -18,7 +18,7 @@ pub(crate) fn is_valid_identifier(s: &str) -> bool {
 /// Compute the normalized grant set for an agent config. `write` and
 /// `network` imply `tools`; a non-empty tools list also implies `tools`.
 pub(crate) fn normalized_grants(ac: &AgentConfig) -> BTreeSet<String> {
-    let mut set: BTreeSet<String> = ac.grant_list().iter().cloned().collect();
+    let mut set: BTreeSet<String> = ac.grants_list().iter().cloned().collect();
     if set.contains("write") || set.contains("network") {
         set.insert("tools".to_string());
     }
@@ -114,15 +114,19 @@ pub(crate) fn transitive_ctrl_reach(func: &FunctionDef) -> BTreeMap<String, BTre
 /// Uniform/PerCall, intersects all callees.
 pub(crate) fn collect_block_fields(
     func: &FunctionDef,
-    wf: &WorkflowFile,
+    wf: &MechDocument,
 ) -> BTreeMap<String, BTreeSet<String>> {
+    let empty = BTreeMap::new();
+    let schemas = wf.workflow.as_ref().map(|w| &w.schemas).unwrap_or(&empty);
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, block) in &func.blocks {
         let fields = match block {
             BlockDef::Prompt(p) => {
-                extract_schema_properties(&crate::schema::resolve_schema_value(&p.schema, wf))
+                extract_schema_properties(&crate::schema::resolve_schema_value(&p.schema, schemas))
             }
-            BlockDef::Call(c) => collect_call_schema_fields(c, wf, extract_schema_properties),
+            BlockDef::Call(c) => {
+                collect_call_schema_fields(c, wf, schemas, extract_schema_properties)
+            }
         };
         out.insert(name.clone(), fields);
     }
@@ -148,19 +152,23 @@ pub(crate) fn schema_required_fields(schema: &JsonValue) -> BTreeSet<String> {
 /// callees (a field is guaranteed-required only if ALL callees require it).
 pub(crate) fn collect_block_required_fields(
     func: &FunctionDef,
-    wf: &WorkflowFile,
+    wf: &MechDocument,
 ) -> BTreeMap<String, BTreeSet<String>> {
+    let empty = BTreeMap::new();
+    let schemas = wf.workflow.as_ref().map(|w| &w.schemas).unwrap_or(&empty);
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (name, block) in &func.blocks {
         let required = match block {
             BlockDef::Prompt(p) => {
-                let sv = crate::schema::resolve_schema_value(&p.schema, wf);
+                let sv = crate::schema::resolve_schema_value(&p.schema, schemas);
                 match sv {
                     Some(v) => schema_required_fields(&v),
                     None => BTreeSet::new(),
                 }
             }
-            BlockDef::Call(c) => collect_call_schema_fields(c, wf, extract_schema_required),
+            BlockDef::Call(c) => {
+                collect_call_schema_fields(c, wf, schemas, extract_schema_required)
+            }
         };
         out.insert(name.clone(), required);
     }
@@ -171,7 +179,8 @@ pub(crate) fn collect_block_required_fields(
 /// `extractor`, intersecting results for Uniform/PerCall.
 fn collect_call_schema_fields(
     c: &CallBlock,
-    wf: &WorkflowFile,
+    wf: &MechDocument,
+    schemas: &BTreeMap<String, JsonValue>,
     extractor: fn(&Option<JsonValue>) -> BTreeSet<String>,
 ) -> BTreeSet<String> {
     match &c.call {
@@ -180,15 +189,15 @@ fn collect_call_schema_fields(
                 .functions
                 .get(fname)
                 .and_then(|f| f.output.as_ref())
-                .map(|s| crate::schema::resolve_schema_value(s, wf));
+                .map(|s| crate::schema::resolve_schema_value(s, schemas));
             match sv {
                 Some(ref inner) => extractor(inner),
                 None => BTreeSet::new(),
             }
         }
-        CallSpec::Uniform(names) => intersect_callee_fields(names.iter(), wf, extractor),
+        CallSpec::Uniform(names) => intersect_callee_fields(names.iter(), wf, schemas, extractor),
         CallSpec::PerCall(entries) => {
-            intersect_callee_fields(entries.iter().map(|e| &e.func), wf, extractor)
+            intersect_callee_fields(entries.iter().map(|e| &e.func), wf, schemas, extractor)
         }
     }
 }
@@ -197,7 +206,8 @@ fn collect_call_schema_fields(
 /// only if every callee provides it.
 fn intersect_callee_fields<'a>(
     names: impl Iterator<Item = &'a String>,
-    wf: &WorkflowFile,
+    wf: &MechDocument,
+    schemas: &BTreeMap<String, JsonValue>,
     extractor: fn(&Option<JsonValue>) -> BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut result: Option<BTreeSet<String>> = None;
@@ -206,7 +216,7 @@ fn intersect_callee_fields<'a>(
             .functions
             .get(fname.as_str())
             .and_then(|f| f.output.as_ref())
-            .map(|s| crate::schema::resolve_schema_value(s, wf));
+            .map(|s| crate::schema::resolve_schema_value(s, schemas));
         let fields = match sv {
             Some(ref inner) => extractor(inner),
             None => BTreeSet::new(),

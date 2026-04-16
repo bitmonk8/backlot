@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cel::{self, CelExpression};
-use crate::schema::{BlockDef, CallSpec, FunctionDef, WorkflowFile};
+use crate::schema::{BlockDef, CallSpec, FunctionDef, MechDocument};
 
 use super::Validator;
 use super::graph::compute_dominators;
@@ -30,7 +30,7 @@ impl Validator<'_> {
     pub(crate) fn validate_cel_and_templates(
         &mut self,
         func: &FunctionDef,
-        wf: &WorkflowFile,
+        wf: &MechDocument,
         floc: &Location,
     ) {
         let block_fields = collect_block_fields(func, wf);

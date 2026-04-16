@@ -230,7 +230,7 @@ for the full specification.
 |--------|---------|
 | `lib.rs` | Public API re-exports |
 | `loader.rs` | `WorkflowLoader::load(path) → Workflow` — parse → validate → infer → compile CEL |
-| `schema/mod.rs` | Serde types: `WorkflowFile`, `FunctionDef`, `BlockDef`, `AgentConfig`, etc. |
+| `schema/mod.rs` | Serde types: `MechDocument`, `FunctionDef`, `BlockDef`, `AgentConfig`, etc. |
 | `schema/registry.rs` | `SchemaRegistry` — compile and validate JSON Schemas, resolve `$ref` |
 | `schema/infer.rs` | Output schema inference (`output: infer`) from terminal block schemas |
 | `validate.rs` | `validate_workflow` — 24+ load-time checks (§10.1 of spec) |

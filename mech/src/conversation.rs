@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{CompactionConfig, FunctionDef, WorkflowFile};
+use crate::schema::{CompactionConfig, FunctionDef, MechDocument};
 
 /// Role of a message in a conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ impl From<&CompactionConfig> for ResolvedCompaction {
         Self {
             keep_recent_tokens: cfg.keep_recent_tokens,
             reserve_tokens: cfg.reserve_tokens,
-            custom_fn: cfg.r#fn.clone(),
+            custom_fn: cfg.func.clone(),
         }
     }
 }
@@ -98,7 +98,7 @@ impl From<&CompactionConfig> for ResolvedCompaction {
 /// Resolve compaction configuration: function-level overrides workflow-level.
 /// Returns `None` if neither level declares compaction.
 pub fn resolve_compaction(
-    workflow: &WorkflowFile,
+    workflow: &MechDocument,
     function: &FunctionDef,
 ) -> Option<ResolvedCompaction> {
     let cfg = function.compaction.as_ref().or_else(|| {
@@ -289,12 +289,12 @@ mod tests {
 
     #[test]
     fn resolve_compaction_function_overrides_workflow() {
-        let wf = crate::schema::WorkflowFile {
-            workflow: Some(crate::schema::WorkflowDefaults {
+        let wf = crate::schema::MechDocument {
+            workflow: Some(crate::schema::WorkflowSection {
                 compaction: Some(CompactionConfig {
                     keep_recent_tokens: 1000,
                     reserve_tokens: 2000,
-                    r#fn: None,
+                    func: None,
                 }),
                 ..Default::default()
             }),
@@ -310,7 +310,7 @@ mod tests {
             compaction: Some(CompactionConfig {
                 keep_recent_tokens: 500,
                 reserve_tokens: 800,
-                r#fn: Some("custom".into()),
+                func: Some("custom".into()),
             }),
             blocks: BTreeMap::new(),
         };
@@ -323,12 +323,12 @@ mod tests {
 
     #[test]
     fn resolve_compaction_falls_back_to_workflow() {
-        let wf = crate::schema::WorkflowFile {
-            workflow: Some(crate::schema::WorkflowDefaults {
+        let wf = crate::schema::MechDocument {
+            workflow: Some(crate::schema::WorkflowSection {
                 compaction: Some(CompactionConfig {
                     keep_recent_tokens: 1000,
                     reserve_tokens: 2000,
-                    r#fn: None,
+                    func: None,
                 }),
                 ..Default::default()
             }),
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn resolve_compaction_none_when_unconfigured() {
-        let wf = crate::schema::WorkflowFile {
+        let wf = crate::schema::MechDocument {
             workflow: None,
             functions: BTreeMap::new(),
         };
