@@ -56,6 +56,30 @@ cargo build -p mech
 cargo build -p mech-cli
 ```
 
+## Testing
+
+```sh
+cargo test -p mech
+```
+
+The test suite covers:
+
+- **Validation (§10.1):** Both negative tests (invalid block names, reserved
+  names, bad schemas, missing transitions, undefined targets, dataflow cycles,
+  CEL errors, agent misconfigurations, optional field safety) and positive
+  counterpart fixtures that confirm valid inputs pass cleanly.
+- **Schema registry:** Cycle detection (2-node, 3-node, string-form, nested),
+  multi-hop alias chains, external file ref rejection, inline/named/infer
+  resolution, nested `$ref` expansion, diamond non-false-cycle, allOf
+  composition.
+- **Loader pipeline:** End-to-end load of the §12 worked example, empty
+  functions rejection, omitted `workflow:` fallback, guard/template
+  deduplication, model checker propagation, cyclic shared schema surfacing,
+  inference success/failure, deterministic key ordering, CEL and template
+  error surfacing.
+- **Runtime:** Imperative routing, dataflow pipelines, function composition,
+  context/workflow state, cue orchestration integration.
+
 ## Quick start
 
 ### 1. Write a workflow YAML

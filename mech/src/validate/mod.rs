@@ -1072,11 +1072,8 @@ functions:
           - goto: nowhere
 "#;
         let r = ok(yaml);
-        assert!(
-            r.errors.len() >= 2,
-            "expected multiple errors, got {:#?}",
-            r.errors
-        );
+        assert_err_contains(&r, "root type must be `object`");
+        assert_err_contains(&r, "does not exist");
     }
 
     // ---- Unreachable block warning ----
@@ -1841,5 +1838,286 @@ functions:
             "expected no non-safety errors for callee without output schema, got: {:#?}",
             non_safety_errors
         );
+    }
+    // ---- Passing-fixture counterparts for §10.1 checks ----
+
+    #[test]
+    fn accepts_valid_block_name() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      good_name:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [a]
+          properties: { a: { type: string } }
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_non_reserved_block_name() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      process:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [a]
+          properties: { a: { type: string } }
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_schema_with_required_fields() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [x]
+          properties: { x: { type: string } }
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_valid_context_var() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      count: { type: integer, initial: 0 }
+      name: { type: string, initial: "" }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [a]
+          properties: { a: { type: string } }
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_set_context_with_declared_target() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      count: { type: integer, initial: 0 }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [a]
+          properties: { a: { type: string } }
+        set_context:
+          count: "1"
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_set_workflow_with_declared_target() {
+        let yaml = r#"
+workflow:
+  context:
+    counter: { type: integer, initial: 0 }
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [a]
+          properties: { a: { type: string } }
+        set_workflow:
+          counter: "1"
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_valid_transition_target() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+        transitions:
+          - goto: b
+      b:
+        prompt: "bye"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_acyclic_dataflow() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+      b:
+        prompt: "bye"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+        depends_on: [a]
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_valid_call_target() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        call: g
+        input: { text: "hello" }
+  g:
+    input:
+      type: object
+      required: [text]
+      properties: { text: { type: string } }
+    blocks:
+      done:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_valid_n_of_m() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        call: [g, h]
+        input: { text: "x" }
+        parallel: n_of_m
+        n: 1
+  g:
+    input: { type: object, required: [text], properties: { text: { type: string } } }
+    blocks:
+      d:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+  h:
+    input: { type: object, required: [text], properties: { text: { type: string } } }
+    blocks:
+      d:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_valid_explicit_terminal() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    terminals: [done]
+    blocks:
+      a:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+        transitions:
+          - goto: done
+      done:
+        prompt: "bye"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_valid_agent_config() {
+        let yaml = r#"
+workflow:
+  agents:
+    reader:
+      model: sonnet
+      grant: [tools]
+    writer:
+      model: opus
+      grant: [write, tools]
+      write_paths: [src/]
+functions:
+  f:
+    input: { type: object }
+    agent: "$ref:#reader"
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+        assert_clean(&ok(yaml));
+    }
+
+    #[test]
+    fn accepts_infer_with_terminal_blocks() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+"#;
+        assert_clean(&ok(yaml));
     }
 }

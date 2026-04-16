@@ -1052,4 +1052,63 @@ mod tests {
         let schema = SchemaRef::Infer;
         assert_eq!(resolve_schema_ref_in_map(&schema, &empty), None);
     }
+    // ---- Cycle / alias topology ----
+
+    #[test]
+    fn three_node_cycle_detected() {
+        let s = schemas(&[
+            ("a", json!({ "$ref": "#b" })),
+            ("b", json!({ "$ref": "#c" })),
+            ("c", json!({ "$ref": "#a" })),
+        ]);
+        let err = SchemaRegistry::build(&s).expect_err("3-node cycle must be rejected");
+        match err {
+            MechError::SchemaRefCircular { chain } => {
+                assert!(chain.contains(&"a".to_string()));
+                assert!(chain.contains(&"b".to_string()));
+                assert!(chain.contains(&"c".to_string()));
+            }
+            other => panic!("expected SchemaRefCircular, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_hop_alias_chain_resolves() {
+        let s = schemas(&[
+            ("a", json!({ "type": "string" })),
+            ("b", json!("$ref:#a")),
+            ("c", json!("$ref:#b")),
+        ]);
+        let reg = SchemaRegistry::build(&s).expect("multi-hop alias must resolve");
+        let resolved = reg.resolve(&SchemaRef::Ref("$ref:#c".to_string())).unwrap();
+        resolved.validate(&json!("hello")).unwrap();
+        resolved
+            .validate(&json!(42))
+            .expect_err("int against string schema must fail");
+    }
+
+    #[test]
+    fn external_file_ref_rejected() {
+        let s = schemas(&[("ext", json!("$ref:./foo.json"))]);
+        let err = SchemaRegistry::build(&s).expect_err("external file ref must be rejected");
+        // The string "$ref:./foo.json" is not a valid $ref:#name (no #), so
+        // top_level_ref_target returns None. It is then treated as a literal
+        // schema value and passed to jsonschema::validator_for, which rejects
+        // a bare string as an invalid JSON Schema.
+        assert!(matches!(err, MechError::SchemaInvalid { .. }));
+    }
+
+    #[test]
+    fn string_form_cycle_detected() {
+        // Using string form "$ref:#name" instead of object form {"$ref": "#name"}
+        let s = schemas(&[("a", json!("$ref:#b")), ("b", json!("$ref:#a"))]);
+        let err = SchemaRegistry::build(&s).expect_err("string-form cycle must be rejected");
+        match err {
+            MechError::SchemaRefCircular { chain } => {
+                assert!(chain.contains(&"a".to_string()));
+                assert!(chain.contains(&"b".to_string()));
+            }
+            other => panic!("expected SchemaRefCircular, got {other:?}"),
+        }
+    }
 }

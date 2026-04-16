@@ -98,17 +98,19 @@
 
 ## Mech
 
-**Phase:** Complete. 331 tests passing (305 unit + 26 integration), zero clippy warnings.
+**Phase:** Complete. 371 tests passing (345 unit + 26 integration), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
 - All 12 sections drafted and reviewed. Covers: motivation, design goals, unified CDFG model, conversation model (history scoping, compaction, agent configuration), block specification (prompt + call blocks, field validity), transitions & guards (CEL, ordered evaluation, self-loops), template expressions & scoping (5 namespaces, CEL everywhere), schema handling (inline + `$ref` + workflow-level shared schemas), context & state (two-level declared variables, `set_context`/`set_workflow`), validation & error handling (24+ load-time checks, 5 runtime error types), cue integration (function = leaf task, model escalation interaction), YAML reference schema with complete worked example.
 
-**Issues:** 29 open (tracked in GitHub Issues).
+**Issues:** 25 open (tracked in GitHub Issues).
 
 **Next Work:** None identified.
 
-**Recent:** Schema model naming & structure fixes — 8 issues closed (#38, #43, #44, #45, #58, #61, #289, #290). `WorkflowFile` renamed to `MechDocument` and `WorkflowDefaults` renamed to `WorkflowSection` (more accurate names). `InferLiteral` single-variant enum collapsed into `SchemaRef::Infer` unit variant with custom serde. `CompactionConfig.r#fn` standardized to `func` + `#[serde(rename = "fn")]`. `AgentConfig.grant` renamed to `grants` with serde rename for YAML compatibility; accessor `grant_list()` → `grants_list()`. `AgentRequest.grant` and `ResolvedAgentConfig.grant` renamed to `grants`. `SchemaRefUnsupported` error variant added for `$ref:path` (external file refs). `resolve_schema_value` signature narrowed from `&MechDocument` to `&BTreeMap<String, JsonValue>`. `resolve_schema_ref_in_map` extracted as shared helper replacing duplicate logic in `infer.rs` and `registry.rs`.
+**Recent:** Test coverage cluster — 4 issues closed (#5, #6, #10, #11). Strengthened `collects_multiple_errors` to assert specific error messages instead of just count. Added 6 loader edge-case tests (empty functions, omitted workflow block, guard deduplication, model checker propagation, resolve_billing block count, cyclic shared schema). Added 4 schema registry tests (3-node cycle, multi-hop alias chain, external file ref rejection, string-form cycle). Added 14 positive-fixture counterparts for §10.1 validation checks.
+
+Schema model naming & structure fixes — 8 issues closed (#38, #43, #44, #45, #58, #61, #289, #290). `WorkflowFile` renamed to `MechDocument` and `WorkflowDefaults` renamed to `WorkflowSection` (more accurate names). `InferLiteral` single-variant enum collapsed into `SchemaRef::Infer` unit variant with custom serde. `CompactionConfig.r#fn` standardized to `func` + `#[serde(rename = "fn")]`. `AgentConfig.grant` renamed to `grants` with serde rename for YAML compatibility; accessor `grant_list()` → `grants_list()`. `AgentRequest.grant` and `ResolvedAgentConfig.grant` renamed to `grants`. `SchemaRefUnsupported` error variant added for `$ref:path` (external file refs). `resolve_schema_value` signature narrowed from `&MechDocument` to `&BTreeMap<String, JsonValue>`. `resolve_schema_ref_in_map` extracted as shared helper replacing duplicate logic in `infer.rs` and `registry.rs`.
 
 validate.rs restructuring — 12 issues closed (#1, #4, #16, #18, #22, #48, #50, #51, #52, #55, #56, #287). Split `validate.rs` (3766 lines) into `validate/` directory with 7 submodules (mod.rs, model.rs, report.rs, blocks.rs, agents.rs, cel_check.rs, graph.rs, helpers.rs). CEL reference-extraction helpers moved to `cel.rs`. `BlockDef::set_context()`/`set_workflow()` accessors added. `check_type` in context.rs replaced with JSON Schema validation. Prompt/Call arm duplication resolved via shared `BlockDef` accessors. Uniform/PerCall call blocks now handled in `collect_block_fields`/`collect_block_required_fields`. Dominator computation simplified. Agent ref naming clarified (`validate_agent_ref_strict` vs `validate_agent_ref`). `check_*` methods renamed to `validate_*`. `CollectedRefs.block_refs` Option wrapper removed. Dataflow cycle message direction fixed. Missing extends target deduplication. Unused `_fn_name` parameter removed. `CelCheckCtx` struct replaces too-many-arguments suppressions.
 

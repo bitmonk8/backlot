@@ -698,4 +698,162 @@ functions:
             result.err()
         );
     }
+    // ---- Loader edge cases ----
+
+    #[test]
+    fn empty_functions_map_errors() {
+        let yaml = "functions: {}
+";
+        let loader = WorkflowLoader::new();
+        let err = loader
+            .load_str(yaml)
+            .expect_err("empty functions must error");
+        assert!(matches!(err, MechError::WorkflowValidation { .. }));
+    }
+
+    #[test]
+    fn omitted_workflow_block_loads() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      done:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+"#;
+        let loader = WorkflowLoader::new();
+        let wf = loader
+            .load_str(yaml)
+            .expect("workflow without `workflow:` block must load");
+        assert!(wf.file().workflow.is_none());
+        assert_eq!(wf.file().functions.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_guards_are_deduplicated() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "classify"
+        schema:
+          type: object
+          required: [x]
+          properties:
+            x: { type: string }
+        transitions:
+          - when: "output.x == \"yes\""
+            goto: b
+          - when: "output.x == \"yes\""
+            goto: c
+          - goto: c
+      b:
+        prompt: "b"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+      c:
+        prompt: "c"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+"#;
+        let loader = WorkflowLoader::new();
+        let wf = loader.load_str(yaml).expect("must load");
+        // Two identical guards should deduplicate to one entry
+        assert_eq!(
+            wf.guard_count(),
+            1,
+            "duplicate guards must deduplicate to 1"
+        );
+        assert!(wf.guard(r#"output.x == "yes""#).is_some());
+        assert_eq!(
+            wf.template_count(),
+            3,
+            "three distinct prompts must each be interned"
+        );
+    }
+
+    #[test]
+    fn rejecting_model_checker_propagates_error() {
+        use crate::validate::KnownModels;
+        let yaml = r#"
+workflow:
+  agents:
+    a:
+      model: unknown_model
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+"#;
+        let known = KnownModels::new(["sonnet".to_string()]);
+        let loader = WorkflowLoader::new().with_model_checker(known);
+        let err = loader.load_str(yaml).expect_err("unknown model must error");
+        assert!(matches!(err, MechError::WorkflowValidation { .. }));
+    }
+
+    #[test]
+    fn resolve_billing_block_count() {
+        let loader = WorkflowLoader::new();
+        let wf = loader
+            .load_str(FULL_EXAMPLE)
+            .expect("full example must load");
+        let billing = wf
+            .file()
+            .functions
+            .get("resolve_billing")
+            .expect("resolve_billing present");
+        assert_eq!(
+            billing.blocks.len(),
+            2,
+            "resolve_billing must have 2 blocks (analyze, resolve)"
+        );
+    }
+
+    #[test]
+    fn cyclic_shared_schema_errors_at_loader() {
+        let yaml = r##"
+workflow:
+  schemas:
+    a:
+      $ref: "#b"
+    b:
+      $ref: "#a"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      done:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [k]
+          properties: { k: { type: string } }
+"##;
+        let loader = WorkflowLoader::new();
+        let err = loader.load_str(yaml).expect_err("cyclic schema must error");
+        match err {
+            MechError::SchemaRefCircular { chain } => {
+                assert!(chain.contains(&"a".to_string()), "chain must include 'a'");
+                assert!(chain.contains(&"b".to_string()), "chain must include 'b'");
+            }
+            other => panic!("expected MechError::SchemaRefCircular, got {other:?}"),
+        }
+    }
 }

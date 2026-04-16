@@ -264,6 +264,11 @@ See [docs/MECH_SPEC.md](docs/MECH_SPEC.md) for the workflow format, §11 for the
 cue integration design, and [docs/STATUS.md](docs/STATUS.md) for implementation
 status.
 
+**Test coverage:** The mech test suite covers validation (positive and negative
+fixtures for most §10.1 checks), schema registry (cycle detection, alias
+resolution, nested refs), loader pipeline edge cases, and runtime integration
+tests. See module-level `#[cfg(test)]` blocks for specifics.
+
 ---
 
 ### epic -- Recursive problem-solver orchestrator
