@@ -46,6 +46,28 @@ enum Command {
 }
 
 // ---------------------------------------------------------------------------
+// CLI-local error type
+// ---------------------------------------------------------------------------
+
+/// CLI-local error enum — wraps library errors and adds CLI-specific variants
+/// for JSON input parsing and output serialization.
+#[derive(Debug)]
+enum CliError {
+    /// A mech library error.
+    Mech(MechError),
+    /// Bad JSON input from the user (e.g., `--input` flag).
+    InputParse { message: String },
+    /// Failed to serialize output JSON.
+    OutputSerialize { message: String },
+}
+
+impl From<MechError> for CliError {
+    fn from(err: MechError) -> Self {
+        CliError::Mech(err)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stub agent executor
 // ---------------------------------------------------------------------------
 
@@ -69,15 +91,21 @@ impl AgentExecutor for StubAgent {
 // Error formatting
 // ---------------------------------------------------------------------------
 
-fn print_mech_error(err: &MechError) {
+fn print_error(err: &CliError) {
     match err {
-        MechError::Validation { errors } => {
+        CliError::Mech(MechError::WorkflowValidation { errors }) => {
             for e in errors {
                 eprintln!("error: {e}");
             }
         }
-        other => {
+        CliError::Mech(other) => {
             eprintln!("error: {other}");
+        }
+        CliError::InputParse { message } => {
+            eprintln!("error: bad input JSON: {message}");
+        }
+        CliError::OutputSerialize { message } => {
+            eprintln!("error: output serialization failed: {message}");
         }
     }
 }
@@ -86,7 +114,7 @@ fn print_mech_error(err: &MechError) {
 // Command implementations
 // ---------------------------------------------------------------------------
 
-async fn run_validate(workflow_path: &Path) -> Result<(), MechError> {
+async fn run_validate(workflow_path: &Path) -> Result<(), CliError> {
     WorkflowLoader::new().load(workflow_path)?;
     Ok(())
 }
@@ -95,10 +123,9 @@ async fn run_execute(
     workflow_path: &Path,
     function: Option<String>,
     input_json: &str,
-) -> Result<(), MechError> {
-    let input: JsonValue = serde_json::from_str(input_json).map_err(|e| MechError::Io {
-        path: workflow_path.to_path_buf(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()),
+) -> Result<(), CliError> {
+    let input: JsonValue = serde_json::from_str(input_json).map_err(|e| CliError::InputParse {
+        message: e.to_string(),
     })?;
 
     let workflow = WorkflowLoader::new().load(workflow_path)?;
@@ -112,9 +139,8 @@ async fn run_execute(
 
     let output = runtime.run(&entry_fn, input).await?;
 
-    let pretty = serde_json::to_string_pretty(&output).map_err(|e| MechError::Io {
-        path: workflow_path.to_path_buf(),
-        source: std::io::Error::other(e.to_string()),
+    let pretty = serde_json::to_string_pretty(&output).map_err(|e| CliError::OutputSerialize {
+        message: e.to_string(),
     })?;
     println!("{pretty}");
     Ok(())
@@ -140,7 +166,7 @@ async fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            print_mech_error(&err);
+            print_error(&err);
             ExitCode::FAILURE
         }
     }
@@ -193,10 +219,10 @@ functions:
         let result = WorkflowLoader::new().load(tmp.path());
         assert!(result.is_err(), "expected Err but got Ok");
         match result.unwrap_err() {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(!errors.is_empty(), "expected at least one validation error");
             }
-            other => panic!("expected Validation error but got: {other:?}"),
+            other => panic!("expected WorkflowValidation error but got: {other:?}"),
         }
     }
 
@@ -226,7 +252,7 @@ functions:
         let result = run_execute(tmp.path(), None, "{}").await;
         assert!(result.is_err(), "expected Err from stub agent");
         match result.unwrap_err() {
-            MechError::LlmCallFailure { message, .. } => {
+            CliError::Mech(MechError::LlmCallFailure { message, .. }) => {
                 assert!(
                     message.contains("standalone CLI"),
                     "expected 'standalone CLI' in message, got: {message}"
@@ -274,8 +300,8 @@ functions:
         let result = run_execute(tmp.path(), None, "not-json").await;
         assert!(result.is_err(), "expected error for bad JSON input");
         match result.unwrap_err() {
-            MechError::Io { .. } => {}
-            other => panic!("expected MechError::Io for bad JSON but got: {other:?}"),
+            CliError::InputParse { .. } => {}
+            other => panic!("expected CliError::InputParse for bad JSON but got: {other:?}"),
         }
     }
 
@@ -371,13 +397,13 @@ functions:
         let result = WorkflowLoader::new().load(tmp.path());
         assert!(result.is_err());
         match result.unwrap_err() {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(
                     errors.len() >= 2,
                     "expected at least 2 errors, got: {errors:?}"
                 );
             }
-            other => panic!("expected Validation error but got: {other:?}"),
+            other => panic!("expected WorkflowValidation error but got: {other:?}"),
         }
     }
 }

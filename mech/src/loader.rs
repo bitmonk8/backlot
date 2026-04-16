@@ -141,7 +141,7 @@ impl WorkflowLoader {
     fn load_impl(&self, yaml: &str, source_path: Option<PathBuf>) -> MechResult<Workflow> {
         // 1. Parse YAML.
         let mut file = parse_workflow(yaml).map_err(|e| MechError::YamlParse {
-            path: source_path.clone().unwrap_or_default(),
+            path: source_path.clone(),
             message: e.to_string(),
         })?;
 
@@ -155,10 +155,10 @@ impl WorkflowLoader {
             .unwrap_or(&empty_schemas);
         let registry = SchemaRegistry::build(schemas_map)?;
 
-        // 3. Run the §10.1 load-time validation pass. Errors → `MechError::Validation`.
+        // 3. Run the §10.1 load-time validation pass. Errors → `MechError::WorkflowValidation`.
         let report = validate_workflow(&file, source_path.as_deref(), self.models.as_ref());
         if !report.is_ok() {
-            return Err(MechError::Validation {
+            return Err(MechError::WorkflowValidation {
                 errors: report.errors.iter().map(|i| i.to_string()).collect(),
             });
         }
@@ -289,7 +289,7 @@ fn compile_call(
 fn intern_guard(source: &str, guards: &mut BTreeMap<String, Arc<CelExpression>>) -> MechResult<()> {
     // Note: `validate.rs` has already compiled every guard via
     // `CelExpression::compile` and would have surfaced any compile error as
-    // `MechError::Validation`. By the time we get here, compilation cannot
+    // `MechError::WorkflowValidation`. By the time we get here, compilation cannot
     // fail — but we still recompile to populate the interning cache.
     if guards.contains_key(source) {
         return Ok(());
@@ -453,13 +453,13 @@ functions:
             .load_str(yaml)
             .expect_err("semantic error must error");
         match err {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(
                     !errors.is_empty(),
                     "validation error list must be non-empty"
                 );
             }
-            other => panic!("expected MechError::Validation, got {other:?}"),
+            other => panic!("expected MechError::WorkflowValidation, got {other:?}"),
         }
     }
 
@@ -483,10 +483,10 @@ functions:
     #[test]
     fn cel_compile_error_surfaces() {
         // validate.rs compiles every guard via `CelExpression::compile` and
-        // aggregates failures into `MechError::Validation`. The loader's
+        // aggregates failures into `MechError::WorkflowValidation`. The loader's
         // compile pass never sees a bad-CEL guard — by the time it runs,
         // validation has already failed. So the deterministic variant here
-        // is `Validation`, not `CelCompilation`.
+        // is `WorkflowValidation`, not `CelCompilation`.
         let yaml = r#"
 functions:
   f:
@@ -505,13 +505,13 @@ functions:
         let loader = WorkflowLoader::new();
         let err = loader.load_str(yaml).expect_err("bad CEL must error");
         match err {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(
                     errors.iter().any(|e| e.contains("CEL compile error")),
                     "expected a CEL compile error message, got {errors:?}"
                 );
             }
-            other => panic!("expected MechError::Validation, got {other:?}"),
+            other => panic!("expected MechError::WorkflowValidation, got {other:?}"),
         }
     }
 
@@ -519,7 +519,7 @@ functions:
     fn inference_failure_surfaces() {
         // A function with `output: infer` and a cycle (no terminals) cannot
         // produce an output schema. Inference must surface
-        // `MechError::InferenceFailed`.
+        // `MechError::OutputSchemaInferenceFailed`.
         let yaml = r#"
 functions:
   f:
@@ -559,8 +559,8 @@ functions:
             .load_str(yaml)
             .expect_err("incompatible terminal outputs must error");
         assert!(
-            matches!(err, MechError::InferenceFailed { .. }),
-            "expected MechError::InferenceFailed, got {err:?}"
+            matches!(err, MechError::OutputSchemaInferenceFailed { .. }),
+            "expected MechError::OutputSchemaInferenceFailed, got {err:?}"
         );
     }
 
@@ -568,7 +568,7 @@ functions:
     fn bad_template_surfaces() {
         // A malformed `{{...}}` (unterminated) in a prompt block is caught by
         // validate.rs's template extraction pass and surfaces as
-        // `MechError::Validation`. Pin to that deterministic variant.
+        // `MechError::WorkflowValidation`. Pin to that deterministic variant.
         let yaml = r#"
 functions:
   f:
@@ -587,8 +587,8 @@ functions:
             .load_str(yaml)
             .expect_err("malformed template must error");
         assert!(
-            matches!(err, MechError::Validation { .. }),
-            "expected MechError::Validation, got {err:?}"
+            matches!(err, MechError::WorkflowValidation { .. }),
+            "expected MechError::WorkflowValidation, got {err:?}"
         );
     }
 
@@ -668,13 +668,13 @@ functions:
             .load_str(yaml)
             .expect_err("undefined transition target must fail validation");
         match err {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(
                     !errors.is_empty(),
                     "validation error list must be non-empty"
                 );
             }
-            other => panic!("expected MechError::Validation, got {other:?}"),
+            other => panic!("expected MechError::WorkflowValidation, got {other:?}"),
         }
     }
 

@@ -77,11 +77,15 @@ fn resolve_calls(
 ) -> MechResult<Vec<ResolvedCall>> {
     match &block.call {
         CallSpec::Single(name) => {
-            let input_mapping = block.input.as_ref().ok_or_else(|| MechError::Validation {
-                errors: vec![format!(
-                    "call block: single function call `{name}` requires block-level `input`"
-                )],
-            })?;
+            let input_mapping =
+                block
+                    .input
+                    .as_ref()
+                    .ok_or_else(|| MechError::WorkflowValidation {
+                        errors: vec![format!(
+                            "call block: single function call `{name}` requires block-level `input`"
+                        )],
+                    })?;
             let input = render_mapping(workflow, input_mapping, namespaces)?;
             Ok(vec![ResolvedCall {
                 fn_name: name.clone(),
@@ -89,9 +93,15 @@ fn resolve_calls(
             }])
         }
         CallSpec::Uniform(names) => {
-            let input_mapping = block.input.as_ref().ok_or_else(|| MechError::Validation {
-                errors: vec!["call block: uniform list call requires block-level `input`".into()],
-            })?;
+            let input_mapping =
+                block
+                    .input
+                    .as_ref()
+                    .ok_or_else(|| MechError::WorkflowValidation {
+                        errors: vec![
+                            "call block: uniform list call requires block-level `input`".into(),
+                        ],
+                    })?;
             let input = render_mapping(workflow, input_mapping, namespaces)?;
             Ok(names
                 .iter()
@@ -123,7 +133,7 @@ pub(crate) fn validate_function_exists(
     block_id: &str,
 ) -> MechResult<()> {
     if !workflow.file().functions.contains_key(fn_name) {
-        return Err(MechError::Validation {
+        return Err(MechError::WorkflowValidation {
             errors: vec![format!(
                 "call block `{block_id}`: function `{fn_name}` is not declared in the workflow"
             )],
@@ -248,13 +258,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((function_name.to_string(), input));
-            let result =
-                self.responses
-                    .get(function_name)
-                    .cloned()
-                    .ok_or_else(|| MechError::Validation {
-                        errors: vec![format!("fake: no canned response for `{function_name}`")],
-                    });
+            let result = self.responses.get(function_name).cloned().ok_or_else(|| {
+                MechError::WorkflowValidation {
+                    errors: vec![format!("fake: no canned response for `{function_name}`")],
+                }
+            });
             Box::pin(async move { result })
         }
     }
@@ -596,13 +604,13 @@ functions:
         let result = WorkflowLoader::new().load_str(UNDECLARED_FN);
         assert!(result.is_err(), "loader must reject undeclared function");
         match result.unwrap_err() {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(
                     errors.iter().any(|e| e.contains("nonexistent")),
                     "error should mention the undeclared function: {errors:?}"
                 );
             }
-            other => panic!("expected Validation, got {other:?}"),
+            other => panic!("expected WorkflowValidation, got {other:?}"),
         }
     }
 
@@ -870,7 +878,7 @@ functions:
         ))
         .expect_err("should error");
 
-        assert!(matches!(err, MechError::Validation { .. }));
+        assert!(matches!(err, MechError::WorkflowValidation { .. }));
     }
 
     // ---- T13: validate_function_exists accepts/rejects functions -----------
@@ -880,13 +888,13 @@ functions:
         let wf = load(SINGLE_CALL);
         let err = validate_function_exists(&wf, "ghost", "do_call").expect_err("must reject ghost");
         match err {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(
                     errors.iter().any(|e| e.contains("ghost")),
                     "error should mention `ghost`: {errors:?}"
                 );
             }
-            other => panic!("expected Validation, got {other:?}"),
+            other => panic!("expected WorkflowValidation, got {other:?}"),
         }
     }
 

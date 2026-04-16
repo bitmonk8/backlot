@@ -1,8 +1,8 @@
 //! Error types for the mech crate.
 //!
 //! Covers the five runtime error categories from `docs/MECH_SPEC.md` §10.2
-//! plus load-time variants, including the aggregated `Validation` variant
-//! populated by `validate.rs`.
+//! plus load-time variants, including the aggregated `WorkflowValidation`
+//! variant populated by `validate.rs`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,13 +15,13 @@ use thiserror::Error;
 ///
 /// * **Runtime errors** (per spec §10.2): raised while executing a workflow.
 /// * **Load-time errors**: raised while reading, parsing, or validating a
-///   workflow file. This includes the aggregated `Validation` variant
+///   workflow file. This includes the aggregated `WorkflowValidation` variant
 ///   produced by `validate.rs`.
 #[derive(Debug, Error)]
 pub enum MechError {
     // ---- Runtime errors (§10.2) -------------------------------------------
     /// LLM output failed to validate against the block's declared JSON Schema.
-    #[error("schema validation failure in block '{block}': {details} (raw output: {raw_output})")]
+    #[error("schema validation failure in block '{block}': {details}")]
     SchemaValidationFailure {
         /// Name of the block whose output failed validation.
         block: String,
@@ -94,6 +94,18 @@ pub enum MechError {
         message: String,
     },
 
+    /// Failed to bind a namespace variable for CEL evaluation.
+    ///
+    /// This is distinct from [`CelEvaluation`] — the expression hasn't been
+    /// reached yet; the failure is in converting JSON data to CEL values.
+    #[error("CEL namespace bind error for '{namespace}': {message}")]
+    CelNamespaceBind {
+        /// The namespace name that failed to bind.
+        namespace: String,
+        /// Underlying conversion error message.
+        message: String,
+    },
+
     /// A CEL expression returned a value of the wrong type.
     #[error("CEL type error in `{source_text}`: expected {expected}, got {got}")]
     CelType {
@@ -126,10 +138,10 @@ pub enum MechError {
     },
 
     /// Failed to parse a workflow YAML file.
-    #[error("yaml parse error in {path}: {message}")]
+    #[error("yaml parse error{}: {message}", path.as_ref().map(|p| format!(" in {}", p.display())).unwrap_or_default())]
     YamlParse {
-        /// Path that failed to parse.
-        path: PathBuf,
+        /// Path that failed to parse, if loaded from disk.
+        path: Option<PathBuf>,
         /// Underlying parser error message.
         message: String,
     },
@@ -156,11 +168,18 @@ pub enum MechError {
         chain: Vec<String>,
     },
 
-    /// A workflow-level shared schema is not a syntactically valid JSON Schema.
-    #[error("invalid JSON Schema for '{name}': {message}")]
+    /// A workflow-level shared schema failed JSON Schema compilation.
+    #[error("invalid JSON Schema for shared schema '{name}': {message}")]
     SchemaInvalid {
         /// Name of the offending shared schema.
         name: String,
+        /// Underlying jsonschema compilation error message.
+        message: String,
+    },
+
+    /// An inline JSON Schema (on a block or function) failed compilation.
+    #[error("invalid inline JSON Schema: {message}")]
+    InlineSchemaInvalid {
         /// Underlying jsonschema compilation error message.
         message: String,
     },
@@ -188,16 +207,16 @@ pub enum MechError {
     /// but its terminal blocks produce incompatible schemas, or no terminal
     /// block can supply a concrete schema.
     #[error("output inference failed for function '{function}': {message}")]
-    InferenceFailed {
+    OutputSchemaInferenceFailed {
         /// Name of the function whose output schema could not be inferred.
         function: String,
         /// Human-readable description of the failure.
         message: String,
     },
 
-    /// Aggregated load-time validation errors produced by `validate.rs`.
+    /// Aggregated load-time workflow validation errors produced by `validate.rs`.
     #[error("validation failed with {} error(s): {}", errors.len(), errors.join("; "))]
-    Validation {
+    WorkflowValidation {
         /// All validation error messages collected during loading.
         errors: Vec<String>,
     },
@@ -230,6 +249,11 @@ mod tests {
         let s = format!("{e}");
         assert!(s.contains("extract"));
         assert!(s.contains("missing field 'name'"));
+        // raw_output is kept for programmatic access but NOT in Display.
+        assert!(
+            !s.contains("raw output"),
+            "raw_output must not appear in Display: {s}"
+        );
 
         let e = MechError::GuardEvaluationError {
             block: "decide".into(),
@@ -274,12 +298,23 @@ mod tests {
         assert!(s.contains("/tmp/wf.yaml"));
 
         let e = MechError::YamlParse {
-            path: PathBuf::from("/tmp/wf.yaml"),
+            path: Some(PathBuf::from("/tmp/wf.yaml")),
             message: "unexpected token".into(),
         };
         let s = format!("{e}");
         assert!(s.contains("/tmp/wf.yaml"));
         assert!(s.contains("unexpected token"));
+
+        let e = MechError::YamlParse {
+            path: None,
+            message: "unexpected token".into(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("unexpected token"));
+        assert!(
+            !s.contains("in "),
+            "None path must not produce 'in ' prefix: {s}"
+        );
 
         let e = MechError::SchemaRefUnresolved {
             name: "Person".into(),
@@ -287,7 +322,7 @@ mod tests {
         let s = format!("{e}");
         assert!(s.contains("Person"));
 
-        let e = MechError::Validation {
+        let e = MechError::WorkflowValidation {
             errors: vec!["bad guard".into(), "missing block".into()],
         };
         let s = format!("{e}");

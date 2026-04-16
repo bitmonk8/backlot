@@ -121,7 +121,7 @@ impl<'w> FunctionRunner<'w> {
             .file()
             .functions
             .get(function_name)
-            .ok_or_else(|| MechError::Validation {
+            .ok_or_else(|| MechError::WorkflowValidation {
                 errors: vec![format!("function `{function_name}` not found in workflow")],
             })?;
 
@@ -235,7 +235,7 @@ impl FunctionExecutor for FunctionRunner<'_> {
     ) -> BoxFuture<'a, Result<JsonValue, MechError>> {
         Box::pin(async move {
             if self.current_depth >= self.max_depth {
-                return Err(MechError::Validation {
+                return Err(MechError::WorkflowValidation {
                     errors: vec![format!(
                         "maximum call depth ({}) exceeded calling `{function_name}`",
                         self.max_depth
@@ -398,14 +398,14 @@ functions:
 
         let err = run_blocking(runner.run_function("recurse", json!({ "x": 1 }))).unwrap_err();
         match err {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(
                     errors[0].contains("maximum call depth"),
                     "expected depth error, got: {}",
                     errors[0]
                 );
             }
-            other => panic!("expected Validation, got {other:?}"),
+            other => panic!("expected WorkflowValidation, got {other:?}"),
         }
     }
 
@@ -637,10 +637,10 @@ functions:
 
         let err = run_blocking(runner.run_function("nonexistent", json!({}))).unwrap_err();
         match err {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(errors[0].contains("nonexistent"));
             }
-            other => panic!("expected Validation, got {other:?}"),
+            other => panic!("expected WorkflowValidation, got {other:?}"),
         }
     }
 

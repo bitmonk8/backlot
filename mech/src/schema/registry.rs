@@ -174,11 +174,11 @@ impl SchemaRegistry {
                 })
             }
             SchemaRef::Inline(value) => {
-                let validator =
-                    jsonschema::validator_for(value).map_err(|e| MechError::SchemaInvalid {
-                        name: "<inline>".to_string(),
+                let validator = jsonschema::validator_for(value).map_err(|e| {
+                    MechError::InlineSchemaInvalid {
                         message: e.to_string(),
-                    })?;
+                    }
+                })?;
                 Ok(ResolvedSchema::Inline(Box::new(validator)))
             }
         }
@@ -615,6 +615,22 @@ mod tests {
         match err {
             MechError::SchemaInvalid { name, .. } => assert_eq!(name, "bad"),
             other => panic!("expected SchemaInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_inline_schema_errors_at_resolve() {
+        let s = schemas(&[]);
+        let registry = SchemaRegistry::build(&s).expect("empty registry builds fine");
+        let bad_inline = SchemaRef::Inline(json!({ "type": 12345 }));
+        let err = registry
+            .resolve(&bad_inline)
+            .expect_err("invalid inline schema");
+        match err {
+            MechError::InlineSchemaInvalid { message } => {
+                assert!(!message.is_empty(), "error message must not be empty");
+            }
+            other => panic!("expected InlineSchemaInvalid, got {other:?}"),
         }
     }
 

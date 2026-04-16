@@ -94,7 +94,7 @@ impl<'w> WorkflowRuntime<'w> {
             .keys()
             .next()
             .map(String::as_str)
-            .ok_or_else(|| MechError::Validation {
+            .ok_or_else(|| MechError::WorkflowValidation {
                 errors: vec!["workflow has no functions".into()],
             })
     }
@@ -257,7 +257,7 @@ functions:
         let rt = WorkflowRuntime::new(&wf, &agent);
 
         let err = run_blocking(rt.run("nonexistent", json!({}))).unwrap_err();
-        assert!(matches!(err, MechError::Validation { .. }));
+        assert!(matches!(err, MechError::WorkflowValidation { .. }));
     }
 
     // ---- T5: Multi-function workflow with call block ----------------------
@@ -324,10 +324,10 @@ functions:
 
         let err = run_blocking(rt.run("recurse", json!({ "x": 1 }))).unwrap_err();
         match err {
-            MechError::Validation { errors } => {
+            MechError::WorkflowValidation { errors } => {
                 assert!(errors[0].contains("maximum call depth"));
             }
-            other => panic!("expected Validation, got {other:?}"),
+            other => panic!("expected WorkflowValidation, got {other:?}"),
         }
     }
 

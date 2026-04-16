@@ -120,16 +120,16 @@ impl Namespaces {
             ("blocks", &self.block),
             ("meta", &self.meta),
         ] {
-            let value = to_value(json).map_err(|e| MechError::CelEvaluation {
-                source_text: format!("<namespace {name}>"),
+            let value = to_value(json).map_err(|e| MechError::CelNamespaceBind {
+                namespace: name.to_string(),
                 message: format!("failed to convert JSON to CEL value: {e}"),
             })?;
             let value = normalize_uint_to_int(value);
             ctx.add_variable_from_value(name, value);
         }
         for (name, json) in &self.extras {
-            let value = to_value(json).map_err(|e| MechError::CelEvaluation {
-                source_text: format!("<extra {name}>"),
+            let value = to_value(json).map_err(|e| MechError::CelNamespaceBind {
+                namespace: name.to_string(),
                 message: format!("failed to convert JSON to CEL value: {e}"),
             })?;
             let value = normalize_uint_to_int(value);

@@ -209,7 +209,7 @@ fn find_entry_block(function: &FunctionDef) -> MechResult<String> {
     }
 
     if no_deps.is_empty() {
-        return Err(MechError::Validation {
+        return Err(MechError::WorkflowValidation {
             errors: vec!["no entry block found: every block has depends_on".into()],
         });
     }
@@ -255,22 +255,20 @@ pub async fn run_function_imperative(
     loop {
         step_count += 1;
         if step_count > MAX_IMPERATIVE_STEPS {
-            return Err(MechError::Validation {
+            return Err(MechError::WorkflowValidation {
                 errors: vec![format!(
                     "function `{function_name}`: exceeded maximum step count of \n                     {MAX_IMPERATIVE_STEPS}; possible infinite loop (self-loop guard never terminates)"
                 )],
             });
         }
 
-        let block =
-            function
-                .blocks
-                .get(&current_block_id)
-                .ok_or_else(|| MechError::Validation {
-                    errors: vec![format!(
-                        "function `{function_name}`: block `{current_block_id}` not found"
-                    )],
-                })?;
+        let block = function.blocks.get(&current_block_id).ok_or_else(|| {
+            MechError::WorkflowValidation {
+                errors: vec![format!(
+                    "function `{function_name}`: block `{current_block_id}` not found"
+                )],
+            }
+        })?;
 
         // Execute the block.
         let output = match block {
@@ -380,13 +378,11 @@ mod tests {
             function_name: &'a str,
             _input: JsonValue,
         ) -> BoxFuture<'a, Result<JsonValue, MechError>> {
-            let result =
-                self.responses
-                    .get(function_name)
-                    .cloned()
-                    .ok_or_else(|| MechError::Validation {
-                        errors: vec![format!("fake: no response for `{function_name}`")],
-                    });
+            let result = self.responses.get(function_name).cloned().ok_or_else(|| {
+                MechError::WorkflowValidation {
+                    errors: vec![format!("fake: no response for `{function_name}`")],
+                }
+            });
             Box::pin(async move { result })
         }
     }

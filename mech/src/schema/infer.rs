@@ -6,7 +6,7 @@
 //! schemas. "Union" here is intentionally narrow per the spec: if every
 //! terminal block's output schema is structurally identical (after `$ref`
 //! resolution), that schema becomes the function output; otherwise inference
-//! fails with [`MechError::InferenceFailed`]. No `oneOf`/`anyOf` synthesis is
+//! fails with [`MechError::OutputSchemaInferenceFailed`]. No `oneOf`/`anyOf` synthesis is
 //! attempted.
 //!
 //! This module runs **after** load-time validation (§13 Deliverable 5) and
@@ -90,7 +90,7 @@ pub fn infer_function_outputs(wf: &mut WorkflowFile) -> MechResult<()> {
     // Any function still declaring `infer` after the fixed point is an error.
     for (name, func) in &wf.functions {
         if needs_inference(&func.output) {
-            return Err(MechError::InferenceFailed {
+            return Err(MechError::OutputSchemaInferenceFailed {
                 function: name.clone(),
                 message: "unable to infer function output schema: no resolvable terminal block \
                           provided a concrete schema"
@@ -151,7 +151,7 @@ fn try_infer_function(
     };
 
     if terminals.is_empty() {
-        return Err(MechError::InferenceFailed {
+        return Err(MechError::OutputSchemaInferenceFailed {
             function: func_name.to_string(),
             message: "function has no terminal blocks; cannot infer output schema".to_string(),
         });
@@ -161,7 +161,7 @@ fn try_infer_function(
     for t_name in terminals {
         let block = func.blocks.get(t_name).ok_or_else(|| {
             // Validate should have caught this, but be defensive.
-            MechError::InferenceFailed {
+            MechError::OutputSchemaInferenceFailed {
                 function: func_name.to_string(),
                 message: format!("terminal block `{t_name}` does not exist"),
             }
@@ -170,7 +170,7 @@ fn try_infer_function(
             TerminalOutput::Concrete(v) => v,
             TerminalOutput::Deferred => return Ok(None),
             TerminalOutput::Error(msg) => {
-                return Err(MechError::InferenceFailed {
+                return Err(MechError::OutputSchemaInferenceFailed {
                     function: func_name.to_string(),
                     message: format!("terminal block `{t_name}`: {msg}"),
                 });
@@ -181,7 +181,7 @@ fn try_infer_function(
             None => unified = Some(block_schema),
             Some(prev) if *prev == block_schema => {}
             Some(prev) => {
-                return Err(MechError::InferenceFailed {
+                return Err(MechError::OutputSchemaInferenceFailed {
                     function: func_name.to_string(),
                     message: format!(
                         "terminal blocks produce incompatible output schemas: `{}` vs `{}`",
@@ -381,14 +381,14 @@ functions:
         let mut wf = parse_workflow(yaml).unwrap();
         let err = infer_function_outputs(&mut wf).expect_err("must error");
         match err {
-            MechError::InferenceFailed { function, message } => {
+            MechError::OutputSchemaInferenceFailed { function, message } => {
                 assert_eq!(function, "f");
                 assert!(
                     message.contains("incompatible"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected InferenceFailed, got {other:?}"),
+            other => panic!("expected OutputSchemaInferenceFailed, got {other:?}"),
         }
     }
 
@@ -439,7 +439,7 @@ functions:
     #[test]
     fn ref_and_inline_with_different_schemas_errors() {
         // A $ref terminal and an inline terminal with DIFFERENT schemas must
-        // produce an InferenceFailed error, proving the $ref path is exercised.
+        // produce an OutputSchemaInferenceFailed error, proving the $ref path is exercised.
         let yaml = r#"
 workflow:
   schemas:
@@ -472,14 +472,14 @@ functions:
         let mut wf = parse_workflow(yaml).unwrap();
         let err = infer_function_outputs(&mut wf).expect_err("must error");
         match err {
-            MechError::InferenceFailed { function, message } => {
+            MechError::OutputSchemaInferenceFailed { function, message } => {
                 assert_eq!(function, "f");
                 assert!(
                     message.contains("incompatible"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected InferenceFailed, got {other:?}"),
+            other => panic!("expected OutputSchemaInferenceFailed, got {other:?}"),
         }
     }
 
@@ -593,7 +593,7 @@ functions:
 "#;
         let mut wf = parse_workflow(yaml).unwrap();
         let err = infer_function_outputs(&mut wf).expect_err("must error");
-        assert!(matches!(err, MechError::InferenceFailed { .. }));
+        assert!(matches!(err, MechError::OutputSchemaInferenceFailed { .. }));
     }
 
     #[test]
@@ -620,7 +620,7 @@ functions:
 "#;
         let mut wf = parse_workflow(yaml).unwrap();
         let err = infer_function_outputs(&mut wf).expect_err("must error");
-        assert!(matches!(err, MechError::InferenceFailed { .. }));
+        assert!(matches!(err, MechError::OutputSchemaInferenceFailed { .. }));
     }
 
     #[test]
@@ -640,14 +640,14 @@ functions:
         let mut wf = parse_workflow(yaml).unwrap();
         let err = infer_function_outputs(&mut wf).expect_err("must error");
         match err {
-            MechError::InferenceFailed { function, message } => {
+            MechError::OutputSchemaInferenceFailed { function, message } => {
                 assert_eq!(function, "f");
                 assert!(
                     message.contains("not allowed on blocks"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected InferenceFailed, got {other:?}"),
+            other => panic!("expected OutputSchemaInferenceFailed, got {other:?}"),
         }
     }
 
@@ -689,14 +689,14 @@ functions:
         let mut wf = parse_workflow(yaml).unwrap();
         let err = infer_function_outputs(&mut wf).expect_err("must error");
         match err {
-            MechError::InferenceFailed { function, message } => {
+            MechError::OutputSchemaInferenceFailed { function, message } => {
                 assert_eq!(function, "caller");
                 assert!(
                     message.contains("list-form call block"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected InferenceFailed, got {other:?}"),
+            other => panic!("expected OutputSchemaInferenceFailed, got {other:?}"),
         }
     }
 
@@ -754,14 +754,14 @@ functions:
         let mut wf = parse_workflow(yaml).unwrap();
         let err = infer_function_outputs(&mut wf).expect_err("must error");
         match err {
-            MechError::InferenceFailed { function, message } => {
+            MechError::OutputSchemaInferenceFailed { function, message } => {
                 assert_eq!(function, "f");
                 assert!(
                     message.contains("unresolved"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected InferenceFailed, got {other:?}"),
+            other => panic!("expected OutputSchemaInferenceFailed, got {other:?}"),
         }
     }
 
