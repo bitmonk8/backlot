@@ -1,0 +1,186 @@
+//! Agent validation methods on [`Validator`].
+
+use std::collections::BTreeSet;
+
+use crate::schema::{AgentConfig, AgentConfigRef};
+
+use super::Validator;
+use super::helpers::{VALID_GRANTS, normalized_grants};
+use super::model::ModelChecker;
+use super::report::{Location, ValidationIssue};
+
+impl Validator<'_> {
+    /// Validate the named-agents map from `workflow.agents`.
+    pub(crate) fn validate_named_agents(
+        &mut self,
+        defaults: &crate::schema::WorkflowDefaults,
+        models: &dyn ModelChecker,
+    ) {
+        // Per-agent validity
+        for (name, ac) in &defaults.agents {
+            let loc = self
+                .root_loc()
+                .with_field(format!("workflow.agents.{name}"));
+            if ac.extends.is_some() {
+                self.err(
+                    loc.clone().with_field("extends"),
+                    format!(
+                        "named agent `{name}` must not use `extends` (extends is only permitted on inline agent configs)"
+                    ),
+                );
+            }
+            self.validate_agent_inline(ac, models, loc);
+        }
+
+        // Defense-in-depth: cycle detection on extends chains.
+        // Under current rules, named agents with `extends` are rejected above
+        // (line 24-28), so this walk cannot discover new cycles that weren't
+        // already flagged. It is kept as a safety net in case `extends` is
+        // allowed on named agents in the future.
+        // Issue #51: deduplicate missing extends target reports.
+        let mut reported_missing: BTreeSet<String> = BTreeSet::new();
+        for name in defaults.agents.keys() {
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            let mut cur = Some(name.clone());
+            while let Some(c) = cur {
+                if !seen.insert(c.clone()) {
+                    self.err(
+                        self.root_loc()
+                            .with_field(format!("workflow.agents.{name}.extends")),
+                        format!("cyclic `extends` chain involving agent `{c}`"),
+                    );
+                    break;
+                }
+                cur = defaults
+                    .agents
+                    .get(&c)
+                    .and_then(|a| a.extends.clone())
+                    .filter(|n| {
+                        if !defaults.agents.contains_key(n) {
+                            if reported_missing.insert(n.clone()) {
+                                self.report.errors.push(ValidationIssue::new(
+                                    Location::root(self.file)
+                                        .with_field(format!("workflow.agents.{c}.extends")),
+                                    format!("`extends` target `{n}` is not a named agent"),
+                                ));
+                            }
+                            false
+                        } else {
+                            true
+                        }
+                    });
+            }
+        }
+    }
+
+    pub(crate) fn validate_agent_inline(
+        &mut self,
+        ac: &AgentConfig,
+        models: &dyn ModelChecker,
+        loc: Location,
+    ) {
+        if let Some(model) = &ac.model
+            && !model.is_empty()
+            && !models.knows(model)
+        {
+            self.err(
+                loc.clone().with_field("model"),
+                format!("agent model `{model}` is not known to the model registry"),
+            );
+        }
+        for g in ac.grant_list() {
+            if !VALID_GRANTS.contains(&g.as_str()) {
+                self.err(
+                    loc.clone().with_field("grant"),
+                    format!("invalid grant `{g}`; must be one of tools/write/network"),
+                );
+            }
+        }
+        let normalized = normalized_grants(ac);
+        if !ac.write_path_list().is_empty() && !normalized.contains("write") {
+            self.warn(
+                loc.with_field("write_paths"),
+                "`write_paths` is set but `write` grant is not present (write_paths will be ignored)",
+            );
+        }
+    }
+
+    /// Validate an agent reference that requires `WorkflowDefaults`.
+    ///
+    /// Renamed from `validate_agent_ref` → `validate_agent_ref_strict` for
+    /// clarity (Issue #50): this form requires defaults to be present.
+    pub(crate) fn validate_agent_ref_strict(
+        &mut self,
+        agent_ref: &AgentConfigRef,
+        defaults: &crate::schema::WorkflowDefaults,
+        models: &dyn ModelChecker,
+        loc: Location,
+    ) {
+        match agent_ref {
+            AgentConfigRef::Inline(ac) => {
+                if let Some(parent) = &ac.extends
+                    && !defaults.agents.contains_key(parent)
+                {
+                    self.err(
+                        loc.clone().with_field("extends"),
+                        format!("`extends` target `{parent}` is not a named agent"),
+                    );
+                }
+                self.validate_agent_inline(ac, models, loc);
+            }
+            AgentConfigRef::Ref(raw) => {
+                let Some(rest) = raw.strip_prefix("$ref:") else {
+                    self.err(loc, format!("malformed agent $ref: `{raw}`"));
+                    return;
+                };
+                if let Some(name) = rest.strip_prefix('#') {
+                    if name.is_empty() || !defaults.agents.contains_key(name) {
+                        self.err(
+                            loc,
+                            format!(
+                                "agent $ref `#{name}` is not a named agent in `workflow.agents`"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Validate an agent reference with optional defaults (Issue #50).
+    ///
+    /// Renamed from `validate_agent_ref_with_defaults` → `validate_agent_ref`
+    /// for clarity: this is the general-purpose form that handles the case
+    /// when no workflow defaults are declared.
+    pub(crate) fn validate_agent_ref(
+        &mut self,
+        agent_ref: &AgentConfigRef,
+        defaults: Option<&crate::schema::WorkflowDefaults>,
+        models: &dyn ModelChecker,
+        loc: Location,
+    ) {
+        if let Some(d) = defaults {
+            self.validate_agent_ref_strict(agent_ref, d, models, loc);
+        } else {
+            match agent_ref {
+                AgentConfigRef::Inline(ac) => {
+                    if let Some(parent) = &ac.extends {
+                        self.err(
+                            loc.clone().with_field("extends"),
+                            format!(
+                                "`extends` target `{parent}` is not a named agent (no `workflow.agents` declared)"
+                            ),
+                        );
+                    }
+                    self.validate_agent_inline(ac, models, loc);
+                }
+                AgentConfigRef::Ref(raw) => {
+                    self.err(
+                        loc,
+                        format!("agent $ref `{raw}` cannot resolve: no `workflow.agents` declared"),
+                    );
+                }
+            }
+        }
+    }
+}

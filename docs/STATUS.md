@@ -98,17 +98,19 @@
 
 ## Mech
 
-**Phase:** Complete. 326 tests passing (300 unit + 26 integration), zero clippy warnings.
+**Phase:** Complete. 331 tests passing (305 unit + 26 integration), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
 - All 12 sections drafted and reviewed. Covers: motivation, design goals, unified CDFG model, conversation model (history scoping, compaction, agent configuration), block specification (prompt + call blocks, field validity), transitions & guards (CEL, ordered evaluation, self-loops), template expressions & scoping (5 namespaces, CEL everywhere), schema handling (inline + `$ref` + workflow-level shared schemas), context & state (two-level declared variables, `set_context`/`set_workflow`), validation & error handling (24+ load-time checks, 5 runtime error types), cue integration (function = leaf task, model escalation interaction), YAML reference schema with complete worked example.
 
-**Issues:** 52 open (tracked in GitHub Issues).
+**Issues:** 40 open (tracked in GitHub Issues).
 
 **Next Work:** None identified.
 
-**Recent:** Schema subsystem consolidation — 10 issues closed (#3, #14, #15, #19, #20, #28, #32, #36, #46, #288). `SchemaRegistry` now stores resolved JSON bodies; prompt executor uses pre-compiled validators; `$ref:#name` parsing consolidated into `parse_named_ref`/`try_parse_named_ref`; `ResolvedSchema::validate` replaces `SchemaRegistry::validate`; `SchemaInferDeferred` error variant; `BlockDef::transitions()`/`depends_on()` accessors; `schema/mod.rs` split into submodules.
+**Recent:** validate.rs restructuring — 12 issues closed (#1, #4, #16, #18, #22, #48, #50, #51, #52, #55, #56, #287). Split `validate.rs` (3766 lines) into `validate/` directory with 7 submodules (mod.rs, model.rs, report.rs, blocks.rs, agents.rs, cel_check.rs, graph.rs, helpers.rs). CEL reference-extraction helpers moved to `cel.rs`. `BlockDef::set_context()`/`set_workflow()` accessors added. `check_type` in context.rs replaced with JSON Schema validation. Prompt/Call arm duplication resolved via shared `BlockDef` accessors. Uniform/PerCall call blocks now handled in `collect_block_fields`/`collect_block_required_fields`. Dominator computation simplified. Agent ref naming clarified (`validate_agent_ref_strict` vs `validate_agent_ref`). `check_*` methods renamed to `validate_*`. `CollectedRefs.block_refs` Option wrapper removed. Dataflow cycle message direction fixed. Missing extends target deduplication. Unused `_fn_name` parameter removed. `CelCheckCtx` struct replaces too-many-arguments suppressions.
+
+Schema subsystem consolidation — 10 issues closed (#3, #14, #15, #19, #20, #28, #32, #36, #46, #288). `SchemaRegistry` now stores resolved JSON bodies; prompt executor uses pre-compiled validators; `$ref:#name` parsing consolidated into `parse_named_ref`/`try_parse_named_ref`; `ResolvedSchema::validate` replaces `SchemaRegistry::validate`; `SchemaInferDeferred` error variant; `BlockDef::transitions()`/`depends_on()` accessors; `schema/mod.rs` split into submodules.
 
 ---
 

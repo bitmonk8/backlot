@@ -30,7 +30,7 @@ use serde_json::Value as JsonValue;
 
 use crate::cel::Namespaces;
 use crate::error::{MechError, MechResult};
-use crate::schema::ContextVarDef;
+use crate::schema::{ContextVarDef, value_matches_json_type};
 
 /// Shared workflow-level state. Cloneable handle — all clones refer to the
 /// same underlying mutex-guarded map.
@@ -269,28 +269,12 @@ impl Scope {
 
 /// Check that `value` matches the declared JSON Schema type name `ty`.
 ///
-/// Accepts the six type names listed in spec §9.1: `string`, `number`,
-/// `integer`, `boolean`, `array`, `object`. An unknown type name produces a
-/// `Validation` error (the loader should have rejected it earlier, but we
-/// guard defensively).
+/// Delegates to [`value_matches_json_type`] from `crate::schema`, which uses
+/// serde_json type predicates. This keeps integer semantics consistent with
+/// the rest of the codebase: `1.0` is NOT a valid integer (it has a fractional
+/// representation in serde_json).
 fn check_type(name: &str, ty: &str, value: &JsonValue, scope: Scope) -> MechResult<()> {
-    let ok = match ty {
-        "string" => value.is_string(),
-        "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "boolean" => value.is_boolean(),
-        "array" => value.is_array(),
-        "object" => value.is_object(),
-        other => {
-            return Err(MechError::Validation {
-                errors: vec![format!(
-                    "{}: variable `{name}` has unknown declared type `{other}`",
-                    scope.as_str()
-                )],
-            });
-        }
-    };
-    if !ok {
+    if !value_matches_json_type(value, ty) {
         return Err(MechError::Validation {
             errors: vec![format!(
                 "{}: variable `{name}` expected type `{ty}`, got value `{value}`",
@@ -610,5 +594,37 @@ mod tests {
         bad.insert("n".to_string(), decl("integer", json!("not-int")));
         let err = WorkflowState::from_declarations(&bad).unwrap_err();
         assert!(matches!(err, MechError::Validation { .. }));
+    }
+    #[test]
+    fn float_one_is_not_valid_integer() {
+        // json!(1.0) must be REJECTED for declared type "integer".
+        // serde_json represents 1.0 as Number with a fractional part,
+        // so value_matches_json_type correctly rejects it — unlike
+        // jsonschema which treats 1.0 as a valid integer per the spec.
+        let mut decls = BTreeMap::new();
+        decls.insert("i".into(), decl("integer", json!(0)));
+        let ws = WorkflowState::from_declarations(&BTreeMap::new()).unwrap();
+        let mut ctx = ExecutionContext::new(json!({}), json!({}), &decls, ws).unwrap();
+        let err = ctx.set_context("i", json!(1.0)).unwrap_err();
+        match err {
+            MechError::Validation { errors } => {
+                assert!(
+                    errors[0].contains("integer"),
+                    "error should mention integer: {}",
+                    errors[0]
+                );
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn float_one_is_valid_number() {
+        // json!(1.0) must be ACCEPTED for declared type "number".
+        let mut decls = BTreeMap::new();
+        decls.insert("n".into(), decl("number", json!(0.0)));
+        let ws = WorkflowState::from_declarations(&BTreeMap::new()).unwrap();
+        let mut ctx = ExecutionContext::new(json!({}), json!({}), &decls, ws).unwrap();
+        ctx.set_context("n", json!(1.0)).unwrap();
     }
 }

@@ -484,6 +484,185 @@ impl fmt::Display for Template {
     }
 }
 
+// ---- CEL AST reference extraction (used by validate) ----------------------
+
+use cel_parser::{Expression, Member};
+use std::collections::BTreeSet;
+
+use crate::validate::{Location, ValidationIssue};
+
+/// References collected from a CEL expression AST.
+#[derive(Debug, Default)]
+pub struct CollectedRefs {
+    /// Top-level identifiers (e.g. `input`, `context`, `blocks`).
+    pub top_idents: BTreeSet<String>,
+    /// Block references discovered as `blocks.<name>.output.<field?>` or
+    /// `block.<name>.<field?>`.
+    pub block_refs: Vec<(String, Option<String>)>,
+}
+
+/// Walk a parsed CEL expression and collect namespace/block references.
+pub fn collect_references(expr: &Expression) -> CollectedRefs {
+    let mut out = CollectedRefs::default();
+    walk_refs(expr, &mut out);
+    out
+}
+
+fn walk_refs(expr: &Expression, out: &mut CollectedRefs) {
+    match expr {
+        Expression::Arithmetic(a, _, b)
+        | Expression::Relation(a, _, b)
+        | Expression::Or(a, b)
+        | Expression::And(a, b) => {
+            walk_refs(a, out);
+            walk_refs(b, out);
+        }
+        Expression::Ternary(a, b, c) => {
+            walk_refs(a, out);
+            walk_refs(b, out);
+            walk_refs(c, out);
+        }
+        Expression::Unary(_, a) => walk_refs(a, out),
+        Expression::FunctionCall(_, target, args) => {
+            if let Some(t) = target {
+                walk_refs(t, out);
+            }
+            for a in args {
+                walk_refs(a, out);
+            }
+        }
+        Expression::List(items) => {
+            for it in items {
+                walk_refs(it, out);
+            }
+        }
+        Expression::Map(entries) => {
+            for (k, v) in entries {
+                walk_refs(k, out);
+                walk_refs(v, out);
+            }
+        }
+        Expression::Atom(_) => {}
+        Expression::Ident(name) => {
+            out.top_idents.insert(name.as_ref().clone());
+        }
+        Expression::Member(_, _) => {
+            let chain = flatten_member_chain(expr);
+            if let Some((root, attrs)) = chain {
+                out.top_idents.insert(root.clone());
+                if (root == "blocks" || root == "block") && !attrs.is_empty() {
+                    let target_block = attrs[0].clone();
+                    let field = if attrs.len() >= 2 && attrs[1] == "output" {
+                        attrs.get(2).cloned()
+                    } else {
+                        None
+                    };
+                    out.block_refs.push((target_block, field));
+                }
+            } else {
+                walk_member_subexprs(expr, out);
+            }
+        }
+    }
+}
+
+fn walk_member_subexprs(expr: &Expression, out: &mut CollectedRefs) {
+    if let Expression::Member(inner, member) = expr {
+        walk_refs(inner, out);
+        if let Member::Index(idx) = member.as_ref() {
+            walk_refs(idx, out);
+        }
+        if let Member::Fields(fields) = member.as_ref() {
+            for (_, e) in fields {
+                walk_refs(e, out);
+            }
+        }
+    }
+}
+
+/// Flatten a chain of `Member::Attribute` accesses ending in an `Ident`.
+/// Returns `Some((root_ident, [attr1, attr2, ...]))` if the entire chain is
+/// attribute access; `None` if any non-attribute member is encountered.
+pub fn flatten_member_chain(expr: &Expression) -> Option<(String, Vec<String>)> {
+    let mut attrs: Vec<String> = Vec::new();
+    let mut cur = expr;
+    loop {
+        match cur {
+            Expression::Member(inner, member) => match member.as_ref() {
+                Member::Attribute(name) => {
+                    attrs.push(name.as_ref().clone());
+                    cur = inner;
+                }
+                _ => return None,
+            },
+            Expression::Ident(name) => {
+                attrs.reverse();
+                return Some((name.as_ref().clone(), attrs));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Extract `{{ ... }}` expression segments from a template string for
+/// validation. Parsing errors are appended to `errors`.
+pub fn extract_template_exprs(
+    source: &str,
+    loc: &Location,
+    errors: &mut Vec<ValidationIssue>,
+) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            let start = i + 2;
+            let mut j = start;
+            let mut quote: Option<u8> = None;
+            let mut found = false;
+            while j + 1 < bytes.len() {
+                let b = bytes[j];
+                if let Some(q) = quote {
+                    if b == b'\\' && j + 1 < bytes.len() {
+                        j += 2;
+                        continue;
+                    }
+                    if b == q {
+                        quote = None;
+                    }
+                    j += 1;
+                    continue;
+                }
+                if b == b'"' || b == b'\'' {
+                    quote = Some(b);
+                    j += 1;
+                    continue;
+                }
+                if b == b'}' && bytes[j + 1] == b'}' {
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !found {
+                errors.push(ValidationIssue::new(
+                    loc.clone(),
+                    "unterminated `{{` in template",
+                ));
+                return out;
+            }
+            let trimmed = source[start..j].trim().to_string();
+            if !trimmed.is_empty() {
+                out.push(trimmed);
+            }
+            i = j + 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 // ---- Tests ----------------------------------------------------------------
 
 #[cfg(test)]

@@ -37,6 +37,22 @@ impl BlockDef {
             BlockDef::Call(c) => &c.depends_on,
         }
     }
+
+    /// Returns the block's `set_context` mappings.
+    pub fn set_context(&self) -> &BTreeMap<String, Expr> {
+        match self {
+            BlockDef::Prompt(p) => &p.set_context,
+            BlockDef::Call(c) => &c.set_context,
+        }
+    }
+
+    /// Returns the block's `set_workflow` mappings.
+    pub fn set_workflow(&self) -> &BTreeMap<String, Expr> {
+        match self {
+            BlockDef::Prompt(p) => &p.set_workflow,
+            BlockDef::Call(c) => &c.set_workflow,
+        }
+    }
 }
 
 /// A prompt block (§5.1).

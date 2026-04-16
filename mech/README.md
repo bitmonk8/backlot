@@ -228,6 +228,25 @@ println!("{}", serde_json::to_string_pretty(&output)?);
 `WorkflowLoader::load_str(yaml)` accepts a YAML string for in-memory loading
 without touching the filesystem — useful for tests and embedded callers.
 
+## Module structure
+
+| Module | Description |
+|--------|-------------|
+| `schema/` | Serde parse types for YAML grammar, schema registry, output inference |
+| `validate/` | Load-time validation (§10.1): structural, graph, type, and agent checks |
+| `validate/mod.rs` | Entry point (`validate_workflow`), `Validator` struct, top-level orchestration |
+| `validate/model.rs` | `ModelChecker` trait, `AnyModel`, `KnownModels` |
+| `validate/report.rs` | `Location`, `ValidationIssue`, `ValidationReport` |
+| `validate/blocks.rs` | Block/transition/call-target validation, schema/context checks |
+| `validate/agents.rs` | Agent config validation, extends-chain cycle detection |
+| `validate/cel_check.rs` | CEL/template validation: scope, reachability, optional field safety |
+| `validate/graph.rs` | Dataflow cycles, unreachable blocks, dominator computation, parallel conflicts |
+| `validate/helpers.rs` | Free functions: identifier checks, schema field collection, AST walkers |
+| `cel.rs` | CEL compilation/evaluation, template interpolation, reference extraction |
+| `context.rs` | `ExecutionContext`, `WorkflowState`, runtime type checking |
+| `exec/` | Block executors, transition evaluation, function runners, workflow runtime |
+| `loader.rs` | `WorkflowLoader` — parse → validate → infer → compile pipeline |
+
 ## Full specification
 
 [`docs/MECH_SPEC.md`](../docs/MECH_SPEC.md) — complete language specification
