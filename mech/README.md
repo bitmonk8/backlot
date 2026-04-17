@@ -234,11 +234,13 @@ mech run <file> [--function <name>] --input <json>
 
 ## Library usage
 
+Prefer the free functions for loading workflows:
+
 ```rust
-use mech::{WorkflowLoader, WorkflowRuntime, AgentExecutor};
+use mech::{load_workflow, load_workflow_str, WorkflowRuntime, AgentExecutor};
 
 // 1. Load and validate the workflow from disk.
-let workflow = WorkflowLoader::new().load("greet.yaml")?;
+let workflow = load_workflow("greet.yaml")?;
 
 // 2. Construct the runtime, supplying your AgentExecutor implementation.
 //    In production this wraps a reel::Agent; in tests you can use a stub.
@@ -249,8 +251,17 @@ let output = runtime.run("greet", serde_json::json!({"name": "Alice"})).await?;
 println!("{}", serde_json::to_string_pretty(&output)?);
 ```
 
-`WorkflowLoader::load_str(yaml)` accepts a YAML string for in-memory loading
-without touching the filesystem — useful for tests and embedded callers.
+### Loader API
+
+| Function | Description |
+|----------|-------------|
+| `load_workflow(path)` | Load, validate, and compile a workflow YAML from disk |
+| `load_workflow_with(path, models)` | Same, with a custom `ModelChecker` |
+| `load_workflow_str(yaml)` | Load from an in-memory YAML string |
+| `load_workflow_str_with(yaml, models)` | Same, with a custom `ModelChecker` |
+
+The legacy `WorkflowLoader` struct is still available for backward compatibility
+but delegates to the free functions above.
 
 ## Module structure
 
@@ -261,15 +272,16 @@ without touching the filesystem — useful for tests and embedded callers.
 | `validate/mod.rs` | Entry point (`validate_workflow`), `Validator` struct, top-level orchestration |
 | `validate/model.rs` | `ModelChecker` trait, `AnyModel`, `KnownModels` |
 | `validate/report.rs` | `Location`, `ValidationIssue`, `ValidationReport` |
-| `validate/blocks.rs` | Block/transition/call-target validation, schema/context checks |
-| `validate/agents.rs` | Agent config validation, extends-chain cycle detection |
-| `validate/cel_check.rs` | CEL/template validation: scope, reachability, optional field safety |
-| `validate/graph.rs` | Dataflow cycles, unreachable blocks, dominator computation, parallel conflicts |
-| `validate/helpers.rs` | Free functions: identifier checks, schema field collection, AST walkers |
+| `validate/blocks.rs` | Block/transition/call-target validation |
+| `validate/schema_check.rs` | JSON Schema object validation, `$ref` resolution, context map checks |
+| `validate/agents.rs` | Agent config validation, grant normalization, extends-chain cycle detection |
+| `validate/cel_check.rs` | CEL/template validation: scope, reachability, optional field safety, AST walkers |
+| `validate/graph.rs` | Dataflow cycles, unreachable blocks, dominator computation, transitive closures, parallel conflicts |
+| `validate/helpers.rs` | Utility functions (identifier checks, block writes, terminals), schema field collection, constants |
 | `cel.rs` | CEL compilation/evaluation, template interpolation, namespace bindings (`blocks`/`block` alias), reference extraction |
 | `context.rs` | `ExecutionContext`, `WorkflowState`, runtime type checking |
 | `exec/` | Block executors, transition evaluation, function runners, workflow runtime |
-| `loader.rs` | `WorkflowLoader` — parse → validate → infer → compile pipeline (uses `visit_cel_sources` visitor) |
+| `loader.rs` | Free-function loader API (`load_workflow`, `load_workflow_str`) — parse → validate → infer → compile pipeline |
 
 ## Full specification
 

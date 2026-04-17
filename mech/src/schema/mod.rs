@@ -76,7 +76,7 @@ mod tests {
 
     // The complete §12.2 worked example. Kept in-file so tests are
     // self-contained and fail loudly if the spec drifts.
-    const FULL_EXAMPLE: &str = include_str!("full_example.yaml");
+    const FULL_EXAMPLE: &str = include_str!("../../testdata/full_example.yaml");
 
     #[test]
     fn parses_full_worked_example() {

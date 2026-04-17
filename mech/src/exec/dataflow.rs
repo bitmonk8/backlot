@@ -21,8 +21,8 @@ use crate::error::{MechError, MechResult};
 use crate::exec::agent::AgentExecutor;
 use crate::exec::call::{FunctionExecutor, execute_call_block};
 use crate::exec::prompt::execute_prompt_block;
-use crate::loader::Workflow;
 use crate::schema::{BlockDef, FunctionDef};
+use crate::workflow::Workflow;
 
 /// Extract `depends_on` list from a block.
 fn block_depends_on(block: &BlockDef) -> &[String] {
@@ -375,7 +375,7 @@ functions:
     #[test]
     fn simple_dag_executes_roots_before_dependent() {
         let wf = load(SIMPLE_DAG);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         // A and B are roots (level 0), C depends on both (level 1).
         let agent = SequentialAgent::new(vec![
             json!({ "val": "A_out" }),
@@ -440,7 +440,7 @@ functions:
     #[test]
     fn diamond_dependency_executes_correctly() {
         let wf = load(DIAMOND);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         // Level 0: a; Level 1: b, c; Level 2: d
         let agent = SequentialAgent::new(vec![
             json!({ "x": 42 }),
@@ -495,7 +495,7 @@ functions:
           properties: { y: { type: string } }
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         // Only 2 agent calls: a then b. orphan is never reached.
         let agent = SequentialAgent::new(vec![json!({ "x": 1 }), json!({ "result": "done" })]);
         let mut ctx = new_ctx(json!({}));
@@ -549,7 +549,7 @@ functions:
     #[test]
     fn multiple_terminals_produce_map_output() {
         let wf = load(MULTI_TERMINAL);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         // Level 0: shared; Level 1: sink_a, sink_b (both terminals)
         let agent = SequentialAgent::new(vec![
             json!({ "data": "root_data" }),
@@ -610,7 +610,7 @@ functions:
         depends_on: [a]
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let terminals = find_dataflow_terminals(func).unwrap();
         assert_eq!(terminals, vec!["b".to_string()]);
     }
@@ -620,7 +620,7 @@ functions:
     #[test]
     fn topo_sort_diamond_produces_three_levels() {
         let wf = load(DIAMOND);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let terminals = find_dataflow_terminals(func).unwrap();
         let reachable = backward_reachable(&func.blocks, &terminals);
         let levels = topo_sort_levels(&func.blocks, &reachable).unwrap();
@@ -651,7 +651,7 @@ functions:
           properties: { answer: { type: string } }
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![json!({ "answer": "42" })]);
         let mut ctx = new_ctx(json!({}));
 
@@ -700,7 +700,7 @@ functions:
         depends_on: [a]
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![json!({ "val": 10 }), json!({ "result": 20 })]);
         let fn_decls = func.context.clone();
         let ws = WorkflowState::from_declarations(&BTreeMap::new()).unwrap();

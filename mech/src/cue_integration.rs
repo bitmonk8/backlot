@@ -18,7 +18,7 @@ use cue::{
 
 use crate::MechError;
 use crate::exec::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture, WorkflowRuntime};
-use crate::loader::Workflow;
+use crate::workflow::Workflow;
 
 struct EscalatingExecutor<'a> {
     inner: &'a dyn AgentExecutor,
@@ -122,7 +122,7 @@ impl MechTask {
         agent: Option<Arc<dyn AgentExecutor>>,
     ) -> Self {
         let workflow_default_model = workflow
-            .file()
+            .document()
             .workflow
             .as_ref()
             .and_then(|w| w.agent.as_ref())
@@ -620,7 +620,7 @@ functions:
           properties: { greeting: { type: string } }
 "#;
 
-    const FULL_EXAMPLE: &str = include_str!("schema/full_example.yaml");
+    const FULL_EXAMPLE: &str = include_str!("../testdata/full_example.yaml");
 
     #[test]
     fn mech_task_implements_task_node() {

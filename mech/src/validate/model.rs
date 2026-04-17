@@ -8,7 +8,7 @@ use std::collections::HashSet;
 /// [`AnyModel`] or [`KnownModels`] to avoid filesystem access.
 pub trait ModelChecker {
     /// Returns `true` if the named model is known.
-    fn knows(&self, model: &str) -> bool;
+    fn is_known(&self, model: &str) -> bool;
 }
 
 /// [`ModelChecker`] that accepts every model name. Useful for tests where
@@ -17,7 +17,7 @@ pub trait ModelChecker {
 pub struct AnyModel;
 
 impl ModelChecker for AnyModel {
-    fn knows(&self, _model: &str) -> bool {
+    fn is_known(&self, _model: &str) -> bool {
         true
     }
 }
@@ -42,7 +42,7 @@ impl KnownModels {
 }
 
 impl ModelChecker for KnownModels {
-    fn knows(&self, model: &str) -> bool {
+    fn is_known(&self, model: &str) -> bool {
         self.names.contains(model)
     }
 }

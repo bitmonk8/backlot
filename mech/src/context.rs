@@ -53,13 +53,7 @@ impl WorkflowState {
     /// each variable to its declared `initial` value. Each `initial` value is
     /// type-checked against its declared `type`.
     pub fn from_declarations(decls: &BTreeMap<String, ContextVarDef>) -> MechResult<Self> {
-        let mut declarations = BTreeMap::new();
-        let mut values = BTreeMap::new();
-        for (name, def) in decls {
-            check_type(name, &def.ty, &def.initial, Scope::Workflow)?;
-            declarations.insert(name.clone(), def.ty.clone());
-            values.insert(name.clone(), def.initial.clone());
-        }
+        let (declarations, values) = build_var_store(decls, Scope::Workflow)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(WorkflowStateInner {
                 declarations,
@@ -76,6 +70,11 @@ impl WorkflowState {
 
     /// Write a single `workflow.*` variable. Errors if undeclared or if the
     /// value's type does not match the declaration.
+    ///
+    /// Note: the lookup-then-check_type pattern here mirrors
+    /// [`ExecutionContext::set_context`]. The duplication is intentional —
+    /// a shared helper would obscure the different error messages and lock
+    /// scoping between the two call sites.
     pub fn set(&self, name: &str, value: JsonValue) -> MechResult<()> {
         let mut guard = self.inner.lock().expect("workflow state mutex poisoned");
         let ty = guard
@@ -127,13 +126,7 @@ impl ExecutionContext {
         context_decls: &BTreeMap<String, ContextVarDef>,
         workflow: WorkflowState,
     ) -> MechResult<Self> {
-        let mut decls = BTreeMap::new();
-        let mut values = BTreeMap::new();
-        for (name, def) in context_decls {
-            check_type(name, &def.ty, &def.initial, Scope::Function)?;
-            decls.insert(name.clone(), def.ty.clone());
-            values.insert(name.clone(), def.initial.clone());
-        }
+        let (decls, values) = build_var_store(context_decls, Scope::Function)?;
         Ok(Self {
             input,
             meta,
@@ -165,6 +158,11 @@ impl ExecutionContext {
     }
 
     /// Write a `context.*` variable. Errors if undeclared or type-mismatched.
+    ///
+    /// Note: the lookup-then-check_type pattern here mirrors
+    /// [`WorkflowState::set`]. The duplication is intentional — a shared
+    /// helper would obscure the different error messages and lock scoping
+    /// between the two call sites.
     pub fn set_context(&mut self, name: &str, value: JsonValue) -> MechResult<()> {
         let ty = self
             .context_decls
@@ -285,6 +283,23 @@ fn check_type(name: &str, ty: &str, value: &JsonValue, scope: Scope) -> MechResu
     Ok(())
 }
 
+/// Build declarations and initial values from a set of context var definitions.
+///
+/// Shared by [`WorkflowState::from_declarations`] and [`ExecutionContext::new`]
+/// to avoid duplicating the iterate → check_type → clone logic.
+fn build_var_store(
+    decls: &BTreeMap<String, ContextVarDef>,
+    scope: Scope,
+) -> MechResult<(BTreeMap<String, String>, BTreeMap<String, JsonValue>)> {
+    let mut declarations = BTreeMap::new();
+    let mut values = BTreeMap::new();
+    for (name, def) in decls {
+        check_type(name, &def.ty, &def.initial, scope)?;
+        declarations.insert(name.clone(), def.ty.clone());
+        values.insert(name.clone(), def.initial.clone());
+    }
+    Ok((declarations, values))
+}
 // ---- Tests ----------------------------------------------------------------
 
 #[cfg(test)]

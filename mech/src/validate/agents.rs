@@ -5,9 +5,22 @@ use std::collections::BTreeSet;
 use crate::schema::{AgentConfig, AgentConfigRef};
 
 use super::Validator;
-use super::helpers::{VALID_GRANTS, normalized_grants};
+use super::helpers::VALID_GRANTS;
 use super::model::ModelChecker;
 use super::report::{Location, ValidationIssue};
+
+/// Compute the normalized grant set for an agent config. `write` and
+/// `network` imply `tools`; a non-empty tools list also implies `tools`.
+fn expanded_grants(ac: &AgentConfig) -> BTreeSet<String> {
+    let mut set: BTreeSet<String> = ac.grants_list().iter().cloned().collect();
+    if set.contains("write") || set.contains("network") {
+        set.insert("tools".to_string());
+    }
+    if !ac.tool_list().is_empty() {
+        set.insert("tools".to_string());
+    }
+    set
+}
 
 impl Validator<'_> {
     /// Validate the named-agents map from `workflow.agents`.
@@ -81,7 +94,7 @@ impl Validator<'_> {
     ) {
         if let Some(model) = &ac.model
             && !model.is_empty()
-            && !models.knows(model)
+            && !models.is_known(model)
         {
             self.err(
                 loc.clone().with_field("model"),
@@ -96,7 +109,7 @@ impl Validator<'_> {
                 );
             }
         }
-        let normalized = normalized_grants(ac);
+        let normalized = expanded_grants(ac);
         if !ac.write_path_list().is_empty() && !normalized.contains("write") {
             self.warn(
                 loc.with_field("write_paths"),
@@ -142,6 +155,11 @@ impl Validator<'_> {
                             ),
                         );
                     }
+                } else {
+                    self.err(
+                        loc,
+                        format!("external file agent $ref `{raw}` is not supported; only `$ref:#name` references are allowed"),
+                    );
                 }
             }
         }

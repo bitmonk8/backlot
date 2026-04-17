@@ -80,7 +80,7 @@ impl AgentExecutor for RecordingAgent {
     }
 }
 
-const FULL_EXAMPLE: &str = include_str!("../src/schema/full_example.yaml");
+const FULL_EXAMPLE: &str = include_str!("../testdata/full_example.yaml");
 
 #[test]
 fn worked_example_general_path() {

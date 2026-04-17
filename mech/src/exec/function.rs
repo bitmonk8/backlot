@@ -23,8 +23,8 @@ use crate::exec::agent::AgentExecutor;
 use crate::exec::call::FunctionExecutor;
 use crate::exec::dataflow::run_function_dataflow;
 use crate::exec::schedule::run_function_imperative;
-use crate::loader::Workflow;
 use crate::schema::{BlockDef, FunctionDef};
+use crate::workflow::Workflow;
 
 /// Default maximum call depth to prevent infinite recursion.
 const DEFAULT_MAX_DEPTH: usize = 64;
@@ -118,7 +118,7 @@ impl<'w> FunctionRunner<'w> {
     ) -> MechResult<JsonValue> {
         let function = self
             .workflow
-            .file()
+            .document()
             .functions
             .get(function_name)
             .ok_or_else(|| MechError::WorkflowValidation {
@@ -152,7 +152,7 @@ impl<'w> FunctionRunner<'w> {
         // Resolve system prompt: function override beats workflow default.
         let system_source = function.system.as_deref().or_else(|| {
             self.workflow
-                .file()
+                .document()
                 .workflow
                 .as_ref()
                 .and_then(|w| w.system.as_deref())
@@ -177,7 +177,7 @@ impl<'w> FunctionRunner<'w> {
             None => None,
         };
 
-        let compaction = resolve_compaction(self.workflow.file(), function);
+        let compaction = resolve_compaction(self.workflow.document(), function);
 
         let mut conversation = match rendered_system {
             Some(sys) => Conversation::with_system(sys),
@@ -486,7 +486,7 @@ functions:
 "#;
         let wf = load(yaml);
         let wf_decls = wf
-            .file()
+            .document()
             .workflow
             .as_ref()
             .map(|w| &w.context)
@@ -564,7 +564,7 @@ functions:
 "#;
         let wf = load(yaml);
         assert_eq!(
-            detect_mode(wf.file().functions.get("f").unwrap()),
+            detect_mode(wf.document().functions.get("f").unwrap()),
             ExecutionMode::Imperative
         );
 
@@ -590,7 +590,7 @@ functions:
 "#;
         let wf = load(yaml);
         assert_eq!(
-            detect_mode(wf.file().functions.get("f").unwrap()),
+            detect_mode(wf.document().functions.get("f").unwrap()),
             ExecutionMode::Dataflow
         );
 
@@ -609,7 +609,7 @@ functions:
 "#;
         let wf = load(yaml);
         assert_eq!(
-            detect_mode(wf.file().functions.get("f").unwrap()),
+            detect_mode(wf.document().functions.get("f").unwrap()),
             ExecutionMode::Imperative
         );
     }
@@ -646,13 +646,13 @@ functions:
 
     // ---- T9: §12 worked example end-to-end (billing path) -----------------
 
-    const FULL_EXAMPLE: &str = include_str!("../schema/full_example.yaml");
+    const FULL_EXAMPLE: &str = include_str!("../../testdata/full_example.yaml");
 
     #[test]
     fn worked_example_billing_path() {
         let wf = load(FULL_EXAMPLE);
         let wf_decls = wf
-            .file()
+            .document()
             .workflow
             .as_ref()
             .map(|w| &w.context)
@@ -698,7 +698,7 @@ functions:
     fn worked_example_technical_path() {
         let wf = load(FULL_EXAMPLE);
         let wf_decls = wf
-            .file()
+            .document()
             .workflow
             .as_ref()
             .map(|w| &w.context)
@@ -870,7 +870,7 @@ functions:
 "#;
         let wf = load(yaml);
         let ws = WorkflowState::from_declarations(
-            &wf.file()
+            &wf.document()
                 .workflow
                 .as_ref()
                 .map(|w| w.context.clone())

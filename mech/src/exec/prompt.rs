@@ -34,12 +34,12 @@ use crate::context::ExecutionContext;
 use crate::conversation::Conversation;
 use crate::error::{MechError, MechResult};
 use crate::exec::agent::{AgentExecutor, AgentRequest};
-use crate::loader::Workflow;
 #[cfg(test)]
 use crate::schema::BlockDef;
 use crate::schema::{
     AgentConfig, AgentConfigRef, FunctionDef, MechDocument, PromptBlock, SchemaRef,
 };
+use crate::workflow::Workflow;
 
 /// Resolved agent configuration: the three-level cascade with `extends:` and
 /// `$ref:#name` fully expanded. Every field is optional because the agent
@@ -320,7 +320,7 @@ pub async fn execute_prompt_block(
     executor: &dyn AgentExecutor,
     conversation: &mut Conversation,
 ) -> MechResult<JsonValue> {
-    let file = workflow.file();
+    let file = workflow.document();
 
     // 1. Agent cascade.
     let resolved_agent = resolve_agent_config(file, function, block)?;
@@ -531,7 +531,7 @@ functions:
     #[test]
     fn trivial_prompt_block_stores_output_in_context() {
         let wf = load(TRIVIAL);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["classify"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!("expected prompt"),
@@ -560,7 +560,7 @@ functions:
     #[test]
     fn prompt_template_interpolation_uses_current_context() {
         let wf = load(TRIVIAL);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["classify"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!("expected prompt"),
@@ -585,7 +585,7 @@ functions:
     #[test]
     fn output_schema_mismatch_is_runtime_error() {
         let wf = load(TRIVIAL);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["classify"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!("expected prompt"),
@@ -692,12 +692,12 @@ functions:
 
     fn get_resolved(fn_name: &str) -> ResolvedAgentConfig {
         let wf = load(CASCADE);
-        let func = wf.file().functions.get(fn_name).unwrap();
+        let func = wf.document().functions.get(fn_name).unwrap();
         let block = match &func.blocks["b"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!("prompt"),
         };
-        resolve_agent_config(wf.file(), func, &block).unwrap()
+        resolve_agent_config(wf.document(), func, &block).unwrap()
     }
 
     #[test]
@@ -767,12 +767,12 @@ functions:
           write_paths: []
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["b"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!("expected prompt block"),
         };
-        let r = resolve_agent_config(wf.file(), func, &block).unwrap();
+        let r = resolve_agent_config(wf.document(), func, &block).unwrap();
         assert!(
             r.grants.is_empty(),
             "grant: [] should clear inherited grants"
@@ -809,12 +809,12 @@ functions:
           grant: []
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["b"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!("expected prompt block"),
         };
-        let r = resolve_agent_config(wf.file(), func, &block).unwrap();
+        let r = resolve_agent_config(wf.document(), func, &block).unwrap();
         // Block-level replaces function-level entirely; workflow default does not leak.
         assert_eq!(r.model.as_deref(), Some("haiku"), "block model wins");
         assert!(
@@ -853,12 +853,12 @@ functions:
           model: opus
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["b"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!("expected prompt block"),
         };
-        let r = resolve_agent_config(wf.file(), func, &block).unwrap();
+        let r = resolve_agent_config(wf.document(), func, &block).unwrap();
         assert_eq!(r.model.as_deref(), Some("opus"), "model overridden");
         assert_eq!(
             r.grants,
@@ -898,7 +898,7 @@ functions:
         agent: "$ref:#w"
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["classify"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!(),
@@ -970,7 +970,7 @@ functions:
           properties: { category: { type: string } }
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["classify"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!(),
@@ -995,7 +995,7 @@ functions:
     #[test]
     fn llm_call_failure_is_tagged_with_block_id() {
         let wf = load(TRIVIAL);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["classify"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!(),
@@ -1051,7 +1051,7 @@ functions:
     #[test]
     fn shared_schema_ref_validates_conforming_output() {
         let wf = load(SHARED_SCHEMA_YAML);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["classify"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!(),
@@ -1074,7 +1074,7 @@ functions:
     #[test]
     fn shared_schema_ref_rejects_nonconforming_output() {
         let wf = load(SHARED_SCHEMA_YAML);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["classify"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!(),
@@ -1167,7 +1167,7 @@ functions:
           properties: { ok: { type: boolean } }
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let first_block = match &func.blocks["first"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!(),
@@ -1179,7 +1179,7 @@ functions:
         // Build context with the function's declared context vars.
         let fn_decls = func.context.clone();
         let ws = WorkflowState::from_declarations(
-            &wf.file()
+            &wf.document()
                 .workflow
                 .as_ref()
                 .map(|w| w.context.clone())
@@ -1229,7 +1229,7 @@ functions:
     #[test]
     fn default_request_when_no_agent_configured() {
         let wf = load(TRIVIAL);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["classify"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!(),
@@ -1281,7 +1281,7 @@ functions:
         schema: "$ref:#Outer"
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let block = match &func.blocks["b"] {
             BlockDef::Prompt(p) => p.clone(),
             _ => panic!("expected prompt"),

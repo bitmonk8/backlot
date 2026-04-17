@@ -6,8 +6,67 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::schema::FunctionDef;
 
 use super::Validator;
-use super::helpers::{block_writes, transitive_ctrl_reach, transitive_depends_on};
+use super::helpers::block_writes;
 use super::report::Location;
+
+// ---- Graph helper functions -----------------------------------------------
+
+/// Compute, for each block, the transitive closure of `depends_on`.
+pub(crate) fn transitive_depends_on(func: &FunctionDef) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for name in func.blocks.keys() {
+        let mut acc: BTreeSet<String> = BTreeSet::new();
+        let mut stack: Vec<&str> = func
+            .blocks
+            .get(name)
+            .unwrap()
+            .depends_on()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        while let Some(n) = stack.pop() {
+            if acc.insert(n.to_string())
+                && let Some(b) = func.blocks.get(n)
+            {
+                for d in b.depends_on() {
+                    stack.push(d.as_str());
+                }
+            }
+        }
+        out.insert(name.clone(), acc);
+    }
+    out
+}
+
+/// Compute, per block, the set of blocks forward-reachable via any chain of
+/// `transitions[].goto` edges (excluding the block itself).
+pub(crate) fn transitive_ctrl_reach(func: &FunctionDef) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for name in func.blocks.keys() {
+        let mut acc: BTreeSet<String> = BTreeSet::new();
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        if let Some(b) = func.blocks.get(name) {
+            for t in b.transitions() {
+                queue.push_back(t.goto.as_str());
+            }
+        }
+        while let Some(n) = queue.pop_front() {
+            if acc.insert(n.to_string())
+                && let Some(b) = func.blocks.get(n)
+            {
+                for t in b.transitions() {
+                    if !acc.contains(t.goto.as_str()) {
+                        queue.push_back(t.goto.as_str());
+                    }
+                }
+            }
+        }
+        out.insert(name.clone(), acc);
+    }
+    out
+}
+
+// ---- Validator methods ----------------------------------------------------
 
 impl Validator<'_> {
     pub(crate) fn detect_dataflow_cycles(&mut self, func: &FunctionDef, floc: &Location) {

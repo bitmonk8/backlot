@@ -11,7 +11,7 @@ use crate::context::WorkflowState;
 use crate::error::{MechError, MechResult};
 use crate::exec::agent::AgentExecutor;
 use crate::exec::function::FunctionRunner;
-use crate::loader::Workflow;
+use crate::workflow::Workflow;
 
 /// Top-level workflow executor.
 ///
@@ -44,7 +44,7 @@ impl<'w> WorkflowRuntime<'w> {
         // Initialise shared workflow state from declarations.
         let wf_context_decls = self
             .workflow
-            .file()
+            .document()
             .workflow
             .as_ref()
             .map(|w| &w.context)
@@ -68,7 +68,7 @@ impl<'w> WorkflowRuntime<'w> {
     ) -> MechResult<(JsonValue, WorkflowState)> {
         let wf_context_decls = self
             .workflow
-            .file()
+            .document()
             .workflow
             .as_ref()
             .map(|w| &w.context)
@@ -89,7 +89,7 @@ impl<'w> WorkflowRuntime<'w> {
     /// Returns an error if the workflow has no functions.
     pub fn default_entry_function(&self) -> MechResult<&str> {
         self.workflow
-            .file()
+            .document()
             .functions
             .keys()
             .next()
@@ -333,7 +333,7 @@ functions:
 
     // ---- T7: §12 worked example end-to-end via WorkflowRuntime -----------
 
-    const FULL_EXAMPLE: &str = include_str!("../schema/full_example.yaml");
+    const FULL_EXAMPLE: &str = include_str!("../../testdata/full_example.yaml");
 
     #[test]
     fn worked_example_via_runtime() {

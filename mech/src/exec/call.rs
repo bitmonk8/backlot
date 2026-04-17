@@ -26,8 +26,8 @@ use crate::cel::Namespaces;
 use crate::context::ExecutionContext;
 use crate::error::{MechError, MechResult};
 use crate::exec::agent::BoxFuture;
-use crate::loader::Workflow;
 use crate::schema::{CallBlock, CallSpec, FunctionDef};
+use crate::workflow::Workflow;
 
 /// Callback for invoking a function by name. The workflow driver (D12)
 /// supplies the production implementation; tests inject a fake.
@@ -132,7 +132,7 @@ pub(crate) fn validate_function_exists(
     fn_name: &str,
     block_id: &str,
 ) -> MechResult<()> {
-    if !workflow.file().functions.contains_key(fn_name) {
+    if !workflow.document().functions.contains_key(fn_name) {
         return Err(MechError::WorkflowValidation {
             errors: vec![format!(
                 "call block `{block_id}`: function `{fn_name}` is not declared in the workflow"
@@ -288,7 +288,7 @@ mod tests {
     }
 
     fn get_call_block(wf: &crate::Workflow, fn_name: &str, block_name: &str) -> CallBlock {
-        let func = wf.file().functions.get(fn_name).unwrap();
+        let func = wf.document().functions.get(fn_name).unwrap();
         match &func.blocks[block_name] {
             BlockDef::Call(c) => c.clone(),
             _ => panic!("expected call block"),
@@ -322,7 +322,7 @@ functions:
     #[test]
     fn single_call_with_shared_input() {
         let wf = load(SINGLE_CALL);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "do_call");
         let mut ctx = new_ctx(json!({ "user_text": "hello", "n": 42 }), &BTreeMap::new());
 
@@ -399,7 +399,7 @@ functions:
     #[test]
     fn uniform_list_all_receive_same_input() {
         let wf = load(UNIFORM_LIST);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "pipeline");
         let mut ctx = new_ctx(json!({ "text": "shared" }), &BTreeMap::new());
 
@@ -471,7 +471,7 @@ functions:
     #[test]
     fn per_call_list_heterogeneous_input() {
         let wf = load(PER_CALL);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "analyze");
         let mut ctx = new_ctx(
             json!({ "text": "great product", "cat": "review", "lang": "en" }),
@@ -548,7 +548,7 @@ functions:
     #[test]
     fn output_mapping_constructs_block_output() {
         let wf = load(WITH_OUTPUT_MAPPING);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "analyze");
         let mut ctx = new_ctx(json!({ "text": "billing issue" }), &BTreeMap::new());
 
@@ -620,7 +620,7 @@ functions:
     fn default_output_single_fn_returns_function_output() {
         // Reuse SINGLE_CALL fixture — no output mapping, single fn.
         let wf = load(SINGLE_CALL);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "do_call");
         let mut ctx = new_ctx(json!({ "user_text": "hi", "n": 1 }), &BTreeMap::new());
 
@@ -642,7 +642,7 @@ functions:
     fn default_output_list_returns_last_function_output() {
         // Reuse UNIFORM_LIST fixture.
         let wf = load(UNIFORM_LIST);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "pipeline");
         let mut ctx = new_ctx(json!({ "text": "test" }), &BTreeMap::new());
 
@@ -693,11 +693,11 @@ functions:
     #[test]
     fn input_template_reads_all_namespaces() {
         let wf = load(NAMESPACE_INPUT);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "do_call");
         let fn_decls = func.context.clone();
         let ws = WorkflowState::from_declarations(
-            &wf.file()
+            &wf.document()
                 .workflow
                 .as_ref()
                 .map(|w| w.context.clone())
@@ -764,7 +764,7 @@ functions:
     #[test]
     fn input_template_reads_block_namespace() {
         let wf = load(BLOCK_NS_INPUT);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "do_call");
         let mut ctx = new_ctx(json!({}), &BTreeMap::new());
 
@@ -790,7 +790,7 @@ functions:
     #[test]
     fn sequential_execution_order_preserved() {
         let wf = load(UNIFORM_LIST);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "pipeline");
         let mut ctx = new_ctx(json!({ "text": "order_test" }), &BTreeMap::new());
 
@@ -845,7 +845,7 @@ functions:
     #[test]
     fn output_mapping_with_single_call() {
         let wf = load(SINGLE_WITH_OUTPUT);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "do_call");
         let mut ctx = new_ctx(json!({ "text": "test" }), &BTreeMap::new());
 
@@ -866,7 +866,7 @@ functions:
     #[test]
     fn function_executor_error_propagates() {
         let wf = load(SINGLE_CALL);
-        let func = wf.file().functions.get("caller").unwrap();
+        let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "do_call");
         let mut ctx = new_ctx(json!({ "user_text": "hi", "n": 1 }), &BTreeMap::new());
 

@@ -26,8 +26,8 @@ use crate::error::{MechError, MechResult};
 use crate::exec::agent::AgentExecutor;
 use crate::exec::call::{FunctionExecutor, execute_call_block};
 use crate::exec::prompt::execute_prompt_block;
-use crate::loader::Workflow;
 use crate::schema::{BlockDef, FunctionDef, TransitionDef};
+use crate::workflow::Workflow;
 const MAX_IMPERATIVE_STEPS: usize = 10_000;
 
 /// Result of evaluating transitions for a block.
@@ -83,12 +83,12 @@ pub fn evaluate_transitions(
                 return TransitionResult::Goto(t.goto.clone());
             }
             Some(guard_src) => {
-                let Some(guard) = workflow.guard(guard_src) else {
+                let Some(cel_expr) = workflow.cel_expression(guard_src) else {
                     // Loader invariant violated: guard was not compiled at load time.
                     // Treat as false per §10.2 (non-fatal guard semantics).
                     continue;
                 };
-                match guard.evaluate_guard(&ns) {
+                match cel_expr.evaluate_guard(&ns) {
                     Ok(true) => return TransitionResult::Goto(t.goto.clone()),
                     Ok(false) => continue,
                     Err(_) => {
@@ -124,14 +124,15 @@ pub fn apply_side_effects(
     // Evaluate all set_context expressions atomically (all see pre-write state).
     let mut context_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_context.len());
     for (var_name, expr_src) in set_context {
-        let guard = workflow
-            .guard(expr_src)
-            .ok_or_else(|| MechError::InternalInvariant {
-                message: format!(
-                    "set_context expression `{expr_src}` should have been compiled at load time"
-                ),
-            })?;
-        let cel_value = guard.evaluate(&ns)?;
+        let cel_expr =
+            workflow
+                .cel_expression(expr_src)
+                .ok_or_else(|| MechError::InternalInvariant {
+                    message: format!(
+                        "set_context expression `{expr_src}` should have been compiled at load time"
+                    ),
+                })?;
+        let cel_value = cel_expr.evaluate(&ns)?;
         let json_value = cel_value_to_json(&cel_value)?;
         context_writes.push((var_name.clone(), json_value));
     }
@@ -139,14 +140,14 @@ pub fn apply_side_effects(
     // Evaluate all set_workflow expressions atomically (all see pre-write state).
     let mut workflow_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_workflow.len());
     for (var_name, expr_src) in set_workflow {
-        let guard = workflow
-            .guard(expr_src)
-            .ok_or_else(|| MechError::InternalInvariant {
+        let cel_expr = workflow.cel_expression(expr_src).ok_or_else(|| {
+            MechError::InternalInvariant {
                 message: format!(
                     "set_workflow expression `{expr_src}` should have been compiled at load time"
                 ),
-            })?;
-        let cel_value = guard.evaluate(&ns)?;
+            }
+        })?;
+        let cel_value = cel_expr.evaluate(&ns)?;
         let json_value = cel_value_to_json(&cel_value)?;
         workflow_writes.push((var_name.clone(), json_value));
     }
@@ -461,7 +462,7 @@ functions:
     #[test]
     fn linear_sequence_terminates_at_c() {
         let wf = load(LINEAR);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![
             json!({ "val": "A" }),
             json!({ "val": "B" }),
@@ -525,7 +526,7 @@ functions:
     #[test]
     fn guard_selects_billing_branch() {
         let wf = load(GUARDED);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![
             json!({ "category": "billing" }),
             json!({ "result": "billing handled" }),
@@ -549,7 +550,7 @@ functions:
     #[test]
     fn guard_selects_technical_branch() {
         let wf = load(GUARDED);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![
             json!({ "category": "technical" }),
             json!({ "result": "tech handled" }),
@@ -573,7 +574,7 @@ functions:
     #[test]
     fn guard_falls_through_to_unconditional() {
         let wf = load(GUARDED);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![
             json!({ "category": "other" }),
             json!({ "result": "general handled" }),
@@ -630,7 +631,7 @@ functions:
     #[test]
     fn self_loop_executes_until_guard_flips() {
         let wf = load(SELF_LOOP);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         // Three draft attempts with low quality, then done.
         let agent = SequentialAgent::new(vec![
             json!({ "text": "draft 1", "quality": 0.3 }),
@@ -661,7 +662,7 @@ functions:
     #[test]
     fn self_loop_exits_early_on_quality() {
         let wf = load(SELF_LOOP);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         // First attempt has high quality — exits immediately.
         let agent = SequentialAgent::new(vec![
             json!({ "text": "great draft", "quality": 0.9 }),
@@ -704,7 +705,7 @@ functions:
     #[test]
     fn terminal_block_ends_function() {
         let wf = load(SINGLE_BLOCK);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![json!({ "answer": "42" })]);
         let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
 
@@ -757,7 +758,7 @@ functions:
     #[test]
     fn no_matching_transition_is_terminal() {
         let wf = load(NO_MATCH);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         // Output status is "unknown" — matches no guard.
         let agent = SequentialAgent::new(vec![json!({ "status": "unknown" })]);
         let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
@@ -799,7 +800,7 @@ functions:
     #[test]
     fn set_context_reads_output() {
         let wf = load(SET_CONTEXT_OUTPUT);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![json!({ "value": 0.95 })]);
         let mut fn_decls = BTreeMap::new();
         fn_decls.insert("score".into(), decl("number", json!(0.0)));
@@ -843,7 +844,7 @@ functions:
     #[test]
     fn set_context_atomicity_swap() {
         let wf = load(ATOMIC_SWAP);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![json!({ "ok": true })]);
         let mut fn_decls = BTreeMap::new();
         fn_decls.insert("a".into(), decl("integer", json!(1)));
@@ -905,7 +906,7 @@ functions:
     #[test]
     fn guard_error_treated_as_false() {
         let wf = load(GUARD_ERROR);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![
             json!({ "status": "ok" }),
             json!({ "result": "fallback reached" }),
@@ -964,7 +965,7 @@ functions:
     #[test]
     fn side_effects_applied_before_transitions() {
         let wf = load(SIDE_EFFECTS_ORDER);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         // First execution: output.x = 5. set_context sets fn_val = 5.
         // Transition sees context.fn_val = 5 > 0, goes to done.
         let agent = SequentialAgent::new(vec![json!({ "x": 5 }), json!({ "ok": true })]);
@@ -1031,7 +1032,7 @@ functions:
     #[test]
     fn backward_edge_re_executes() {
         let wf = load(BACKWARD_EDGE);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         // Execution: a(round=1) → b → a(round=2) → b → c
         let agent = SequentialAgent::new(vec![
             json!({ "val": "a1" }),
@@ -1065,7 +1066,7 @@ functions:
     fn entry_block_is_detected_correctly() {
         // In LINEAR, block "a" has no inbound transitions and no depends_on.
         let wf = load(LINEAR);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let entry = find_entry_block(func).unwrap();
         assert_eq!(entry, "a");
     }
@@ -1095,7 +1096,7 @@ functions:
         depends_on: [entry]
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let entry = find_entry_block(func).unwrap();
         assert_eq!(entry, "entry");
     }
@@ -1155,7 +1156,7 @@ functions:
     #[test]
     fn call_block_in_imperative_flow() {
         let wf = load(CALL_IN_FLOW);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![json!({ "data": "from prompt" })]);
         let mut responses = BTreeMap::new();
         responses.insert("helper".into(), json!({ "result": "from call" }));
@@ -1203,7 +1204,7 @@ functions:
           properties: { result: { type: string } }
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
 
         // Capture all requests to verify history.
         let all_requests: std::sync::Arc<Mutex<Vec<AgentRequest>>> =
@@ -1295,7 +1296,7 @@ functions:
           properties: { result: { type: string } }
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
 
         // Agent that returns tool call/result messages.
         let all_requests: std::sync::Arc<Mutex<Vec<AgentRequest>>> =
@@ -1401,7 +1402,7 @@ functions:
           properties: { ok: { type: boolean } }
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
 
         let all_requests: std::sync::Arc<Mutex<Vec<AgentRequest>>> =
             std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -1491,7 +1492,7 @@ functions:
             goto: step
 "#;
         let wf = load(yaml);
-        let func = wf.file().functions.get("f").unwrap();
+        let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![
             json!({ "val": "r0" }),
             json!({ "val": "r1" }),

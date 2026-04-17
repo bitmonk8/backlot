@@ -1,24 +1,8 @@
-//! # mech
+//! Declarative YAML-based workflow definition and execution engine.
 //!
-//! Declarative YAML-based workflow definition format targeting [`cue`] (task
-//! orchestration) and [`reel`] (agent runtime).
-//!
-//! Mech workflows describe LLM-driven control- and dataflow as a unified CDFG
-//! of prompt and call blocks, with CEL expressions for guards, templates, and
-//! state mutations. See `docs/MECH_SPEC.md` for the full specification.
-//!
-//! This crate exposes: error types, parse-only serde schema types for the YAML
-//! workflow grammar, a CEL expression compiler/evaluator, a JSON Schema
-//! registry with `$ref` resolution and instance validation, a `validate`
-//! module providing `validate_workflow` for §10.1 load-time checks, a `loader`
-//! module exposing `WorkflowLoader::load(path) -> Workflow` which composes
-//! parse → resolve schemas → validate → infer outputs → compile CEL into an
-//! immutable `Send + Sync` [`Workflow`], an `exec` module holding prompt/call
-//! block executors, transition evaluation, imperative-mode and dataflow-mode
-//! function execution, [`FunctionRunner`] (recursive function dispatch with
-//! depth limit), [`WorkflowRuntime`] (top-level entry point), and the
-//! `AgentExecutor` / `FunctionExecutor` seams, plus per-invocation
-//! `ExecutionContext` / shared `WorkflowState` types for runtime state.
+//! Mech workflows describe LLM-driven control and dataflow as prompt and call
+//! blocks with CEL guards, template expressions, and declared state variables.
+//! See `docs/MECH_SPEC.md` for the full specification.
 
 pub mod cel;
 pub mod context;
@@ -29,6 +13,7 @@ pub mod exec;
 pub mod loader;
 pub mod schema;
 pub mod validate;
+pub mod workflow;
 
 pub use cel::{CelExpression, Namespaces, Template, cel_value_to_json};
 pub use context::{ExecutionContext, WorkflowState};
@@ -46,7 +31,9 @@ pub use exec::{
 pub use exec::{
     TransitionResult, apply_side_effects, evaluate_transitions, run_function_imperative,
 };
-pub use loader::{Workflow, WorkflowLoader};
+pub use loader::{
+    WorkflowLoader, load_workflow, load_workflow_str, load_workflow_str_with, load_workflow_with,
+};
 pub use schema::{
     AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,
     ContextVarDef, FunctionDef, MechDocument, ParallelStrategy, PromptBlock, ResolvedSchema,
@@ -58,3 +45,4 @@ pub use validate::{
     AnyModel, KnownModels, Location, ModelChecker, ValidationIssue, ValidationReport,
     validate_workflow,
 };
+pub use workflow::Workflow;
