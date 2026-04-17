@@ -12,10 +12,28 @@ Full design: [`specs/GATE.md`](../specs/GATE.md).
 
 ## Status
 
-D1-D5 complete: types, assertions, reporting, subprocess execution,
-scratch directories, binary discovery, and the stage runner skeleton.
-Stage modules (`flick`, `lot`, `reel`, `vault`, `epic`, `mech`) are
-empty stubs filled in by D6-D8.
+D1-D6 complete:
+
+- D1-D5: types, assertions, reporting, subprocess execution, scratch
+  directories, binary discovery, and the stage runner skeleton.
+- D6: Stage 0 prerequisite check (`prereqs`), Stage 1 (`flick`, six
+  tests) and Stage 2 (`lot`, eight tests) wired against their real CLIs.
+
+Stage modules `reel`, `vault`, `epic`, and `mech` remain stubs filled in
+by D7-D8.
+
+## Stage 0: prerequisite check
+
+Before any test stage runs, gate verifies the environment is ready:
+
+1. Every required backlot binary is on disk.
+2. `~/.flick/providers` exists and is non-empty.
+3. `~/.flick/models` contains aliases `fast`, `balanced`, and `strong`.
+4. `lot setup --check` exits 0 (sandbox prerequisites granted).
+
+A failure prints **all** problems found in the single check pass, names
+the command that fixes each, and exits with code `2`. The summary
+table is **not** printed in this case -- no stages ran.
 
 ## Build
 
@@ -44,7 +62,7 @@ gate --keep-scratch              # preserve the per-run scratch tree on success
 |------|---------|
 | `0`  | Every executed stage passed (soft-fails do not count) |
 | `1`  | At least one stage produced a hard `Fail` |
-| `2`  | Prerequisite check failed (missing binary, scratch creation error, or `--verbose` output-write failure) |
+| `2`  | Prerequisite check failed (binary discovery, scratch creation, Stage 0 `prereqs` check, or `--verbose` output-write failure) |
 
 ### Binary discovery
 

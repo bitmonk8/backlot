@@ -1,0 +1,10 @@
+# network-allowed: explicit allow=true. SoftFail in the test code if
+# the connection itself fails -- a corporate firewall is not a sandbox
+# defect.
+filesystem:
+  read:
+    - "${GATE_SCRATCH}"
+  include_platform_exec: true
+  include_platform_lib: true
+network:
+  allow: true

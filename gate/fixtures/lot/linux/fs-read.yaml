@@ -1,0 +1,8 @@
+# fs-read-allowed: grant read access to the scratch dir; the child reads
+# a file inside it. ${GATE_SCRATCH} is expanded by lot from the parent
+# process environment before the sandbox is built.
+filesystem:
+  read:
+    - "${GATE_SCRATCH}"
+  include_platform_exec: true
+  include_platform_lib: true

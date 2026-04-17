@@ -1,0 +1,10 @@
+# fs-deny-overrides-read: read on the parent dir is granted, but a
+# specific child path is on the deny list -- the deny must override the
+# inherited read.
+filesystem:
+  read:
+    - "${GATE_SCRATCH}"
+  deny:
+    - "${GATE_SCRATCH}/denied"
+  include_platform_exec: true
+  include_platform_lib: true

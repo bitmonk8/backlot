@@ -12,6 +12,7 @@ use clap::Parser;
 
 mod check;
 mod exec;
+mod prereqs;
 mod report;
 mod runner;
 mod scratch;

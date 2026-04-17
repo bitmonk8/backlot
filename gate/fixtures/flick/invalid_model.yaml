@@ -1,0 +1,3 @@
+# Config for the error-invalid-model test. The alias intentionally does
+# not exist; the test asserts a non-zero exit and an error result.
+model: "nonexistent-model-xyz"

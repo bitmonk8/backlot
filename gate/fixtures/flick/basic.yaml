@@ -1,0 +1,4 @@
+# Minimal config for the basic-invocation flick test.
+# Uses the cheapest tier alias; the human registers `fast` once during setup.
+model: "fast"
+system_prompt: "You are a test bot. Respond with a single short sentence."

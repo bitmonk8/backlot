@@ -1,0 +1,5 @@
+# Config for the chatcompletions-invocation test. The `balanced` alias
+# typically points at a Sonnet-class model on a different provider type
+# than `fast`, exercising the second API backend.
+model: "balanced"
+system_prompt: "You are a test bot. Respond with a single short sentence."

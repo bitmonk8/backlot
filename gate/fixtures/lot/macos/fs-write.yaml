@@ -1,0 +1,9 @@
+# fs-write-allowed: grant read+write to the scratch dir; the child
+# creates a file inside it. Verified outside the sandbox.
+filesystem:
+  read:
+    - "${GATE_SCRATCH}"
+  write:
+    - "${GATE_SCRATCH}"
+  include_platform_exec: true
+  include_platform_lib: true

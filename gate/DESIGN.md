@@ -16,6 +16,8 @@ in [`specs/GATE.md`](../specs/GATE.md).
 | `report.rs` | Summary table formatting + `results.json` serialization |
 | `runner.rs` | Binary discovery + stage orchestration loop |
 | `stage/`    | One module per stage; each exposes `pub fn run(&StageContext) -> Vec<TestResult>` |
+| `prereqs.rs`| Stage 0 prerequisite checks; runs before any stage and aborts with exit 2 on failure |
+| `fixtures/` | Committed YAML/JSON inputs each stage hands to its CLI (per-platform subtree under `lot/`) |
 
 ## Stage runner
 
@@ -96,13 +98,84 @@ related tests.
   verified is a lie (workspace `CLAUDE.md` rule).
 - No `unsafe_code`; workspace `[lints]` is `clippy::all = "deny"`.
 
-## Future work (D6-D8)
+## Stage 0: prerequisite check (`prereqs`)
 
-The stage modules currently return empty vecs. D6-D8 fill them in:
+Runs in `runner::run` between scratch-dir creation and the stage loop.
+Calls `prereqs::check_prerequisites` with the resolved `BinaryPaths`;
+on `Err` prints every problem and exits with code `2`. The stage
+runner is never invoked, no per-stage scratch subdir is touched, the
+results.json file is never written.
 
-- D6: `flick`, `lot`
+Internally `check_prerequisites_inner` takes injectable parameters for
+the providers/models directory paths and the `lot setup --check`
+result. The unit tests exercise the aggregation logic against project-
+local temp directories without ever spawning the real lot binary; the
+production wrapper simply binds those parameters to `~/.flick/...` and
+the real `lot setup --check` invocation.
+
+Aggregation contract: every check runs unconditionally, every problem
+is appended to one `Vec<String>`, and the function returns
+`Err(PrereqError)` only at the end. This avoids the discover-fix-rerun
+loop a fail-on-first design would create.
+
+## Stage modules
+
+### Stage 1: `flick`
+
+Six tests (`basic-invocation`, `chatcompletions-invocation`,
+`tool-declaration-and-resume`, `structured-output`, `dry-run`,
+`error-invalid-model`) each invoke `flick run --config <yaml>` with a
+committed fixture from `gate/fixtures/flick/`. The model alias `fast`
+is used everywhere except `chatcompletions-invocation` (which uses
+`balanced` to exercise a second provider/API backend) and
+`error-invalid-model` (which references a deliberately-unregistered
+alias).
+
+JSON parsing is centralized in `parse_result`; per-test functions
+assert on the `status`, `content` array shape, and `usage` block.
+The `tool-declaration-and-resume` test rounds through two flick
+invocations in the same scratch dir: the first yields a
+`tool_calls_pending` result, the second resumes via the
+`context_hash` and a synthetic `tool-results.json` file, expecting
+`status=complete`. The token/cost figures are summed across both
+calls so the summary table reports the whole round-trip cost.
+
+### Stage 2: `lot`
+
+Eight tests covering capability detection (`probe`, `setup-check`),
+filesystem enforcement (`fs-read-allowed`, `fs-write-allowed`,
+`fs-deny-overrides-read`), network enforcement (`network-denied`,
+`network-allowed`), and timeout (`timeout`).
+
+Per-platform fixtures live under `gate/fixtures/lot/<platform>/<test>.yaml`.
+The fixture loader `lot_policy_path(name)` selects the right path
+based on `cfg!(target_os)`; the `platform_fixture_selection` unit
+test verifies the dispatch.
+
+Policy YAMLs reference `${GATE_SCRATCH}` so they can target the
+per-stage scratch dir without hard-coded paths. The placeholder is
+expanded by lot itself during config load (its built-in
+`${VAR}` mechanism); gate sets `GATE_SCRATCH` on the `run_command`
+invocation so the lookup resolves before the sandbox is built.
+
+`network-allowed` is the only test that returns
+`TestOutcome::SoftFail` when the outbound connection fails: a
+firewall-blocked packet does not indicate a sandbox defect, only
+that the network is unreachable. `network-denied`, by contrast,
+asserts the connection **must** fail.
+
+The `timeout` test pins exit code to exactly `124` (the conventional
+`timeout(1)` value lot's CLI uses) **and** verifies the wall-clock
+elapsed time exceeds the configured `--timeout`; this makes a child
+that crashed for an unrelated reason unable to fool the assertion.
+
+## Future work (D7-D8)
+
+`reel`, `vault`, `epic`, and `mech` stage modules currently return
+empty vecs. D7-D8 fill them in:
+
 - D7: `reel`, `vault`
 - D8: `epic`, `mech`
 
-The runner framework, binary discovery, scratch management, and
-reporting stay unchanged through those deliverables.
+The runner framework, prereqs check, binary discovery, scratch
+management, and reporting stay unchanged through those deliverables.

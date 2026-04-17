@@ -1,0 +1,13 @@
+# Config for the structured-output test. The schema is intentionally
+# trivial so any model can satisfy it without much guidance.
+model: "fast"
+system_prompt: "You produce JSON conforming to the requested schema. Output only the JSON, no commentary."
+output_schema:
+  schema:
+    type: object
+    properties:
+      name:
+        type: string
+      count:
+        type: integer
+    required: [name, count]

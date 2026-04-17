@@ -1,0 +1,7 @@
+# timeout: any policy works; the test runs a long-running child with a
+# short --timeout flag.
+filesystem:
+  read:
+    - "${GATE_SCRATCH}"
+  include_platform_exec: true
+  include_platform_lib: true

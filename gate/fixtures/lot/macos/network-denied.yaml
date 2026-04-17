@@ -1,0 +1,10 @@
+# network-denied: explicit allow=false. The child's network attempt must
+# fail. Read on the scratch dir is needed so curl/PowerShell can resolve
+# its own working directory under AppContainer.
+filesystem:
+  read:
+    - "${GATE_SCRATCH}"
+  include_platform_exec: true
+  include_platform_lib: true
+network:
+  allow: false

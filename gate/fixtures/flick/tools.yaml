@@ -1,0 +1,14 @@
+# Config for the tool-declaration-and-resume test. Declares one tool
+# whose schema is simple enough that any model will produce a valid call.
+model: "fast"
+system_prompt: "You are a weather assistant. When asked about weather, you must call the get_weather tool."
+tools:
+  - name: get_weather
+    description: "Get the current weather for a named city."
+    parameters:
+      type: object
+      properties:
+        city:
+          type: string
+          description: "City name, e.g. 'San Francisco'."
+      required: [city]

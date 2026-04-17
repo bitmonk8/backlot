@@ -203,6 +203,15 @@ pub fn run(config: GateConfig) -> i32 {
         }
     };
 
+    if let Err(e) = crate::prereqs::check_prerequisites(&binaries) {
+        eprintln!("gate: prerequisite check failed:");
+        eprint!("{e}");
+        // Preserve the per-run scratch dir is unnecessary -- nothing wrote to
+        // it yet -- but try to clean it up so we don't leave orphans behind.
+        let _ = scratch::cleanup_run_dir(&run_dir);
+        return 2;
+    }
+
     let (code, _results, _summary) = run_inner(config, binaries, run_dir, |stage, ctx| {
         dispatch_stage(stage)(ctx)
     });
