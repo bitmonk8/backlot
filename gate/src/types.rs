@@ -131,6 +131,14 @@ pub struct TestResult {
     pub cost_usd: Option<f64>,
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
+    /// Captured subprocess stdout for this test, when the stage chose
+    /// to record it. Used by the runner's `--verbose` mode to write
+    /// `output/transcripts/{stage}-{test}.stdout`. `None` means "no
+    /// transcript available"; the runner skips writing the file in that
+    /// case rather than producing an empty placeholder.
+    pub stdout: Option<String>,
+    /// Captured subprocess stderr; same contract as `stdout`.
+    pub stderr: Option<String>,
 }
 
 /// Aggregate results for one stage.
@@ -232,6 +240,8 @@ mod tests {
             cost_usd: cost,
             tokens_in: None,
             tokens_out: None,
+            stdout: None,
+            stderr: None,
         }
     }
 

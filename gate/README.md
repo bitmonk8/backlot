@@ -12,7 +12,7 @@ Full design: [`specs/GATE.md`](../specs/GATE.md).
 
 ## Status
 
-D1-D7 complete:
+D1-D8 complete -- all stages wired:
 
 - D1-D5: types, assertions, reporting, subprocess execution, scratch
   directories, binary discovery, and the stage runner skeleton.
@@ -20,8 +20,10 @@ D1-D7 complete:
   tests) and Stage 2 (`lot`, eight tests) wired against their real CLIs.
 - D7: Stage 3 (`reel`, five tests) and Stage 4 (`vault`, five tests)
   wired against their real CLIs.
-
-Stage modules `epic` and `mech` remain stubs filled in by D8.
+- D8: Stage 5 (`epic`, three tests against a generated test project),
+  Stage 6 (`mech` placeholder -- prints a notice and returns no tests
+  until mech-cli supports real workflow execution), `--verbose`
+  transcript capture, and `gate/FINDINGS.md`.
 
 ## Stage 0: prerequisite check
 
@@ -48,10 +50,10 @@ cargo build              # builds gate alongside every other backlot binary
 gate                             # run all stages
 gate --only flick                # run exactly one stage
 gate --from reel                 # skip stages before reel
-gate --verbose                   # write results.json (implies --keep-scratch; transcripts deferred)
+gate --verbose                   # write results.json + per-test transcripts (implies --keep-scratch)
 gate --bin-dir ./target/release  # use release binaries
 gate --timeout 120               # override per-stage wall-clock timeout
-gate --output-dir ./gate-out     # redirect results.json (transcripts deferred)
+gate --output-dir ./gate-out     # redirect results.json + transcripts
 gate --keep-scratch              # preserve the per-run scratch tree on success
 ```
 
@@ -138,3 +140,65 @@ vault's `storage_root` must be an absolute path to a per-run scratch
 directory, so the runtime config is generated in stage code.
 
 Cost: moderate (5 librarian sessions).
+
+## Stage 5: epic
+
+Three tests exercising epic's recursive orchestrator against a
+programmatically generated Rust project. The project is **not** a
+committed fixture: at stage start gate writes `Cargo.toml`, `src/lib.rs`
+(with a deliberate `a - b` bug in an `add` function), `tests/basic.rs`
+(asserting `add(2, 3) == 5`), and `epic.toml` into the per-stage scratch
+dir, runs `cargo check` to confirm the bug is logic-level (not syntax),
+and initializes a clean git repo with one `initial` commit.
+
+Tests run **sequentially** -- `status` and `resume-completed` materially
+depend on the on-disk state (`<project>/.epic/state.json`) the
+leaf-task run leaves behind:
+
+| Order | Test | What it verifies |
+|------:|------|-----------------|
+| 1 | `leaf-task` | Epic fixes the bug. Oracle: `cargo test` exits 0 after `epic --no-tui run` returns. State file exists. |
+| 2 | `status` | `epic status` exits 0 and prints the goal line, proving it loaded persisted state. |
+| 3 | `resume-completed` | `epic --no-tui resume` on an already-completed run exits 0 with `Epic completed: ...` -- no re-execution. |
+
+Per-test timeout: 600s for `leaf-task` (epic's spec-mandated cap;
+the most expensive test in the entire suite); 60s for `status` and
+`resume-completed` (state-only invocations, no model calls). A
+leaf-task failure short-circuits the rest of the stage into `Skip`
+results.
+
+The generated `Cargo.toml` carries an empty `[workspace]` table so cargo
+does not try to adopt the project into the backlot workspace (gate's
+scratch dir lives under the workspace's `target/`). Tier aliases match
+gate's `fast`/`balanced`/`strong` convention; the single
+`[[verification]] cargo test` step is what epic's leaf agent uses to
+know it has fixed the bug.
+
+Cost: highest in the suite (full orchestration cycle, ~$0.50-2.00).
+
+## Stage 6: mech (placeholder)
+
+Prints `mech: stage placeholder -- no tests defined yet` and returns
+zero tests. The stage appears in the summary table with `0` in every
+column. Tests are deferred until mech-cli supports real workflow
+execution (today its `StubAgent` errors for any workflow with `prompt`
+or `call` blocks); when that lands, this module switches from
+`Vec::new()` to populated tests without any other deliverable's wiring
+needing changes.
+
+## `--verbose` output
+
+When `--verbose` is set, gate writes (in `<output_dir>/`, default
+`gate/output/`):
+
+- `results.json` -- structured per-test results, durations, costs, and
+  totals.
+- `transcripts/{stage}-{test}.stdout` and `.stderr` -- captured
+  subprocess output, one file per stream per test that recorded one.
+  Tests whose stage did not stash a stream are simply skipped (no
+  empty placeholder file).
+
+The output dir and `transcripts/` subdir are created at run start.
+Any I/O failure during transcript or JSON writing produces exit code 2,
+even when every stage passed -- a `--verbose` run that silently lost
+its artifacts would be worse than no run at all.

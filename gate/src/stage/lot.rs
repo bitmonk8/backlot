@@ -102,6 +102,8 @@ where
         cost_usd: None,
         tokens_in: None,
         tokens_out: None,
+        stdout: None,
+        stderr: None,
     }
 }
 

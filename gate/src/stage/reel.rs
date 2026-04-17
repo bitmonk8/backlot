@@ -145,6 +145,8 @@ where
         cost_usd,
         tokens_in,
         tokens_out,
+        stdout: None,
+        stderr: None,
     }
 }
 

@@ -275,6 +275,8 @@ where
                     cost_usd: None,
                     tokens_in: None,
                     tokens_out: None,
+                    stdout: None,
+                    stderr: None,
                 }],
                 duration: std::time::Duration::ZERO,
             });
@@ -313,6 +315,22 @@ where
             eprintln!("gate: run will exit non-zero");
             verbose_io_failed = true;
         } else {
+            // Transcripts first, results.json second: a transcript-write
+            // failure usually means the directory is unwritable, in which
+            // case we still want to surface the failure rather than fall
+            // through and pretend everything worked. Both writes are
+            // attempted independently so a transcript regression cannot
+            // hide a JSON-summary regression and vice versa.
+            let transcripts_dir = config.output_dir.join("transcripts");
+            if let Err(e) = report::write_transcripts(&stage_results, &transcripts_dir) {
+                eprintln!(
+                    "gate: --verbose requested but failed to write transcripts to {}: {}",
+                    transcripts_dir.display(),
+                    e
+                );
+                eprintln!("gate: run will exit non-zero");
+                verbose_io_failed = true;
+            }
             let json_path = config.output_dir.join("results.json");
             if let Err(e) = report::write_results_json(&stage_results, &json_path) {
                 eprintln!(
@@ -433,6 +451,8 @@ mod tests {
             cost_usd: None,
             tokens_in: None,
             tokens_out: None,
+            stdout: None,
+            stderr: None,
         }
     }
 
@@ -445,6 +465,8 @@ mod tests {
             cost_usd: None,
             tokens_in: None,
             tokens_out: None,
+            stdout: None,
+            stderr: None,
         }
     }
 
@@ -457,6 +479,8 @@ mod tests {
             cost_usd: None,
             tokens_in: None,
             tokens_out: None,
+            stdout: None,
+            stderr: None,
         }
     }
 
@@ -777,6 +801,40 @@ mod tests {
     }
 
     // ---- Cleanup runs on success when keep_scratch=false ----
+
+    /// Spec TDD test #6: when `--verbose` is set, the runner creates
+    /// the transcripts subdirectory under `output_dir`. The dir must
+    /// exist after the run regardless of whether any test populated a
+    /// captured stream (so a downstream tool listing transcripts does
+    /// not fail with ENOENT).
+    #[test]
+    fn transcript_dir_created_when_verbose() {
+        let dir = TestDir::new("verbose-transcripts");
+        let binaries = dummy_binaries(dir.path());
+        let (run_dir, _td) = make_run_dir();
+        let mut cfg = default_test_config();
+        cfg.verbose = true;
+        // Steer the output dir under our scratch so cleanup is bounded.
+        let output_dir = TestDir::new("verbose-output");
+        cfg.output_dir = output_dir.path().to_path_buf();
+
+        let (_code, _results, _summary) = run_inner(cfg.clone(), binaries, run_dir, |s, _ctx| {
+            vec![pass_result(s, "p")]
+        });
+
+        let ts_dir = cfg.output_dir.join("transcripts");
+        assert!(
+            ts_dir.is_dir(),
+            "transcripts dir should exist when verbose: {}",
+            ts_dir.display()
+        );
+        let json_path = cfg.output_dir.join("results.json");
+        assert!(
+            json_path.is_file(),
+            "results.json should exist when verbose: {}",
+            json_path.display()
+        );
+    }
 
     #[test]
     fn cleanup_runs_on_success_without_keep_scratch() {

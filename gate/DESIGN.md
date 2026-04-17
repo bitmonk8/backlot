@@ -32,7 +32,7 @@ in [`specs/GATE.md`](../specs/GATE.md).
    function, time it, collect a `StageResult`. A `Fail` does not abort --
    later stages still run so the operator sees the full picture.
 5. Print the summary table (always).
-6. When `--verbose`, write `<output_dir>/results.json`. Transcripts are deferred to a later deliverable.
+6. When `--verbose`, create `<output_dir>/transcripts/` and write per-test transcript files (`{stage}-{test}.stdout`/.stderr` -- one per stream the stage chose to capture), then write `<output_dir>/results.json`. Either I/O failure produces exit code 2.
 7. Clean up the scratch tree unless `--keep-scratch` / `--verbose` is set,
    or any stage hard-failed. Failures preserve the scratch tree and print
    its path so the operator can inspect.
@@ -235,9 +235,65 @@ store recursively for a name substring so the test does not hard-code
 Tier aliases: `balanced` for `bootstrap`/`reorganize` (heavier
 librarian work) and `fast` for `query`/`record` (lighter).
 
-## Future work (D8)
+### Stage 5: `epic`
 
-`epic` and `mech` stage modules currently return empty vecs. D8 fills
-them in. The runner framework, prereqs check, binary discovery,
-scratch management, and reporting stay unchanged through that
-deliverable.
+Three tests (`leaf-task`, `status`, `resume-completed`) run in fixed
+order against a programmatically generated Rust project living at
+`<scratch>/epic/project/`. Generation is split out into
+`generate_test_project` (called once per stage run): it writes a
+3-file project (manifest, library with a deliberate `a - b` bug in
+`add`, and a test that exercises it), runs `cargo check` to confirm
+the bug is logic-level (not syntax), then `git init/add/commit`s a
+clean working tree. The Cargo.toml carries an empty `[workspace]`
+table so the parent workspace does not try to adopt it. Local
+`user.name`/`user.email` plus `commit.gpgsign=false` and
+`core.autocrlf=false` are set on the repo so the commit cannot prompt
+for a GPG passphrase or rewrite line endings.
+
+Per-test wiring is the same `run_test` boilerplate the other stages
+use, with one difference: this stage's `run_test` stashes the captured
+`CommandResult` (stdout + stderr) into the resulting `TestResult` so
+the runner's `--verbose` transcript writer can persist it. Other
+stages currently leave the new `stdout`/`stderr` fields as `None`;
+they can opt in later by switching their `run_test` to pass through
+the captured streams.
+
+The leaf-task test is the suite's primary oracle: epic's value is
+measured by whether `cargo test` exits 0 against the post-fix project,
+not by which tools the LLM called or what its stdout looked like.
+Because the three tests share on-disk state (`<project>/.epic/state.json`),
+a leaf-task failure short-circuits the rest of the stage into `Skip`
+results -- the same pattern `vault` uses.
+
+### Stage 6: `mech`
+
+Pure placeholder: prints `mech: stage placeholder -- no tests defined
+yet` and returns `Vec::new()`. The unit test
+`mech_placeholder_returns_empty` pins the empty-vec contract so a
+contributor cannot silently slot in a stub test that always passes;
+real mech tests are blocked on mech-cli wiring a real `AgentExecutor`.
+
+## Output capture (`--verbose`)
+
+`TestResult` carries optional `stdout` and `stderr` fields. Stages that
+want their per-test transcripts persisted populate these from the
+captured `CommandResult` of the subprocess invocation; the runner's
+`--verbose` path then calls `report::write_transcripts` to write
+`{stage}-{test}.stdout`/`.stderr` files into
+`<output_dir>/transcripts/`. Tests whose streams are `None` are
+skipped (no empty placeholder file). The helper rejects test names
+containing path separators as a tripwire against accidentally
+scribbling outside the transcripts directory.
+
+A `--verbose` run that fails to write the transcripts dir or the
+`results.json` summary returns exit code 2, even when every stage
+passed -- the artifacts are the whole point of `--verbose`, and a
+silent-loss path would be worse than no run at all.
+
+## `FINDINGS.md`
+
+`gate/FINDINGS.md` is the tracker for issues the E2E suite surfaces
+in the other backlot crates. Format is one Markdown table; entries
+carry an `F-NNN` ID, the affected crate, a short description, status
+(OPEN / RESOLVED), and any workaround. The file is committed empty
+(template only) and grown by hand as findings accumulate.

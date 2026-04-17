@@ -128,6 +128,8 @@ fn synthetic_skip(label: &str, upstream: &str) -> TestResult {
         cost_usd: None,
         tokens_in: None,
         tokens_out: None,
+        stdout: None,
+        stderr: None,
     }
 }
 
@@ -212,6 +214,8 @@ fn synthetic_setup_failure(msg: String) -> TestResult {
         cost_usd: None,
         tokens_in: None,
         tokens_out: None,
+        stdout: None,
+        stderr: None,
     }
 }
 
@@ -295,6 +299,8 @@ where
         cost_usd,
         tokens_in,
         tokens_out,
+        stdout: None,
+        stderr: None,
     }
 }
 

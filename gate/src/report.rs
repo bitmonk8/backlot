@@ -245,6 +245,55 @@ pub fn write_results_json(results: &[StageResult], path: &Path) -> std::io::Resu
     std::fs::write(path, s)
 }
 
+/// Write per-test transcript files into `dir`. For each `TestResult`
+/// whose `stdout` / `stderr` field is `Some`, writes
+/// `dir/{stage}-{test}.stdout` and `.stderr` respectively. Tests whose
+/// captured streams are `None` are skipped (no empty placeholder file).
+///
+/// `dir` is created if it does not exist. Returns the number of files
+/// actually written so callers can log the count; an I/O error is
+/// surfaced as `Err` and stops the loop -- there's no partial-success
+/// recovery, because a failure to write the first transcript usually
+/// means the directory is unwritable and subsequent writes will fail
+/// the same way.
+///
+/// File names use `{stage}-{test}` directly (no escaping). Test names
+/// in gate use only `[a-z0-9-]`, so no path-separator characters can
+/// sneak in; the runtime check below pins that contract for any future
+/// stage that adds a test with an unusual name.
+pub fn write_transcripts(results: &[StageResult], dir: &Path) -> std::io::Result<usize> {
+    std::fs::create_dir_all(dir)?;
+    let mut written = 0usize;
+    for stage in results {
+        for t in &stage.results {
+            // Defensive sanity check: any stage that ever embeds a path
+            // separator in a test name would silently scribble outside
+            // `dir`. Surface the bug here as an explicit error rather
+            // than letting `std::fs::write` happily create a file in a
+            // sibling directory.
+            if t.test.contains('/') || t.test.contains('\\') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "test name {:?} contains a path separator; transcripts cannot be written safely",
+                        t.test
+                    ),
+                ));
+            }
+            let base = format!("{}-{}", stage.stage, t.test);
+            if let Some(out) = &t.stdout {
+                std::fs::write(dir.join(format!("{base}.stdout")), out)?;
+                written += 1;
+            }
+            if let Some(err) = &t.stderr {
+                std::fs::write(dir.join(format!("{base}.stderr")), err)?;
+                written += 1;
+            }
+        }
+    }
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +316,8 @@ mod tests {
             cost_usd: cost,
             tokens_in: None,
             tokens_out: None,
+            stdout: None,
+            stderr: None,
         }
     }
 
@@ -286,6 +337,8 @@ mod tests {
             cost_usd: cost,
             tokens_in: ti,
             tokens_out: to,
+            stdout: None,
+            stderr: None,
         }
     }
 
@@ -892,5 +945,125 @@ mod tests {
         let stages: Vec<StageResult> = vec![];
         let result = write_results_json(&stages, &bad);
         assert!(result.is_err(), "expected Err for unwritable path, got Ok");
+    }
+
+    fn mk_test_with_streams(
+        stage: Stage,
+        name: &str,
+        stdout: Option<&str>,
+        stderr: Option<&str>,
+    ) -> TestResult {
+        TestResult {
+            stage,
+            test: name.into(),
+            outcome: TestOutcome::Pass,
+            duration: Duration::ZERO,
+            cost_usd: None,
+            tokens_in: None,
+            tokens_out: None,
+            stdout: stdout.map(str::to_string),
+            stderr: stderr.map(str::to_string),
+        }
+    }
+
+    /// Spec TDD test #7: when test results carry captured streams, the
+    /// helper writes one `{stage}-{test}.stdout` and `.stderr` file per
+    /// populated stream, and skips files whose stream is `None`.
+    #[test]
+    fn write_transcripts_writes_files_with_correct_names() {
+        // Project-local scratch under `target/gate-scratch/` for
+        // consistency with sibling tests in this module (and the
+        // workspace-wide preference against system temp).
+        let parent = std::path::PathBuf::from("target/gate-scratch")
+            .join(format!("transcripts-write-{}", std::process::id()));
+        let dir = parent.join("ts");
+        let _ = std::fs::remove_dir_all(&parent);
+        let stages = vec![mk_stage(
+            Stage::Epic,
+            vec![
+                mk_test_with_streams(
+                    Stage::Epic,
+                    "leaf-task",
+                    Some(
+                        "hello
+",
+                    ),
+                    Some(
+                        "warn
+",
+                    ),
+                ),
+                mk_test_with_streams(Stage::Epic, "status", Some("only-stdout"), None),
+                mk_test_with_streams(Stage::Epic, "resume-completed", None, Some("only-stderr")),
+            ],
+            0.0,
+        )];
+        let count = write_transcripts(&stages, &dir).expect("write transcripts");
+        assert_eq!(count, 4, "expected 4 transcript files, wrote {count}");
+
+        // Files present with exact names.
+        for (name, want) in [
+            (
+                "epic-leaf-task.stdout",
+                "hello
+",
+            ),
+            (
+                "epic-leaf-task.stderr",
+                "warn
+",
+            ),
+            ("epic-status.stdout", "only-stdout"),
+            ("epic-resume-completed.stderr", "only-stderr"),
+        ] {
+            let p = dir.join(name);
+            assert!(p.is_file(), "expected file {} to exist", p.display());
+            let body = std::fs::read_to_string(&p).expect("read transcript");
+            assert_eq!(body, want, "{}", p.display());
+        }
+        // Skipped files are absent.
+        for name in ["epic-status.stderr", "epic-resume-completed.stdout"] {
+            assert!(
+                !dir.join(name).exists(),
+                "did not expect {} to exist (no captured stream)",
+                name
+            );
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn write_transcripts_creates_dir_when_missing() {
+        // Even with zero results, the target dir is created so the
+        // runner can rely on its existence.
+        let parent = std::path::PathBuf::from("target/gate-scratch")
+            .join(format!("transcripts-mkdir-{}", std::process::id()));
+        let target = parent.join("nested-transcripts");
+        let _ = std::fs::remove_dir_all(&parent);
+        let count = write_transcripts(&[], &target).expect("create dir");
+        assert_eq!(count, 0);
+        assert!(target.is_dir(), "{} should exist", target.display());
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn write_transcripts_rejects_test_name_with_path_separator() {
+        let parent = std::path::PathBuf::from("target/gate-scratch")
+            .join(format!("transcripts-reject-{}", std::process::id()));
+        let target = parent.join("ts");
+        let _ = std::fs::remove_dir_all(&parent);
+        let stages = vec![mk_stage(
+            Stage::Epic,
+            vec![mk_test_with_streams(
+                Stage::Epic,
+                "bad/name",
+                Some("x"),
+                None,
+            )],
+            0.0,
+        )];
+        let err = write_transcripts(&stages, &target).expect_err("path sep rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }
