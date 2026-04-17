@@ -187,7 +187,7 @@ mod tests {
     fn validate_good_workflow_succeeds() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let example_path =
-            std::path::Path::new(manifest_dir).join("../mech/src/schema/full_example.yaml");
+            std::path::Path::new(manifest_dir).join("../mech/testdata/full_example.yaml");
         let result = WorkflowLoader::new().load(&example_path);
         assert!(result.is_ok(), "expected Ok but got: {:?}", result.err());
     }
