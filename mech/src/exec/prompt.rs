@@ -374,10 +374,13 @@ pub async fn execute_prompt_block(
     let resolved_schema = registry.resolve(&block.schema)?;
 
     // 4b. Extract the raw JSON schema body for the agent request.
-    //     The registry has already compiled and validated this schema;
-    //     we just need the JSON representation for the LLM.
+    //     Named schemas (`$ref:#name`) use the registry's pre-expanded body.
+    //     Inline schemas are run through `expand_refs` so that any nested
+    //     `{"$ref": "#name"}` references are substituted with their resolved
+    //     bodies — ensuring both paths produce identical expanded JSON for the
+    //     agent (fix for issue #307: inline vs. named schema equivalence).
     let output_schema_json = match &block.schema {
-        SchemaRef::Inline(v) => v.clone(),
+        SchemaRef::Inline(v) => registry.expand_refs(v)?,
         SchemaRef::Ref(raw) => {
             let name = crate::schema::parse_named_ref(raw)?;
             registry

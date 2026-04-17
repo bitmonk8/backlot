@@ -191,6 +191,61 @@ impl SchemaRegistry {
     pub fn resolved_body(&self, name: &str) -> Option<&Value> {
         self.resolved_bodies.get(name)
     }
+
+    /// Expand all `{"$ref": "#name"}` references within a JSON Schema value
+    /// using the registry's pre-resolved bodies.
+    ///
+    /// This is intended for inline schemas: the registry has no stored body
+    /// for them, so callers must run the raw JSON through this method to get
+    /// the same ref-expanded form that named schemas receive at build time.
+    /// Without this, agents would see different schema shapes depending on
+    /// whether the workflow author used an inline schema or a named one.
+    ///
+    /// Substituted bodies are not re-walked because `resolved_bodies` values
+    /// are already free of `$ref` references (fully expanded by
+    /// `resolve_nested_refs` at build time). The function does recurse into
+    /// the surrounding schema structure (objects and arrays) to reach all
+    /// nested `{"$ref": "#name"}` sites.
+    ///
+    /// Only bare `{"$ref": "#name"}` objects (a single-key map) are
+    /// substituted, matching the same criterion as `resolve_nested_walk` so
+    /// inline and named schemas receive identical treatment.
+    ///
+    /// Returns [`MechError::SchemaRefUnresolved`] if a `$ref` target is not
+    /// present in the registry.
+    pub fn expand_refs(&self, value: &Value) -> MechResult<Value> {
+        match value {
+            Value::Object(map) => {
+                // Recognise `{"$ref": "#name"}` — same criterion as resolve_nested_walk.
+                if map.len() == 1 {
+                    if let Some(Value::String(ref_str)) = map.get("$ref") {
+                        if let Some(name) = ref_str
+                            .strip_prefix('#')
+                            .filter(|n| !n.is_empty() && !n.contains('/'))
+                        {
+                            return self.resolved_bodies.get(name).cloned().ok_or_else(|| {
+                                MechError::SchemaRefUnresolved {
+                                    name: name.to_string(),
+                                }
+                            });
+                        }
+                    }
+                }
+                // Not a hash-ref — recurse into all values.
+                let mut new_map = serde_json::Map::with_capacity(map.len());
+                for (k, v) in map {
+                    new_map.insert(k.clone(), self.expand_refs(v)?);
+                }
+                Ok(Value::Object(new_map))
+            }
+            Value::Array(arr) => {
+                let new_arr: Result<Vec<_>, _> = arr.iter().map(|v| self.expand_refs(v)).collect();
+                Ok(Value::Array(new_arr?))
+            }
+            // Scalars (string, number, bool, null) pass through unchanged.
+            other => Ok(other.clone()),
+        }
+    }
 }
 
 /// Parse a `$ref:#name` string and return the bare `name`.
@@ -1110,5 +1165,384 @@ mod tests {
             }
             other => panic!("expected SchemaRefCircular, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // expand_refs tests — guard issue #307 (inline vs named schema produce
+    // identical expanded JSON for the agent). Originally lived in
+    // exec/prompt.rs but moved here since they exercise SchemaRegistry.
+    // ---------------------------------------------------------------------
+
+    // (a) Inline with no $refs passes through unchanged.
+    #[test]
+    fn expand_refs_inline_no_refs_passes_through_unchanged() {
+        let reg = SchemaRegistry::build(&schemas(&[])).expect("registry must build");
+        let schema = json!({
+            "type": "object",
+            "required": ["x"],
+            "properties": { "x": { "type": "integer" } }
+        });
+        let expanded = reg.expand_refs(&schema).expect("expand must succeed");
+        assert_eq!(expanded, schema);
+    }
+
+    // (b) Inline with $ref:#name expands the reference.
+    #[test]
+    fn expand_refs_inline_with_ref_is_expanded() {
+        let reg = SchemaRegistry::build(&schemas(&[(
+            "Coord",
+            json!({
+                "type": "object",
+                "required": ["lat", "lon"],
+                "properties": {
+                    "lat": { "type": "number" },
+                    "lon": { "type": "number" }
+                }
+            }),
+        )]))
+        .expect("registry must build");
+        let inline = json!({
+            "type": "object",
+            "required": ["position"],
+            "properties": {
+                "position": { "$ref": "#Coord" }
+            }
+        });
+        let expanded = reg.expand_refs(&inline).expect("expand must succeed");
+        let position_prop = expanded
+            .get("properties")
+            .and_then(|p| p.get("position"))
+            .expect("position property must exist");
+        assert_eq!(
+            position_prop,
+            &json!({
+                "type": "object",
+                "required": ["lat", "lon"],
+                "properties": {
+                    "lat": { "type": "number" },
+                    "lon": { "type": "number" }
+                }
+            }),
+            "$ref must be replaced with Coord body"
+        );
+    }
+
+    // (c) Named-schema path still produces an expanded body.
+    #[test]
+    fn expand_refs_named_schema_resolved_body_is_expanded() {
+        let reg = SchemaRegistry::build(&schemas(&[
+            (
+                "Inner",
+                json!({
+                    "type": "object",
+                    "required": ["v"],
+                    "properties": { "v": { "type": "integer" } }
+                }),
+            ),
+            (
+                "Outer",
+                json!({
+                    "type": "object",
+                    "required": ["inner"],
+                    "properties": { "inner": { "$ref": "#Inner" } }
+                }),
+            ),
+        ]))
+        .expect("registry must build");
+        let body = reg.resolved_body("Outer").expect("body must exist");
+        let inner_prop = body
+            .get("properties")
+            .and_then(|p| p.get("inner"))
+            .expect("inner must exist");
+        // The named path must already be expanded (regression guard).
+        assert_eq!(
+            inner_prop,
+            &json!({
+                "type": "object",
+                "required": ["v"],
+                "properties": { "v": { "type": "integer" } }
+            })
+        );
+    }
+
+    // (d) Expanded inline matches named form for an equivalent schema.
+    #[test]
+    fn expand_refs_expanded_inline_matches_named_form() {
+        let reg = SchemaRegistry::build(&schemas(&[
+            (
+                "Item",
+                json!({
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": { "id": { "type": "string" } }
+                }),
+            ),
+            (
+                "Wrapper",
+                json!({
+                    "type": "object",
+                    "required": ["item"],
+                    "properties": { "item": { "$ref": "#Item" } }
+                }),
+            ),
+        ]))
+        .expect("registry must build");
+
+        // Named path: registry.resolved_body("Wrapper")
+        let named_body = reg
+            .resolved_body("Wrapper")
+            .expect("named body must exist")
+            .clone();
+
+        // Inline path: same structure but written inline, using expand_refs.
+        let inline_schema = json!({
+            "type": "object",
+            "required": ["item"],
+            "properties": { "item": { "$ref": "#Item" } }
+        });
+        let expanded_inline = reg
+            .expand_refs(&inline_schema)
+            .expect("expand must succeed");
+
+        assert_eq!(
+            expanded_inline, named_body,
+            "expanded inline must match named resolved body"
+        );
+    }
+
+    // Error path: $ref to a non-existent schema name must error with the
+    // unresolved name surfaced for diagnostics.
+    #[test]
+    fn expand_refs_unresolved_ref_errors() {
+        let reg = SchemaRegistry::build(&BTreeMap::new()).expect("empty registry builds fine");
+        let bad_inline = json!({ "$ref": "#Missing" });
+        let err = reg
+            .expand_refs(&bad_inline)
+            .expect_err("unresolved ref must error");
+        match err {
+            MechError::SchemaRefUnresolved { name } => assert_eq!(name, "Missing"),
+            other => panic!("expected SchemaRefUnresolved, got {other:?}"),
+        }
+    }
+
+    // `{"$ref": "#X", "description": "..."}` has sibling keys — only bare
+    // single-key objects are substituted, matching `resolve_nested_walk`.
+    // The schema recurser walks into the map values but does not substitute
+    // the whole object, so the `$ref` key's string value is left as-is.
+    #[test]
+    fn expand_refs_ref_with_sibling_keys_is_not_substituted() {
+        let reg = SchemaRegistry::build(&schemas(&[("Foo", json!({ "type": "string" }))]))
+            .expect("registry must build");
+        // Object with $ref plus a sibling key — not a bare ref, so it is
+        // treated as a regular object (consistent with resolve_nested_walk).
+        let inline = json!({
+            "type": "object",
+            "properties": {
+                "x": { "$ref": "#Foo", "description": "annotated" }
+            }
+        });
+        let expanded = reg.expand_refs(&inline).expect("expand must succeed");
+        let x_prop = expanded
+            .get("properties")
+            .and_then(|p| p.get("x"))
+            .expect("x must exist");
+        // Sibling-key object is NOT substituted — stays as the original map.
+        assert_eq!(
+            x_prop,
+            &json!({ "$ref": "#Foo", "description": "annotated" }),
+            "object with sibling keys must not be substituted"
+        );
+    }
+
+    // Top-level sibling-key: the entry-point guard is checked directly
+    // (not only through recursive descent).
+    #[test]
+    fn expand_refs_top_level_sibling_key_passes_through() {
+        let reg = SchemaRegistry::build(&schemas(&[("Foo", json!({ "type": "string" }))]))
+            .expect("registry must build");
+        // At the entry-point (top level), a two-key map must not be substituted.
+        let top_level = json!({ "$ref": "#Foo", "description": "annotated" });
+        let expanded = reg.expand_refs(&top_level).expect("expand must succeed");
+        assert_eq!(
+            expanded, top_level,
+            "top-level sibling-key object must not be substituted"
+        );
+    }
+
+    // Sibling-key with unregistered name: no lookup is attempted, so the
+    // object passes through without error even though the name is absent.
+    #[test]
+    fn expand_refs_sibling_key_with_unregistered_name_passes_through() {
+        // Empty registry — "Ghost" is not a registered schema.
+        let reg = SchemaRegistry::build(&BTreeMap::new()).expect("empty registry builds fine");
+        let schema = json!({ "$ref": "#Ghost", "description": "phantom" });
+        // Must succeed: the guard skips lookup entirely for multi-key objects.
+        let expanded = reg
+            .expand_refs(&schema)
+            .expect("sibling-key with unregistered name must not error");
+        assert_eq!(
+            expanded, schema,
+            "sibling-key with unregistered name must pass through unchanged"
+        );
+    }
+
+    // Array elements: $ref objects inside arrays (oneOf / anyOf / items) are
+    // substituted by the Value::Array arm of expand_refs.
+    #[test]
+    fn expand_refs_array_element_ref_is_expanded() {
+        let reg = SchemaRegistry::build(&schemas(&[
+            (
+                "Coord",
+                json!({
+                    "type": "object",
+                    "required": ["lat", "lon"],
+                    "properties": {
+                        "lat": { "type": "number" },
+                        "lon": { "type": "number" }
+                    }
+                }),
+            ),
+            (
+                "Shape",
+                json!({
+                    "type": "object",
+                    "required": ["kind"],
+                    "properties": { "kind": { "type": "string" } }
+                }),
+            ),
+        ]))
+        .expect("registry must build");
+        // oneOf with two $ref elements — both live inside an array.
+        let inline = json!({ "oneOf": [{ "$ref": "#Coord" }, { "$ref": "#Shape" }] });
+        let expanded = reg.expand_refs(&inline).expect("expand must succeed");
+        let one_of = expanded
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("oneOf array must exist");
+        assert_eq!(one_of.len(), 2);
+        assert_eq!(
+            &one_of[0],
+            &json!({
+                "type": "object",
+                "required": ["lat", "lon"],
+                "properties": {
+                    "lat": { "type": "number" },
+                    "lon": { "type": "number" }
+                }
+            }),
+            "first array element must be expanded to Coord body"
+        );
+        assert_eq!(
+            &one_of[1],
+            &json!({
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string" } }
+            }),
+            "second array element must be expanded to Shape body"
+        );
+    }
+
+    // Deep recursion: $ref three levels deep inside nested properties.
+    #[test]
+    fn expand_refs_deeply_nested_ref_is_expanded() {
+        let reg = SchemaRegistry::build(&schemas(&[(
+            "Leaf",
+            json!({ "type": "integer", "minimum": 0 }),
+        )]))
+        .expect("registry must build");
+        let inline = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "properties": {
+                        "b": {
+                            "type": "object",
+                            "properties": {
+                                "c": { "$ref": "#Leaf" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let expanded = reg.expand_refs(&inline).expect("expand must succeed");
+        let c_prop = expanded
+            .pointer("/properties/a/properties/b/properties/c")
+            .expect("c must exist at full depth");
+        assert_eq!(
+            c_prop,
+            &json!({ "type": "integer", "minimum": 0 }),
+            "$ref three levels deep must be expanded to Leaf body"
+        );
+    }
+
+    // Empty-string $ref value: does not match the #name guard, so the object
+    // passes through unchanged (consistent with resolve_nested_walk).
+    #[test]
+    fn expand_refs_empty_string_ref_passes_through() {
+        let reg = SchemaRegistry::build(&BTreeMap::new()).expect("empty registry builds fine");
+        let schema = json!({ "$ref": "" });
+        let expanded = reg
+            .expand_refs(&schema)
+            .expect("empty-string $ref must not error");
+        assert_eq!(
+            expanded, schema,
+            "empty-string $ref must pass through unchanged"
+        );
+    }
+
+    // JSON Pointer $ref (`#/definitions/X`) must NOT be substituted: the
+    // `!n.contains('/')` filter delegates these to jsonschema, matching
+    // resolve_nested_walk's identical guard.
+    #[test]
+    fn expand_refs_json_pointer_ref_passes_through() {
+        let reg = SchemaRegistry::build(&BTreeMap::new()).expect("empty registry builds fine");
+        let schema = json!({ "$ref": "#/definitions/X" });
+        let expanded = reg
+            .expand_refs(&schema)
+            .expect("JSON Pointer $ref must not error");
+        assert_eq!(
+            expanded, schema,
+            "JSON Pointer $ref must pass through unchanged (slash-form delegated to jsonschema)"
+        );
+    }
+
+    // $ref value with no `#` prefix (e.g. external file ref) also passes
+    // through unchanged — the strip_prefix('#') guard rejects it before any
+    // registry lookup is attempted.
+    #[test]
+    fn expand_refs_ref_without_hash_prefix_passes_through() {
+        let reg = SchemaRegistry::build(&BTreeMap::new()).expect("empty registry builds fine");
+        let schema = json!({ "$ref": "SomeName" });
+        let expanded = reg
+            .expand_refs(&schema)
+            .expect("no-hash $ref must not error");
+        assert_eq!(
+            expanded, schema,
+            "$ref without '#' prefix must pass through unchanged"
+        );
+    }
+
+    // JSON Pointer $ref nested inside properties must also pass through
+    // unchanged — the slash-filter guard applies identically in the recursive
+    // call, not only at the top-level entry point.
+    #[test]
+    fn expand_refs_nested_json_pointer_ref_passes_through() {
+        let reg = SchemaRegistry::build(&BTreeMap::new()).expect("empty registry builds fine");
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "x": { "$ref": "#/definitions/X" }
+            }
+        });
+        let expanded = reg
+            .expand_refs(&schema)
+            .expect("nested JSON Pointer $ref must not error");
+        assert_eq!(
+            expanded, schema,
+            "nested JSON Pointer $ref must pass through unchanged"
+        );
     }
 }
