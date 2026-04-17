@@ -848,4 +848,101 @@ functions:
             "expected exactly one distinct rendered system string across all requests, got {distinct:?}"
         );
     }
+
+    // ---- T9: Inferred keyed-map schema matches runtime output (C-07 fix) --
+
+    /// End-to-end test: load a multi-terminal dataflow function with
+    /// `output: infer`, run inference (via `WorkflowLoader`), execute the
+    /// function, and assert that the runtime output's top-level keys match
+    /// the inferred schema's `properties` keys. This proves the C-07 alignment
+    /// invariant: inference and runtime produce the same keyed-map shape.
+    #[test]
+    fn inferred_keyed_map_schema_matches_runtime_output() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      root:
+        prompt: "root"
+        schema:
+          type: object
+          required: [data]
+          properties: { data: { type: string } }
+      sink_a:
+        prompt: "a: {{block.root.output.data}}"
+        schema:
+          type: object
+          required: [a_val]
+          properties: { a_val: { type: string } }
+        depends_on: [root]
+      sink_b:
+        prompt: "b: {{block.root.output.data}}"
+        schema:
+          type: object
+          required: [b_val]
+          properties: { b_val: { type: integer } }
+        depends_on: [root]
+"#;
+        // Load triggers inference; the inferred `output:` schema is keyed map.
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+
+        // Verify inferred schema has keyed-map shape.
+        let inferred_output = func.output.as_ref().expect("output must be inferred");
+        let schema_json = match inferred_output {
+            crate::schema::SchemaRef::Inline(v) => v.clone(),
+            other => panic!("expected inline inferred schema, got {other:?}"),
+        };
+        let props = schema_json
+            .get("properties")
+            .expect("inferred schema must have properties")
+            .as_object()
+            .expect("properties must be object");
+        let schema_keys: std::collections::BTreeSet<&str> =
+            props.keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            schema_keys,
+            ["sink_a", "sink_b"]
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "inferred schema properties must be keyed by terminal block names"
+        );
+
+        // Run the function and verify runtime output has the same top-level keys.
+        let agent = SequentialAgent::new(vec![
+            json!({ "data": "root_data" }),
+            json!({ "a_val": "hello" }),
+            json!({ "b_val": 42 }),
+        ]);
+        let mut ctx = new_ctx(json!({}));
+        let runtime_output = run_blocking(run_function_dataflow(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &NoFuncExecutor,
+        ))
+        .unwrap();
+
+        let runtime_keys: std::collections::BTreeSet<&str> = runtime_output
+            .as_object()
+            .expect("runtime output must be object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+
+        // The central C-07 invariant: inferred schema keys == runtime output keys.
+        assert_eq!(
+            schema_keys, runtime_keys,
+            "inferred schema properties must equal runtime output keys (C-07 alignment)"
+        );
+
+        // Also verify terminal values are nested under the right keys.
+        assert_eq!(runtime_output["sink_a"]["a_val"], json!("hello"));
+        assert_eq!(runtime_output["sink_b"]["b_val"], json!(42));
+    }
 }

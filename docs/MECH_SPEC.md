@@ -206,11 +206,11 @@ functions:
 - **`infer`:** The string literal `"infer"`. The loader derives the output schema from the terminal blocks (see inference rules below).
 - **Omitted:** Defaults to `infer`.
 
-**Output schema inference rules:**
+**Output schema inference rules (Option A — keyed map):**
 
-- **Single terminal:** output schema = that terminal's schema.
-- **Multiple terminals (CFG paths):** output schema = `oneOf` the distinct terminal schemas. If all terminals share the same schema, collapses to that single schema.
-- **Multiple terminals (dataflow sinks):** output schema = object with terminal block names as keys, each terminal's schema as the property type.
+- **Single terminal (either mode):** output schema = that terminal's schema directly. Callers reference `{{callee.output.field}}`.
+- **Multiple terminals, dataflow sinks:** output schema is a keyed-map object — `{type: object, required: [t1, t2, …], properties: {t1: schema1, t2: schema2, …}}`. The runtime collects all dataflow sink outputs into a JSON object keyed by block name; the inferred schema mirrors that shape. Callers reference `{{callee.output.terminal_name.field}}`.
+- **Multiple terminals, CFG (imperative) paths:** all terminals must share the same output schema (structural equality after `$ref` resolution). If they do, that shared schema is used. If they differ, inference fails — declare an explicit `output:` schema and document which terminal the caller should expect. (CFG paths reach exactly one terminal at runtime, so only one schema applies per execution; requiring them to be identical lets `infer` work without a discriminator.)
 - **No terminals detected:** load-time error — the author must declare an explicit output schema or fix the terminal detection.
 
 **Terminal blocks** determine the function's return value:
@@ -218,8 +218,8 @@ functions:
 - If `terminals` is specified: those blocks are terminal. Validated at load time (must exist, must have no outgoing transitions or data edges).
 - If `terminals` is omitted: terminal blocks are inferred — any block with no outgoing control edges and no outgoing data edges.
 - **Single terminal reached:** the function's output is that block's output.
-- **Multiple terminals (CFG paths):** the function's output is the output of whichever terminal was reached during execution.
-- **Multiple terminals (dataflow sinks):** all terminal outputs are collected into a map keyed by block name.
+- **Multiple terminals (CFG paths):** the function's output is the output of whichever terminal was reached during execution. (Schema: all terminals share the same schema per the inference rule above.)
+- **Multiple terminals (dataflow sinks):** all terminal outputs are collected into a JSON object keyed by block name, e.g. `{"sink_a": {...}, "sink_b": {...}}`. (Schema: a keyed-map object with one property per sink, matching this runtime shape.)
 
 ### 4.6 Conversation Model
 
@@ -1763,7 +1763,8 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 **Acceptance:** Every function has a concrete output schema after loading.
 
 **Design notes (implemented):**
-- "Union" is narrow: structural equality on resolved JSON bodies. Non-matching terminals error (`MechError::InferenceFailed`); no `oneOf`/`anyOf` synthesis is attempted.
+- **Option A (keyed map) — C-07 fix:** Multi-terminal output shape now depends on execution mode. Dataflow sinks produce a keyed-map schema `{type: object, required: [t1, t2, …], properties: {t1: s1, t2: s2, …}}`, matching the runtime’s `{terminal_name: output}` collection. CFG paths require structural equality across all terminals (unchanged from original); non-matching terminals error rather than synthesise a `oneOf`.
+- Terminal detection is mode-aware: dataflow terminals are sink nodes (no transitions AND not depended upon by any other block); imperative terminals are blocks with no outgoing transitions.
 - Terminal prompt blocks contribute their resolved `schema:` (inline or `$ref:#name`). Terminal call blocks contribute the callee's output schema only when the block is a single-function call with no `output:` mapping; list-form calls or call blocks that declare an `output:` mapping cannot be structurally inferred and must live under a function with an explicit `output:` schema.
 - A fixed-point pass resolves chains of `infer` functions (A's terminal calls B, B's output also `infer`). Functions still unresolved after the fixed point error out.
 - Inference mutates the parsed `MechDocument` in place, replacing `SchemaRef::Infer` with `SchemaRef::Inline`, and is idempotent on a second run. Public entry point: `mech::infer_function_outputs(&mut MechDocument)`.

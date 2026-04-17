@@ -1,13 +1,23 @@
-//! Function output schema inference (§13 Deliverable 6).
+//! Function output schema inference (§13 Deliverable 6, C-07 fix).
 //!
 //! When a function declares `output: infer` (or omits `output:` entirely, which
 //! per §4.2 defaults to `infer`), the concrete output schema is derived by
-//! walking the function's terminal blocks and unioning their declared output
-//! schemas. "Union" here is intentionally narrow per the spec: if every
-//! terminal block's output schema is structurally identical (after `$ref`
-//! resolution), that schema becomes the function output; otherwise inference
-//! fails with [`MechError::OutputSchemaInferenceFailed`]. No `oneOf`/`anyOf` synthesis is
-//! attempted.
+//! walking the function's terminal blocks. The shape depends on execution mode:
+//!
+//! * **Single terminal (either mode):** output schema = that terminal's schema.
+//! * **Multiple terminals, dataflow mode:** output schema is a keyed-map object
+//!   `{type: object, required: [t1, t2, …], properties: {t1: s1, t2: s2, …}}`,
+//!   keyed by terminal block name. This mirrors the runtime, which returns a
+//!   JSON object keyed by block name when collecting multiple dataflow sinks
+//!   ([`crate::exec::dataflow::run_function_dataflow`]). Callers reference
+//!   `{{callee.output.sink_name.field}}`.
+//! * **Multiple terminals, imperative (CFG) mode:** all terminals must share
+//!   the same schema (structural equality after `$ref` resolution). If they do,
+//!   that schema becomes the function output; if they differ, inference fails
+//!   with [`MechError::OutputSchemaInferenceFailed`] — the author must supply
+//!   an explicit `output:` schema. No `oneOf`/`anyOf` synthesis is attempted.
+//!   (In CFG mode only one terminal is ever reached per execution, so the
+//!   output schema is always that one terminal's schema.)
 //!
 //! This module runs **after** load-time validation (§13 Deliverable 5) and
 //! **before** the end-to-end loader (Deliverable 7). It mutates the parsed
@@ -127,27 +137,95 @@ fn snapshot_concrete_outputs(wf: &MechDocument) -> BTreeMap<String, JsonValue> {
     out
 }
 
+/// Execution mode detected from a function's block edges, used during
+/// inference to select the correct multi-terminal schema shape.
+#[derive(PartialEq)]
+enum InferMode {
+    /// Any block has outgoing transitions → imperative (CFG) mode.
+    Imperative,
+    /// No block has transitions, at least one has `depends_on` → dataflow mode.
+    Dataflow,
+}
+
+/// Detect execution mode from a function's block edges (mirrors
+/// `exec::function::detect_mode` without importing from the exec layer).
+fn infer_mode(func: &FunctionDef) -> InferMode {
+    let has_transitions = func.blocks.values().any(|b| !b.transitions().is_empty());
+    if has_transitions {
+        return InferMode::Imperative;
+    }
+    let has_depends = func.blocks.values().any(|b| !b.depends_on().is_empty());
+    if has_depends {
+        InferMode::Dataflow
+    } else {
+        InferMode::Imperative
+    }
+}
+
+/// Collect the terminal block names for a function.
+///
+/// * If `func.terminals` is non-empty, use that explicit list.
+/// * In **dataflow** mode (no transitions): terminals are blocks with no
+///   transitions **and** not referenced in any other block's `depends_on`
+///   (i.e. the sink nodes). This matches `exec::dataflow::find_dataflow_terminals`.
+/// * In **imperative** mode: terminals are blocks with no outgoing transitions.
+fn terminal_names<'a>(func: &'a FunctionDef, mode: &InferMode) -> Vec<&'a String> {
+    if !func.terminals.is_empty() {
+        return func.terminals.iter().collect();
+    }
+    match mode {
+        InferMode::Dataflow => {
+            // Sink detection: not depended upon by any other block.
+            let depended_upon: std::collections::BTreeSet<&str> = func
+                .blocks
+                .values()
+                .flat_map(|b| b.depends_on().iter().map(|s| s.as_str()))
+                .collect();
+            func.blocks
+                .iter()
+                .filter(|(name, block)| {
+                    block.transitions().is_empty() && !depended_upon.contains(name.as_str())
+                })
+                .map(|(n, _)| n)
+                .collect()
+        }
+        InferMode::Imperative => func
+            .blocks
+            .iter()
+            .filter(|(_, b)| b.transitions().is_empty())
+            .map(|(n, _)| n)
+            .collect(),
+    }
+}
+
 /// Attempt to infer a single function's output schema. Returns:
 ///
 /// * `Ok(Some(schema))` on success.
 /// * `Ok(None)` if the function depends on a yet-unresolved callee (caller
 ///   should loop and retry after more progress).
 /// * `Err(..)` on a permanent error (no terminals, incompatible schemas, …).
+///
+/// ### Multi-terminal schema shape (Option A — keyed map)
+///
+/// * **Single terminal** (both modes): output schema = that terminal's schema.
+/// * **Multiple terminals, dataflow mode**: output schema is an object keyed
+///   by terminal block name — `{type: object, required: [t1, t2, ...],
+///   properties: {t1: schema1, t2: schema2, ...}}`. This aligns with the
+///   runtime, which collects all dataflow sinks into a map keyed by block
+///   name (`exec::dataflow::run_function_dataflow`).
+/// * **Multiple terminals, imperative (CFG) mode**: all terminals must share
+///   the same schema (structural equality after `$ref` resolution). If they
+///   differ, inference fails and the author must supply an explicit `output:`
+///   schema. In CFG mode only one terminal is reached at runtime, so the
+///   output schema is always that terminal's schema.
 fn try_infer_function(
     func_name: &str,
     func: &FunctionDef,
     shared: &BTreeMap<String, JsonValue>,
     concrete_outputs: &BTreeMap<String, JsonValue>,
 ) -> MechResult<Option<JsonValue>> {
-    let terminals: Vec<&String> = if !func.terminals.is_empty() {
-        func.terminals.iter().collect()
-    } else {
-        func.blocks
-            .iter()
-            .filter(|(_, b)| b.transitions().is_empty())
-            .map(|(n, _)| n)
-            .collect()
-    };
+    let mode = infer_mode(func);
+    let terminals = terminal_names(func, &mode);
 
     if terminals.is_empty() {
         return Err(MechError::OutputSchemaInferenceFailed {
@@ -156,7 +234,9 @@ fn try_infer_function(
         });
     }
 
-    let mut unified: Option<JsonValue> = None;
+    // Resolve every terminal block's schema.  A single Deferred aborts this
+    // pass — the caller will retry after more progress.
+    let mut terminal_schemas: Vec<(String, JsonValue)> = Vec::with_capacity(terminals.len());
     for t_name in terminals {
         let block = func.blocks.get(t_name).ok_or_else(|| {
             // Validate should have caught this, but be defensive.
@@ -175,23 +255,54 @@ fn try_infer_function(
                 });
             }
         };
-
-        match &unified {
-            None => unified = Some(block_schema),
-            Some(prev) if *prev == block_schema => {}
-            Some(prev) => {
-                return Err(MechError::OutputSchemaInferenceFailed {
-                    function: func_name.to_string(),
-                    message: format!(
-                        "terminal blocks produce incompatible output schemas: `{}` vs `{}`",
-                        prev, block_schema
-                    ),
-                });
-            }
-        }
+        terminal_schemas.push((t_name.clone(), block_schema));
     }
 
-    Ok(unified)
+    // Single terminal: same result for both modes.
+    if terminal_schemas.len() == 1 {
+        return Ok(Some(terminal_schemas.remove(0).1));
+    }
+
+    match mode {
+        InferMode::Dataflow => {
+            // Multiple dataflow sinks → keyed-map schema.
+            // Runtime collects sink outputs into a map keyed by block name;
+            // the inferred schema mirrors that shape exactly.
+            // Build `required` from `properties` keys after insertion so both
+            // are always in sync (one source of truth for terminal names).
+            let properties: serde_json::Map<String, JsonValue> =
+                terminal_schemas.into_iter().collect();
+            let required: Vec<JsonValue> = properties
+                .keys()
+                .map(|n| JsonValue::String(n.clone()))
+                .collect();
+            Ok(Some(serde_json::json!({
+                "type": "object",
+                "required": required,
+                "properties": properties,
+            })))
+        }
+        InferMode::Imperative => {
+            // Multiple CFG terminals → all must share the same schema.
+            // In CFG mode only one terminal is ever reached at runtime, so
+            // the output is always that terminal's raw output. If terminals
+            // differ, the author must supply an explicit `output:` schema.
+            let (first_name, first_schema) = &terminal_schemas[0];
+            for (name, schema) in &terminal_schemas[1..] {
+                if schema != first_schema {
+                    return Err(MechError::OutputSchemaInferenceFailed {
+                        function: func_name.to_string(),
+                        message: format!(
+                            "terminal blocks produce incompatible output schemas: \
+                             `{first_name}` vs `{name}` — declare an explicit \
+                             `output:` schema when CFG terminals differ"
+                        ),
+                    });
+                }
+            }
+            Ok(Some(first_schema.clone()))
+        }
+    }
 }
 
 /// The three possible outcomes of resolving a terminal block's output schema.
@@ -770,5 +881,156 @@ functions:
         assert_eq!(before, wf.functions["f"].output);
         let out = inferred_output(&wf, "f");
         assert!(out.pointer("/properties/hello").is_some());
+    }
+
+    // ---- Dataflow multi-terminal inference (Option A: keyed map) ---------
+
+    /// A pure dataflow function (blocks connected only by `depends_on`, no
+    /// transitions) with two sink blocks must infer an object schema with one
+    /// property per terminal, keyed by block name. This matches the runtime
+    /// behavior of `exec::dataflow::run_function_dataflow`, which collects
+    /// multiple terminal outputs into `{block_name: output}` (C-07 fix).
+    #[test]
+    fn dataflow_multi_terminal_infers_keyed_map_schema() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      root:
+        prompt: "root"
+        schema: { type: object, properties: { data: { type: string } } }
+      sink_a:
+        prompt: "a"
+        schema: { type: object, properties: { a_result: { type: string } } }
+        depends_on: [root]
+      sink_b:
+        prompt: "b"
+        schema: { type: object, properties: { b_result: { type: integer } } }
+        depends_on: [root]
+"#;
+        let mut wf = parse_workflow(yaml).unwrap();
+        infer_function_outputs(&mut wf).unwrap();
+        let out = inferred_output(&wf, "f");
+
+        // Top-level shape: keyed-map object.
+        assert_eq!(out.get("type").and_then(|v| v.as_str()), Some("object"));
+        let required = out.get("required").and_then(|v| v.as_array()).unwrap();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required_strs.contains(&"sink_a"), "sink_a must be required");
+        assert!(required_strs.contains(&"sink_b"), "sink_b must be required");
+
+        // Each terminal's schema is nested under its name.
+        assert_eq!(
+            out.pointer("/properties/sink_a/properties/a_result/type")
+                .and_then(|v| v.as_str()),
+            Some("string"),
+            "sink_a schema must be nested under 'sink_a' key"
+        );
+        assert_eq!(
+            out.pointer("/properties/sink_b/properties/b_result/type")
+                .and_then(|v| v.as_str()),
+            Some("integer"),
+            "sink_b schema must be nested under 'sink_b' key"
+        );
+
+        // Intermediate (non-sink) block `root` must NOT appear in the schema
+        // (neither in `properties` nor in `required`).
+        assert!(
+            out.pointer("/properties/root").is_none(),
+            "intermediate dataflow block 'root' must not appear in properties"
+        );
+        let required_strs2: Vec<&str> = out
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            !required_strs2.contains(&"root"),
+            "intermediate dataflow block 'root' must not appear in required"
+        );
+    }
+
+    /// Dataflow functions with identical sink schemas still produce a keyed
+    /// map (Option A), not the collapsed shared schema. Callers must reference
+    /// `{{callee.output.sink_a.field}}`, not `{{callee.output.field}}`.
+    #[test]
+    fn dataflow_multi_terminal_identical_schemas_still_keyed_map() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      root:
+        prompt: "root"
+        schema: { type: object, properties: { data: { type: string } } }
+      sink_a:
+        prompt: "a"
+        schema: { type: object, properties: { done: { type: boolean } } }
+        depends_on: [root]
+      sink_b:
+        prompt: "b"
+        schema: { type: object, properties: { done: { type: boolean } } }
+        depends_on: [root]
+"#;
+        let mut wf = parse_workflow(yaml).unwrap();
+        infer_function_outputs(&mut wf).unwrap();
+        let out = inferred_output(&wf, "f");
+
+        // Must be keyed map, not the collapsed shared schema.
+        assert_eq!(out.get("type").and_then(|v| v.as_str()), Some("object"));
+        // Each sink's schema is nested under its name.
+        assert!(
+            out.pointer("/properties/sink_a").is_some(),
+            "sink_a must appear as a key in the keyed-map schema"
+        );
+        assert!(
+            out.pointer("/properties/sink_b").is_some(),
+            "sink_b must appear as a key in the keyed-map schema"
+        );
+        // The shared field 'done' is NOT a top-level property.
+        assert!(
+            out.pointer("/properties/done").is_none(),
+            "shared field must be nested under terminal key, not at top level"
+        );
+    }
+
+    /// A pure dataflow function with a single sink produces the sink's schema
+    /// directly (no wrapping key) — single-terminal behavior is unchanged.
+    #[test]
+    fn dataflow_single_terminal_returns_sink_schema_directly() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: infer
+    blocks:
+      root:
+        prompt: "root"
+        schema: { type: object, properties: { data: { type: string } } }
+      sink:
+        prompt: "sink"
+        schema: { type: object, properties: { result: { type: integer } } }
+        depends_on: [root]
+"#;
+        let mut wf = parse_workflow(yaml).unwrap();
+        infer_function_outputs(&mut wf).unwrap();
+        let out = inferred_output(&wf, "f");
+
+        // Single terminal in dataflow mode: return sink's schema directly
+        // (no wrapper object).
+        assert_eq!(
+            out.pointer("/properties/result/type")
+                .and_then(|v| v.as_str()),
+            Some("integer")
+        );
+        assert!(
+            out.pointer("/properties/sink").is_none(),
+            "single-terminal dataflow must not wrap schema in a keyed map"
+        );
     }
 }
