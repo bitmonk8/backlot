@@ -9,7 +9,9 @@ use std::time::Duration;
 use clap::Parser;
 
 mod check;
+mod exec;
 mod report;
+mod scratch;
 mod types;
 
 use types::{GateConfig, Stage};

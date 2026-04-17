@@ -14,7 +14,11 @@ gate/
   src/
     main.rs           # CLI entry point (clap), config plumbing
     types.rs          # Shared types: Stage, TestOutcome, *Result, GateConfig
-    # later deliverables add: runner.rs, check.rs, report.rs, stage/
+    check.rs          # Assertion helpers (PASS/FAIL printers, TestFailure)
+    report.rs         # Summary table + JSON output
+    exec.rs           # Subprocess execution with timeout
+    scratch.rs        # Per-run scratch dir lifecycle
+    # later deliverables add: runner.rs, stage/
 ```
 
 Direct dependencies: `clap`, `serde`, `serde_json`, `tempfile`. No other backlot crates.
@@ -68,6 +72,31 @@ Three derived helpers centralise policy that downstream modules share:
 
 ---
 
+## Subprocess Execution (`exec.rs`)
+
+`run_command(program, args, working_dir, env, timeout) -> io::Result<CommandResult>` is the single entry point through which gate stages spawn binaries. It captures stdout, stderr, exit code, and wall-clock duration into a `CommandResult` and enforces a wall-clock timeout.
+
+**Pipe draining.** Stdout and stderr are read on background threads from the moment the child is spawned. A naive `wait()`-then-read scheme deadlocks once a chatty child fills its pipe buffer; the per-pipe drain threads keep the child unblocked regardless of output volume.
+
+**Timeout enforcement.** A poll loop calls `Child::try_wait()` every 25 ms. When `start.elapsed() >= timeout` the child is killed and reaped, the returned `exit_code` is set to `TIMEOUT_EXIT_CODE` (`-1`, deliberately negative so it cannot collide with a legitimate platform exit code), and a `gate: command timed out after Xs` line is appended to stderr.
+
+**Error model.** `Err` is reserved for genuine I/O failures (spawning a missing binary, OS-level wait failure). Non-zero exit codes are normal program output and surface through `CommandResult::exit_code`, never as `Err` — letting stages distinguish "tool ran and reported failure" from "tool could not be invoked at all".
+
+**Environment.** The `env` slice augments (and overrides) the inherited parent environment; it does not clear it. Tests rely on `PATH` being inherited so `git`, `sh`, `cmd`, `ping` resolve.
+
+## Scratch Directories (`scratch.rs`)
+
+`scratch_base() -> PathBuf` resolves to `<workspace>/target/gate-scratch/`, derived from `CARGO_MANIFEST_DIR`. Living under the workspace `target/` keeps scratch paths project-local and out of `%TEMP%` / `C:\Users` — the workspace `CLAUDE.md` rule that `lot`/`reel`/`epic` sandbox-granted paths must avoid system temp (Windows AppContainer ancestor-traverse ACEs cannot be granted there).
+
+`create_run_dir() -> io::Result<PathBuf>` creates a `run-YYYYMMDD-HHMMSS/` directory plus `lot/`, `reel/`, `vault/`, `epic/` subdirs (eagerly, even for stages that may not run). The timestamp is computed in UTC with no external date crate dependency, using Howard Hinnant's `civil_from_days` algorithm.
+
+**Race-safe naming.** The implementation does not check `exists()` then `mkdir`; that pattern loses to concurrent callers within the same one-second timestamp bucket (parallel test threads, parallel gate invocations). Instead `create_dir` is invoked directly and `AlreadyExists` triggers a `-1`, `-2`, ... suffix retry until a fresh name succeeds.
+
+`cleanup_run_dir(path)` is a recursive `remove_dir_all` that swallows `NotFound` so the runner can call it unconditionally on success without a stat-then-delete dance.
+
+
+---
+
 ## CLI (`main.rs`)
 
 A clap-derive `Cli` struct mirrors `GateConfig`. `--only` and `--from` are mutually exclusive (clap `conflicts_with`). `Stage` values are parsed through its `FromStr` impl, so unknown values produce a `ValueValidation` error rather than the generic `InvalidValue` from `value_enum`.
@@ -90,4 +119,4 @@ A clap-derive `Cli` struct mirrors `GateConfig`. `--only` and `--from` are mutua
 
 **Workspace lints.** Gate inherits `[lints] workspace = true`, which denies `unsafe_code` and `clippy::all`. CI does not run gate, but `cargo build -p gate` and `cargo clippy -p gate` are expected to be clean.
 
-**Future scope** (subsequent deliverables): runner with binary discovery + timeout-aware subprocess execution, per-stage modules (`flick`, `lot`, `reel`, `vault`, `epic`, `mech`), assertion helpers (`check.rs`), per-run scratch directories under `target/gate-scratch/run-<timestamp>/`, summary table + optional JSON output, and the Stage 0 prerequisite check. See `specs/GATE.md` for the full system design.
+**Future scope** (subsequent deliverables): runner with binary discovery, per-stage modules (`flick`, `lot`, `reel`, `vault`, `epic`, `mech`), and the Stage 0 prerequisite check. See `specs/GATE.md` for the full system design.
