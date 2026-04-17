@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
+mod check;
 mod types;
 
 use types::{GateConfig, Stage};
