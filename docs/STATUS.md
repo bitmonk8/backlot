@@ -158,15 +158,21 @@ MechError variant naming cleanup — 7 issues closed (#35, #37, #39, #47, #54, #
 
 ## Gate
 
-**Phase:** D1 complete — crate scaffold, shared types, and CLI parsing landed. The binary builds, prints `gate: not yet implemented`, and all 21 unit tests pass. Subsequent deliverables (D2–D8) wire up the runner, stage modules, and reporting per `specs/GATE.md` and `specs/gate/D2.md` onward.
+**Phase:** Implementation complete (D1–D8). 171 unit tests passing, `cargo clippy -p gate --all-targets -- -D warnings` clean. Stage tests against live providers verified manually only — CI never runs gate (real credentials, real cost).
 
-**Implemented (D1):**
-- Workspace member `gate/` registered.
-- `Stage` enum (Flick…Mech) with `Display`, `FromStr`, `Ord`, `all()`, and `default_timeout()` (Epic = 600s, others = 300s).
-- `TestOutcome`, `TestResult`, `StageResult`, `CommandResult` data types. `SoftFail` does not count as failure.
-- `GateConfig` with `effective_timeout()`, `should_run()` (only/from filters), `effective_keep_scratch()` (verbose implies keep).
-- Clap CLI: `--only`/`--from` (mutually exclusive), `--verbose`, `--bin-dir`, `--timeout`, `--output-dir`, `--keep-scratch`.
+**Implemented (D1–D8):**
+- Crate scaffold and CLI (clap): `--only`, `--from`, `--verbose`, `--bin-dir`, `--timeout`, `--output-dir`, `--keep-scratch`.
+- Shared types: `Stage`, `TestOutcome`, `TestResult`, `StageResult`, `GateConfig`, `CommandResult`.
+- Assertion helpers (`check.rs`) — 6 functions with live PASS/FAIL stdout output.
+- Reporting (`report.rs`) — box-drawn summary table, JSON results writer, transcript writer.
+- Subprocess execution (`exec.rs`) with timeout and stdin support; scratch directory management (`scratch.rs`) at `target/gate-scratch/run-<timestamp>/`.
+- Binary discovery (`runner.rs`) with `--bin-dir` override and Windows `.exe` handling; stage runner with filtering and exit-code semantics (0 / 1 / 2).
+- Stage 0 prerequisites (`prereqs.rs`) — providers/models alias check + `lot setup --check`.
+- Stage 1 flick (6 tests), Stage 2 lot (8 tests, per-platform fixtures), Stage 3 reel (5 tests), Stage 4 vault (5 tests sequential), Stage 5 epic (3 tests with programmatic project generation), Stage 6 mech placeholder.
+- `--verbose` writes `output/results.json` and per-test transcripts; scratch preserved on failure.
+- `gate/FINDINGS.md` template, `gate/.gitignore`.
 
 **Next Work:**
-1. **D2** — runner + binary discovery (resolve flick/lot/reel/vault/epic/mech CLIs, missing-binary errors).
-2. **D3+** — per-stage modules, assertion helpers, scratch-directory management, summary reporting.
+1. **First end-to-end run** against real providers (manual). Record findings in `gate/FINDINGS.md`.
+2. **Stage 6 mech tests** — blocked on mech-cli real `AgentExecutor` (currently uses `StubAgent`).
+3. **`gate.toml` configuration file** at workspace root for per-stage model-alias overrides (per spec Future Work).
