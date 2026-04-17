@@ -1,6 +1,8 @@
-//! gate — End-to-end test harness binary for the backlot workspace.
+//! gate -- End-to-end test harness binary for the backlot workspace.
 //!
-//! Currently parses CLI args and prints a placeholder; runner wiring lands in a later deliverable.
+//! Parses CLI args into a `GateConfig` and hands off to [`runner::run`],
+//! which performs binary discovery, dispatches every requested stage,
+//! prints the summary, and returns the process exit code.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,7 +13,9 @@ use clap::Parser;
 mod check;
 mod exec;
 mod report;
+mod runner;
 mod scratch;
+mod stage;
 mod types;
 
 use types::{GateConfig, Stage};
@@ -32,7 +36,8 @@ struct Cli {
     #[arg(long, value_name = "STAGE")]
     from: Option<Stage>,
 
-    /// Save transcripts to the output directory; implies --keep-scratch.
+    /// Write results.json to the output directory; implies --keep-scratch.
+    /// Transcripts are deferred to a later deliverable.
     #[arg(long)]
     verbose: bool,
 
@@ -44,7 +49,7 @@ struct Cli {
     #[arg(long, value_name = "SECONDS")]
     timeout: Option<u64>,
 
-    /// Where to write results and transcripts.
+    /// Where to write results.json (transcripts deferred to a later deliverable).
     #[arg(long, value_name = "PATH", default_value = "gate/output/")]
     output_dir: PathBuf,
 
@@ -69,9 +74,18 @@ impl Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let _config = cli.into_config();
-    println!("gate: not yet implemented");
-    ExitCode::SUCCESS
+    let config = cli.into_config();
+    // Process exit codes only need 0/1/2; bridging an i32 sentinel into
+    // `ExitCode` requires a u8.
+    let code = runner::run(config);
+    let exit = if (0..=255).contains(&code) {
+        code as u8
+    } else {
+        // Out-of-range sentinel from runner -- treat as prereq failure rather
+        // than silently mapping a negative value to success (0).
+        2
+    };
+    ExitCode::from(exit)
 }
 
 #[cfg(test)]
