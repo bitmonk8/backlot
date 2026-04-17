@@ -197,7 +197,7 @@ flick, or lot dependencies.
 |--------|---------|
 | `lib.rs` | Public API re-exports |
 | `types.rs` | All orchestration-protocol types: `TaskId`, `TaskPhase`, `TaskPath`, `Model`, `TaskOutcome`, `Attempt`, `Magnitude`, outcome/decision enums, context types (`SiblingSummary`, `ChildSummary`) |
-| `traits.rs` | `TaskNode` (28 methods: accessors, decisions, mutations, lifecycle) and `TaskStore` (storage, creation, cross-task queries) |
+| `traits.rs` | `TaskNode` (30 methods: accessors, decisions, mutations, lifecycle) and `TaskStore` (storage, creation, cross-task queries) |
 | `orchestrator.rs` | `Orchestrator<S: TaskStore, T: EventEmitter<CueEvent>>` -- coordination loop: `run()`, `execute_task()`, `run_leaf()`, `execute_branch()`, `finalize_branch()`, `branch_fix_loop()`, `attempt_recovery()` |
 | `context.rs` | `TreeContext` -- read-only snapshot of tree state around a task |
 | `events.rs` | `CueEvent` enum (10 orchestration variants) |
@@ -229,19 +229,20 @@ for the full specification.
 | Module | Purpose |
 |--------|---------|
 | `lib.rs` | Public API re-exports |
-| `loader.rs` | `WorkflowLoader::load(path) → Workflow` — parse → validate → infer → compile CEL |
+| `loader/` | `load_workflow(path) → Workflow` — parse → validate → infer → compile CEL |
 | `schema/mod.rs` | Serde types: `MechDocument`, `FunctionDef`, `BlockDef`, `AgentConfig`, etc. |
 | `schema/registry.rs` | `SchemaRegistry` — compile and validate JSON Schemas, resolve `$ref` |
 | `schema/infer.rs` | Output schema inference (`output: infer`) from terminal block schemas |
-| `validate.rs` | `validate_workflow` — 24+ load-time checks (§10.1 of spec) |
+| `validate/` | `validate_workflow` — 24+ load-time checks (§10.1 of spec) |
 | `cel.rs` | CEL compilation (`CelExpression`) and template interpolation (`Template`) |
 | `context.rs` | `ExecutionContext` (per-invocation), `WorkflowState` (workflow-lifetime) |
-| `conversation.rs` | `Conversation` — per-function message history, compaction hook |
+| `conversation.rs` | `Conversation` — per-function conversation: dedicated system slot + message history; compaction hook (placeholder) |
 | `exec/prompt.rs` | `execute_prompt_block` — agent cascade, template render, LLM dispatch |
 | `exec/call.rs` | `execute_call_block` — single/uniform/per-call forms, output mapping |
 | `exec/schedule.rs` | `run_function_imperative` — transition evaluation, side-effects |
-| `exec/dataflow.rs` | `run_function_dataflow` — topo-sort, level-parallel scheduling |
+| `exec/dataflow.rs` | `run_function_dataflow` — topo-sort, level-sequential scheduling (within-level parallelism is future work) |
 | `exec/function.rs` | `FunctionRunner` — per-invocation dispatch, mode detection, depth limit |
+| `exec/system.rs` | `render_function_system` — single source of truth for function-entry system-prompt rendering (consumed by both imperative and dataflow scheduling paths) |
 | `exec/workflow.rs` | `WorkflowRuntime` — top-level entry point, workflow-state initialisation |
 | `exec/agent.rs` | `AgentExecutor` trait, `AgentRequest`, `AgentResponse` — agent seam for testing |
 | `cue_integration.rs` | `MechTask` (`cue::TaskNode`) and `MechStore` (`cue::TaskStore`) — bridges mech to cue orchestration |
@@ -255,10 +256,14 @@ all tests hermetic and fast — no network, no real models.
 **Cue integration:** `MechTask` implements `cue::TaskNode` as a leaf-only task.
 `forced_assessment` always returns `TaskPath::Leaf`. `execute_leaf` runs
 `WorkflowRuntime` over the named function and maps `MechError` to `TaskOutcome`.
-When `set_assessment` stores an escalated model (Sonnet or Opus), `execute_leaf`
-wraps the executor with `EscalatingExecutor` to override the model at the
-workflow/function level while preserving block-level agent configs. `MechStore`
-is a minimal `HashMap`-backed `TaskStore` for leaf-only scenarios.
+Escalation fires when the assessment-selected model differs from the workflow
+default (i.e. `task.model != workflow_default`); when no workflow default is
+declared (`workflow_default = None`, e.g. the workflow uses `agent: "$ref:#named_config"`)
+escalation is disabled because there is no comparable model to diverge from.
+When escalation fires, `execute_leaf` wraps the executor with `EscalatingExecutor`
+to override the model at the workflow/function level while preserving block-level
+agent configs. `MechStore` is a minimal `HashMap`-backed `TaskStore` for
+leaf-only scenarios.
 
 See [docs/MECH_SPEC.md](docs/MECH_SPEC.md) for the workflow format, §11 for the
 cue integration design, and [docs/STATUS.md](docs/STATUS.md) for implementation
@@ -297,7 +302,7 @@ failures through retry, escalation, and re-decomposition.
 | `agent/wire.rs` | Wire format types for structured agent output |
 | `knowledge.rs` | `ResearchQuery` tool (vault gap-filling pipeline), vault integration |
 | `state.rs` | `EpicState` — task tree and session state, JSON persistence |
-| `events.rs` | `Event` enum (24 variants), `EventLog` (append-only), `EventSubscription`, `From<CueEvent>` adapter |
+| `events.rs` | `Event` enum (25 variants), `EventLog` (append-only), `EventSubscription`, `From<CueEvent>` adapter |
 | `config/mod.rs` | `EpicConfig`, model config, vault config |
 | `config/project.rs` | `ProjectConfig` — verification steps from `epic.toml` |
 | `init.rs` | Interactive project setup (detect build system, generate config) |
@@ -347,7 +352,7 @@ Key types and functions to start navigating the codebase. Names are greppable.
 | Tool dispatch | `execute_tool()` | `reel/reel/src/tools.rs` |
 | Vault operations | `Vault::bootstrap()`, `Vault::record()`, `Vault::query()`, `Vault::reorganize()` | `vault/vault/src/lib.rs` |
 | Generic orchestration | `cue::Orchestrator::run()` | `cue/src/orchestrator.rs` |
-| TaskNode trait | `cue::TaskNode` (28 methods) | `cue/src/traits.rs` |
+| TaskNode trait | `cue::TaskNode` (30 methods) | `cue/src/traits.rs` |
 | TaskStore trait | `cue::TaskStore` | `cue/src/traits.rs` |
 | Epic store (TaskStore impl) | `EpicStore::from_state()` | `epic/src/store.rs` |
 | Epic task (TaskNode impl) | `EpicTask<A>` | `epic/src/task/node_impl.rs` |
@@ -355,7 +360,7 @@ Key types and functions to start navigating the codebase. Names are greppable.
 | Branch decisions | `EpicTask::verify_branch()`, `EpicTask::design_fix()` | `epic/src/task/node_impl.rs` |
 | Research pipeline | `ResearchQuery` (ToolHandler impl) | `epic/src/knowledge.rs` |
 | State persistence | `EpicState::save()`, `EpicState::load()` | `epic/src/state.rs` |
-| Workflow load | `WorkflowLoader::load()` | `mech/src/loader.rs` |
+| Workflow load | `load_workflow()` | `mech/src/loader/mod.rs` |
 | Run mech workflow | `WorkflowRuntime::run()` | `mech/src/exec/workflow.rs` |
 | Mech cue integration | `MechTask`, `MechStore` | `mech/src/cue_integration.rs` |
 

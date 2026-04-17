@@ -149,41 +149,14 @@ impl<'w> FunctionRunner<'w> {
         let mode = detect_mode(function);
 
         // Create a fresh conversation per function invocation (§4.6 rule 1).
-        // Resolve system prompt: function override beats workflow default.
-        let system_source = function.system.as_deref().or_else(|| {
-            self.workflow
-                .document()
-                .workflow
-                .as_ref()
-                .and_then(|w| w.system.as_deref())
-        });
-        // System prompts are template strings; render against the current
-        // context namespaces. The prompt executor also renders the system
-        // prompt independently (for the AgentRequest), but the conversation
-        // needs the rendered form as its first message.
-        let rendered_system = match system_source {
-            Some(src) => {
-                let ns = ctx.namespaces();
-                let tmpl =
-                    self.workflow
-                        .template(src)
-                        .ok_or_else(|| MechError::InternalInvariant {
-                            message: format!(
-                                "system template `{src}` should have been interned at load time"
-                            ),
-                        })?;
-                Some(tmpl.render(&ns)?)
-            }
-            None => None,
-        };
-
+        // The system prompt is rendered inside each scheduler entry point
+        // (`run_function_imperative` / `run_function_dataflow`) so both
+        // paths render exactly once and neither relies on the conversation
+        // slot for routing. The slot is left empty here; schedulers pass
+        // the rendered value to `execute_prompt_block` via an explicit
+        // `system: Option<&str>` parameter.
         let compaction = resolve_compaction(self.workflow.document(), function);
-
-        let mut conversation = match rendered_system {
-            Some(sys) => Conversation::with_system(sys),
-            None => Conversation::new(),
-        }
-        .with_compaction(compaction);
+        let mut conversation = Conversation::new().with_compaction(compaction);
 
         match mode {
             ExecutionMode::Imperative => {
@@ -732,9 +705,9 @@ functions:
         assert_eq!(out["resolved"], json!(true));
     }
 
-    // ---- D13: Conversation management at function level -------------------
+    // ---- Conversation management at function level ----------------------
 
-    // D13/T2: Call block's callee sees empty history (fresh conversation).
+    // Call block's callee sees empty history (fresh conversation).
     #[test]
     fn call_block_callee_sees_empty_history() {
         // prompt (a) → call (b) → prompt (c)
@@ -836,8 +809,102 @@ functions:
         );
     }
 
-    // D13/T3: Compaction config is wired through FunctionRunner.
-    // Actual compaction trigger count is asserted in schedule-level tests
+    // System must be rendered exactly once at function entry and delivered
+    // to the agent through AgentRequest.system. It must NOT be duplicated into
+    // AgentRequest.history (which would cause executors that prepend system to
+    // history to see it twice). And on subsequent prompt blocks within the
+    // same function, the system must remain stable (consumed from the
+    // conversation, not re-rendered).
+    #[test]
+    fn system_is_set_on_conversation_and_not_duplicated_into_history() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    system: "helping {{input.user}}"
+    blocks:
+      a:
+        prompt: "step a"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        transitions:
+          - goto: b
+      b:
+        prompt: "step b"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+"#;
+        let wf = load(yaml);
+        let ws = WorkflowState::from_declarations(&BTreeMap::new()).unwrap();
+
+        let captured: std::sync::Arc<Mutex<Vec<AgentRequest>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let cap = std::sync::Arc::clone(&captured);
+        struct CapturingAgent {
+            requests: std::sync::Arc<Mutex<Vec<AgentRequest>>>,
+            responses: Mutex<Vec<JsonValue>>,
+        }
+        impl AgentExecutor for CapturingAgent {
+            fn run<'a>(
+                &'a self,
+                request: AgentRequest,
+            ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
+                self.requests.lock().unwrap().push(request);
+                let output = self.responses.lock().unwrap().remove(0);
+                Box::pin(async move {
+                    Ok(AgentResponse {
+                        output,
+                        messages: vec![],
+                    })
+                })
+            }
+        }
+        let agent = CapturingAgent {
+            requests: cap,
+            responses: Mutex::new(vec![json!({ "val": "A" }), json!({ "result": "B" })]),
+        };
+        let runner = FunctionRunner::new(&wf, &agent, ws);
+        run_blocking(runner.run_function("f", json!({ "user": "ada" }))).unwrap();
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            2,
+            "expected exactly 2 agent requests, got {}",
+            reqs.len()
+        );
+        // Both prompt blocks see the same rendered system.
+        assert_eq!(reqs[0].system.as_deref(), Some("helping ada"));
+        assert_eq!(reqs[1].system.as_deref(), Some("helping ada"));
+        // Cross-check: across all requests in this invocation the agent must
+        // have observed exactly one distinct, non-empty system string. Multiple
+        // distinct strings would mean the system was re-rendered (potentially
+        // with a different context) somewhere downstream.
+        let distinct: std::collections::HashSet<&str> =
+            reqs.iter().filter_map(|r| r.system.as_deref()).collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "expected exactly one distinct rendered system across requests, got {distinct:?}"
+        );
+        // System must NOT appear in history — it travels via .system only.
+        for (i, r) in reqs.iter().enumerate() {
+            for m in &r.history {
+                assert_ne!(
+                    m.role,
+                    crate::conversation::Role::System,
+                    "request {i} history must not contain a System message"
+                );
+            }
+        }
+    }
+
+    // Compaction config is wired through FunctionRunner. Actual compaction
+    // trigger count is asserted in schedule-level tests
     // (schedule::tests::compaction_hook_invoked_at_threshold).
     #[test]
     fn compaction_config_wired_through_runner() {

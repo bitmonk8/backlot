@@ -46,7 +46,18 @@ pub(crate) fn inferred_terminals(func: &FunctionDef) -> Vec<String> {
 
 // ---- Constants ------------------------------------------------------------
 
-pub(crate) const RESERVED_BLOCK_NAMES: &[&str] = &["input", "output", "context", "workflow"];
+// Reserved names cover two distinct concerns:
+//   1. The 6 CEL namespaces bound by `cel::Namespaces::to_context`
+//      (`input`, `context`, `workflow`, `block`, `blocks`, `meta`). A block
+//      named after any of them silently shadows the runtime namespace in
+//      transition guards and templates.
+//   2. The synthetic `output` field, an extra variable bound by
+//      `build_post_block_namespaces` for transition-guard / set_context /
+//      set_workflow expressions.
+// The reserved list MUST cover all 7 names (6 namespaces + `output`).
+pub(crate) const RESERVED_BLOCK_NAMES: &[&str] = &[
+    "input", "output", "context", "workflow", "block", "blocks", "meta",
+];
 pub(crate) const VALID_GRANTS: &[&str] = &["tools", "write", "network"];
 pub(crate) const VALID_JSON_TYPES: &[&str] = &[
     "string", "number", "integer", "boolean", "array", "object", "null",

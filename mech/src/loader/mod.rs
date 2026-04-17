@@ -21,6 +21,13 @@
 //! let wf = load_workflow_str(yaml)?;
 //! ```
 //!
+//! Load-time warnings (non-fatal advisories such as
+//! [`LoadWarning::CompactionPlaceholder`]) are emitted via
+//! `tracing::warn!` for production observability — callers must install a
+//! `tracing` subscriber to see them. Tests use [`collect_load_warnings`]
+//! against a parsed document to inspect the same advisories
+//! programmatically.
+//!
 //! The legacy [`WorkflowLoader`] struct is still available but new code should
 //! prefer the free functions.
 
@@ -41,10 +48,38 @@ use crate::workflow::{Workflow, WorkflowInner};
 // Free-function API
 // ---------------------------------------------------------------------------
 
+/// A non-fatal advisory emitted during workflow load.
+///
+/// Surfaced via `tracing::warn!` for production observability — callers
+/// must install a `tracing` subscriber to see them. Tests inspect the
+/// same advisories programmatically via [`collect_load_warnings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadWarning {
+    /// Workflow- or function-level `compaction:` is configured but the
+    /// runtime compaction strategy is a placeholder no-op. The declared
+    /// scope (`"workflow-level"` or `"function-level: <name>"`) is
+    /// included for diagnostics.
+    CompactionPlaceholder { scope: String },
+}
+
+impl std::fmt::Display for LoadWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CompactionPlaceholder { scope } => write!(
+                f,
+                "{scope} `compaction` is configured but compaction is not implemented (placeholder). The hook only increments a counter; messages are NOT summarized. See docs/MECH_SPEC.md §4.6."
+            ),
+        }
+    }
+}
+
 /// Load, parse, and validate a workflow from disk.
 ///
 /// Pipeline: read file → parse YAML → build schema registry → validate →
 /// infer function outputs → compile CEL expressions and templates.
+///
+/// Load-time advisories are emitted via `tracing::warn!`; install a
+/// `tracing` subscriber to capture them.
 pub fn load_workflow(path: impl AsRef<Path>) -> MechResult<Workflow> {
     load_workflow_with(path, &AnyModel)
 }
@@ -59,17 +94,17 @@ pub fn load_workflow_with(
         path: path.to_path_buf(),
         source: e,
     })?;
-    load_impl(&source, Some(path.to_path_buf()), models)
+    load_impl(&source, Some(path.to_path_buf()), models).map(|(wf, _)| wf)
 }
 
 /// Load a workflow from a YAML string.
 pub fn load_workflow_str(yaml: &str) -> MechResult<Workflow> {
-    load_impl(yaml, None, &AnyModel)
+    load_impl(yaml, None, &AnyModel).map(|(wf, _)| wf)
 }
 
 /// Load a workflow from a YAML string with a custom model checker.
 pub fn load_workflow_str_with(yaml: &str, models: &dyn ModelChecker) -> MechResult<Workflow> {
-    load_impl(yaml, None, models)
+    load_impl(yaml, None, models).map(|(wf, _)| wf)
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +153,7 @@ fn load_impl(
     yaml: &str,
     source_path: Option<PathBuf>,
     models: &dyn ModelChecker,
-) -> MechResult<Workflow> {
+) -> MechResult<(Workflow, Vec<LoadWarning>)> {
     // 1. Parse YAML.
     let mut file = parse_workflow(yaml).map_err(|e| MechError::YamlParse {
         path: source_path.clone(),
@@ -160,18 +195,39 @@ fn load_impl(
     // 4. Infer function output schemas (`output: infer` / omitted).
     infer_function_outputs(&mut file)?;
 
+    // The spec describes LLM-based summarization at a token budget; today
+    // the conversation compaction hook is a placeholder no-op that only
+    // increments a counter. Mirror compaction-related advisories through
+    // `tracing::warn!` for production observability. Tests inspect the
+    // same advisories via `collect_load_warnings` against the parsed
+    // document. (See `Conversation::check_compaction` and
+    // `docs/MECH_SPEC.md` §4.6.)
+    let warnings = collect_load_warnings(&file);
+    let path_label = source_path
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<inline>".to_string());
+    for w in &warnings {
+        match w {
+            LoadWarning::CompactionPlaceholder { scope } => {
+                tracing::warn!(workflow = %path_label, scope = %scope, "{w}");
+            }
+        }
+    }
+
     // 5. Compile every CEL guard and template in the workflow.
     let mut cel_expressions: BTreeMap<String, Arc<CelExpression>> = BTreeMap::new();
     let mut templates: BTreeMap<String, Arc<Template>> = BTreeMap::new();
     compile_all(&file, &mut cel_expressions, &mut templates)?;
 
-    Ok(Workflow::new(WorkflowInner {
+    let workflow = Workflow::new(WorkflowInner {
         document: file,
         source_path,
         schemas: registry,
         cel_expressions,
         templates,
-    }))
+    });
+    Ok((workflow, warnings))
 }
 
 fn compile_all(
@@ -179,14 +235,10 @@ fn compile_all(
     cel_expressions: &mut BTreeMap<String, Arc<CelExpression>>,
     templates: &mut BTreeMap<String, Arc<Template>>,
 ) -> MechResult<()> {
-    // Workflow-level `system` is a template string (spec §7) and can contain
-    // `{{...}}` interpolation. Compile it so the "every template compiled at
-    // load" invariant holds.
     if let Some(system) = file.workflow.as_ref().and_then(|w| w.system.as_ref()) {
         intern_template(system, templates)?;
     }
     for func in file.functions.values() {
-        // Function-level `system` override is also a template string (§7).
         if let Some(system) = &func.system {
             intern_template(system, templates)?;
         }
@@ -225,10 +277,6 @@ fn intern_cel_expression(
     source: &str,
     cel_expressions: &mut BTreeMap<String, Arc<CelExpression>>,
 ) -> MechResult<()> {
-    // Note: `validate.rs` has already compiled every CEL expression via
-    // `CelExpression::compile` and would have surfaced any compile error as
-    // `MechError::WorkflowValidation`. By the time we get here, compilation cannot
-    // fail — but we still recompile to populate the interning cache.
     if cel_expressions.contains_key(source) {
         return Ok(());
     }
@@ -247,6 +295,25 @@ fn intern_template(
     let compiled = Template::compile(source)?;
     templates.insert(source.to_string(), Arc::new(compiled));
     Ok(())
+}
+
+pub fn collect_load_warnings(file: &MechDocument) -> Vec<LoadWarning> {
+    let mut warnings = Vec::new();
+    if let Some(workflow) = &file.workflow {
+        if workflow.compaction.is_some() {
+            warnings.push(LoadWarning::CompactionPlaceholder {
+                scope: "workflow-level".to_string(),
+            });
+        }
+    }
+    for (name, func) in &file.functions {
+        if func.compaction.is_some() {
+            warnings.push(LoadWarning::CompactionPlaceholder {
+                scope: format!("function-level `{name}`"),
+            });
+        }
+    }
+    warnings
 }
 
 #[cfg(test)]

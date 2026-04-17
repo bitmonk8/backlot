@@ -98,7 +98,7 @@
 
 ## Mech
 
-**Phase:** Complete. 372 tests passing (346 unit + 26 integration), zero clippy warnings.
+**Phase:** Complete. 392 tests passing (366 unit + 26 integration), zero clippy warnings.
 
 **Spec** (`docs/MECH_SPEC.md`):
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
@@ -108,7 +108,6 @@
 
 **Next Work:**
 1. **mech-cli real agent executor** — mech-cli's `run` subcommand currently uses `StubAgent` that errors for any workflow with `prompt` or `call` blocks. Needs to be wired to a real `AgentExecutor` (likely via reel) so workflows can execute end-to-end against real models. Blocks gate's mech phase from having any real tests.
-2. **Audit remediation** — begin with importance:high effort:low cluster (9 issues): #295 (C-15), #296 (C-19), #297 (C-21), #298 (C-09), #299 (C-40), #300 (D-03), #301 (D-04), #302 (D-07), #303 (T-04).
 
 **Recent:** Batch NIT fix — 20 issues closed (#12, #13, #17, #21, #25, #26, #27, #29, #31, #40, #41, #42, #49, #53, #57, #60, #291, #292, #293, #294). Removed unused deps (reel, schemars). Renamed `ModelChecker::knows` → `is_known`, `Workflow::file()` → `document()`, `guards` → `cel_expressions`, `normalized_grants` → `expanded_grants`. Extracted `Workflow` to own module. Simplified `WorkflowLoader` to unit struct with free-function API (`load_workflow`, `load_workflow_str`, etc.). Deduplicated context var store setup. Moved `full_example.yaml` to `testdata/`. Split validate tests to submodule. Moved schema validation methods to `schema_check.rs`. Moved graph/CEL helpers to proper modules. Added validation for empty call lists and external `$ref:path`. Fixed temp file leak in loader test.
 

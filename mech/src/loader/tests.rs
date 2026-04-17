@@ -1,4 +1,6 @@
 use super::*;
+use crate::loader::{LoadWarning, collect_load_warnings};
+use crate::schema::parse_workflow;
 
 const FULL_EXAMPLE: &str = include_str!("../../testdata/full_example.yaml");
 
@@ -143,19 +145,23 @@ functions:
     }
 }
 
+// System temp (`%TEMP%`, under `C:\Users\...`) requires elevation for
+// AppContainer traverse ACE grants. Use a project-local gitignored directory
+// (`<workspace>/test_tmp/`) instead so this test stays passing once mech ever
+// loads workflows from sandbox-granted paths. Pattern matches lot/reel/epic.
+fn ensure_project_test_tmp_dir() -> std::path::PathBuf {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("test_tmp");
+    std::fs::create_dir_all(&base).expect("create workspace test_tmp dir");
+    base
+}
+
 #[test]
 fn load_from_disk_roundtrips_via_tempfile() {
-    let path = std::env::temp_dir().join(format!("mech-loader-test-{}.yaml", std::process::id()));
-    let _ = std::fs::remove_file(&path); // clean stale
-
-    struct Cleanup(std::path::PathBuf);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let _cleanup = Cleanup(path.clone());
-
+    let dir = tempfile::TempDir::new_in(ensure_project_test_tmp_dir()).expect("create temp dir");
+    let path = dir.path().join("workflow.yaml");
     std::fs::write(&path, FULL_EXAMPLE.as_bytes()).expect("write yaml");
     let wf = load_workflow(&path).expect("load from disk must succeed");
     assert_eq!(wf.source_path(), Some(path.as_path()));
@@ -572,4 +578,207 @@ fn legacy_workflow_loader_load_str() {
         .load_str(FULL_EXAMPLE)
         .expect("must load via legacy API");
     assert_eq!(wf.document().functions.len(), 2);
+}
+
+// ---- compaction-config warning at load time -----------------------------
+
+// Load-time advisories are exposed as a `Vec<LoadWarning>` via
+// `collect_load_warnings(&parsed_document)`. Tests parse the YAML
+// independently and call the collector directly so they pin the advisory
+// list without needing a `tracing::Subscriber`. The loader pipes the same
+// list through `tracing::warn!` for production observability.
+
+fn count_compaction_warnings_for_scope(warnings: &[LoadWarning], scope: &str) -> usize {
+    warnings
+        .iter()
+        .filter(|w| match w {
+            LoadWarning::CompactionPlaceholder { scope: s } => s.contains(scope),
+        })
+        .count()
+}
+
+#[test]
+fn workflow_level_compaction_emits_load_time_warning() {
+    let yaml = r#"
+workflow:
+  compaction:
+    keep_recent_tokens: 1000
+    reserve_tokens: 1000
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+"#;
+    // Round-trip the YAML through the loader to ensure it is still valid,
+    // then parse + collect warnings against the parsed document.
+    load_workflow_str(yaml).expect("load");
+    let parsed = parse_workflow(yaml).expect("parse");
+    let warnings = collect_load_warnings(&parsed);
+    assert_eq!(
+        count_compaction_warnings_for_scope(&warnings, "workflow-level"),
+        1,
+        "expected exactly one workflow-level compaction warning, got: {warnings:?}"
+    );
+    // No function-level compaction was configured.
+    assert_eq!(
+        count_compaction_warnings_for_scope(&warnings, "function-level"),
+        0
+    );
+}
+
+#[test]
+fn function_level_compaction_emits_load_time_warning() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    compaction:
+      keep_recent_tokens: 500
+      reserve_tokens: 800
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+"#;
+    // Round-trip the YAML through the loader to ensure it is still valid,
+    // then parse + collect warnings against the parsed document.
+    load_workflow_str(yaml).expect("load");
+    let parsed = parse_workflow(yaml).expect("parse");
+    let warnings = collect_load_warnings(&parsed);
+    assert_eq!(
+        count_compaction_warnings_for_scope(&warnings, "function-level `f`"),
+        1,
+        "expected exactly one function-level compaction warning, got: {warnings:?}"
+    );
+    assert_eq!(
+        count_compaction_warnings_for_scope(&warnings, "workflow-level"),
+        0
+    );
+}
+
+#[test]
+fn workflow_without_compaction_emits_no_warning() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+"#;
+    // Round-trip the YAML through the loader to ensure it is still valid,
+    // then parse + collect warnings against the parsed document.
+    load_workflow_str(yaml).expect("load");
+    let parsed = parse_workflow(yaml).expect("parse");
+    let warnings = collect_load_warnings(&parsed);
+    assert!(
+        warnings.is_empty(),
+        "expected no warnings for a workflow without compaction config, got: {warnings:?}"
+    );
+}
+
+// When both workflow- and function-level `compaction:` are configured,
+// both warnings must fire (one of each, neither suppressing the other).
+#[test]
+fn combined_workflow_and_function_compaction_emits_two_warnings() {
+    let yaml = r#"
+workflow:
+  compaction:
+    keep_recent_tokens: 1000
+    reserve_tokens: 1000
+functions:
+  f:
+    input: { type: object }
+    compaction:
+      keep_recent_tokens: 500
+      reserve_tokens: 800
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+"#;
+    // Round-trip the YAML through the loader to ensure it is still valid,
+    // then parse + collect warnings against the parsed document.
+    load_workflow_str(yaml).expect("load");
+    let parsed = parse_workflow(yaml).expect("parse");
+    let warnings = collect_load_warnings(&parsed);
+    assert_eq!(
+        warnings.len(),
+        2,
+        "expected exactly two compaction warnings (one workflow + one function), got: {warnings:?}"
+    );
+    assert_eq!(
+        count_compaction_warnings_for_scope(&warnings, "workflow-level"),
+        1,
+        "expected one workflow-level warning, got: {warnings:?}"
+    );
+    assert_eq!(
+        count_compaction_warnings_for_scope(&warnings, "function-level `f`"),
+        1,
+        "expected one function-level warning, got: {warnings:?}"
+    );
+}
+
+// Two function-level `compaction` configs (no workflow-level) must both
+// emit warnings — pins the loader's `filter` over `find` semantics so a
+// future short-circuit refactor would surface in tests rather than ship.
+#[test]
+fn two_function_level_compactions_emit_two_warnings() {
+    let yaml = r#"
+functions:
+  f1:
+    input: { type: object }
+    compaction:
+      keep_recent_tokens: 500
+      reserve_tokens: 800
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+  f2:
+    input: { type: object }
+    compaction:
+      keep_recent_tokens: 600
+      reserve_tokens: 900
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+"#;
+    load_workflow_str(yaml).expect("load");
+    let parsed = parse_workflow(yaml).expect("parse");
+    let warnings = collect_load_warnings(&parsed);
+    assert_eq!(
+        count_compaction_warnings_for_scope(&warnings, "function"),
+        2,
+        "expected exactly two function-level compaction warnings, got: {warnings:?}"
+    );
 }

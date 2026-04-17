@@ -21,6 +21,7 @@ use crate::error::{MechError, MechResult};
 use crate::exec::agent::AgentExecutor;
 use crate::exec::call::{FunctionExecutor, execute_call_block};
 use crate::exec::prompt::execute_prompt_block;
+use crate::exec::system::render_function_system;
 use crate::schema::{BlockDef, FunctionDef};
 use crate::workflow::Workflow;
 
@@ -167,11 +168,14 @@ pub fn topo_sort_levels(
 /// Execute a single block (prompt or call) and record its output.
 ///
 /// Dataflow blocks are single-turn per §4.6 rule 3: each gets a fresh
-/// conversation with no shared history.
+/// conversation with no shared history. The function's pre-rendered system
+/// prompt is supplied by the caller — it must be rendered exactly once per
+/// function invocation, not per block.
 async fn execute_block(
     workflow: &Workflow,
     function: &FunctionDef,
     block_id: &str,
+    rendered_system: Option<&str>,
     ctx: &mut ExecutionContext,
     agent_executor: &dyn AgentExecutor,
     func_executor: &dyn FunctionExecutor,
@@ -187,6 +191,12 @@ async fn execute_block(
         BlockDef::Prompt(p) => {
             // Each dataflow prompt block gets a fresh single-turn
             // conversation (§4.6 rule 3: data edges do not carry history).
+            // The system prompt was rendered once at function entry by
+            // `run_function_dataflow` and is passed to `execute_prompt_block`
+            // explicitly via the `system` parameter. Each dataflow block runs
+            // with a fresh empty conversation; the `Conversation.system` slot
+            // is intentionally left unset to keep the slot uniformly empty
+            // across schedulers and avoid double-sourcing the system prompt.
             let mut conversation = Conversation::new();
             execute_prompt_block(
                 workflow,
@@ -196,6 +206,7 @@ async fn execute_block(
                 ctx,
                 agent_executor,
                 &mut conversation,
+                rendered_system,
             )
             .await?
         }
@@ -237,6 +248,11 @@ pub async fn run_function_dataflow(
     let reachable = backward_reachable(&function.blocks, &terminals);
     let levels = topo_sort_levels(&function.blocks, &reachable)?;
 
+    // Render the system prompt exactly once per function invocation, mirroring
+    // the FunctionRunner pattern. Passed by reference into each block so the
+    // single-render invariant holds across all execution modes.
+    let rendered_system = render_function_system(workflow, function, ctx)?;
+
     // Execute level by level.
     for level in &levels {
         for block_id in level {
@@ -244,6 +260,7 @@ pub async fn run_function_dataflow(
                 workflow,
                 function,
                 block_id,
+                rendered_system.as_deref(),
                 ctx,
                 agent_executor,
                 func_executor,
@@ -719,5 +736,116 @@ functions:
 
         assert_eq!(out, json!({ "result": 20 }));
         assert_eq!(ctx.get_context("total"), Some(&json!(10)));
+    }
+
+    // Dataflow path must pass a consistent rendered system prompt to every
+    // prompt block via `AgentRequest.system` (every block receives the
+    // same string), and that string must NOT also appear in any block's
+    // `AgentRequest.history` (otherwise executors that prepend system to
+    // history would duplicate it). This pins the visible contract: the
+    // request field is consistent across blocks and history is system-free.
+    // It cannot prove only one render call happened — a counting shim
+    // would be required for that, and the request-field consistency is
+    // the property that actually matters at the executor seam.
+    #[test]
+    fn dataflow_passes_consistent_system_to_each_block_via_request_field() {
+        let yaml = r#"
+workflow:
+  system: "helping {{input.user}} via dataflow"
+functions:
+  f:
+    input: { type: object }
+    output:
+      type: object
+      required: [merged]
+      properties: { merged: { type: string } }
+    blocks:
+      a:
+        prompt: "root"
+        schema:
+          type: object
+          required: [x]
+          properties: { x: { type: integer } }
+      b:
+        prompt: "leaf {{block.a.output.x}}"
+        schema:
+          type: object
+          required: [merged]
+          properties: { merged: { type: string } }
+        depends_on: [a]
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+
+        let captured: std::sync::Arc<std::sync::Mutex<Vec<AgentRequest>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = std::sync::Arc::clone(&captured);
+        struct CapturingAgent {
+            requests: std::sync::Arc<std::sync::Mutex<Vec<AgentRequest>>>,
+            responses: std::sync::Mutex<Vec<JsonValue>>,
+        }
+        impl AgentExecutor for CapturingAgent {
+            fn run<'a>(
+                &'a self,
+                request: AgentRequest,
+            ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
+                self.requests.lock().unwrap().push(request);
+                let output = self.responses.lock().unwrap().remove(0);
+                Box::pin(async move {
+                    Ok(AgentResponse {
+                        output,
+                        messages: vec![],
+                    })
+                })
+            }
+        }
+        let agent = CapturingAgent {
+            requests: cap,
+            responses: std::sync::Mutex::new(vec![json!({ "x": 7 }), json!({ "merged": "ok" })]),
+        };
+
+        let mut ctx = ExecutionContext::new(
+            json!({ "user": "ada" }),
+            json!({ "run_id": "r1" }),
+            &BTreeMap::new(),
+            WorkflowState::from_declarations(&BTreeMap::new()).unwrap(),
+        )
+        .unwrap();
+
+        let out = run_blocking(run_function_dataflow(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &NoFuncExecutor,
+        ))
+        .unwrap();
+        assert_eq!(out, json!({ "merged": "ok" }));
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 2, "expected one request per prompt block");
+        let expected = "helping ada via dataflow";
+        for (i, r) in reqs.iter().enumerate() {
+            assert_eq!(
+                r.system.as_deref(),
+                Some(expected),
+                "request {i}: system must be the rendered function-entry value"
+            );
+            for m in &r.history {
+                assert_ne!(
+                    m.role,
+                    crate::conversation::Role::System,
+                    "request {i}: history must not duplicate the system role"
+                );
+            }
+        }
+        let distinct: std::collections::HashSet<&str> =
+            reqs.iter().filter_map(|r| r.system.as_deref()).collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "expected exactly one distinct rendered system string across all requests, got {distinct:?}"
+        );
     }
 }

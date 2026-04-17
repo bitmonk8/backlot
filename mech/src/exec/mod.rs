@@ -13,6 +13,7 @@ pub mod dataflow;
 pub mod function;
 pub mod prompt;
 pub mod schedule;
+pub mod system;
 pub mod workflow;
 
 pub use agent::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};

@@ -310,6 +310,16 @@ fn tag_executor_error(err: MechError, block_id: &str) -> MechError {
 /// conversation history (§4.6). The prompt/response and any tool
 /// call/result messages from the agent loop are appended after each
 /// execution.
+///
+/// The `system` parameter is the authoritative pre-rendered system
+/// prompt for this invocation. It is rendered exactly once per function
+/// entry by [`FunctionRunner`] / [`run_function_dataflow`] via
+/// [`crate::exec::system::render_function_system`] and passed in
+/// explicitly so the agent receives system through `AgentRequest.system`
+/// only — never duplicated into the message history. Pass `None` when
+/// the workflow / function declared no system. The conversation's own
+/// `system` slot is for the renderer's tracking only and is NOT consulted
+/// here.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_prompt_block(
     workflow: &Workflow,
@@ -319,6 +329,7 @@ pub async fn execute_prompt_block(
     ctx: &mut ExecutionContext,
     executor: &dyn AgentExecutor,
     conversation: &mut Conversation,
+    system: Option<&str>,
 ) -> MechResult<JsonValue> {
     let file = workflow.document();
 
@@ -330,15 +341,14 @@ pub async fn execute_prompt_block(
     let namespaces = ctx.namespaces();
     let rendered_prompt = render_template(workflow, &block.prompt, &namespaces)?;
 
-    // 3. Render the system prompt (function override beats workflow default).
-    let system_source = function
-        .system
-        .as_deref()
-        .or_else(|| file.workflow.as_ref().and_then(|w| w.system.as_deref()));
-    let rendered_system = match system_source {
-        Some(src) => Some(render_template(workflow, src, &namespaces)?),
-        None => None,
-    };
+    // 3. The explicit `system` parameter is the rendered system prompt.
+    //    Both callers (`FunctionRunner` for imperative mode and the
+    //    dataflow scheduler for dataflow blocks) render once via
+    //    `render_function_system` and pass the result here. We do NOT
+    //    fall back to `conversation.system()` — the conversation slot is
+    //    for the renderer's own tracking, not a source-of-truth for this
+    //    block.
+    let rendered_system = system.map(str::to_owned);
 
     // 4. Resolve the output schema via the compiled registry.
     let registry = workflow.schemas();
@@ -547,6 +557,7 @@ functions:
             &mut ctx,
             &agent,
             &mut Conversation::new(),
+            None,
         ))
         .expect("execute");
 
@@ -576,6 +587,7 @@ functions:
             &mut ctx,
             &agent,
             &mut Conversation::new(),
+            None,
         ))
         .unwrap();
 
@@ -602,6 +614,7 @@ functions:
             &mut ctx,
             &agent,
             &mut Conversation::new(),
+            None,
         ))
         .expect_err("schema mismatch must error");
         match err {
@@ -913,6 +926,7 @@ functions:
             &mut ctx,
             &agent,
             &mut Conversation::new(),
+            None,
         ))
         .unwrap();
 
@@ -952,10 +966,14 @@ functions:
         }
     }
 
-    // ---- F6/T1: system prompt rendering -----------------------------------
+    // ---- system prompt sourcing -----------------------------------------
 
+    // The `system` parameter is authoritative — `execute_prompt_block`
+    // forwards it verbatim to the agent and does NOT inspect
+    // `conversation.system()`. Function-entry rendering is covered
+    // separately in `function.rs::tests`.
     #[test]
-    fn system_prompt_is_rendered_against_context() {
+    fn system_parameter_is_forwarded_to_agent_request() {
         let yaml = r#"
 functions:
   f:
@@ -985,12 +1003,54 @@ functions:
             &mut ctx,
             &agent,
             &mut Conversation::new(),
+            Some("helping ada"),
         ))
         .unwrap();
         assert_eq!(agent.last().system.as_deref(), Some("helping ada"));
     }
 
-    // ---- F6/T2: LlmCallFailure block tagging ------------------------------
+    // `system: None` produces `AgentRequest.system: None`.
+    // `execute_prompt_block` does NOT re-render from `function.system`
+    // and does NOT fall back to `conversation.system()`.
+    #[test]
+    fn system_is_none_when_caller_passes_none() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    system: "this should not appear"
+    blocks:
+      classify:
+        prompt: "go"
+        schema:
+          type: object
+          required: [category]
+          properties: { category: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!(),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        let agent = FakeAgent::fixed(json!({ "category": "x" }));
+        // Even if the conversation carries a system slot, the parameter
+        // wins. Passing `None` here must produce `None` on the request.
+        let mut conv = Conversation::with_system("this should also not appear");
+        run_blocking(execute_prompt_block(
+            &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
+        ))
+        .unwrap();
+        assert_eq!(
+            agent.last().system,
+            None,
+            "execute_prompt_block must use the system parameter only; got {:?}",
+            agent.last().system
+        );
+    }
+
+    // ---- LlmCallFailure tagged with the executing block id ---------------
 
     #[test]
     fn llm_call_failure_is_tagged_with_block_id() {
@@ -1018,6 +1078,7 @@ functions:
             &mut ctx,
             &agent,
             &mut Conversation::new(),
+            None,
         ))
         .expect_err("llm failure");
         match err {
@@ -1029,7 +1090,7 @@ functions:
         }
     }
 
-    // ---- F6/T3: $ref:#name schema resolution -------------------------------
+    // ---- $ref:#name schema resolution ---------------------------------------
 
     const SHARED_SCHEMA_YAML: &str = r#"
 workflow:
@@ -1066,6 +1127,7 @@ functions:
             &mut ctx,
             &agent,
             &mut Conversation::new(),
+            None,
         ))
         .unwrap();
         assert_eq!(out, json!({ "category": "ok" }));
@@ -1089,12 +1151,13 @@ functions:
             &mut ctx,
             &agent,
             &mut Conversation::new(),
+            None,
         ))
         .expect_err("bad schema");
         assert!(matches!(err, MechError::SchemaValidationFailure { .. }));
     }
 
-    // ---- F6/T4: agent cascade error paths ---------------------------------
+    // ---- Agent cascade error paths ----------------------------------------
 
     #[test]
     fn agent_ref_unknown_name_errors() {
@@ -1134,7 +1197,7 @@ functions:
         assert!(m.contains("malformed agent $ref"), "case c: {m}");
     }
 
-    // ---- F6/T5: multi-namespace template ----------------------------------
+    // ---- Prompt template can read all four namespaces ---------------------
 
     #[test]
     fn rendered_prompt_can_read_all_namespaces() {
@@ -1203,6 +1266,7 @@ functions:
             &mut ctx,
             &first_agent,
             &mut Conversation::new(),
+            None,
         ))
         .unwrap();
 
@@ -1215,6 +1279,7 @@ functions:
             &mut ctx,
             &second_agent,
             &mut Conversation::new(),
+            None,
         ))
         .unwrap();
         let rendered = second_agent.last().prompt;
@@ -1224,7 +1289,7 @@ functions:
         assert!(rendered.contains("b=FIRST"), "got: {rendered}");
     }
 
-    // ---- F6/T6: default request when no agent configured ------------------
+    // ---- Default request when no agent configured ------------------------
 
     #[test]
     fn default_request_when_no_agent_configured() {
@@ -1244,6 +1309,7 @@ functions:
             &mut ctx,
             &agent,
             &mut Conversation::new(),
+            None,
         ))
         .unwrap();
         let req = agent.last();
@@ -1299,6 +1365,7 @@ functions:
                 &mut ctx,
                 &agent,
                 &mut Conversation::new(),
+                None,
             ))
             .expect("conforming output must pass");
             assert_eq!(out, json!({ "inner": { "value": 5 } }));
@@ -1316,6 +1383,7 @@ functions:
                 &mut ctx,
                 &agent,
                 &mut Conversation::new(),
+                None,
             ))
             .expect_err("non-conforming output must fail");
             assert!(

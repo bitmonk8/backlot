@@ -88,6 +88,65 @@ functions:
     assert_err_contains(&r, "reserved");
 }
 
+// `RESERVED_BLOCK_NAMES` must cover every namespace the runtime binds, or a
+// block with a colliding name would silently shadow that namespace in guards
+// and templates. One regression test per name (`block`, `blocks`, `meta`)
+// pins coverage of the three namespaces most likely to be omitted.
+
+#[test]
+fn rejects_reserved_block_name_block() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      block:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [a]
+          properties: { a: { type: string } }
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "reserved");
+}
+
+#[test]
+fn rejects_reserved_block_name_blocks() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      blocks:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [a]
+          properties: { a: { type: string } }
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "reserved");
+}
+
+#[test]
+fn rejects_reserved_block_name_meta() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      meta:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [a]
+          properties: { a: { type: string } }
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "reserved");
+}
+
 // ---- Schema validity ----
 
 #[test]

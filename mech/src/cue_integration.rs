@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value as JsonValue;
 
@@ -267,11 +268,16 @@ impl cue::TaskNode for MechTask {
     }
 
     async fn execute_leaf(&mut self, _ctx: &TreeContext) -> TaskOutcome {
+        // Panicking inside an async task aborts the entire Orchestrator::run
+        // future and takes down sibling tasks. Surface the misconfiguration as a
+        // task-level failure instead so the orchestrator can record it and continue.
         let agent = match &self.agent {
             Some(a) => Arc::clone(a),
-            None => panic!(
-                "MechTask::execute_leaf: agent not bound — call bind_runtime or pass agent at construction"
-            ),
+            None => {
+                return TaskOutcome::Failed {
+                    reason: "MechTask::execute_leaf: agent not bound (call bind_runtime or pass agent at construction)".into(),
+                };
+            }
         };
 
         // Use escalation executor if assessment selected a model that differs from the workflow default.
@@ -394,6 +400,12 @@ pub struct MechStore {
     root_id: Option<TaskId>,
     next_id: u64,
     agent: Option<Arc<dyn AgentExecutor>>,
+    /// Counter incremented on every `save()` call. Wrapped in `Arc` so it
+    /// can be cloned out of the store before the orchestrator consumes the
+    /// store via `Orchestrator::new` — the test seam in
+    /// [`MechStore::save_call_count_snapshot`] reads through the same `Arc`
+    /// after the run completes.
+    save_call_count: Arc<AtomicUsize>,
 }
 
 impl MechStore {
@@ -404,6 +416,7 @@ impl MechStore {
             root_id: None,
             next_id: 0,
             agent: None,
+            save_call_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -437,6 +450,20 @@ impl MechStore {
         self.agent = Some(agent);
         self
     }
+
+    /// Number of times `save()` has been invoked on this store. Useful as a
+    /// test seam when the store is consumed by an `Orchestrator`: clone the
+    /// underlying counter via this accessor before handing the store off so
+    /// the post-run assertion can still read it.
+    pub fn save_call_count_snapshot(&self) -> usize {
+        self.save_call_count.load(Ordering::SeqCst)
+    }
+
+    /// Shared handle to the save-call counter. Lets a caller observe save
+    /// invocations after the store has been moved into an `Orchestrator`.
+    pub fn save_call_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.save_call_count)
+    }
 }
 
 impl Default for MechStore {
@@ -469,8 +496,15 @@ impl cue::TaskStore for MechStore {
     fn set_root_id(&mut self, id: TaskId) {
         self.root_id = Some(id);
     }
+    /// Always returns `Err` with the same descriptive message
+    /// `"MechStore checkpoint persistence not implemented"`. Increments
+    /// [`MechStore::save_call_counter`] on every invocation so callers
+    /// (and tests) can observe how many times the orchestrator attempted
+    /// a checkpoint. Persistence is out of scope until a real
+    /// implementation lands.
     fn save(&self, _path: &Path) -> anyhow::Result<()> {
-        Ok(())
+        self.save_call_count.fetch_add(1, Ordering::SeqCst);
+        anyhow::bail!("MechStore checkpoint persistence not implemented")
     }
 
     fn bind_runtime(&mut self) {
@@ -533,6 +567,19 @@ mod tests {
 
     fn load(yaml: &str) -> Arc<Workflow> {
         Arc::new(WorkflowLoader::new().load_str(yaml).expect("load"))
+    }
+
+    /// Mirror of `loader::tests::ensure_project_test_tmp_dir`.
+    /// System temp (under `C:\Users\...`) requires elevation for
+    /// AppContainer traverse ACE grants; tests use a project-local
+    /// gitignored `<workspace>/test_tmp/` directory instead.
+    fn ensure_project_test_tmp_dir() -> std::path::PathBuf {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("test_tmp");
+        std::fs::create_dir_all(&base).expect("create workspace test_tmp dir");
+        base
     }
 
     struct SeqAgent {
@@ -842,9 +889,11 @@ functions:
         );
     }
 
+    // Regression: a missing agent must surface as a task-level failure instead
+    // of panicking inside the async task. A panic here would abort the entire
+    // Orchestrator::run future and take down sibling tasks.
     #[test]
-    #[should_panic(expected = "agent not bound")]
-    fn execute_leaf_panics_when_no_agent() {
+    fn execute_leaf_returns_failed_when_no_agent() {
         let wf = load(SIMPLE_YAML);
         let mut task = MechTask::new(
             TaskId(0),
@@ -864,7 +913,16 @@ functions:
             children: vec![],
             checkpoint_guidance: None,
         };
-        run_blocking(task.execute_leaf(&ctx));
+        let outcome = run_blocking(task.execute_leaf(&ctx));
+        match outcome {
+            TaskOutcome::Failed { reason } => {
+                assert!(
+                    reason.contains("agent not bound"),
+                    "expected reason to mention agent not bound, got: {reason}"
+                );
+            }
+            other => panic!("expected TaskOutcome::Failed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1081,5 +1139,83 @@ functions:
         store.agent = Some(Arc::clone(&agent));
         store.bind_runtime();
         assert!(store.get(id).unwrap().agent.is_some());
+    }
+
+    // Regression: MechStore::save must surface a loud error rather than
+    // silently no-op'ing — checkpoint persistence is not implemented and
+    // callers configuring checkpoints need to know.
+    #[test]
+    fn mech_store_save_returns_err_with_sentinel_message() {
+        use cue::TaskStore;
+        let store = MechStore::new();
+        let result = store.save(std::path::Path::new("<unused>"));
+        let err = result.expect_err("MechStore::save must return Err");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("MechStore checkpoint persistence not implemented"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    // Every call to `MechStore::save` returns the same descriptive
+    // `Err` message and increments the invocation counter. Pinning
+    // message stability across repeated calls — orchestrators that log on
+    // every checkpoint cycle see a consistent diagnostic, and callers
+    // that want to suppress noise can do so themselves.
+    #[test]
+    fn mech_store_save_message_is_stable_across_calls() {
+        use cue::TaskStore;
+        let store = MechStore::new();
+        let path = std::path::Path::new("<unused>");
+
+        let mut messages: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            let err = store.save(path).expect_err("save must return Err");
+            messages.push(format!("{err}"));
+        }
+        for m in &messages {
+            assert!(
+                m.contains("MechStore checkpoint persistence not implemented"),
+                "every call must carry the descriptive message, got: {m}"
+            );
+        }
+        assert_eq!(messages[0], messages[1]);
+        assert_eq!(messages[1], messages[2]);
+        assert_eq!(store.save_call_count_snapshot(), 3);
+    }
+
+    // Integration coverage for cue Orchestrator + MechStore + state_path.
+    // The orchestrator calls `MechStore::save` on every checkpoint cycle
+    // when `state_path` is set. Asserts (a) the run completes successfully
+    // despite `save` bailing, and (b) `save` was actually invoked — the
+    // shared counter is observed via [`MechStore::save_call_counter`],
+    // cloned out of the store before the orchestrator consumes it.
+    #[test]
+    fn cue_orchestrator_with_state_path_calls_mech_store_save() {
+        let wf = load(SIMPLE_YAML);
+        let agent: Arc<dyn AgentExecutor> =
+            Arc::new(SeqAgent::new(vec![json!({ "greeting": "Hi!" })]));
+        let mut store = MechStore::new().with_agent(agent);
+        let root_id = store.create_root("run main", Arc::clone(&wf), "main", json!({}));
+        // Clone the save-counter handle BEFORE the store moves into the
+        // orchestrator — this is the test seam that lets us observe
+        // checkpoint invocations after the run completes.
+        let save_counter = store.save_call_counter();
+        let (emitter, _events) = EventLog::new();
+        // Use a project-local gitignored path per the workspace AppContainer
+        // rule; the path is never actually written to (save bails before
+        // any I/O), but we still avoid system-temp.
+        let dir = tempfile::TempDir::new_in(ensure_project_test_tmp_dir()).expect("temp dir");
+        let state_path = dir.path().join("checkpoint.json");
+        let mut orchestrator = Orchestrator::new(store, emitter).with_state_path(state_path);
+        assert_eq!(
+            run_blocking(orchestrator.run(root_id)).unwrap(),
+            TaskOutcome::Success,
+            "orchestrator must complete successfully despite save() bail"
+        );
+        assert!(
+            save_counter.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "orchestrator with state_path must have invoked MechStore::save at least once"
+        );
     }
 }

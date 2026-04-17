@@ -83,7 +83,7 @@ How a block fires depends on which inbound edge types it has:
 1. **Backward dependency walk.** Starting from terminal blocks (or blocks targeted by outbound control edges), walk `depends_on` edges backward to identify the reachable subgraph.
 2. **Dead node elimination.** Blocks not reachable backward from any terminal or control-edge target are never executed.
 3. **Topological sort.** Reachable blocks are sorted into execution levels by dependency depth.
-4. **Level-parallel scheduling.** Blocks within the same level (no mutual dependencies) execute concurrently. The executor advances level-by-level.
+4. **Level scheduling.** The executor advances level-by-level. Blocks within the same level (no mutual dependencies) execute sequentially today; within-level parallel execution is future work.
 5. **Multiple sinks.** If multiple terminal blocks exist in a dataflow region, shared upstream blocks execute exactly once.
 
 ### 4.4 Function Calls
@@ -223,7 +223,7 @@ functions:
 
 ### 4.6 Conversation Model
 
-Each function invocation creates a new **conversation** — an ordered message list (system prompt + alternating user/assistant pairs) that is passed to the LLM on each block execution within that function. Conversation history follows **control edges only**. Data edges carry structured output, never conversation history.
+Each function invocation creates a new **conversation** — a system prompt (stored in a dedicated conversation slot, not as a message in the history) plus an ordered list of user/assistant/tool messages that is passed to the LLM on each block execution within that function. Conversation history follows **control edges only**. Data edges carry structured output, never conversation history.
 
 **Core rules:**
 
@@ -239,11 +239,11 @@ Self-loops and backward transitions accumulate conversation history. A block tha
 
 **Implications for mixed CDFG graphs:**
 
-In a function with both control edges and data edges, the conversation follows the control-flow spine. Dataflow blocks that execute in parallel within a level are single-turn — they receive structured data from their dependencies but no conversational context. This avoids nondeterministic message interleaving from parallel execution.
+In a function with both control edges and data edges, the conversation follows the control-flow spine. Dataflow blocks within a level execute sequentially today (within-level parallelism is future work, see §13); each is single-turn, receiving structured data from its dependencies but no conversational context. The single-turn rule is permanent: even when parallel execution lands, dataflow blocks will not share conversation history.
 
 A hybrid block (inbound control edge + inbound data edges, per §4.3) inherits conversation from the control edge that activated it. Its data dependencies contribute structured output only.
 
-**System prompts are layered: workflow default + function override.** The workflow file may declare a default `system` field. Each function may override it with its own `system` field. The resolved system prompt becomes the system message for the function's conversation. System prompts support template variables (`{{input.*}}`, `{{context.*}}`), allowing the caller to parameterize persona.
+**System prompts are layered: workflow default + function override.** The workflow file may declare a default `system` field. Each function may override it with its own `system` field. The resolved system prompt is rendered once at function entry and stored in a dedicated `Conversation.system` slot, separate from the message history. It is delivered to the agent through `AgentRequest.system` (not as the first element of the message list) so executors that prepend system to history themselves do not see it duplicated. System prompts support template variables (`{{input.*}}`, `{{context.*}}`), allowing the caller to parameterize persona.
 
 ```yaml
 workflow:
@@ -265,9 +265,11 @@ functions:
     blocks: { ... }
 ```
 
-If neither the function nor the workflow declares a `system` field, the conversation has no system message. Per-block system prompt variation is not supported — per-block instructions belong in the block's `prompt` template. If a block needs a fundamentally different persona, extract it to a separate function.
+If neither the function nor the workflow declares a `system` field, the conversation's system slot is empty and `AgentRequest.system` is `None`. Per-block system prompt variation is not supported — per-block instructions belong in the block's `prompt` template. If a block needs a fundamentally different persona, extract it to a separate function.
 
 **History compaction.** Long-running functions (especially those with cycles) accumulate conversation history that may exceed the model's context window. Mech provides a token-budget compaction mechanism, modeled after Pi Agent's approach.
+
+> **Implementation status:** Not implemented (placeholder). The hook fires at the configured token threshold and increments a counter, but messages are not summarized. Workflows that configure `compaction` receive a `tracing::warn!` at load time (a `LoadWarning::CompactionPlaceholder` is emitted; the same advisories are also exposed programmatically via the `pub` test seam `mech::loader::collect_load_warnings`). Real LLM-based summarization, custom-function dispatch, and accurate token-budget triggers are future work.
 
 When a function's conversation exceeds a token threshold, compaction fires: older messages are summarized into a synthetic message that replaces them at the head of the conversation. Recent messages (within `keep_recent_tokens`) are preserved verbatim. The summary is generated by an LLM call using a structured format (goal, progress, decisions, key context), and the previous summary is fed as iterative context so information degrades gracefully rather than being hard-truncated.
 
@@ -482,7 +484,7 @@ analyze:
 
 ### 5.4 Block Identity and Naming
 
-Block names are the YAML keys under the `blocks:` map. Names must be valid identifiers: `[a-z][a-z0-9_]*` (lowercase, underscore-separated). Names must be unique within a function. Reserved names: `input`, `output`, `context`, `workflow` (these conflict with CEL namespace variables).
+Block names are the YAML keys under the `blocks:` map. Names must be valid identifiers: `[a-z][a-z0-9_]*` (lowercase, underscore-separated). Names must be unique within a function. Reserved names: `input`, `context`, `workflow`, `block`, `blocks`, `meta`, plus the synthetic `output` (these conflict with CEL namespace variables).
 
 ### 5.5 Agent Configuration
 
@@ -1085,7 +1087,7 @@ Parallel function calls (via `parallel: all|any|n_of_m`) each get their own func
 
 The parent block's `set_context` and `set_workflow` run after the parallel calls complete, in the parent function's scope.
 
-Dataflow blocks within a single function that execute in parallel at the same topological level share the function's context. Since `set_context` writes happen after block execution, and parallel blocks cannot have data dependencies on each other, there is no write conflict — each block's writes are applied in an arbitrary order after all blocks at that level complete. If two parallel blocks write the same context variable, the result is nondeterministic. Load-time validation flags this as a **warning**.
+Dataflow blocks within a single function share the function's context. Today the scheduler runs blocks within a topological level sequentially, so write ordering is deterministic (declaration order). Within-level parallelism is future work; the load-time **warning** when two sibling blocks write the same context variable is preserved as future-proofing for that work — once parallel execution lands, two sibling writes to the same variable would resolve in completion order (nondeterministic).
 
 ## 10. Validation & Error Handling
 
@@ -1894,7 +1896,7 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 **Scope:** Implement `MechTask` as a `cue::TaskNode`. A mech function invocation = one cue leaf task. Bridge mech's runtime errors to cue's `TaskOutcome`. Handle cue's model escalation by re-running with a higher-tier agent config (the function's agent cascade supplies the base; escalation bumps the model tier). Expose mech workflows to epic/other cue consumers.
 
 **Tests first:**
-- `MechTask` implements all 28 `TaskNode` methods; compile check.
+- `MechTask` implements all 30 `TaskNode` methods; compile check.
 - Running a mech workflow via `cue::Orchestrator<MechStore, _>` completes successfully for the §12 example.
 - Task failure maps to the right `TaskOutcome` variant.
 - Model escalation retries with a higher-tier model; final attempt's model matches expectation.
@@ -2485,7 +2487,7 @@ Author declares:   workflow.output → "final_report"
 Executor does:
   1. Walk depends_on backward → build DAG
   2. Topo-sort → find execution levels
-  3. Execute level-by-level, parallelising within each level
+  3. Execute level-by-level (within-level parallelism is future work; today blocks within a level run sequentially)
   4. Return the output of the declared sink(s)
 ```
 

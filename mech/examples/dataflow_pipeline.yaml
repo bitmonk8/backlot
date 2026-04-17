@@ -1,8 +1,12 @@
 # dataflow_pipeline.yaml
 #
 # Demonstrates dataflow mode: blocks declare what they depend on via
-# `depends_on:`, and the runtime executes them in topological order,
-# running independent blocks in parallel.
+# `depends_on:`, and the runtime executes them in topological order.
+#
+# Current scheduler: blocks are executed level-by-level, sequentially within
+# each level. Within-level parallel execution is future work — the spec
+# (§4.3) describes the intended level-parallel model, but the current
+# implementation runs sibling blocks one after another.
 #
 # DAG shape:
 #
@@ -10,12 +14,14 @@
 #   ├── analyze   (depends_on: [extract])
 #   └── summarize (depends_on: [extract])
 #
-# `analyze` and `summarize` are independent — the runtime may run them
-# concurrently once `extract` completes.
+# `analyze` and `summarize` are independent. Once parallel scheduling lands,
+# they will run concurrently once `extract` completes; today they run
+# sequentially in topological order.
 #
 # Key concepts shown:
 #   - `depends_on:` for DAG-based scheduling (dataflow mode)
-#   - parallel execution of independent sibling blocks
+#   - sequential execution of independent sibling blocks within a level
+#     (within-level parallelism is future work)
 #   - referencing upstream block output via `blocks.<name>.output.*`
 #   - explicit function `output:` schema (avoids inference ambiguity when
 #     multiple terminal blocks exist with different shapes)
@@ -64,7 +70,8 @@ functions:
         # No `depends_on` — this is the source node in the DAG.
 
       # Stage 2a: deep analysis of the extracted facts.
-      # Depends on `extract`; can run in parallel with `summarize`.
+      # Depends on `extract`. (Today the scheduler runs siblings sequentially
+      # within a level; within-level parallelism is future work.)
       analyze:
         prompt: |
           Perform a detailed analysis of the following facts about "{{blocks.extract.output.topic}}":
@@ -78,7 +85,8 @@ functions:
         depends_on: [extract]   # must run after extract
 
       # Stage 2b: concise summary for quick reading.
-      # Also depends only on `extract`, so it runs in parallel with `analyze`.
+      # Also depends only on `extract`. (Today the scheduler runs siblings
+      # sequentially within a level; within-level parallelism is future work.)
       summarize:
         prompt: |
           Write a concise one-paragraph summary of "{{blocks.extract.output.topic}}"

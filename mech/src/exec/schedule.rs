@@ -13,7 +13,7 @@
 //! - §6.5: no matching transition → de facto terminal
 //! - §9.3: `set_context` / `set_workflow` evaluated atomically, applied
 //!   before transitions
-//! - §10.2: guard evaluation error → treat as false (non-fatal)
+//! - §10.2: guard evaluation error → block failure (MechError::GuardEvaluationError)
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,6 +26,7 @@ use crate::error::{MechError, MechResult};
 use crate::exec::agent::AgentExecutor;
 use crate::exec::call::{FunctionExecutor, execute_call_block};
 use crate::exec::prompt::execute_prompt_block;
+use crate::exec::system::render_function_system;
 use crate::schema::{BlockDef, FunctionDef, TransitionDef};
 use crate::workflow::Workflow;
 const MAX_IMPERATIVE_STEPS: usize = 10_000;
@@ -61,17 +62,20 @@ fn build_post_block_namespaces(ctx: &ExecutionContext, output: &JsonValue) -> Na
 
 /// Evaluate outgoing transitions for a block in declaration order.
 ///
-/// Returns the first matching target or [`TransitionResult::Terminal`].
-/// Guard evaluation errors are treated as false per §10.2 (non-fatal).
+/// Returns the first matching target or [`TransitionResult::Terminal`]. A
+/// guard that errors during evaluation surfaces as
+/// [`MechError::GuardEvaluationError`] per spec §10.2 — silently treating
+/// such errors as false would mask author bugs and let execution drift into
+/// the wrong branch.
 pub fn evaluate_transitions(
     workflow: &Workflow,
-    _block_id: &str,
+    block_id: &str,
     transitions: &[TransitionDef],
     output: &JsonValue,
     ctx: &ExecutionContext,
-) -> TransitionResult {
+) -> MechResult<TransitionResult> {
     if transitions.is_empty() {
-        return TransitionResult::Terminal;
+        return Ok(TransitionResult::Terminal);
     }
 
     let ns = build_post_block_namespaces(ctx, output);
@@ -80,20 +84,28 @@ pub fn evaluate_transitions(
         match &t.when {
             None => {
                 // Unconditional — always matches.
-                return TransitionResult::Goto(t.goto.clone());
+                return Ok(TransitionResult::Goto(t.goto.clone()));
             }
             Some(guard_src) => {
-                let Some(cel_expr) = workflow.cel_expression(guard_src) else {
-                    // Loader invariant violated: guard was not compiled at load time.
-                    // Treat as false per §10.2 (non-fatal guard semantics).
-                    continue;
-                };
+                let cel_expr = workflow.cel_expression(guard_src).ok_or_else(|| {
+                    // Loader invariant: every guard is compiled at load time. A
+                    // miss here is a runtime corruption of the Workflow handle.
+                    MechError::InternalInvariant {
+                        message: format!(
+                            "guard `{guard_src}` should have been compiled at load time"
+                        ),
+                    }
+                })?;
                 match cel_expr.evaluate_guard(&ns) {
-                    Ok(true) => return TransitionResult::Goto(t.goto.clone()),
+                    Ok(true) => return Ok(TransitionResult::Goto(t.goto.clone())),
                     Ok(false) => continue,
-                    Err(_) => {
-                        // §10.2: guard evaluation error → treat as false.
-                        continue;
+                    Err(e) => {
+                        // Spec §10.2: guard evaluation error is a block-level failure.
+                        return Err(MechError::GuardEvaluationError {
+                            block: block_id.to_string(),
+                            expression: guard_src.clone(),
+                            message: e.to_string(),
+                        });
                     }
                 }
             }
@@ -101,24 +113,37 @@ pub fn evaluate_transitions(
     }
 
     // No transition matched.
-    TransitionResult::Terminal
+    Ok(TransitionResult::Terminal)
 }
 
-/// Apply `set_context` and `set_workflow` side-effects after a block produces
-/// output.
+/// Staged side-effects ready to commit: `(var_name, computed_value)` pairs
+/// for `set_context` (`.0`) and `set_workflow` (`.1`).
+pub(crate) struct StagedSideEffects {
+    context_writes: Vec<(String, JsonValue)>,
+    workflow_writes: Vec<(String, JsonValue)>,
+}
+
+/// Evaluate `set_context` and `set_workflow` expressions WITHOUT applying any
+/// writes. Per §9.3 expressions within each field are evaluated atomically
+/// against the pre-write state. The returned [`StagedSideEffects`] can be
+/// committed via [`commit_side_effects`].
 ///
-/// Per §9.3:
-/// 1. Expressions within each field are evaluated atomically (all see
-///    pre-write state).
-/// 2. `set_context` writes are applied first, then `set_workflow` writes.
-pub fn apply_side_effects(
+/// Stage and commit are split as forward-prep: a future deferred-commit
+/// design could evaluate transition guards before mutating state. The
+/// current imperative loop does NOT defer — it stages, commits, then
+/// evaluates transitions in that order (matches spec §9.3 / §9.4 which
+/// require guards to observe post-write state, e.g. the `attempts` counter
+/// pattern). A guard error after the commit therefore leaves the staged
+/// writes already applied to `ctx`. Cue retry constructs a fresh
+/// `WorkflowState` per attempt, so retries still start from a clean slate
+/// even though there is no rollback inside a single attempt.
+pub(crate) fn stage_side_effects(
     workflow: &Workflow,
-    _block_id: &str,
     set_context: &BTreeMap<String, String>,
     set_workflow: &BTreeMap<String, String>,
     output: &JsonValue,
-    ctx: &mut ExecutionContext,
-) -> MechResult<()> {
+    ctx: &ExecutionContext,
+) -> MechResult<StagedSideEffects> {
     let ns = build_post_block_namespaces(ctx, output);
 
     // Evaluate all set_context expressions atomically (all see pre-write state).
@@ -152,17 +177,53 @@ pub fn apply_side_effects(
         workflow_writes.push((var_name.clone(), json_value));
     }
 
-    // Apply set_context first.
-    for (name, value) in context_writes {
+    Ok(StagedSideEffects {
+        context_writes,
+        workflow_writes,
+    })
+}
+
+/// Commit previously-staged side effects. Per §9.3 `set_context` writes are
+/// applied first, then `set_workflow` writes.
+pub(crate) fn commit_side_effects(
+    staged: StagedSideEffects,
+    ctx: &mut ExecutionContext,
+) -> MechResult<()> {
+    for (name, value) in staged.context_writes {
         ctx.set_context(&name, value)?;
     }
-
-    // Then set_workflow.
-    for (name, value) in workflow_writes {
+    for (name, value) in staged.workflow_writes {
         ctx.set_workflow(&name, value)?;
     }
-
     Ok(())
+}
+
+/// Apply `set_context` and `set_workflow` side-effects after a block produces
+/// output. Stages then immediately commits — there is no deferred-commit
+/// path today (see [`stage_side_effects`] for the rationale behind keeping
+/// the split).
+///
+/// Per §9.3:
+/// 1. Expressions within each field are evaluated atomically against the
+///    pre-write state.
+/// 2. `set_context` writes are applied first, then `set_workflow` writes.
+/// 3. The imperative scheduler evaluates transitions AFTER this commit, so
+///    guards observe the post-write state. A guard error at that point
+///    leaves the writes already applied; cue retry starts from a fresh
+///    `WorkflowState`.
+///
+/// The dataflow scheduler also calls this directly because dataflow blocks
+/// have no transition guards.
+pub fn apply_side_effects(
+    workflow: &Workflow,
+    _block_id: &str,
+    set_context: &BTreeMap<String, String>,
+    set_workflow: &BTreeMap<String, String>,
+    output: &JsonValue,
+    ctx: &mut ExecutionContext,
+) -> MechResult<()> {
+    let staged = stage_side_effects(workflow, set_context, set_workflow, output, ctx)?;
+    commit_side_effects(staged, ctx)
 }
 
 /// Extract transition list and side-effect maps from a block definition.
@@ -252,6 +313,15 @@ pub async fn run_function_imperative(
     let entry = find_entry_block(function)?;
     let mut current_block_id = entry;
 
+    // Render the function's system prompt exactly once at function entry,
+    // mirroring the dataflow scheduler. The rendered value is the single
+    // source of truth passed by reference into each prompt block — never
+    // re-derived per block, never read from `conversation.system()`. This
+    // keeps both schedulers symmetric and makes `run_function_imperative`
+    // robust to callers that construct a fresh `Conversation::new()`
+    // instead of pre-populating system via `Conversation::with_system`.
+    let rendered_system = render_function_system(workflow, function, ctx)?;
+
     let mut step_count: usize = 0;
     loop {
         step_count += 1;
@@ -282,6 +352,7 @@ pub async fn run_function_imperative(
                     ctx,
                     agent_executor,
                     conversation,
+                    rendered_system.as_deref(),
                 )
                 .await?
             }
@@ -292,19 +363,21 @@ pub async fn run_function_imperative(
             }
         };
 
-        // Apply side effects (set_context, set_workflow).
+        // Per spec §9.3 rule 4: `set_context` writes are applied first,
+        // then `set_workflow` writes; transitions are evaluated after both
+        // complete (so guards observe the post-write state, e.g. the
+        // `attempts` counter pattern in §9.4). We therefore stage, commit,
+        // then evaluate transitions in that order. A guard error after
+        // commit means the side-effect writes survive into a cue retry of
+        // the same `WorkflowRuntime`, but the cue integration creates a
+        // fresh `WorkflowState` per `WorkflowRuntime::run`, so retry
+        // semantics still observe a clean slate.
         let (transitions, set_context, set_workflow) = block_edges(block);
-        apply_side_effects(
-            workflow,
-            &current_block_id,
-            set_context,
-            set_workflow,
-            &output,
-            ctx,
-        )?;
+        let staged = stage_side_effects(workflow, set_context, set_workflow, &output, ctx)?;
+        commit_side_effects(staged, ctx)?;
 
         // Evaluate transitions.
-        let result = evaluate_transitions(workflow, &current_block_id, transitions, &output, ctx);
+        let result = evaluate_transitions(workflow, &current_block_id, transitions, &output, ctx)?;
 
         match result {
             TransitionResult::Terminal => return Ok(output),
@@ -428,7 +501,7 @@ mod tests {
         FakeFuncExecutor::new(BTreeMap::new())
     }
 
-    // ---- T1: Linear sequence A → B → C terminates at C -------------------
+    // ---- Linear sequence A → B → C terminates at C ----
 
     const LINEAR: &str = r#"
 functions:
@@ -484,7 +557,7 @@ functions:
         assert_eq!(out, json!({ "val": "C" }));
     }
 
-    // ---- T2: Guard selects among multiple transitions ---------------------
+    // ---- Guard selects among multiple transitions ----
 
     const GUARDED: &str = r#"
 functions:
@@ -595,7 +668,7 @@ functions:
         assert_eq!(out, json!({ "result": "general handled" }));
     }
 
-    // ---- T3: Self-loop until guard flips ----------------------------------
+    // ---- Self-loop until guard flips ----
 
     const SELF_LOOP: &str = r#"
 functions:
@@ -687,7 +760,7 @@ functions:
         assert_eq!(ctx.get_context("attempts"), Some(&json!(1)));
     }
 
-    // ---- T4: Terminal block (no transitions) ends function ----------------
+    // ---- Terminal block (no transitions) ends function ----
 
     const SINGLE_BLOCK: &str = r#"
 functions:
@@ -723,7 +796,7 @@ functions:
         assert_eq!(out, json!({ "answer": "42" }));
     }
 
-    // ---- T5: No matching guard, no fallback → terminal --------------------
+    // ---- No matching guard, no fallback → terminal ----
 
     const NO_MATCH: &str = r#"
 functions:
@@ -778,7 +851,7 @@ functions:
         assert_eq!(out, json!({ "status": "unknown" }));
     }
 
-    // ---- T6: set_context reads output -------------------------------------
+    // ---- set_context reads output ----
 
     const SET_CONTEXT_OUTPUT: &str = r#"
 functions:
@@ -820,7 +893,7 @@ functions:
         assert_eq!(ctx.get_context("score"), Some(&json!(0.95)));
     }
 
-    // ---- T7: set_context atomicity (swap) ---------------------------------
+    // ---- set_context atomicity (swap) ----
 
     const ATOMIC_SWAP: &str = r#"
 functions:
@@ -867,7 +940,7 @@ functions:
         assert_eq!(ctx.get_context("b"), Some(&json!(1)));
     }
 
-    // ---- T8: Guard evaluation error treated as false ----------------------
+    // ---- Guard evaluation error propagates as block failure --------------
 
     const GUARD_ERROR: &str = r#"
 functions:
@@ -903,17 +976,17 @@ functions:
           properties: { result: { type: string } }
 "#;
 
+    // Regression: a guard whose evaluation errors must surface as
+    // MechError::GuardEvaluationError, not be silently swallowed and let
+    // execution drift to the next transition.
     #[test]
-    fn guard_error_treated_as_false() {
+    fn guard_evaluation_error_propagates_as_block_failure() {
         let wf = load(GUARD_ERROR);
         let func = wf.document().functions.get("f").unwrap();
-        let agent = SequentialAgent::new(vec![
-            json!({ "status": "ok" }),
-            json!({ "result": "fallback reached" }),
-        ]);
+        let agent = SequentialAgent::new(vec![json!({ "status": "ok" })]);
         let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
 
-        let out = run_blocking(run_function_imperative(
+        let err = run_blocking(run_function_imperative(
             &wf,
             "f",
             func,
@@ -922,13 +995,100 @@ functions:
             &no_func_executor(),
             &mut Conversation::new(),
         ))
-        .unwrap();
+        .expect_err("guard evaluation error must surface, not be silently swallowed");
 
-        // The erroring guard is treated as false, fallback fires.
-        assert_eq!(out, json!({ "result": "fallback reached" }));
+        match err {
+            MechError::GuardEvaluationError {
+                block,
+                expression,
+                message,
+            } => {
+                assert_eq!(block, "check");
+                assert!(
+                    expression.contains("output.status.deep.field"),
+                    "expected expression to mention `output.status.deep.field`, got: {expression}"
+                );
+                assert!(!message.is_empty(), "guard error message must be non-empty");
+            }
+            other => panic!("expected MechError::GuardEvaluationError, got {other:?}"),
+        }
     }
 
-    // ---- T9: set_context before set_workflow, transitions after both ------
+    // Regression pinning the current `run_function_imperative` ordering:
+    // `commit_side_effects` runs BEFORE `evaluate_transitions`, so a
+    // `set_context` write performed by a block whose subsequent guard
+    // errors is already applied to `ctx` by the time the function returns
+    // `Err(GuardEvaluationError)`. Direct callers of `run_function_imperative`
+    // (it is `pub` and re-exported from `mech::lib`) therefore observe
+    // partial-write side effects on guard failure. The cue runtime masks
+    // this by constructing a fresh `WorkflowState` per attempt
+    // (`MechTask::execute_leaf`), but library callers do not get that
+    // isolation for free. When the bug is fixed (e.g. by deferring commit
+    // until after guard evaluation, or rolling back on guard error) this
+    // test will need to be updated to assert the writes were rolled back.
+    // Tracked in issue #463.
+    #[test]
+    fn committed_side_effects_survive_guard_error_under_run_function_imperative() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      attempts: { type: integer, initial: 0 }
+    blocks:
+      check:
+        prompt: "check"
+        schema:
+          type: object
+          required: [status]
+          properties: { status: { type: string } }
+        set_context:
+          attempts: "context.attempts + 1"
+        transitions:
+          # Guard errors at runtime: strings have no attribute `.deep`.
+          - when: 'output.status.deep.field == "x"'
+            goto: unreachable
+      unreachable:
+        prompt: "unreachable"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![json!({ "status": "ok" })]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("attempts".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        let err = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut Conversation::new(),
+        ))
+        .expect_err("guard error must propagate");
+        assert!(
+            matches!(err, MechError::GuardEvaluationError { .. }),
+            "expected GuardEvaluationError, got {err:?}"
+        );
+
+        // Pinning current behavior: the `set_context` write committed before
+        // the guard ran, and the guard error did NOT roll it back. When the
+        // commit-vs-guard ordering is fixed, this assertion will flip to
+        // `Some(&json!(0))` (or to the initial value).
+        assert_eq!(
+            ctx.get_context("attempts"),
+            Some(&json!(1)),
+            "current behavior: committed side effects survive a subsequent guard error"
+        );
+    }
+
+    // ---- set_context before set_workflow, transitions after both ----
 
     const SIDE_EFFECTS_ORDER: &str = r#"
 workflow:
@@ -992,7 +1152,7 @@ functions:
         assert_eq!(ws.get("wf_val"), Some(json!(15)));
     }
 
-    // ---- T10: Backward edge (goto earlier block) --------------------------
+    // ---- Backward edge (goto earlier block) ----
 
     const BACKWARD_EDGE: &str = r#"
 functions:
@@ -1060,7 +1220,7 @@ functions:
         assert_eq!(ctx.get_context("rounds"), Some(&json!(2)));
     }
 
-    // ---- T11: Entry block detection ---------------------------------------
+    // ---- Entry block detection ----
 
     #[test]
     fn entry_block_is_detected_correctly() {
@@ -1101,13 +1261,13 @@ functions:
         assert_eq!(entry, "entry");
     }
 
-    // ---- T12: evaluate_transitions unit tests -----------------------------
+    // ---- evaluate_transitions unit tests ----
 
     #[test]
     fn evaluate_transitions_empty_is_terminal() {
         let wf = load(SINGLE_BLOCK);
         let ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
-        let result = evaluate_transitions(&wf, "only", &[], &json!({}), &ctx);
+        let result = evaluate_transitions(&wf, "only", &[], &json!({}), &ctx).unwrap();
         assert_eq!(result, TransitionResult::Terminal);
     }
 
@@ -1119,11 +1279,116 @@ functions:
             when: None,
             goto: "b".into(),
         }];
-        let result = evaluate_transitions(&wf, "a", &transitions, &json!({}), &ctx);
+        let result = evaluate_transitions(&wf, "a", &transitions, &json!({}), &ctx).unwrap();
         assert_eq!(result, TransitionResult::Goto("b".into()));
     }
 
-    // ---- T13: Call block in imperative flow --------------------------------
+    // When transitions exist but every guard evaluates to `Ok(false)`,
+    // `evaluate_transitions` falls through the loop and returns
+    // `Terminal`. The other three exit paths (empty list, unconditional
+    // match, guard-eval error) are covered above; this test pins the
+    // fourth.
+    #[test]
+    fn evaluate_transitions_all_guards_false_returns_terminal() {
+        let ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+        // Two guards that are constant-false. Both compile at load time
+        // because they reference no fields, but they require an interned
+        // CelExpression in the workflow handle. Use a bespoke YAML so the
+        // intern set contains the guards we test against.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "a"
+        schema:
+          type: object
+          required: [x]
+          properties: { x: { type: string } }
+        transitions:
+          - when: 'false'
+            goto: never_a
+          - when: '1 == 2'
+            goto: never_b
+      never_a:
+        prompt: "never"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
+      never_b:
+        prompt: "never"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
+"#;
+        let wf2 = load(yaml);
+        // Re-use the function's transitions from the loaded workflow.
+        let func2 = wf2.document().functions.get("f").unwrap();
+        let block_a = match &func2.blocks["a"] {
+            BlockDef::Prompt(p) => p,
+            _ => panic!("expected prompt"),
+        };
+        let result = evaluate_transitions(
+            &wf2,
+            "a",
+            &block_a.transitions,
+            &json!({ "x": "anything" }),
+            &ctx,
+        )
+        .expect("evaluate_transitions must succeed when guards are well-formed");
+        assert_eq!(
+            result,
+            TransitionResult::Terminal,
+            "all guards false must fall through to Terminal"
+        );
+    }
+
+    // Direct unit test for evaluate_transitions: a guard that errors at
+    // CEL evaluation time (string has no  attribute) must
+    // surface as MechError::GuardEvaluationError rather than being treated
+    // as false. The integration-level test above covers the same path
+    // through run_function_imperative; this one isolates evaluate_transitions.
+    #[test]
+    fn evaluate_transitions_propagates_guard_evaluation_error() {
+        let wf = load(GUARD_ERROR);
+        let ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+        // Pull the transition list directly from the loaded workflow so this
+        // test cannot drift out of sync with the YAML in `GUARD_ERROR`.
+        // Re-constructing a `TransitionDef` by hand only works while the
+        // guard string is byte-identical to the YAML — a whitespace edit in
+        // `GUARD_ERROR` would cause the intern lookup to miss and the test
+        // would surface `InternalInvariant` instead of the intended
+        // `GuardEvaluationError`.
+        let func = wf.document().functions.get("f").unwrap();
+        let check_block = match &func.blocks["check"] {
+            BlockDef::Prompt(p) => p,
+            _ => panic!("expected prompt block"),
+        };
+        let transitions = check_block.transitions.clone();
+        let err =
+            evaluate_transitions(&wf, "check", &transitions, &json!({ "status": "ok" }), &ctx)
+                .expect_err("guard evaluation error must propagate as Err");
+        match err {
+            MechError::GuardEvaluationError {
+                block,
+                expression,
+                message,
+            } => {
+                assert_eq!(block, "check");
+                assert!(
+                    expression.contains("output.status.deep.field"),
+                    "unexpected expression: {expression}"
+                );
+                assert!(!message.is_empty(), "guard error message must be non-empty");
+            }
+            other => panic!("expected MechError::GuardEvaluationError, got {other:?}"),
+        }
+    }
+
+    // ---- Call block in imperative flow ----
 
     const CALL_IN_FLOW: &str = r#"
 functions:
@@ -1178,9 +1443,9 @@ functions:
         assert_eq!(out, json!({ "result": "from call" }));
     }
 
-    // ---- D13: Conversation management tests --------------------------------
+    // ---- Conversation management tests ------------------------------------
 
-    // D13/T1: Two sequential prompt blocks share conversation history.
+    // Two sequential prompt blocks share conversation history.
     #[test]
     fn sequential_prompt_blocks_share_conversation_history() {
         let yaml = r#"
@@ -1270,7 +1535,7 @@ functions:
         );
     }
 
-    // D13/T2: History includes tool calls and tool results from agent loop.
+    // History includes tool calls and tool results from agent loop.
     #[test]
     fn history_includes_tool_calls_and_results() {
         use crate::conversation::{Message, Role};
@@ -1370,7 +1635,7 @@ functions:
         assert_eq!(conversation.len(), 6);
     }
 
-    // D13/T3: Self-loop accumulates conversation history.
+    // Self-loop accumulates conversation history across iterations.
     #[test]
     fn self_loop_accumulates_conversation_history() {
         let yaml = r#"
@@ -1463,7 +1728,7 @@ functions:
         assert_eq!(requests[3].history.len(), 6);
     }
 
-    // D13/T4: Compaction hook invoked at threshold (schedule level).
+    // Compaction hook invoked at threshold (schedule-level).
     #[test]
     fn compaction_hook_invoked_at_threshold() {
         use crate::conversation::ResolvedCompaction;

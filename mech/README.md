@@ -4,7 +4,7 @@ Declarative YAML workflow engine for LLM-driven control and dataflow.
 
 Mech lets you describe multi-step LLM workflows as YAML files — functions made
 of prompt and call blocks, with CEL guards routing execution and `depends_on`
-expressing data-flow parallelism. The mech runtime validates, plans, and
+expressing data-flow dependencies. The mech runtime validates, plans, and
 executes those workflows against a reel agent backend.
 
 ## Workspace
@@ -201,7 +201,7 @@ inherited values. Setting it to a non-empty list replaces them entirely.
 | Mode | Trigger | Behaviour |
 |------|---------|-----------|
 | **Imperative** | Block has `transitions:` | Blocks execute serially; guards select the next block |
-| **Dataflow** | Block has `depends_on:` only | Blocks execute in topological order; independent blocks may run in parallel |
+| **Dataflow** | Block has `depends_on:` only | Blocks execute in topological order, sequentially within each level (within-level parallelism is future work) |
 
 Both modes can coexist within the same function.
 
@@ -212,7 +212,7 @@ See [`mech/examples/`](examples/) for ready-to-run workflow definitions:
 | File | What it shows |
 |------|---------------|
 | [`imperative_routing.yaml`](examples/imperative_routing.yaml) | Transitions, CEL guards, conditional branching |
-| [`dataflow_pipeline.yaml`](examples/dataflow_pipeline.yaml) | `depends_on`, parallel block execution, upstream output references |
+| [`dataflow_pipeline.yaml`](examples/dataflow_pipeline.yaml) | `depends_on`, level-sequential block execution, upstream output references |
 | [`function_composition.yaml`](examples/function_composition.yaml) | Call blocks, `input`/`output` mappings, function composition |
 
 ## CLI reference
@@ -262,6 +262,11 @@ println!("{}", serde_json::to_string_pretty(&output)?);
 
 The legacy `WorkflowLoader` struct is still available for backward compatibility
 but delegates to the free functions above.
+
+Mech emits non-fatal load-time advisories (e.g. `LoadWarning::CompactionPlaceholder`)
+via `tracing::warn!`. Consumers must install a `tracing::Subscriber` to surface
+them in production output; tests that need programmatic access can call
+`mech::loader::collect_load_warnings(&parsed_document)` directly.
 
 ## Module structure
 
