@@ -104,10 +104,11 @@
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
 - All 12 sections drafted and reviewed. Covers: motivation, design goals, unified CDFG model, conversation model (history scoping, compaction, agent configuration), block specification (prompt + call blocks, field validity), transitions & guards (CEL, ordered evaluation, self-loops), template expressions & scoping (5 namespaces, CEL everywhere), schema handling (inline + `$ref` + workflow-level shared schemas), context & state (two-level declared variables, `set_context`/`set_workflow`), validation & error handling (24+ load-time checks, 5 runtime error types), cue integration (function = leaf task, model escalation interaction), YAML reference schema with complete worked example.
 
-**Issues:** 0 open.
+**Issues:** 144 open (filed by full audit on 2026-04-17 — 17 importance:high, 56 importance:medium, 71 importance:low). Issues #295–#438.
 
 **Next Work:**
 1. **mech-cli real agent executor** — mech-cli's `run` subcommand currently uses `StubAgent` that errors for any workflow with `prompt` or `call` blocks. Needs to be wired to a real `AgentExecutor` (likely via reel) so workflows can execute end-to-end against real models. Blocks gate's mech phase from having any real tests.
+2. **Audit remediation** — begin with importance:high effort:low cluster (9 issues): #295 (C-15), #296 (C-19), #297 (C-21), #298 (C-09), #299 (C-40), #300 (D-03), #301 (D-04), #302 (D-07), #303 (T-04).
 
 **Recent:** Batch NIT fix — 20 issues closed (#12, #13, #17, #21, #25, #26, #27, #29, #31, #40, #41, #42, #49, #53, #57, #60, #291, #292, #293, #294). Removed unused deps (reel, schemars). Renamed `ModelChecker::knows` → `is_known`, `Workflow::file()` → `document()`, `guards` → `cel_expressions`, `normalized_grants` → `expanded_grants`. Extracted `Workflow` to own module. Simplified `WorkflowLoader` to unit struct with free-function API (`load_workflow`, `load_workflow_str`, etc.). Deduplicated context var store setup. Moved `full_example.yaml` to `testdata/`. Split validate tests to submodule. Moved schema validation methods to `schema_check.rs`. Moved graph/CEL helpers to proper modules. Added validation for empty call lists and external `$ref:path`. Fixed temp file leak in loader test.
 
