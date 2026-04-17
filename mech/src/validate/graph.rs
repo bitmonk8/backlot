@@ -215,6 +215,77 @@ impl Validator<'_> {
 }
 
 /// Compute the dominator set for each block in a function's control-flow
+/// graph (transitions only) using a caller-supplied explicit entry block.
+///
+/// Unlike [`compute_dominators`] (which infers entry from zero in-degree),
+/// this variant accepts the entry block name directly. This is necessary for
+/// the imperative runner, where the entry block is already known via
+/// find_entry_block and may have non-zero in-degree due to backward edges
+/// (loops that jump back to the head block).
+///
+/// Returns `dom[n]` = the set of all blocks that dominate `n` (including `n`
+/// itself). Iterative fixed-point, Kildall-style.
+pub(crate) fn compute_dominators_with_entry(
+    func: &FunctionDef,
+    entry: &str,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let names: Vec<String> = func.blocks.keys().cloned().collect();
+    let all: BTreeSet<String> = names.iter().cloned().collect();
+
+    // Predecessors via control edges only.
+    let mut preds: BTreeMap<String, BTreeSet<String>> =
+        names.iter().map(|n| (n.clone(), BTreeSet::new())).collect();
+    for (src, b) in &func.blocks {
+        for t in b.transitions() {
+            if let Some(e) = preds.get_mut(&t.goto) {
+                e.insert(src.clone());
+            }
+        }
+    }
+
+    // Entry block is dominated only by itself; every other block starts
+    // with dom = all blocks.
+    let mut dom: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for n in &names {
+        if n == entry {
+            let mut s = BTreeSet::new();
+            s.insert(n.clone());
+            dom.insert(n.clone(), s);
+        } else {
+            dom.insert(n.clone(), all.clone());
+        }
+    }
+
+    // Iterative fixed-point: dom[n] = {n} ∪ ⋂{dom[p] | p ∈ preds[n]}.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for n in &names {
+            if n == entry {
+                continue; // entry's dom set is pinned
+            }
+            let p = &preds[n];
+            let mut new_set: Option<BTreeSet<String>> = None;
+            for pn in p {
+                let d = &dom[pn];
+                new_set = Some(match new_set {
+                    None => d.clone(),
+                    Some(acc) => acc.intersection(d).cloned().collect(),
+                });
+            }
+            let mut new_set = new_set.unwrap_or_default();
+            new_set.insert(n.clone());
+            if new_set != dom[n] {
+                dom.insert(n.clone(), new_set);
+                changed = true;
+            }
+        }
+    }
+
+    dom
+}
+
+/// Compute the dominator set for each block in a function's control-flow
 /// graph (transitions only). Inbound-zero blocks are treated as entry points.
 ///
 /// Uses an iterative fixed-point dominator set computation (Kildall-style):

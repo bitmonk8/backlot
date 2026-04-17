@@ -33,7 +33,7 @@
 mod agents;
 mod blocks;
 mod cel_check;
-mod graph;
+pub(crate) mod graph;
 mod helpers;
 mod model;
 mod report;

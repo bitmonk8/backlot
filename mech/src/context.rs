@@ -185,7 +185,7 @@ impl ExecutionContext {
     /// Record a block's output under its block ID. Write-once per spec §8:
     /// re-recording the same block ID within one invocation is a runtime
     /// error unless the previous recording was cleared via
-    /// [`clear_block_output`] (used by self-loops in D11).
+    /// [`clear_block_output`] (used by the dominator-based output clearing on each transition).
     pub fn record_block_output(&mut self, block_id: &str, value: JsonValue) -> MechResult<()> {
         if self.block_outputs.contains_key(block_id) {
             return Err(MechError::WorkflowValidation {

@@ -28,6 +28,7 @@ use crate::exec::call::{FunctionExecutor, execute_call_block};
 use crate::exec::prompt::execute_prompt_block;
 use crate::exec::system::render_function_system;
 use crate::schema::{BlockDef, FunctionDef, TransitionDef};
+use crate::validate::graph::compute_dominators_with_entry;
 use crate::workflow::Workflow;
 const MAX_IMPERATIVE_STEPS: usize = 10_000;
 
@@ -311,6 +312,9 @@ pub async fn run_function_imperative(
     conversation: &mut Conversation,
 ) -> MechResult<JsonValue> {
     let entry = find_entry_block(function)?;
+    // Compute dominators once per invocation so that each transition can
+    // efficiently determine which block outputs remain in scope.
+    let dominators = compute_dominators_with_entry(function, &entry);
     let mut current_block_id = entry;
 
     // Render the function's system prompt exactly once at function entry,
@@ -382,9 +386,23 @@ pub async fn run_function_imperative(
         match result {
             TransitionResult::Terminal => return Ok(output),
             TransitionResult::Goto(next) => {
-                // Clear block output for the target so it can re-execute
-                // (needed for self-loops and backward edges).
-                ctx.clear_block_output(&next);
+                // C-26: when transitioning to `next`, preserve only the
+                // outputs of blocks that *strictly* dominate `next` — i.e.
+                // blocks on every path from entry to `next`.  All other
+                // recorded outputs are stale: they come from abandoned
+                // branches, prior-iteration siblings, or `next` itself
+                // (which must re-execute).  Clear them all.
+                //
+                // Strict dominators of `next` = dom[next] \ {next}.
+                let empty_dom_set = BTreeSet::new();
+                let doms_of_next = dominators.get(&next).unwrap_or(&empty_dom_set);
+                for block_id in function.blocks.keys() {
+                    // Keep output iff block_id strictly dominates `next`.
+                    if block_id != &next && doms_of_next.contains(block_id.as_str()) {
+                        continue;
+                    }
+                    ctx.clear_block_output(block_id);
+                }
                 current_block_id = next;
             }
         }
@@ -1797,5 +1815,310 @@ functions:
         );
         // Messages are NOT modified (placeholder compaction).
         assert_eq!(conversation.len(), 10);
+    }
+
+    // ---- C-26: dominator-based output clearing on block transitions ----
+
+    // (a) Linear A→B→C: the outputs of A and B (strict dominators of C)
+    // must survive intact through every transition.  If the fix
+    // incorrectly clears non-target outputs it would prematurely remove
+    // them and `ctx.get_block_output` would error.
+    #[test]
+    fn linear_transition_preserves_dominator_outputs() {
+        let wf = load(LINEAR); // A→B→C defined above
+        let func = wf.document().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![
+            json!({ "val": "from_a" }),
+            json!({ "val": "from_b" }),
+            json!({ "val": "from_c" }),
+        ]);
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut Conversation::new(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "val": "from_c" }));
+        // All three outputs must still be present: A and B strictly dominate
+        // every subsequent block and are preserved across each transition;
+        // C is the terminal so nothing clears it.
+        assert_eq!(
+            ctx.get_block_output("a").unwrap(),
+            &json!({ "val": "from_a" }),
+            "a's output must survive as a strict dominator of b and c"
+        );
+        assert_eq!(
+            ctx.get_block_output("b").unwrap(),
+            &json!({ "val": "from_b" }),
+            "b's output must survive as a strict dominator of c"
+        );
+        assert_eq!(
+            ctx.get_block_output("c").unwrap(),
+            &json!({ "val": "from_c" }),
+            "c's output must be present (it is the terminal)"
+        );
+    }
+
+    // (b) Backward edge (loop): when transitioning from a block back to an
+    // earlier block, sibling outputs from the prior iteration must be cleared.
+    //
+    // Graph:  a → b_loop (iter 1, branch="b") → a (backward edge)
+    //             a → c_done (iter 2, branch≠"b") → terminal
+    //
+    // b_loop ran in iteration 1 and left a recorded output.  When b_loop
+    // transitions back to a (backward edge), strict_doms[a] = {} (a is the
+    // entry block), so ALL outputs including b_loop's are cleared.  In
+    // iteration 2 the execution goes to c_done, never re-entering b_loop.
+    // At function completion b_loop must have no recorded output.
+    //
+    // With the old single-clear code, only a's output was cleared on the
+    // backward edge, leaving b_loop's stale output present indefinitely.
+    #[test]
+    fn backward_edge_clears_prior_iteration_sibling_output() {
+        // Block names chosen so that `a` sorts first alphabetically
+        // (find_entry_block falls back to alphabetical order when all blocks
+        // are targeted by some transition, which happens with a backward edge).
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      iter: { type: integer, initial: 0 }
+    blocks:
+      a:
+        prompt: "entry"
+        schema:
+          type: object
+          required: [branch]
+          properties: { branch: { type: string } }
+        set_context:
+          iter: "context.iter + 1"
+        transitions:
+          - when: 'output.branch == "b"'
+            goto: b_loop
+          - goto: c_done
+      b_loop:
+        prompt: "loop body"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        transitions:
+          - when: 'context.iter < 2'
+            goto: a
+      c_done:
+        prompt: "exit"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+        // Iteration 1: a outputs branch="b" → b_loop runs → backward edge to a.
+        // Iteration 2: a outputs branch=¬b  → c_done runs (terminal).
+        let agent = SequentialAgent::new(vec![
+            json!({ "branch": "b" }),       // a, iter 1
+            json!({ "val": "loop_iter1" }), // b_loop, iter 1
+            json!({ "branch": "other" }),   // a, iter 2
+            json!({ "val": "exit" }),       // c_done
+        ]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("iter".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut Conversation::new(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "val": "exit" }));
+        assert_eq!(ctx.get_context("iter"), Some(&json!(2)));
+
+        // b_loop ran only in iteration 1.  Its output must have been cleared
+        // when the backward edge (b_loop→a) fired: strict_doms[a]={} so all
+        // outputs were cleared.  In iteration 2 b_loop was never re-entered,
+        // so no new output was recorded.
+        assert!(
+            ctx.get_block_output("b_loop").is_err(),
+            "b_loop's stale output from iteration 1 must be cleared on the backward edge"
+        );
+        // a and c_done are on the iteration-2 path and their outputs persist.
+        assert!(
+            ctx.get_block_output("a").is_ok(),
+            "a's last output must be present"
+        );
+        assert!(
+            ctx.get_block_output("c_done").is_ok(),
+            "c_done's output must be present"
+        );
+    }
+
+    // (c) Divergent branches: in a loop that alternates between two mutually
+    // exclusive branches, the output from the branch taken in the first
+    // iteration must not persist into the second iteration.
+    //
+    // Graph:  classify → path_a (iter 1) → classify (backward edge)
+    //                  → path_b (iter 2) → terminal
+    //
+    // path_a and path_b are mutually exclusive.  After the loop body, the
+    // execution switches to path_b.  At that point the transition
+    // classify→path_b clears all non-strict-dominators of path_b.  Since
+    // path_a is not a strict dominator of path_b, its output is removed.
+    // A block that legitimately references `blocks.path_a.output.*` would
+    // therefore see an absent key rather than stale data.
+    #[test]
+    fn divergent_branch_output_absent_after_switching_branch() {
+        // Block names: "a_classify" sorts before "b_path_a" and "c_path_b"
+        // so find_entry_block reliably picks a_classify as the entry.
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      iter: { type: integer, initial: 0 }
+    blocks:
+      a_classify:
+        prompt: "classify"
+        schema:
+          type: object
+          required: [branch]
+          properties: { branch: { type: string } }
+        set_context:
+          iter: "context.iter + 1"
+        transitions:
+          - when: 'output.branch == "a"'
+            goto: b_path_a
+          - goto: c_path_b
+      b_path_a:
+        prompt: "path a"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+        transitions:
+          - when: 'context.iter < 2'
+            goto: a_classify
+      c_path_b:
+        prompt: "path b"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+        // Iteration 1: classify→branch=a → b_path_a → backward edge to classify.
+        // Iteration 2: classify→branch≠a → c_path_b (terminal).
+        let agent = SequentialAgent::new(vec![
+            json!({ "branch": "a" }),          // a_classify, iter 1
+            json!({ "result": "path_a_out" }), // b_path_a, iter 1
+            json!({ "branch": "b" }),          // a_classify, iter 2
+            json!({ "result": "path_b_out" }), // c_path_b, iter 2
+        ]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("iter".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut Conversation::new(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "result": "path_b_out" }));
+        assert_eq!(ctx.get_context("iter"), Some(&json!(2)));
+
+        // b_path_a executed in iteration 1 only.  When the backward edge
+        // (b_path_a→a_classify) fired, strict_doms[a_classify]={} (a_classify
+        // is the entry block and has no strict dominators), so ALL outputs were
+        // cleared at that point.  b_path_a never re-executed in iteration 2,
+        // so it has no output at function completion.
+        assert!(
+            ctx.get_block_output("b_path_a").is_err(),
+            "abandoned branch b_path_a's output must not persist after switching to c_path_b"
+        );
+        // a_classify and c_path_b are on the final path and must be present.
+        assert!(
+            ctx.get_block_output("a_classify").is_ok(),
+            "a_classify's last output must be present"
+        );
+        assert!(
+            ctx.get_block_output("c_path_b").is_ok(),
+            "c_path_b's output must be present (it is the terminal)"
+        );
+    }
+
+    // Safeguard for the common self-loop path: a block that loops to itself
+    // re-executes correctly under the new dominator-based clearing (draft's
+    // output is cleared on each draft→draft transition because strict_doms[draft]
+    // = {} for the entry block).  Also verifies that draft's final output is
+    // preserved when transitioning draft→done: dom[done]={draft,done} so
+    // strict_doms[done]={draft}, which keeps draft's output.
+    //
+    // Note: this test passes under both old (clear-target-only) and new
+    // (dominator-based) implementations; its purpose is to confirm the new
+    // implementation does not regress the standard self-loop path.  Regression
+    // coverage for the fix itself is provided by tests (b) and (c) above.
+    #[test]
+    fn self_loop_dominator_clearing_allows_reexecution_and_preserves_terminal_inputs() {
+        let wf = load(SELF_LOOP);
+        let func = wf.document().functions.get("f").unwrap();
+        // Three low-quality drafts, then one passing draft, then done.
+        let agent = SequentialAgent::new(vec![
+            json!({ "text": "d1", "quality": 0.3 }),
+            json!({ "text": "d2", "quality": 0.5 }),
+            json!({ "text": "d3", "quality": 0.9 }), // exits to done
+            json!({ "final_text": "finished" }),
+        ]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("attempts".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut Conversation::new(),
+        ))
+        .unwrap();
+
+        assert_eq!(out, json!({ "final_text": "finished" }));
+        assert_eq!(ctx.get_context("attempts"), Some(&json!(3)));
+
+        // `draft` strictly dominates `done` (dom[done] = {draft, done}),
+        // so draft's last output must be preserved when transitioning draft→done.
+        assert_eq!(
+            ctx.get_block_output("draft").unwrap(),
+            &json!({ "text": "d3", "quality": 0.9 }),
+            "draft's last-iteration output must survive as a strict dominator of done"
+        );
+        // `done` is the terminal block; its output must be present.
+        assert_eq!(
+            ctx.get_block_output("done").unwrap(),
+            &json!({ "final_text": "finished" }),
+            "done's output must be present"
+        );
     }
 }
