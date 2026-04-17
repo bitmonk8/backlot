@@ -479,7 +479,7 @@ impl fmt::Display for Template {
 
 // ---- CEL AST reference extraction (used by validate) ----------------------
 
-use cel_parser::{Expression, Member};
+use cel_parser::{Atom, Expression, Member};
 use std::collections::BTreeSet;
 
 use crate::validate::{Location, ValidationIssue};
@@ -541,12 +541,12 @@ fn walk_refs(expr: &Expression, out: &mut CollectedRefs) {
         }
         Expression::Member(_, _) => {
             let chain = flatten_member_chain(expr);
-            if let Some((root, attrs)) = chain {
+            if let Some((root, segments)) = chain {
                 out.top_idents.insert(root.clone());
-                if (root == "blocks" || root == "block") && !attrs.is_empty() {
-                    let target_block = attrs[0].clone();
-                    let field = if attrs.len() >= 2 && attrs[1] == "output" {
-                        attrs.get(2).cloned()
+                if (root == "blocks" || root == "block") && !segments.is_empty() {
+                    let target_block = segments[0].clone();
+                    let field = if segments.len() >= 2 && segments[1] == "output" {
+                        segments.get(2).cloned()
                     } else {
                         None
                     };
@@ -573,24 +573,34 @@ fn walk_member_subexprs(expr: &Expression, out: &mut CollectedRefs) {
     }
 }
 
-/// Flatten a chain of `Member::Attribute` accesses ending in an `Ident`.
-/// Returns `Some((root_ident, [attr1, attr2, ...]))` if the entire chain is
-/// attribute access; `None` if any non-attribute member is encountered.
+/// Flatten a chain of `Member::Attribute` or `Member::Index(string literal)`
+/// accesses ending in an `Ident`.
+/// Returns `Some((root_ident, [seg1, seg2, ...]))` if the entire chain
+/// consists of attribute accesses or string-index accesses; `None` otherwise.
+/// Treating `x["foo"]` the same as `x.foo` ensures that `blocks["name"].output.bar`
+/// is recognised as a block reference just like `blocks.name.output.bar`.
 pub fn flatten_member_chain(expr: &Expression) -> Option<(String, Vec<String>)> {
-    let mut attrs: Vec<String> = Vec::new();
+    let mut segments: Vec<String> = Vec::new();
     let mut cur = expr;
     loop {
         match cur {
             Expression::Member(inner, member) => match member.as_ref() {
                 Member::Attribute(name) => {
-                    attrs.push(name.as_ref().clone());
+                    segments.push(name.as_ref().clone());
+                    cur = inner;
+                }
+                Member::Index(idx_expr) => {
+                    let Expression::Atom(Atom::String(s)) = idx_expr.as_ref() else {
+                        return None;
+                    };
+                    segments.push(s.as_ref().clone());
                     cur = inner;
                 }
                 _ => return None,
             },
             Expression::Ident(name) => {
-                attrs.reverse();
-                return Some((name.as_ref().clone(), attrs));
+                segments.reverse();
+                return Some((name.as_ref().clone(), segments));
             }
             _ => return None,
         }
@@ -955,5 +965,91 @@ mod tests {
         );
         let t = Template::compile("Ärger: {{input.name}} — fertig").unwrap();
         assert_eq!(t.render(&ns).unwrap(), "Ärger: wörld — fertig");
+    }
+
+    // --- collect_references / flatten_member_chain tests ---
+
+    fn parse_expr(src: &str) -> Expression {
+        cel_parser::parse(src).expect("CEL parse failed")
+    }
+
+    #[test]
+    fn collect_refs_attribute_chain_records_block_ref() {
+        // blocks.my_block.output.field — pure attribute chain
+        let expr = parse_expr("blocks.my_block.output.field");
+        let refs = collect_references(&expr);
+        assert!(refs.top_idents.contains("blocks"));
+        assert_eq!(
+            refs.block_refs,
+            vec![("my_block".to_string(), Some("field".to_string()))]
+        );
+    }
+
+    #[test]
+    fn collect_refs_index_string_chain_records_block_ref() {
+        // blocks["my_block"].output.field — bracket string-index access
+        let expr = parse_expr("blocks[\"my_block\"].output.field");
+        let refs = collect_references(&expr);
+        assert!(refs.top_idents.contains("blocks"));
+        assert_eq!(
+            refs.block_refs,
+            vec![("my_block".to_string(), Some("field".to_string()))]
+        );
+    }
+
+    #[test]
+    fn collect_refs_mixed_index_and_attribute_chain_records_block_ref() {
+        // blocks["my_block"].output["field"] — bracket for block name, attribute for output, bracket for field
+        let expr = parse_expr("blocks[\"my_block\"].output[\"field\"]");
+        let refs = collect_references(&expr);
+        assert!(refs.top_idents.contains("blocks"));
+        assert_eq!(
+            refs.block_refs,
+            vec![("my_block".to_string(), Some("field".to_string()))]
+        );
+    }
+
+    #[test]
+    fn collect_refs_index_non_string_does_not_record_block_ref() {
+        // blocks[0] — integer index must NOT produce a block_ref
+        let expr = parse_expr("blocks[0]");
+        let refs = collect_references(&expr);
+        // top_idents still sees "blocks"
+        assert!(refs.top_idents.contains("blocks"));
+        // but no block_refs entry
+        assert!(refs.block_refs.is_empty());
+    }
+
+    #[test]
+    fn flatten_member_chain_attribute_only() {
+        let expr = parse_expr("a.b.c");
+        assert_eq!(
+            flatten_member_chain(&expr),
+            Some(("a".to_string(), vec!["b".to_string(), "c".to_string()]))
+        );
+    }
+
+    #[test]
+    fn flatten_member_chain_string_index() {
+        let expr = parse_expr("a[\"b\"][\"c\"]");
+        assert_eq!(
+            flatten_member_chain(&expr),
+            Some(("a".to_string(), vec!["b".to_string(), "c".to_string()]))
+        );
+    }
+
+    #[test]
+    fn flatten_member_chain_mixed() {
+        let expr = parse_expr("a.b[\"c\"]");
+        assert_eq!(
+            flatten_member_chain(&expr),
+            Some(("a".to_string(), vec!["b".to_string(), "c".to_string()]))
+        );
+    }
+
+    #[test]
+    fn flatten_member_chain_int_index_returns_none() {
+        let expr = parse_expr("a[0]");
+        assert_eq!(flatten_member_chain(&expr), None);
     }
 }
