@@ -1,0 +1,6 @@
+# Reel agent config for the nushell-execution test. NuShell ships under the
+# `tools` grant alongside Read/Glob/Grep.
+model: "fast"
+system_prompt: "You are a helpful assistant. Use the NuShell tool to perform computations."
+grant:
+  - tools

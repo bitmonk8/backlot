@@ -1,0 +1,11 @@
+# Stub vault config. The vault stage does NOT consume this file directly --
+# `storage_root` must be an absolute path to a per-run scratch directory,
+# which gate generates in `target/gate-scratch/run-*/vault/` at stage setup
+# time. This stub exists so the `vault_config_fixture_exists` unit test
+# passes and so a human reading the repo sees the expected schema.
+storage_root: "<generated at runtime in target/gate-scratch/run-*/vault/store>"
+models:
+  bootstrap: "balanced"
+  query: "fast"
+  record: "fast"
+  reorganize: "balanced"

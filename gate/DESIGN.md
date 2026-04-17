@@ -11,7 +11,7 @@ in [`specs/GATE.md`](../specs/GATE.md).
 | `main.rs`   | Clap CLI parsing; hands off to `runner::run` |
 | `types.rs`  | `Stage`, `GateConfig`, `TestOutcome`, `TestResult`, `StageResult`, `CommandResult` |
 | `check.rs`  | Assertion helpers (`assert_exit_ok`, `assert_json_field`, ...) returning `Result<(), TestFailure>` |
-| `exec.rs`   | `run_command` -- subprocess invocation with wall-clock timeout, captured stdio, drain threads |
+| `exec.rs`   | `run_command` and `run_command_with_stdin` -- subprocess invocation with wall-clock timeout, captured stdio, drain threads |
 | `scratch.rs`| Per-run timestamped scratch trees under `target/gate-scratch/` |
 | `report.rs` | Summary table formatting + `results.json` serialization |
 | `runner.rs` | Binary discovery + stage orchestration loop |
@@ -169,13 +169,75 @@ The `timeout` test pins exit code to exactly `124` (the conventional
 elapsed time exceeds the configured `--timeout`; this makes a child
 that crashed for an unrelated reason unable to fool the assertion.
 
-## Future work (D7-D8)
+### Stage 3: `reel`
 
-`reel`, `vault`, `epic`, and `mech` stage modules currently return
-empty vecs. D7-D8 fill them in:
+Five tests (`readonly-session`, `write-session`, `nushell-execution`,
+`multi-turn`, `error-invalid-model`) each invoke
+`reel run --config <yaml> --project-root <copy> --query <q>` with a
+committed YAML config from `gate/fixtures/reel/` and a per-test
+workspace seeded by recursively copying `gate/fixtures/reel/workspace/`
+into a sub-directory of `ctx.scratch_dir`.
 
-- D7: `reel`, `vault`
-- D8: `epic`, `mech`
+The seed helper `seed_workspace` performs a recursive file copy
+(symlinks and other special entries are silently skipped because the
+committed fixture is plain files). The COPY-not-MOVE design is what
+makes reruns work and what isolates write-capable tests
+(`write-session`, `multi-turn`) from the read-only ones.
 
-The runner framework, prereqs check, binary discovery, scratch
-management, and reporting stay unchanged through those deliverables.
+Reel's success JSON uses `status: "Ok"` (compare flick's `complete`);
+the `assert_status_ok` helper is reel-specific. Multi-turn asserts
+`tool_calls > 1` from reel's `SuccessOutput.tool_calls` field --
+anything below 2 either means the model collapsed the task into a
+single tool call or the reel-side counter regressed.
+
+Tier alias `fast` is used in every config that calls a model. The
+`error-invalid-model` config references `nonexistent-model-xyz`
+deliberately and asserts a non-zero exit before any API call happens.
+
+### Stage 4: `vault`
+
+Five tests (`bootstrap`, `record-new`, `record-append`, `query`,
+`reorganize`) run in a FIXED ORDER and SHARE on-disk state. Stage
+setup wipes `<scratch>/store/` once via `cleanup_vault_store`,
+recreates it, and writes a per-run `runtime-config.yaml` whose
+`storage_root` field is the absolute path of that store. This is why
+the committed `gate/fixtures/vault/config.yaml` is a stub: vault's
+`storage_root` cannot be a fixture-relative path -- it must be the
+per-run scratch path -- so the runtime config is generated in
+`render_runtime_config` and the stub fixture exists only to satisfy
+the `vault_config_fixture_exists` unit test and to document the schema.
+
+A setup failure (cleanup or config write) yields a single synthetic
+`gate:vault-setup` Fail and skips the per-test invocations; running
+the rest of the stage against an inconsistent store would just
+produce five identical failures with the same root cause.
+
+Vault's `bootstrap` and `record` subcommands consume their primary
+payload from stdin, so this stage is the consumer of the
+`exec::run_command_with_stdin` helper. The helper writes payload
+bytes on a dedicated thread (so a slow child cannot deadlock the
+parent against a full stdin pipe) and surfaces writer-thread errors
+as appended `gate: stdin write failed: ...` lines in stderr rather
+than as `Err`, so a child that exited successfully without reading
+its stdin still produces a usable `CommandResult`.
+
+The `record-append` assertion REQUIRES the appended marker substring
+(`"Operators must reproduce"`) to appear in the raw document; pre/post
+size growth is logged for diagnostic context but does not gate the
+assertion. Some vault implementations grow the document in place; others
+rewrite it. The marker requirement is the canonical proof that appended
+content reached the document regardless of the storage mechanism. The
+`reorganize` assertion compares pre- and post-reorganize line counts
+of the changelog file; the helper `find_file_containing` walks the
+store recursively for a name substring so the test does not hard-code
+`changelog.md` (vault may rename or rotate the file).
+
+Tier aliases: `balanced` for `bootstrap`/`reorganize` (heavier
+librarian work) and `fast` for `query`/`record` (lighter).
+
+## Future work (D8)
+
+`epic` and `mech` stage modules currently return empty vecs. D8 fills
+them in. The runner framework, prereqs check, binary discovery,
+scratch management, and reporting stay unchanged through that
+deliverable.

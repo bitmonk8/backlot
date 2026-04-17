@@ -52,11 +52,54 @@ pub fn run_command(
     env: &[(&str, &str)],
     timeout: Duration,
 ) -> io::Result<CommandResult> {
+    run_command_inner(program, args, working_dir, env, timeout, None)
+}
+
+/// Variant of [`run_command`] that writes `stdin_bytes` to the child's
+/// standard input and then closes the pipe. Used by stages whose CLIs
+/// consume their primary input from stdin (for example `vault bootstrap`,
+/// which reads requirements text). All other semantics -- timeout
+/// enforcement, captured streams, exit-code conventions -- match
+/// `run_command` exactly.
+///
+/// The write happens on a dedicated thread so a child that drains stdin
+/// slowly cannot wedge the parent against a full pipe buffer; the writer
+/// returns when the bytes are flushed and the pipe is dropped.
+pub fn run_command_with_stdin(
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+    env: &[(&str, &str)],
+    timeout: Duration,
+    stdin_bytes: &[u8],
+) -> io::Result<CommandResult> {
+    run_command_inner(
+        program,
+        args,
+        working_dir,
+        env,
+        timeout,
+        Some(stdin_bytes.to_vec()),
+    )
+}
+
+fn run_command_inner(
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+    env: &[(&str, &str)],
+    timeout: Duration,
+    stdin_bytes: Option<Vec<u8>>,
+) -> io::Result<CommandResult> {
     let start = Instant::now();
 
     let mut cmd = Command::new(program);
     cmd.args(args)
-        .stdin(Stdio::null())
+        .stdin(if stdin_bytes.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(d) = working_dir {
@@ -67,6 +110,25 @@ pub fn run_command(
     }
 
     let mut child = cmd.spawn()?;
+
+    // Hand stdin off to a writer thread so a slow child cannot block the
+    // parent on a full pipe buffer; the thread closes the pipe (signalling
+    // EOF to the child) when done.
+    let stdin_handle = match stdin_bytes {
+        Some(bytes) => {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("child stdin pipe missing"))?;
+            Some(thread::spawn(move || -> io::Result<()> {
+                use std::io::Write;
+                stdin.write_all(&bytes)?;
+                drop(stdin);
+                Ok(())
+            }))
+        }
+        None => None,
+    };
 
     // Drain stdout/stderr on background threads so a chatty child cannot
     // wedge itself by filling the pipe buffer while we are still waiting.
@@ -114,6 +176,27 @@ pub fn run_command(
     let mut stderr_buf = stderr_handle
         .join()
         .unwrap_or_else(|_| String::from("gate: stderr drain thread panicked"));
+    if let Some(handle) = stdin_handle {
+        // A writer-thread panic or write error is surfaced in stderr_buf
+        // rather than as `Err`: the child may already have exited
+        // successfully (for example, a CLI that ignores its stdin), and
+        // raising an `io::Error` would mask the real CommandResult.
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if !stderr_buf.is_empty() && !stderr_buf.ends_with('\n') {
+                    stderr_buf.push('\n');
+                }
+                stderr_buf.push_str(&format!("gate: stdin write failed: {e}\n"));
+            }
+            Err(_) => {
+                if !stderr_buf.is_empty() && !stderr_buf.ends_with('\n') {
+                    stderr_buf.push('\n');
+                }
+                stderr_buf.push_str("gate: stdin write thread panicked\n");
+            }
+        }
+    }
 
     let exit_code = match exit_status {
         Some(status) => status.code().unwrap_or(TIMEOUT_EXIT_CODE),
@@ -494,6 +577,61 @@ mod tests {
             r.stderr.contains("gate-err") && !r.stderr.contains("gate-out"),
             "stderr should hold only the stderr text; got {:?}",
             r.stderr
+        );
+    }
+
+    #[test]
+    fn stdin_bytes_reach_child() {
+        // Pipe a known payload to a stdin-echoing child and verify the
+        // bytes survived the writer-thread + pipe + child-stdout round trip.
+        let (program, args) = if cfg!(windows) {
+            ("findstr", vec![".".into()])
+        } else {
+            ("sh", vec!["-c".into(), "cat".into()])
+        };
+        let arg_refs = args_as_refs(&args);
+        let payload = b"gate-stdin-payload
+";
+        let r = run_command_with_stdin(
+            program,
+            &arg_refs,
+            None,
+            &[],
+            Duration::from_secs(30),
+            payload,
+        )
+        .expect("stdin-echo command runs");
+        assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
+        assert!(
+            r.stdout.contains("gate-stdin-payload"),
+            "expected stdin payload in stdout, got {:?}",
+            r.stdout
+        );
+    }
+
+    #[test]
+    fn stdin_writer_does_not_break_when_child_ignores_stdin() {
+        // `git --version` exits without ever reading stdin, so the writer
+        // thread will see EPIPE / ERROR_BROKEN_PIPE while flushing the
+        // payload. That error must be swallowed (surfaced via stderr at
+        // most) rather than bubble up as `Err`, otherwise a successful
+        // child would be reported as a spawn-time I/O failure.
+        let payload = b"this should be ignored by the child
+";
+        let r = run_command_with_stdin(
+            "git",
+            &["--version"],
+            None,
+            &[],
+            Duration::from_secs(30),
+            payload,
+        )
+        .expect("git --version returns Ok even when stdin is piped and ignored");
+        assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
+        assert!(
+            r.stdout.contains("git version"),
+            "expected stdout to contain 'git version', got {:?}",
+            r.stdout
         );
     }
 }

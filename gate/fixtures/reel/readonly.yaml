@@ -1,0 +1,6 @@
+# Read-only reel agent config for the readonly-session test.
+# `tools` grant gives the agent Read, Glob, Grep, NuShell -- no Write/Edit.
+model: "fast"
+system_prompt: "You are a helpful assistant. Use tools to inspect files when asked."
+grant:
+  - tools

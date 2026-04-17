@@ -12,15 +12,16 @@ Full design: [`specs/GATE.md`](../specs/GATE.md).
 
 ## Status
 
-D1-D6 complete:
+D1-D7 complete:
 
 - D1-D5: types, assertions, reporting, subprocess execution, scratch
   directories, binary discovery, and the stage runner skeleton.
 - D6: Stage 0 prerequisite check (`prereqs`), Stage 1 (`flick`, six
   tests) and Stage 2 (`lot`, eight tests) wired against their real CLIs.
+- D7: Stage 3 (`reel`, five tests) and Stage 4 (`vault`, five tests)
+  wired against their real CLIs.
 
-Stage modules `reel`, `vault`, `epic`, and `mech` remain stubs filled in
-by D7-D8.
+Stage modules `epic` and `mech` remain stubs filled in by D8.
 
 ## Stage 0: prerequisite check
 
@@ -94,3 +95,46 @@ cargo test -p gate
 Gate's own unit tests are pure -- they do not require credentials, network,
 or a real sandbox. The expensive E2E stages run only when `gate` is
 invoked from the command line.
+
+## Stage 3: reel
+
+Five tests exercising reel's agent runtime CLI against a real LLM
+provider. Each test seeds an isolated copy of
+`gate/fixtures/reel/workspace/` (a small directory with `hello.txt` and
+`data.json`) into a sub-directory of the per-stage scratch tree, then
+invokes `reel run --config <yaml> --project-root <copy> --query <q>`.
+
+| Test | What it verifies |
+|------|-----------------|
+| `readonly-session` | Read-only `tools` grant: agent uses Glob/Read on the workspace, reports `hello.txt` content. |
+| `write-session` | `write` grant: agent creates `output.txt`; gate verifies the file on disk. |
+| `nushell-execution` | Agent invokes the NuShell tool to compute `2 + 2`; session must complete without crash. |
+| `multi-turn` | Multi-step task (read + read + write) drives `tool_calls > 1`; final `summary.txt` exists. |
+| `error-invalid-model` | Bogus model alias produces non-zero exit. |
+
+Cost: low (4 cheapest-tier agent sessions; the error test makes no API
+call). Per-test workspaces are **copied**, never moved, so reruns work
+without rebuilding the fixture.
+
+## Stage 4: vault
+
+Five tests exercising vault's knowledge-store CLI. Tests are
+**sequential and shared-state**: each test depends on artifacts the
+previous one produced. Stage setup wipes
+`<scratch>/vault/store/` exactly once and writes a per-run
+`runtime-config.yaml` whose `storage_root` points at it.
+
+| Order | Test | What it verifies |
+|------:|------|-----------------|
+| 1 | `bootstrap` | Pipes requirements into `vault bootstrap`. `raw/`, `derived/`, and a changelog file appear; usage block present. |
+| 2 | `record-new` | `vault record --mode new` creates a new raw document under `raw/`. |
+| 3 | `record-append` | `vault record --mode append` makes the appended marker text appear in the raw document (size growth is logged for diagnostics only). |
+| 4 | `query` | `vault query` returns an answer that references the recorded "Hello, World!" greeting. |
+| 5 | `reorganize` | `vault reorganize` adds entries to the changelog (line count grows). |
+
+The committed `gate/fixtures/vault/config.yaml` is a stub used by the
+`vault_config_fixture_exists` unit test and to document the schema --
+vault's `storage_root` must be an absolute path to a per-run scratch
+directory, so the runtime config is generated in stage code.
+
+Cost: moderate (5 librarian sessions).

@@ -1,0 +1,6 @@
+# Read-write reel agent config for the write-session and multi-turn tests.
+# `write` grant implies `tools` and adds Write/Edit.
+model: "fast"
+system_prompt: "You are a helpful assistant. Use tools to read and write files when asked."
+grant:
+  - write
