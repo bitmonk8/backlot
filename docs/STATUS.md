@@ -104,7 +104,7 @@
 - Standalone crate providing a declarative YAML-based workflow definition format (not a custom-grammar language). Depends on cue (TaskNode integration) and reel (agent execution).
 - All 12 sections drafted and reviewed. Covers: motivation, design goals, unified CDFG model, conversation model (history scoping, compaction, agent configuration), block specification (prompt + call blocks, field validity), transitions & guards (CEL, ordered evaluation, self-loops), template expressions & scoping (5 namespaces, CEL everywhere), schema handling (inline + `$ref` + workflow-level shared schemas), context & state (two-level declared variables, `set_context`/`set_workflow`), validation & error handling (24+ load-time checks, 5 runtime error types), cue integration (function = leaf task, model escalation interaction), YAML reference schema with complete worked example.
 
-**Issues:** 162 open. Importance: 8 high, 65 medium, 89 low. Effort: 118 low, 40 medium, 4 high. Type breakdown: bug 42, docs 36, complexity 31, placement 23, error-handling 22, testing 16, naming 16, cruft 3.
+**Issues:** 157 open. Importance: 3 high, 65 medium, 89 low. Effort: 118 low, 35 medium, 4 high. Type breakdown: bug 37, docs 35, complexity 31, placement 23, error-handling 22, testing 16, naming 16, cruft 3.
 
 **Next Work:**
 1. **mech-cli real agent executor** — mech-cli's `run` subcommand currently uses `StubAgent` that errors for any workflow with `prompt` or `call` blocks. Needs to be wired to a real `AgentExecutor` (likely via reel) so workflows can execute end-to-end against real models. Blocks gate's mech phase from having any real tests.
