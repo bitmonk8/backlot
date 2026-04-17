@@ -158,9 +158,15 @@ MechError variant naming cleanup — 7 issues closed (#35, #37, #39, #47, #54, #
 
 ## Gate
 
-**Phase:** Spec complete (`specs/GATE.md`). Implementation not started.
+**Phase:** D1 complete — crate scaffold, shared types, and CLI parsing landed. The binary builds, prints `gate: not yet implemented`, and all 21 unit tests pass. Subsequent deliverables (D2–D8) wire up the runner, stage modules, and reporting per `specs/GATE.md` and `specs/gate/D2.md` onward.
 
-**Spec:** E2E test harness — a manually-invoked Rust CLI binary that exercises the full backlot stack (flick → lot → reel → vault → epic) against real LLM providers via CLI subprocess calls. 27 tests across 5 active stages plus a mech placeholder. Binary-only crate, no library dependencies on other backlot crates.
+**Implemented (D1):**
+- Workspace member `gate/` registered.
+- `Stage` enum (Flick…Mech) with `Display`, `FromStr`, `Ord`, `all()`, and `default_timeout()` (Epic = 600s, others = 300s).
+- `TestOutcome`, `TestResult`, `StageResult`, `CommandResult` data types. `SoftFail` does not count as failure.
+- `GateConfig` with `effective_timeout()`, `should_run()` (only/from filters), `effective_keep_scratch()` (verbose implies keep).
+- Clap CLI: `--only`/`--from` (mutually exclusive), `--verbose`, `--bin-dir`, `--timeout`, `--output-dir`, `--keep-scratch`.
 
 **Next Work:**
-1. **Implement gate crate** — scaffold crate, CLI, runner, stage modules, fixtures, and reporting per spec.
+1. **D2** — runner + binary discovery (resolve flick/lot/reel/vault/epic/mech CLIs, missing-binary errors).
+2. **D3+** — per-stage modules, assertion helpers, scratch-directory management, summary reporting.

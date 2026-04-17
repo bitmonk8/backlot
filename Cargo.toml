@@ -13,6 +13,7 @@ members = [
     "traits",
     "vault/vault",
     "vault/vault-cli",
+    "gate",
 ]
 resolver = "3"
 
