@@ -1,23 +1,37 @@
 //! Prompt block executor (Deliverable 9, conversation scoping in Deliverable 13).
 //!
-//! Executes a single [`PromptBlock`]:
+//! Executes a single [`PromptBlock`] in the following ordered steps. Each
+//! label below matches the inline step comment at the corresponding point in
+//! [`execute_prompt_block`], so cross-references stay aligned even as steps
+//! are added or split:
 //!
-//! 1. Resolve the effective agent configuration via the three-level cascade
-//!    (workflow → function → block, replace semantics per spec §5.5.2).
-//!    `$ref:#name` string form and the `extends:` field are resolved against
-//!    the workflow-level `agents` map.
-//! 2. Render the prompt template by evaluating CEL against the current
-//!    [`ExecutionContext::namespaces`].
-//! 3. Build an [`AgentRequest`] (model, system prompt, rendered user
-//!    prompt, grant flags, custom tools, write paths, timeout, output
-//!    schema, conversation history).
-//! 4. Invoke the injected [`AgentExecutor`].
-//! 5. Append returned messages (or synthesized user+assistant) to the
-//!    function's conversation (§4.6). Check compaction threshold.
-//! 6. Validate the returned JSON value against the block's declared output
-//!    schema.
-//! 7. Record the validated output under the block's ID in the execution
-//!    context (write-once per invocation).
+//! - **Agent cascade** — resolve the effective agent configuration via the
+//!   three-level cascade (workflow → function → block, replace semantics per
+//!   spec §5.5.2). `$ref:#name` string form and the `extends:` field are
+//!   resolved against the workflow-level `agents` map.
+//! - **Render prompt** — render the prompt template by evaluating CEL against
+//!   the current [`ExecutionContext::namespaces`].
+//! - **System prompt** — the explicit `system` parameter is authoritative
+//!   (rendered once at function entry by the caller); no fallback to
+//!   `conversation.system()`.
+//! - **Resolve schema** — resolve the output schema via the compiled registry
+//!   and extract its raw JSON body for the agent request.
+//! - **Build request** — assemble an [`AgentRequest`] (model, system prompt,
+//!   rendered user prompt, grant flags, custom tools, write paths, timeout,
+//!   output schema) including a snapshot of the conversation history taken
+//!   *before* this turn's commit.
+//! - **Dispatch** — invoke the injected [`AgentExecutor`].
+//! - **Buffer messages** — buffer the returned messages (or synthesized
+//!   user+assistant) — do NOT append to the conversation yet.
+//! - **Validate** — validate the returned JSON value against the block's
+//!   declared output schema *before* mutating the conversation. A validation
+//!   failure leaves the conversation unchanged so the caller can retry
+//!   cleanly.
+//! - **Commit history** — append the buffered messages to the function's
+//!   conversation (§4.6).
+//! - **Check compaction** — check the compaction threshold.
+//! - **Record output** — record the validated output under the block's ID in
+//!   the execution context (write-once per invocation).
 //!
 //! Transitions, `set_context` / `set_workflow` side-effects, and block
 //! scheduling are deliberately out of scope — they land in Deliverable 11
@@ -307,9 +321,14 @@ fn tag_executor_error(err: MechError, block_id: &str) -> MechError {
 /// separate concern (Deliverable 11).
 ///
 /// The `conversation` parameter carries the function's accumulated
-/// conversation history (§4.6). The prompt/response and any tool
-/// call/result messages from the agent loop are appended after each
-/// execution.
+/// conversation history (§4.6). Updates follow a Buffer→Validate→Commit
+/// protocol: the prompt/response and any tool call/result messages from
+/// the agent loop are first buffered locally (not yet appended), then
+/// schema validation runs against the agent's output, and only if
+/// validation succeeds are the buffered messages committed to the
+/// conversation atomically. On validation failure no messages are
+/// appended, leaving the conversation unchanged so the caller can retry
+/// cleanly.
 ///
 /// The `system` parameter is the authoritative pre-rendered system
 /// prompt for this invocation. It is rendered exactly once per function
@@ -395,22 +414,23 @@ pub async fn execute_prompt_block(
         .map_err(|e| tag_executor_error(e, block_id))?;
     let output = response.output;
 
-    // 6b. Append messages to conversation. If the agent returned
-    //     messages, use those (they may include tool call/result pairs).
-    //     Otherwise, synthesize minimal user+assistant messages.
-    if response.messages.is_empty() {
-        conversation.push(crate::conversation::Message::user(rendered_prompt));
-        conversation.push(crate::conversation::Message::assistant(output.to_string()));
+    // 6b. Buffer the pending messages without appending to conversation yet.
+    //     History must not be mutated until validation confirms the output is
+    //     valid — a bogus turn in history would pollute retries.
+    let pending_messages = if response.messages.is_empty() {
+        vec![
+            crate::conversation::Message::user(rendered_prompt),
+            crate::conversation::Message::assistant(output.to_string()),
+        ]
     } else {
-        conversation.push_many(response.messages);
-    }
-
-    // 6c. Check if compaction should fire.
-    conversation.check_compaction();
+        response.messages
+    };
 
     // 7. Validate against the declared output schema using the
     //    pre-compiled validator from the registry. Surface up to the
     //    first 10 errors so authors see more than the single first failure.
+    //    Validation happens BEFORE mutating conversation so that a failure
+    //    leaves history unchanged.
     let validator = resolved_schema
         .validator()
         .ok_or_else(|| MechError::WorkflowValidation {
@@ -434,7 +454,13 @@ pub async fn execute_prompt_block(
         });
     }
 
-    // 8. Record under `block.<id>`.
+    // 8. Validation passed — append the buffered messages atomically.
+    conversation.push_many(pending_messages);
+
+    // 9. Check if compaction should fire (only after a successful append).
+    conversation.check_compaction();
+
+    // 10. Record under `block.<id>`.
     ctx.record_block_output(block_id, output.clone())?;
     Ok(output)
 }
@@ -1391,5 +1417,426 @@ functions:
                 "expected SchemaValidationFailure, got {err:?}"
             );
         }
+    }
+
+    // ---- atomic conversation mutation (buffer until validation) ----------
+
+    #[test]
+    fn validation_success_appends_messages_and_runs_compaction() {
+        // Success path: messages must be appended and compaction must fire
+        // when the threshold is exceeded.
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        let agent = FakeAgent::fixed(json!({ "category": "billing" }));
+
+        // Configure compaction with a threshold low enough that any
+        // non-empty append triggers compaction.
+        let compaction = crate::conversation::ResolvedCompaction {
+            keep_recent_tokens: 50,
+            reserve_tokens: 50,
+            custom_fn: None,
+        };
+        let mut conv = Conversation::new().with_compaction(Some(compaction));
+
+        run_blocking(execute_prompt_block(
+            &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
+        ))
+        .expect("valid output must succeed");
+
+        // Two messages (user prompt + assistant response) must be present.
+        assert_eq!(
+            conv.len(),
+            2,
+            "success path must append user+assistant messages"
+        );
+        assert_eq!(conv.messages()[0].role, crate::conversation::Role::User);
+        assert_eq!(conv.messages()[0].content, "hi ada");
+        assert_eq!(
+            conv.messages()[1].role,
+            crate::conversation::Role::Assistant
+        );
+        assert_eq!(
+            conv.messages()[1].content,
+            json!({ "category": "billing" }).to_string()
+        );
+        // Compaction must have fired because the appended messages exceeded the threshold.
+        assert_eq!(
+            conv.compaction_count(),
+            1,
+            "compaction must fire after successful append"
+        );
+    }
+
+    #[test]
+    fn validation_failure_leaves_conversation_unchanged() {
+        // Failure path: conversation history must be completely unmodified
+        // when schema validation rejects the output.
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        // `category` field is missing — fails the `required` constraint.
+        let agent = FakeAgent::fixed(json!({ "wrong": 1 }));
+
+        // Configure compaction so we can also assert it did NOT fire.
+        let compaction = crate::conversation::ResolvedCompaction {
+            keep_recent_tokens: 50,
+            reserve_tokens: 50,
+            custom_fn: None,
+        };
+        let mut conv = Conversation::new().with_compaction(Some(compaction));
+
+        let err = run_blocking(execute_prompt_block(
+            &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
+        ))
+        .expect_err("schema mismatch must error");
+
+        assert!(
+            matches!(err, MechError::SchemaValidationFailure { .. }),
+            "expected SchemaValidationFailure, got {err:?}"
+        );
+        // History must be completely unchanged.
+        assert_eq!(
+            conv.len(),
+            0,
+            "validation failure must not append any messages to conversation"
+        );
+        // Compaction must not have fired.
+        assert_eq!(
+            conv.compaction_count(),
+            0,
+            "compaction must not fire when validation fails"
+        );
+    }
+
+    // ---- push_many branch (response.messages non-empty) ----------------
+
+    #[test]
+    fn validation_success_uses_explicit_response_messages() {
+        // When the agent returns a non-empty `messages` list, those messages
+        // (not the synthesized user+assistant pair) are appended on success.
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        let agent = FakeAgent::new(|_| {
+            Ok(AgentResponse {
+                output: json!({ "category": "billing" }),
+                messages: vec![
+                    crate::conversation::Message::user("explicit user"),
+                    crate::conversation::Message::tool_call("call t"),
+                    crate::conversation::Message::tool_result("result r"),
+                    crate::conversation::Message::assistant("explicit assistant"),
+                ],
+            })
+        });
+        let mut conv = Conversation::new();
+
+        run_blocking(execute_prompt_block(
+            &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
+        ))
+        .expect("valid output must succeed");
+
+        assert_eq!(
+            conv.len(),
+            4,
+            "explicit response.messages must be appended verbatim"
+        );
+        assert_eq!(conv.messages()[0].role, crate::conversation::Role::User);
+        assert_eq!(conv.messages()[0].content, "explicit user");
+        assert_eq!(conv.messages()[1].role, crate::conversation::Role::ToolCall);
+        assert_eq!(
+            conv.messages()[2].role,
+            crate::conversation::Role::ToolResult
+        );
+        assert_eq!(
+            conv.messages()[3].role,
+            crate::conversation::Role::Assistant
+        );
+        assert_eq!(conv.messages()[3].content, "explicit assistant");
+    }
+
+    #[test]
+    fn validation_failure_with_explicit_messages_leaves_conversation_unchanged() {
+        // Failure path with explicit response.messages: the buffered messages
+        // must NOT be appended when schema validation rejects the output.
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        let agent = FakeAgent::new(|_| {
+            Ok(AgentResponse {
+                // Missing `category` — fails the `required` constraint.
+                output: json!({ "wrong": 1 }),
+                messages: vec![
+                    crate::conversation::Message::user("explicit user"),
+                    crate::conversation::Message::assistant("explicit assistant"),
+                ],
+            })
+        });
+        let mut conv = Conversation::new();
+
+        let err = run_blocking(execute_prompt_block(
+            &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
+        ))
+        .expect_err("schema mismatch must error");
+
+        assert!(
+            matches!(err, MechError::SchemaValidationFailure { .. }),
+            "expected SchemaValidationFailure, got {err:?}"
+        );
+        assert_eq!(
+            conv.len(),
+            0,
+            "validation failure must not append explicit response.messages"
+        );
+    }
+
+    // ---- accumulation: pre-existing history preserved ----
+
+    #[test]
+    fn success_path_preserves_pre_existing_history() {
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        let agent = FakeAgent::fixed(json!({ "category": "ok" }));
+
+        let mut conv = Conversation::new();
+        conv.push(crate::conversation::Message::user("prior user"));
+        conv.push(crate::conversation::Message::assistant("prior reply"));
+
+        run_blocking(execute_prompt_block(
+            &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
+        ))
+        .expect("valid output must succeed");
+
+        // The request's history snapshot must reflect the pre-call state
+        // (2 prior messages), proving the snapshot is taken before the
+        // commit, not after.
+        assert_eq!(
+            agent.last().history.len(),
+            2,
+            "AgentRequest.history must be the pre-call snapshot, not the post-commit history"
+        );
+        assert_eq!(
+            agent.last().history[0].role,
+            crate::conversation::Role::User
+        );
+        assert_eq!(agent.last().history[0].content, "prior user");
+        assert_eq!(
+            agent.last().history[1].role,
+            crate::conversation::Role::Assistant
+        );
+        assert_eq!(agent.last().history[1].content, "prior reply");
+
+        assert_eq!(conv.len(), 4, "prior 2 + new 2 messages must be present");
+        assert_eq!(conv.messages()[0].role, crate::conversation::Role::User);
+        assert_eq!(conv.messages()[0].content, "prior user");
+        assert_eq!(
+            conv.messages()[1].role,
+            crate::conversation::Role::Assistant
+        );
+        assert_eq!(conv.messages()[1].content, "prior reply");
+        assert_eq!(conv.messages()[2].role, crate::conversation::Role::User);
+        assert_eq!(
+            conv.messages()[3].role,
+            crate::conversation::Role::Assistant
+        );
+    }
+
+    #[test]
+    fn failure_path_leaves_pre_existing_history_untouched() {
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        // Missing `category` — fails the `required` constraint.
+        let agent = FakeAgent::fixed(json!({ "wrong": 1 }));
+
+        let mut conv = Conversation::new();
+        conv.push(crate::conversation::Message::user("prior user"));
+        conv.push(crate::conversation::Message::assistant("prior reply"));
+
+        let err = run_blocking(execute_prompt_block(
+            &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
+        ))
+        .expect_err("schema mismatch must error");
+
+        assert!(
+            matches!(err, MechError::SchemaValidationFailure { .. }),
+            "expected SchemaValidationFailure, got {err:?}"
+        );
+        assert_eq!(conv.len(), 2, "original 2 messages must remain unchanged");
+        assert_eq!(conv.messages()[0].content, "prior user");
+        assert_eq!(conv.messages()[1].content, "prior reply");
+    }
+
+    #[test]
+    fn multi_turn_history_flows_into_second_call() {
+        // First call appends user+assistant; the second call's request
+        // must include those two messages as its history snapshot, proving
+        // history flows turn-to-turn through the same Conversation.
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        let mut conv = Conversation::new();
+
+        let first_agent = FakeAgent::fixed(json!({ "category": "first" }));
+        run_blocking(execute_prompt_block(
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx,
+            &first_agent,
+            &mut conv,
+            None,
+        ))
+        .expect("first call must succeed");
+        // First call saw an empty history.
+        assert_eq!(first_agent.last().history.len(), 0);
+        assert_eq!(conv.len(), 2, "first call must append user+assistant");
+
+        // Block outputs are write-once per invocation, so the second
+        // call needs a fresh context. The conversation, however, must be
+        // reused — that is the whole point of this test.
+        let mut ctx2 = new_ctx(&BTreeMap::new());
+        let second_agent = FakeAgent::fixed(json!({ "category": "second" }));
+        run_blocking(execute_prompt_block(
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx2,
+            &second_agent,
+            &mut conv,
+            None,
+        ))
+        .expect("second call must succeed");
+
+        // Second call's request must contain the 2 messages appended by
+        // the first call — history flows turn-to-turn.
+        assert_eq!(
+            second_agent.last().history.len(),
+            2,
+            "second call's AgentRequest.history must contain the first turn's messages"
+        );
+        assert_eq!(
+            second_agent.last().history[0].role,
+            crate::conversation::Role::User
+        );
+        assert_eq!(second_agent.last().history[0].content, "hi ada");
+        assert_eq!(
+            second_agent.last().history[1].role,
+            crate::conversation::Role::Assistant
+        );
+        assert_eq!(
+            second_agent.last().history[1].content,
+            json!({ "category": "first" }).to_string()
+        );
+    }
+
+    // ---- accumulation: pre-existing history + explicit response.messages ----
+
+    #[test]
+    fn success_path_preserves_pre_existing_history_with_explicit_messages() {
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        let agent = FakeAgent::new(|_| {
+            Ok(AgentResponse {
+                output: json!({ "category": "ok" }),
+                messages: vec![
+                    crate::conversation::Message::user("exp user"),
+                    crate::conversation::Message::assistant("exp assistant"),
+                ],
+            })
+        });
+
+        let mut conv = Conversation::new();
+        conv.push(crate::conversation::Message::user("prior user"));
+        conv.push(crate::conversation::Message::assistant("prior reply"));
+
+        run_blocking(execute_prompt_block(
+            &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
+        ))
+        .expect("valid output must succeed");
+
+        assert_eq!(
+            conv.len(),
+            4,
+            "prior 2 + explicit 2 messages must be present"
+        );
+        assert_eq!(conv.messages()[0].content, "prior user");
+        assert_eq!(conv.messages()[1].content, "prior reply");
+        assert_eq!(conv.messages()[2].content, "exp user");
+        assert_eq!(conv.messages()[3].content, "exp assistant");
+    }
+
+    #[test]
+    fn failure_path_leaves_pre_existing_history_untouched_with_explicit_messages() {
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let mut ctx = new_ctx(&BTreeMap::new());
+        let agent = FakeAgent::new(|_| {
+            Ok(AgentResponse {
+                // Missing `category` — fails the `required` constraint.
+                output: json!({ "wrong": 1 }),
+                messages: vec![
+                    crate::conversation::Message::user("exp user"),
+                    crate::conversation::Message::assistant("exp assistant"),
+                ],
+            })
+        });
+
+        let mut conv = Conversation::new();
+        conv.push(crate::conversation::Message::user("prior user"));
+        conv.push(crate::conversation::Message::assistant("prior reply"));
+
+        let err = run_blocking(execute_prompt_block(
+            &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
+        ))
+        .expect_err("schema mismatch must error");
+
+        assert!(
+            matches!(err, MechError::SchemaValidationFailure { .. }),
+            "expected SchemaValidationFailure, got {err:?}"
+        );
+        assert_eq!(conv.len(), 2, "original 2 messages must remain unchanged");
+        assert_eq!(conv.messages()[0].content, "prior user");
+        assert_eq!(conv.messages()[1].content, "prior reply");
     }
 }
