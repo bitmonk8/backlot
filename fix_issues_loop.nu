@@ -169,7 +169,14 @@ def run-pi-data-command [command: string]: nothing -> any {
 
 # Run a Pi agent command (like /implement). Returns exit code.
 def run-pi-agent [pi_args: list<string>, command: string]: nothing -> int {
+  print $"  > pi ($pi_args | str join ' ') ($command)"
   let result = (do { ^pi ...$pi_args $command } | complete)
+  if $result.exit_code != 0 {
+    let stderr_tail = ($result.stderr | str trim | lines | last 10 | str join "\n")
+    let stdout_tail = ($result.stdout | str trim | lines | last 10 | str join "\n")
+    if ($stderr_tail | is-not-empty) { print $"  stderr: ($stderr_tail)" }
+    if ($stdout_tail | is-not-empty) { print $"  stdout: ($stdout_tail)" }
+  }
   $result.exit_code
 }
 
