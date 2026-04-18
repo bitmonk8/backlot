@@ -219,10 +219,7 @@ impl SchemaRegistry {
                 // Recognise `{"$ref": "#name"}` — same criterion as resolve_nested_walk.
                 if map.len() == 1 {
                     if let Some(Value::String(ref_str)) = map.get("$ref") {
-                        if let Some(name) = ref_str
-                            .strip_prefix('#')
-                            .filter(|n| !n.is_empty() && !n.contains('/'))
-                        {
+                        if let Some(name) = try_parse_hash_pointer(ref_str) {
                             return self.resolved_bodies.get(name).cloned().ok_or_else(|| {
                                 MechError::SchemaRefUnresolved {
                                     name: name.to_string(),
@@ -252,6 +249,19 @@ impl SchemaRegistry {
 ///
 /// `$ref:path` (no leading `#`) is reserved for external file references and
 /// is rejected here as unsupported (not malformed).
+///
+/// # Errors
+///
+/// Returns exactly one of two variants:
+///
+/// * [`MechError::SchemaRefMalformed`] — the input is missing the `$ref:`
+///   prefix, has an empty body, or has an empty name after `#`.
+/// * [`MechError::SchemaRefUnsupported`] — the input has the `$ref:` prefix
+///   but no leading `#` (i.e. an external file reference).
+///
+/// Validators in `mech/src/validate/{agents,schema_check}.rs` rely on this
+/// closed contract. Adding a new error variant here requires updating those
+/// `match` blocks.
 pub fn parse_named_ref(raw: &str) -> MechResult<&str> {
     let body = raw
         .strip_prefix(REF_PREFIX)
@@ -282,6 +292,16 @@ pub fn try_parse_named_ref(raw: &str) -> Option<&str> {
     let body = raw.strip_prefix(REF_PREFIX)?;
     let name = body.strip_prefix('#').filter(|s| !s.is_empty())?;
     Some(name)
+}
+
+/// Parse a `#name` JSON-Schema pointer fragment and return the bare `name`.
+///
+/// Accepts only plain workflow-level aliases (no `/` — JSON Pointer paths
+/// are left to jsonschema itself) and rejects empty names. Returns `None`
+/// for anything else.
+fn try_parse_hash_pointer(raw: &str) -> Option<&str> {
+    raw.strip_prefix('#')
+        .filter(|n| !n.is_empty() && !n.contains('/'))
 }
 
 /// Follow a chain of top-level `$ref:#name` documents until reaching a
@@ -410,8 +430,7 @@ fn top_level_ref_target(body: &JsonValue) -> Option<&str> {
             let r = map.get("$ref")?.as_str()?;
             // Only treat plain `#name` (no slash) as a workflow alias; any
             // `#/...` JSON Pointer is left to jsonschema itself.
-            r.strip_prefix('#')
-                .filter(|n| !n.is_empty() && !n.contains('/'))
+            try_parse_hash_pointer(r)
         }
         _ => None,
     }
@@ -963,6 +982,20 @@ mod tests {
         assert_eq!(try_parse_named_ref("$ref:person"), None);
         assert_eq!(try_parse_named_ref("$ref:#"), None);
         assert_eq!(try_parse_named_ref(""), None);
+    }
+
+    #[test]
+    fn try_parse_hash_pointer_valid() {
+        assert_eq!(try_parse_hash_pointer("#person"), Some("person"));
+        assert_eq!(try_parse_hash_pointer("#a_b"), Some("a_b"));
+    }
+
+    #[test]
+    fn try_parse_hash_pointer_returns_none_for_invalid() {
+        assert_eq!(try_parse_hash_pointer("person"), None); // missing leading #
+        assert_eq!(try_parse_hash_pointer("#"), None); // empty name
+        assert_eq!(try_parse_hash_pointer("#foo/bar"), None); // contains /, reserved for JSON Pointer
+        assert_eq!(try_parse_hash_pointer(""), None);
     }
 
     #[test]

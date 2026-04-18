@@ -53,30 +53,35 @@ impl Validator<'_> {
         wf: &MechDocument,
         loc: Location,
     ) {
-        let Some(rest) = raw.strip_prefix("$ref:") else {
-            self.err(loc, format!("malformed schema $ref: `{raw}`"));
-            return;
-        };
-        if let Some(name) = rest.strip_prefix('#') {
-            if name.is_empty() {
-                self.err(loc, format!("malformed schema $ref: `{raw}`"));
-                return;
+        // Route through the canonical parser so the malformed/unsupported
+        // distinction stays consistent with registry/exec call-sites.
+        match crate::schema::parse_named_ref(raw) {
+            Ok(name) => {
+                let exists = wf
+                    .workflow
+                    .as_ref()
+                    .is_some_and(|d| d.schemas.contains_key(name));
+                if !exists {
+                    self.err(
+                        loc,
+                        format!(
+                            "schema $ref `#{name}` does not resolve to a workflow-level schema"
+                        ),
+                    );
+                }
             }
-            let exists = wf
-                .workflow
-                .as_ref()
-                .is_some_and(|d| d.schemas.contains_key(name));
-            if !exists {
+            Err(crate::error::MechError::SchemaRefUnsupported { .. }) => {
                 self.err(
                     loc,
-                    format!("schema $ref `#{name}` does not resolve to a workflow-level schema"),
+                    format!("external file $ref `{raw}` is not supported; only `$ref:#name` references are allowed"),
                 );
             }
-        } else {
-            self.err(
-                loc,
-                format!("external file $ref `{raw}` is not supported; only `$ref:#name` references are allowed"),
-            );
+            Err(crate::error::MechError::SchemaRefMalformed { .. }) => {
+                self.err(loc, format!("malformed schema $ref: `{raw}`"));
+            }
+            Err(_) => {
+                unreachable!("parse_named_ref returns only SchemaRefMalformed/SchemaRefUnsupported")
+            }
         }
     }
 

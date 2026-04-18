@@ -142,24 +142,31 @@ impl Validator<'_> {
                 self.validate_agent_inline(ac, models, loc);
             }
             AgentConfigRef::Ref(raw) => {
-                let Some(rest) = raw.strip_prefix("$ref:") else {
-                    self.err(loc, format!("malformed agent $ref: `{raw}`"));
-                    return;
-                };
-                if let Some(name) = rest.strip_prefix('#') {
-                    if name.is_empty() || !defaults.agents.contains_key(name) {
+                // Route through the canonical parser so malformed/unsupported
+                // are distinguished consistently across crate boundaries.
+                match crate::schema::parse_named_ref(raw) {
+                    Ok(name) => {
+                        if !defaults.agents.contains_key(name) {
+                            self.err(
+                                loc,
+                                format!(
+                                    "agent $ref `#{name}` is not a named agent in `workflow.agents`"
+                                ),
+                            );
+                        }
+                    }
+                    Err(crate::error::MechError::SchemaRefUnsupported { .. }) => {
                         self.err(
                             loc,
-                            format!(
-                                "agent $ref `#{name}` is not a named agent in `workflow.agents`"
-                            ),
+                            format!("external file agent $ref `{raw}` is not supported; only `$ref:#name` references are allowed"),
                         );
                     }
-                } else {
-                    self.err(
-                        loc,
-                        format!("external file agent $ref `{raw}` is not supported; only `$ref:#name` references are allowed"),
-                    );
+                    Err(crate::error::MechError::SchemaRefMalformed { .. }) => {
+                        self.err(loc, format!("malformed agent $ref: `{raw}`"));
+                    }
+                    Err(_) => unreachable!(
+                        "parse_named_ref returns only SchemaRefMalformed/SchemaRefUnsupported"
+                    ),
                 }
             }
         }
