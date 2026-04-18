@@ -139,7 +139,8 @@ def main [
   slack-report $pi_agent_args $slack_channel $summary_msg
 }
 
-# Run a Pi extension command that prints JSON to stdout. No LLM involved.
+# Run a Pi extension command that prints JSON. No LLM involved.
+# Pi print mode routes extension console.log to stderr, so check both streams.
 def run-pi-data-command [command: string]: nothing -> any {
   let result = (do { ^pi -p --no-session $command } | complete)
   if $result.exit_code != 0 {
@@ -147,21 +148,21 @@ def run-pi-data-command [command: string]: nothing -> any {
     return null
   }
 
-  # The command prints JSON to stdout. Pi may also print other lines (startup, etc).
-  # Find the last line that parses as JSON.
-  let lines = ($result.stdout | lines | where { $in | is-not-empty })
+  # Extension output may land on stdout or stderr depending on Pi mode.
+  # Search both streams for the last JSON line.
+  let all_lines = ([$result.stdout $result.stderr] | str join "\n" | lines | where { $in | is-not-empty })
   mut parsed = null
-  for $line in ($lines | reverse) {
-    let attempt = (do { $line | from json } | complete)
-    if $attempt.exit_code == 0 {
+  for $line in ($all_lines | reverse) {
+    try {
       $parsed = ($line | from json)
       break
+    } catch {
+      continue
     }
   }
 
   if $parsed == null {
     print $"ERROR: No JSON output from '($command)'"
-    print $"stdout: ($result.stdout)"
   }
   $parsed
 }

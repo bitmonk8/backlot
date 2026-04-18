@@ -112,7 +112,7 @@ export function registerPickIssue(pi: ExtensionAPI) {
         };
       }
 
-      console.log(JSON.stringify(pick));
+      process.stdout.write(JSON.stringify(pick) + "\n");
     },
   });
 }

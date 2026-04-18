@@ -72,7 +72,7 @@ export function registerGetIssuesSummary(pi: ExtensionAPI) {
 
       const raw: GhIssue[] = JSON.parse(result.stdout);
       const summary = parseIssues(raw);
-      console.log(JSON.stringify(summary));
+      process.stdout.write(JSON.stringify(summary) + "\n");
     },
   });
 }
