@@ -21,13 +21,18 @@
 //! let wf = load_workflow_str(yaml)?;
 //! ```
 //!
-//! Load-time warnings (non-fatal advisories — see the [`LoadWarning`]
-//! enum for all variants, currently [`LoadWarning::CompactionPlaceholder`]
-//! and [`LoadWarning::CompactionOnDataflowFunction`]) are emitted via
-//! `tracing::warn!` for production observability — callers must install a
-//! `tracing` subscriber to see them. Tests use [`collect_load_warnings`]
-//! against a parsed document to inspect the same advisories
-//! programmatically.
+//! Load-time advisories about unimplemented features (see the
+//! [`UnsupportedFeatureAdvisory`] enum for all variants, currently
+//! [`UnsupportedFeatureAdvisory::CompactionUnimplemented`] and
+//! [`UnsupportedFeatureAdvisory::CompactionOnDataflowFunction`]) are aggregated into a
+//! hard [`MechError::UnsupportedFeature`] error and the load is rejected.
+//! This trades a permissive load for a louder, earlier failure: a
+//! workflow that configures e.g. `compaction:` would otherwise run
+//! "successfully" and silently fail to compact at runtime (compaction
+//! is not implemented — see `docs/MECH_SPEC.md` §4.6).
+//! [`collect_unsupported_feature_advisories`] is retained as the internal mechanism that
+//! builds the error message and remains directly testable against a
+//! parsed document.
 //!
 //! The legacy [`WorkflowLoader`] struct is still available but new code should
 //! prefer the free functions.
@@ -49,39 +54,49 @@ use crate::workflow::{Workflow, WorkflowInner};
 // Free-function API
 // ---------------------------------------------------------------------------
 
-/// A non-fatal advisory emitted during workflow load.
+/// An advisory collected during workflow load about a configured-but-
+/// unimplemented feature.
 ///
-/// Surfaced via `tracing::warn!` for production observability — callers
-/// must install a `tracing` subscriber to see them. Tests inspect the
-/// same advisories programmatically via [`collect_load_warnings`].
+/// Each variant describes one offending scope. The loader collects every
+/// variant produced for a document via [`collect_unsupported_feature_advisories`] and, if
+/// the resulting list is non-empty, aggregates their [`Display`]
+/// representations into a single
+/// [`MechError::UnsupportedFeature`](crate::error::MechError::UnsupportedFeature)
+/// and rejects the load — see the module-level docstring for rationale.
+/// Tests construct documents and call [`collect_unsupported_feature_advisories`] directly
+/// to pin which advisories fire for which configurations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoadWarning {
-    /// Workflow- or function-level `compaction:` is configured but the
-    /// runtime compaction strategy is a placeholder no-op. The declared
-    /// scope (`"workflow-level"` or `"function-level: <name>"`) is
-    /// included for diagnostics.
-    CompactionPlaceholder { scope: String },
+pub enum UnsupportedFeatureAdvisory {
+    /// Workflow- or function-level `compaction:` is configured but
+    /// compaction is not implemented; the loader rejects the document at
+    /// load time so the workflow does not run "successfully" while
+    /// silently failing to compact. The declared scope
+    /// (`"workflow-level"` or `"function-level: <name>"`) is included
+    /// for diagnostics.
+    CompactionUnimplemented { scope: String },
 
     /// A dataflow function has an effective `compaction:` config (declared
     /// on the function itself or inherited from the workflow-level
-    /// default), but dataflow blocks are single-turn (§4.6 rule 3): each
-    /// per-block conversation is constructed empty and discarded after one
-    /// prompt+response. Compaction is therefore meaningless on dataflow
-    /// functions and is silently dropped at runtime. The named function is
-    /// the dataflow function whose compaction config is being ignored.
+    /// default). Forward-looking advisory: even once compaction is
+    /// implemented, dataflow functions will not receive it because each
+    /// per-block conversation is constructed empty (§4.6 rule 3) and
+    /// discarded after one prompt+response, so the configured compaction
+    /// would be silently discarded. Until then, the load is rejected.
+    /// The named function is the dataflow function whose compaction
+    /// config would be ignored.
     CompactionOnDataflowFunction { function: String },
 }
 
-impl std::fmt::Display for LoadWarning {
+impl std::fmt::Display for UnsupportedFeatureAdvisory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::CompactionPlaceholder { scope } => write!(
+            Self::CompactionUnimplemented { scope } => write!(
                 f,
-                "{scope} `compaction` is configured but compaction is not implemented (placeholder). The hook only increments a counter; messages are NOT summarized. See docs/MECH_SPEC.md §4.6."
+                "{scope} `compaction` is configured but compaction is not implemented. The hook only increments a counter; messages are NOT summarized. See docs/MECH_SPEC.md §4.6."
             ),
             Self::CompactionOnDataflowFunction { function } => write!(
                 f,
-                "function `{function}` is dataflow (no transitions, only `depends_on` edges) but has an effective `compaction:` config; compaction is meaningless for dataflow functions because each block runs a fresh single-turn conversation (§4.6 rule 3) and the config is dropped at runtime. See docs/MECH_SPEC.md §4.6."
+                "function `{function}` is dataflow (no transitions, only `depends_on` edges) but has an effective `compaction:` config; even once compaction is implemented, dataflow functions will not receive it because each block runs a fresh single-turn conversation (§4.6 rule 3) and the configured compaction would be silently discarded. Until then, the load is rejected. See docs/MECH_SPEC.md §4.6."
             ),
         }
     }
@@ -92,8 +107,9 @@ impl std::fmt::Display for LoadWarning {
 /// Pipeline: read file → parse YAML → build schema registry → validate →
 /// infer function outputs → compile CEL expressions and templates.
 ///
-/// Load-time advisories are emitted via `tracing::warn!`; install a
-/// `tracing` subscriber to capture them.
+/// A workflow that configures any unimplemented feature (currently
+/// `compaction:` — see the module-level docstring) is rejected with
+/// [`MechError::UnsupportedFeature`].
 pub fn load_workflow(path: impl AsRef<Path>) -> MechResult<Workflow> {
     load_workflow_with(path, &AnyModel)
 }
@@ -108,17 +124,17 @@ pub fn load_workflow_with(
         path: path.to_path_buf(),
         source: e,
     })?;
-    load_impl(&source, Some(path.to_path_buf()), models).map(|(wf, _)| wf)
+    load_impl(&source, Some(path.to_path_buf()), models)
 }
 
 /// Load a workflow from a YAML string.
 pub fn load_workflow_str(yaml: &str) -> MechResult<Workflow> {
-    load_impl(yaml, None, &AnyModel).map(|(wf, _)| wf)
+    load_impl(yaml, None, &AnyModel)
 }
 
 /// Load a workflow from a YAML string with a custom model checker.
 pub fn load_workflow_str_with(yaml: &str, models: &dyn ModelChecker) -> MechResult<Workflow> {
-    load_impl(yaml, None, models).map(|(wf, _)| wf)
+    load_impl(yaml, None, models)
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +183,7 @@ fn load_impl(
     yaml: &str,
     source_path: Option<PathBuf>,
     models: &dyn ModelChecker,
-) -> MechResult<(Workflow, Vec<LoadWarning>)> {
+) -> MechResult<Workflow> {
     // 1. Parse YAML.
     let mut file = parse_workflow(yaml).map_err(|e| MechError::YamlParse {
         path: source_path.clone(),
@@ -209,27 +225,18 @@ fn load_impl(
     // 4. Infer function output schemas (`output: infer` / omitted).
     infer_function_outputs(&mut file)?;
 
-    // The spec describes LLM-based summarization at a token budget; today
-    // the conversation compaction hook is a placeholder no-op that only
-    // increments a counter. Mirror compaction-related advisories through
-    // `tracing::warn!` for production observability. Tests inspect the
-    // same advisories via `collect_load_warnings` against the parsed
-    // document. (See `Conversation::check_compaction` and
-    // `docs/MECH_SPEC.md` §4.6.)
-    let warnings = collect_load_warnings(&file);
-    let path_label = source_path
-        .as_deref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "<inline>".to_string());
-    for w in &warnings {
-        match w {
-            LoadWarning::CompactionPlaceholder { scope } => {
-                tracing::warn!(workflow = %path_label, scope = %scope, "{w}");
-            }
-            LoadWarning::CompactionOnDataflowFunction { function } => {
-                tracing::warn!(workflow = %path_label, function = %function, "{w}");
-            }
-        }
+    // Reject configured-but-unimplemented features (currently only
+    // `compaction:`) at load time so callers cannot configure them and
+    // then silently get no behavior — the runtime hook is a placeholder
+    // no-op (see Conversation::check_compaction and docs/MECH_SPEC.md
+    // §4.6). Aggregation mirrors MechError::WorkflowValidation: every
+    // offending scope discovered by collect_unsupported_feature_advisories
+    // is joined into one error message so callers see the full set in a
+    // single failure.
+    let advisories = collect_unsupported_feature_advisories(&file);
+    if !advisories.is_empty() {
+        let advisories: Vec<String> = advisories.iter().map(|a| a.to_string()).collect();
+        return Err(MechError::UnsupportedFeature { advisories });
     }
 
     // 5. Compile every CEL guard and template in the workflow.
@@ -244,7 +251,7 @@ fn load_impl(
         cel_expressions,
         templates,
     });
-    Ok((workflow, warnings))
+    Ok(workflow)
 }
 
 fn compile_all(
@@ -314,36 +321,50 @@ fn intern_template(
     Ok(())
 }
 
-pub fn collect_load_warnings(file: &MechDocument) -> Vec<LoadWarning> {
-    let mut warnings = Vec::new();
+/// Collect every [`UnsupportedFeatureAdvisory`] advisory the document would produce.
+///
+/// This is the internal mechanism `load_impl` uses to build the
+/// [`MechError::UnsupportedFeature`] error message — it is `pub` so tests
+/// (and any out-of-tree caller that wants to inspect advisories without
+/// invoking the full load pipeline) can pin which advisories fire for a
+/// given parsed document. A non-empty return value means the loader will
+/// reject the document; an empty return value means the unimplemented-
+/// feature gate passes (other load-time errors may still apply).
+pub fn collect_unsupported_feature_advisories(
+    file: &MechDocument,
+) -> Vec<UnsupportedFeatureAdvisory> {
+    let mut advisories = Vec::new();
     if let Some(workflow) = &file.workflow {
         if workflow.compaction.is_some() {
-            warnings.push(LoadWarning::CompactionPlaceholder {
+            advisories.push(UnsupportedFeatureAdvisory::CompactionUnimplemented {
                 scope: "workflow-level".to_string(),
             });
         }
     }
     for (name, func) in &file.functions {
         if func.compaction.is_some() {
-            warnings.push(LoadWarning::CompactionPlaceholder {
+            advisories.push(UnsupportedFeatureAdvisory::CompactionUnimplemented {
                 scope: format!("function-level `{name}`"),
             });
         }
 
-        // CompactionOnDataflowFunction is orthogonal to the placeholder
-        // warning: the placeholder warns that compaction is a global no-op
-        // today; this warning warns that even when compaction is fully
-        // implemented, the config will still be silently discarded for
-        // dataflow functions because dataflow blocks construct a fresh
-        // single-turn `Conversation::new(None)` per block (§4.6 rule 3) and
-        // never see the function-level conversation. Both warnings can fire
-        // for the same function. Inheritance via workflow-level default is
-        // mirrored here as a pure schema check (function-level overrides,
-        // workflow-level fallback) so the loader does not depend on the
-        // exec or conversation layers -- a dataflow function with no
+        // CompactionOnDataflowFunction is orthogonal to
+        // CompactionUnimplemented because they describe different
+        // forward-looking facts about the same configured feature:
+        // CompactionUnimplemented says the runtime strategy is a global
+        // no-op today; CompactionOnDataflowFunction says that even once
+        // compaction is fully implemented, the config will still be
+        // silently discarded on dataflow functions because dataflow
+        // blocks construct a fresh single-turn `Conversation::new(None)`
+        // per block (§4.6 rule 3) and never see the function-level
+        // conversation. Both advisories can fire for the same function.
+        // Inheritance via workflow-level default is mirrored here as a
+        // pure schema check (function-level overrides, workflow-level
+        // fallback) so the loader does not depend on the exec or
+        // conversation layers — a dataflow function with no
         // function-level compaction but a workflow-level default still
-        // warns, because that default would also be silently dropped at
-        // runtime.
+        // produces this advisory, because that default would also be
+        // silently dropped at runtime.
         let has_effective_compaction = func.compaction.is_some()
             || file
                 .workflow
@@ -353,12 +374,12 @@ pub fn collect_load_warnings(file: &MechDocument) -> Vec<LoadWarning> {
         if has_effective_compaction
             && crate::schema::infer_mode(func) == crate::schema::InferMode::Dataflow
         {
-            warnings.push(LoadWarning::CompactionOnDataflowFunction {
+            advisories.push(UnsupportedFeatureAdvisory::CompactionOnDataflowFunction {
                 function: name.clone(),
             });
         }
     }
-    warnings
+    advisories
 }
 
 #[cfg(test)]

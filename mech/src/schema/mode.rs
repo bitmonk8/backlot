@@ -17,14 +17,15 @@
 //!
 //! * [`crate::schema::infer`] — to choose the multi-terminal output schema
 //!   shape (keyed map for dataflow, structural unification for imperative).
-//! * [`crate::loader`] — to emit the load-time
-//!   [`LoadWarning::CompactionOnDataflowFunction`] advisory.
+//! * [`crate::loader`] — to contribute the
+//!   [`UnsupportedFeatureAdvisory::CompactionOnDataflowFunction`] advisory
+//!   that the loader aggregates into [`crate::error::MechError::UnsupportedFeature`]
+//!   to reject the load.
 //!
 //! It mirrors `exec::function::detect_mode` without depending on the exec
-//! layer, so loader/schema callers stay layer-clean. (Unifying the two copies
-//! is tracked as a follow-up — see `r2_triage.md` R2-T8.)
+//! layer, so loader/schema callers stay layer-clean.
 //!
-//! [`LoadWarning::CompactionOnDataflowFunction`]: crate::loader::LoadWarning::CompactionOnDataflowFunction
+//! [`UnsupportedFeatureAdvisory::CompactionOnDataflowFunction`]: crate::loader::UnsupportedFeatureAdvisory::CompactionOnDataflowFunction
 
 use crate::schema::FunctionDef;
 

@@ -32,8 +32,8 @@ pub use exec::{
     TransitionResult, apply_side_effects, evaluate_transitions, run_function_imperative,
 };
 pub use loader::{
-    LoadWarning, WorkflowLoader, collect_load_warnings, load_workflow, load_workflow_str,
-    load_workflow_str_with, load_workflow_with,
+    UnsupportedFeatureAdvisory, WorkflowLoader, collect_unsupported_feature_advisories,
+    load_workflow, load_workflow_str, load_workflow_str_with, load_workflow_with,
 };
 pub use schema::{
     AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,

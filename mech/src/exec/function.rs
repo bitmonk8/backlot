@@ -175,7 +175,7 @@ impl<'w> FunctionRunner<'w> {
                 .await
             }
             ExecutionMode::Dataflow => {
-                // Compaction skipped: see `MECH_SPEC.md` §4.6 and `LoadWarning::CompactionOnDataflowFunction`.
+                // Compaction skipped: see `MECH_SPEC.md` §4.6 and `UnsupportedFeatureAdvisory::CompactionOnDataflowFunction`.
                 run_function_dataflow(
                     self.workflow,
                     function_name,
@@ -1004,69 +1004,6 @@ functions:
         }
     }
 
-    // Compaction config is wired through FunctionRunner. Actual compaction
-    // trigger count is asserted in schedule-level tests
-    // (schedule::tests::compaction_hook_invoked_at_threshold).
-    #[test]
-    fn compaction_config_wired_through_runner() {
-        let yaml = r#"
-workflow:
-  compaction:
-    keep_recent_tokens: 50
-    reserve_tokens: 50
-functions:
-  main:
-    input: { type: object }
-    output:
-      type: object
-      required: [val]
-      properties: { val: { type: string } }
-    context:
-      rounds: { type: integer, initial: 0 }
-    blocks:
-      step:
-        prompt: "round {{context.rounds}}"
-        schema:
-          type: object
-          required: [val]
-          properties: { val: { type: string } }
-        set_context:
-          rounds: "context.rounds + 1"
-        transitions:
-          - when: 'context.rounds < 3'
-            goto: step
-"#;
-        let wf = load(yaml);
-        let ws = WorkflowState::from_declarations(
-            &wf.document()
-                .workflow
-                .as_ref()
-                .map(|w| w.context.clone())
-                .unwrap_or_default(),
-        )
-        .unwrap();
-
-        // We need to capture whether compaction was triggered. Since
-        // FunctionRunner owns the conversation internally, we can't
-        // directly inspect compaction_count. Instead, we test at the
-        // schedule level where we have access to the conversation.
-        //
-        // This test verifies the wiring: FunctionRunner correctly
-        // resolves compaction config and passes it to the conversation.
-        // The actual compaction count test lives in the schedule-level
-        // test below.
-        let agent = SequentialAgent::new(vec![
-            json!({ "val": "r0" }),
-            json!({ "val": "r1" }),
-            json!({ "val": "r2" }),
-        ]);
-        let runner = FunctionRunner::new(&wf, &agent, ws);
-
-        // Runs without error — compaction extension point is wired.
-        let out = run_blocking(runner.run_function("main", json!({}))).unwrap();
-        assert_eq!(out, json!({ "val": "r2" }));
-    }
-
     // Workflow-level system prompt falls back through render_function_system
     // when the function declares none. Pins FunctionRunner's
     // `(workflow, function)` wiring to render_function_system end-to-end:
@@ -1324,5 +1261,59 @@ functions:
         // the four blocks. Proves the system is rendered once at function
         // entry and forwarded unchanged.
         assert_all_requests_have_system(&reqs, "round 0");
+    }
+
+    // Issue #440's loader gate makes the imperative-arm compaction wiring
+    // (line 163-164: `resolve_compaction(...)` -> `Conversation::new(compaction)`)
+    // unreachable through normal load. This test pins that the wiring is
+    // intact so the gate can be loosened (when actual compaction lands)
+    // without silently reverting to placeholder no-op behavior.
+    //
+    // Fallback approach (per the test's design note): asserts that
+    // `resolve_compaction(document, function)` returns `Some(...)` for a
+    // programmatically-built document with workflow-level compaction.
+    // Asserting on the internal `Conversation` constructed by
+    // `run_function_with_ctx` would require exposing
+    // `FunctionRunner` / `Conversation` internals; pinning the resolver
+    // covers the wiring's only surviving fail-open path: a regression
+    // that returned `None` here would silently feed `Conversation::new(None)`
+    // even after the loader gate is removed.
+    #[test]
+    fn compaction_config_reaches_runner_when_loader_gate_bypassed() {
+        use crate::conversation::resolve_compaction;
+        use crate::schema::{CompactionConfig, MechDocument, WorkflowSection};
+
+        // Workflow-level compaction with no function-level override --
+        // exercises the inheritance path FunctionRunner relies on.
+        let document = MechDocument {
+            workflow: Some(WorkflowSection {
+                compaction: Some(CompactionConfig {
+                    keep_recent_tokens: 1000,
+                    reserve_tokens: 800,
+                    func: None,
+                }),
+                ..Default::default()
+            }),
+            functions: BTreeMap::new(),
+        };
+        let function = FunctionDef {
+            input: json!({ "type": "object" }),
+            output: None,
+            system: None,
+            agent: None,
+            terminals: Vec::new(),
+            context: BTreeMap::new(),
+            compaction: None,
+            blocks: BTreeMap::new(),
+        };
+
+        let resolved = resolve_compaction(&document, &function);
+        assert!(
+            resolved.is_some(),
+            "FunctionRunner imperative arm depends on resolve_compaction returning              Some(...) here; a None would silently disable compaction once the              loader gate is loosened"
+        );
+        let resolved = resolved.unwrap();
+        assert_eq!(resolved.keep_recent_tokens, 1000);
+        assert_eq!(resolved.reserve_tokens, 800);
     }
 }

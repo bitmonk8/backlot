@@ -229,6 +229,29 @@ pub enum MechError {
         errors: Vec<String>,
     },
 
+    /// A workflow declared a feature that mech does not yet implement.
+    ///
+    /// Today this is raised exclusively for `compaction:` configuration
+    /// (workflow- or function-level): compaction is not implemented (see
+    /// `Conversation::check_compaction` and `docs/MECH_SPEC.md` §4.6), so
+    /// loading a workflow that *configures* compaction would silently fail
+    /// to compact at runtime — exactly the silent-failure mode the
+    /// loader is meant to prevent. The loader therefore rejects such
+    /// workflows up front. `advisories` is the per-scope list of offending
+    /// configurations discovered in the document (each advisory's message
+    /// names the feature), mirroring the `WorkflowValidation::errors`
+    /// shape.
+    #[error(
+        "unsupported feature configuration ({} {}): {}",
+        advisories.len(),
+        if advisories.len() == 1 { "advisory" } else { "advisories" },
+        advisories.join("; ")
+    )]
+    UnsupportedFeature {
+        /// Per-advisory messages, one entry per offending scope.
+        advisories: Vec<String>,
+    },
+
     /// An internal loader invariant was violated at runtime.
     ///
     /// This indicates a bug in the loader or a corrupted [`Workflow`] handle,
@@ -344,6 +367,46 @@ mod tests {
         assert!(s.contains("bad guard"));
         assert!(s.contains("missing block"));
         assert!(s.contains('2'));
+
+        // UnsupportedFeature: must clearly read as an unimplemented-feature
+        // failure (not a user authoring mistake), name the feature, and
+        // include the aggregated message verbatim so callers can still see
+        // every offending scope.
+        let e = MechError::UnsupportedFeature {
+            advisories: vec![
+                "workflow-level `compaction` is configured but compaction is not implemented"
+                    .into(),
+                "function-level `f` `compaction` is configured but compaction is not implemented"
+                    .into(),
+            ],
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("unsupported feature configuration"),
+            "Display must signal this is an unsupported-feature error, not a user mistake: {s}"
+        );
+        assert!(
+            s.contains("compaction"),
+            "Display must surface the feature name (carried by each advisory): {s}"
+        );
+        assert!(
+            s.contains("workflow-level") && s.contains("function-level `f`"),
+            "Display must include every offending scope from `advisories`: {s}"
+        );
+        assert!(
+            s.contains("2 advisories"),
+            "Display must report advisory count with correct pluralization: {s}"
+        );
+
+        // Single-advisory pluralization.
+        let e = MechError::UnsupportedFeature {
+            advisories: vec!["workflow-level `compaction` is configured".into()],
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("1 advisory"),
+            "Display must use singular `advisory` for n=1: {s}"
+        );
     }
 
     #[test]

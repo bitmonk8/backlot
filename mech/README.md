@@ -263,14 +263,20 @@ println!("{}", serde_json::to_string_pretty(&output)?);
 The legacy `WorkflowLoader` struct is still available for backward compatibility
 but delegates to the free functions above.
 
-Mech emits non-fatal load-time advisories (e.g. `LoadWarning::CompactionPlaceholder`,
-`LoadWarning::CompactionOnDataflowFunction`) via `tracing::warn!`. Consumers must
-install a `tracing::Subscriber` to surface them in production output; tests that
-need programmatic access can call `mech::loader::collect_load_warnings(&parsed_document)`
-directly. The dataflow-specific advisory fires when a dataflow function has any
-effective `compaction:` config (declared on the function or inherited from the
-workflow-level default), since dataflow blocks are single-turn and the config is
-silently dropped at runtime — see docs/MECH_SPEC.md §4.6.
+Mech rejects workflows that configure unimplemented features at load time
+with `MechError::UnsupportedFeature { advisories }`. Today this fires
+exclusively for `compaction:` (workflow- or function-level), because
+compaction is not implemented (see `docs/MECH_SPEC.md` §4.6) and a
+permissive load that silently fails to compact is a worse failure mode
+than refusing to load. Internally the loader collects
+`UnsupportedFeatureAdvisory::CompactionUnimplemented` and
+`UnsupportedFeatureAdvisory::CompactionOnDataflowFunction` advisories via
+`mech::loader::collect_unsupported_feature_advisories(&parsed_document)` (still `pub` as a
+test seam) and exposes them per-scope as the `advisories` vector; the dataflow-specific
+advisory additionally surfaces in the message when a dataflow function has
+any effective `compaction:` config (declared on the function or inherited
+from the workflow-level default), since dataflow blocks are single-turn and
+the config would be silently dropped at runtime even after compaction lands.
 
 ## Module structure
 

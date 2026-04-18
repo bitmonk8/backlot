@@ -1,5 +1,5 @@
 use super::*;
-use crate::loader::{LoadWarning, collect_load_warnings};
+use crate::loader::{UnsupportedFeatureAdvisory, collect_unsupported_feature_advisories};
 use crate::schema::parse_workflow;
 
 const FULL_EXAMPLE: &str = include_str!("../../testdata/full_example.yaml");
@@ -580,43 +580,24 @@ fn legacy_workflow_loader_load_str() {
     assert_eq!(wf.document().functions.len(), 2);
 }
 
-// ---- compaction-config warning at load time -----------------------------
+// ---- compaction-config rejection at load time --------------------------
 
-// Load-time advisories are exposed as a `Vec<LoadWarning>` via
-// `collect_load_warnings(&parsed_document)`. Tests parse the YAML
-// independently and call the collector directly so they pin the advisory
-// list without needing a `tracing::Subscriber`. The loader pipes the same
-// list through `tracing::warn!` for production observability.
+// These tests pin that any `compaction:` config is rejected at load
+// time with `MechError::UnsupportedFeature`. `UnsupportedFeatureAdvisory`
+// and `collect_unsupported_feature_advisories` remain `pub` so tests can
+// pin the per-scope wording without re-running the full load pipeline;
+// the integration tests below additionally assert that the same wording
+// reaches the `MechError::UnsupportedFeature` Display.
 
-fn count_compaction_warnings_for_scope(warnings: &[LoadWarning], scope: &str) -> usize {
-    warnings
-        .iter()
-        .filter(|w| match w {
-            LoadWarning::CompactionPlaceholder { scope: s } => s.contains(scope),
-            // The placeholder-scope counter is for the global "compaction is
-            // a no-op" advisory; the dataflow-discard advisory is a
-            // different warning class and is counted separately by
-            // `count_compaction_on_dataflow_warnings_for_function`.
-            LoadWarning::CompactionOnDataflowFunction { .. } => false,
-        })
-        .count()
-}
-
-fn count_compaction_on_dataflow_warnings_for_function(
-    warnings: &[LoadWarning],
-    func: &str,
-) -> usize {
-    warnings
-        .iter()
-        .filter(|w| match w {
-            LoadWarning::CompactionOnDataflowFunction { function } => function == func,
-            LoadWarning::CompactionPlaceholder { .. } => false,
-        })
-        .count()
+fn unsupported_feature_message(err: &MechError) -> String {
+    match err {
+        MechError::UnsupportedFeature { advisories } => advisories.join("; "),
+        other => panic!("expected MechError::UnsupportedFeature, got {other:?}"),
+    }
 }
 
 #[test]
-fn workflow_level_compaction_emits_load_time_warning() {
+fn workflow_level_compaction_rejects_load() {
     let yaml = r#"
 workflow:
   compaction:
@@ -634,87 +615,62 @@ functions:
           properties:
             answer: { type: string }
 "#;
-    // Round-trip the YAML through the loader to ensure it is still valid,
-    // then parse + collect warnings against the parsed document.
-    load_workflow_str(yaml).expect("load");
-    let parsed = parse_workflow(yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "workflow-level"),
-        1,
-        "expected exactly one workflow-level compaction warning, got: {warnings:?}"
-    );
-    // No function-level compaction was configured.
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "function-level"),
-        0
-    );
-}
-
-#[test]
-fn function_level_compaction_emits_load_time_warning() {
-    let yaml = r#"
-functions:
-  f:
-    input: { type: object }
-    compaction:
-      keep_recent_tokens: 500
-      reserve_tokens: 800
-    blocks:
-      a:
-        prompt: "hi"
-        schema:
-          type: object
-          required: [answer]
-          properties:
-            answer: { type: string }
-"#;
-    // Round-trip the YAML through the loader to ensure it is still valid,
-    // then parse + collect warnings against the parsed document.
-    load_workflow_str(yaml).expect("load");
-    let parsed = parse_workflow(yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "function-level `f`"),
-        1,
-        "expected exactly one function-level compaction warning, got: {warnings:?}"
-    );
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "workflow-level"),
-        0
-    );
-}
-
-#[test]
-fn workflow_without_compaction_emits_no_warning() {
-    let yaml = r#"
-functions:
-  f:
-    input: { type: object }
-    blocks:
-      a:
-        prompt: "hi"
-        schema:
-          type: object
-          required: [answer]
-          properties:
-            answer: { type: string }
-"#;
-    // Round-trip the YAML through the loader to ensure it is still valid,
-    // then parse + collect warnings against the parsed document.
-    load_workflow_str(yaml).expect("load");
-    let parsed = parse_workflow(yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
+    let err = load_workflow_str(yaml).expect_err("compaction: must reject load");
+    let msg = unsupported_feature_message(&err);
     assert!(
-        warnings.is_empty(),
-        "expected no warnings for a workflow without compaction config, got: {warnings:?}"
+        msg.contains("workflow-level"),
+        "error must name the workflow-level scope: {msg}"
+    );
+    assert!(
+        !msg.contains("function-level"),
+        "no function-level compaction was configured; message must not mention one: {msg}"
+    );
+
+    // collect_unsupported_feature_advisories still surfaces exactly one advisory for this
+    // document (the placeholder warning for the workflow-level scope).
+    let parsed = parse_workflow(yaml).expect("parse");
+    let warnings = collect_unsupported_feature_advisories(&parsed);
+    assert_eq!(
+        warnings,
+        vec![UnsupportedFeatureAdvisory::CompactionUnimplemented {
+            scope: "workflow-level".to_string()
+        }],
+        "expected exactly the workflow-level placeholder advisory, got {warnings:?}"
     );
 }
 
-// When both workflow- and function-level `compaction:` are configured,
-// both warnings must fire (one of each, neither suppressing the other).
 #[test]
-fn combined_workflow_and_function_compaction_emits_two_warnings() {
+fn function_level_compaction_rejects_load() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    compaction:
+      keep_recent_tokens: 500
+      reserve_tokens: 800
+    blocks:
+      a:
+        prompt: "hi"
+        schema:
+          type: object
+          required: [answer]
+          properties:
+            answer: { type: string }
+"#;
+    let err = load_workflow_str(yaml).expect_err("compaction: must reject load");
+    let msg = unsupported_feature_message(&err);
+    assert!(
+        msg.contains("function-level `f`"),
+        "error must name the function-level scope: {msg}"
+    );
+    assert!(
+        !msg.contains("workflow-level"),
+        "no workflow-level compaction was configured; message must not mention one: {msg}"
+    );
+}
+
+#[test]
+fn combined_workflow_and_function_compaction_mentions_both_scopes() {
     let yaml = r#"
 workflow:
   compaction:
@@ -735,33 +691,16 @@ functions:
           properties:
             answer: { type: string }
 "#;
-    // Round-trip the YAML through the loader to ensure it is still valid,
-    // then parse + collect warnings against the parsed document.
-    load_workflow_str(yaml).expect("load");
-    let parsed = parse_workflow(yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-    assert_eq!(
-        warnings.len(),
-        2,
-        "expected exactly two compaction warnings (one workflow + one function), got: {warnings:?}"
-    );
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "workflow-level"),
-        1,
-        "expected one workflow-level warning, got: {warnings:?}"
-    );
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "function-level `f`"),
-        1,
-        "expected one function-level warning, got: {warnings:?}"
+    let err = load_workflow_str(yaml).expect_err("compaction: must reject load");
+    let msg = unsupported_feature_message(&err);
+    assert!(
+        msg.contains("workflow-level") && msg.contains("function-level `f`"),
+        "error must mention both offending scopes: {msg}"
     );
 }
 
-// Two function-level `compaction` configs (no workflow-level) must both
-// emit warnings — pins the loader's `filter` over `find` semantics so a
-// future short-circuit refactor would surface in tests rather than ship.
 #[test]
-fn two_function_level_compactions_emit_two_warnings() {
+fn two_function_level_compactions_mention_both_functions() {
     let yaml = r#"
 functions:
   f1:
@@ -791,229 +730,161 @@ functions:
           properties:
             answer: { type: string }
 "#;
-    load_workflow_str(yaml).expect("load");
-    let parsed = parse_workflow(yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "function"),
-        2,
-        "expected exactly two function-level compaction warnings, got: {warnings:?}"
+    let err = load_workflow_str(yaml).expect_err("compaction: must reject load");
+    let msg = unsupported_feature_message(&err);
+    assert!(
+        msg.contains("function-level `f1`") && msg.contains("function-level `f2`"),
+        "error must mention both offending function names: {msg}"
     );
 }
 
-/// Build a workflow YAML for the dataflow-warning test matrix.
-/// `workflow_compaction` and `function_compaction` are the body lines that go
-/// under `workflow.compaction:` (4-space indent) and `functions.f.compaction:`
-/// (6-space indent) respectively, or `None` to omit the section. `mode`
-/// selects the block topology: `"dataflow"` (b depends_on a) or
-/// `"imperative"` (a transitions to b).
-fn compaction_warning_yaml(
+// Helper for the dataflow vs imperative matrix. `workflow_compaction` and
+// `function_compaction` are the body lines that go under `workflow.compaction:`
+// (4-space indent) and `functions.f.compaction:` (6-space indent)
+// respectively, or `None` to omit the section. `mode` selects the block
+// topology: `"dataflow"` (b depends_on a) or `"imperative"` (a transitions
+// to b).
+fn compaction_advisory_yaml(
     workflow_compaction: Option<&str>,
     function_compaction: Option<&str>,
     mode: &str,
 ) -> String {
     let workflow_section = match workflow_compaction {
-        Some(body) => format!(
-            "workflow:
-  compaction:
-{body}
-"
-        ),
+        Some(body) => format!("workflow:\n  compaction:\n{body}\n"),
         None => String::new(),
     };
     let function_compaction_section = match function_compaction {
-        Some(body) => format!(
-            "    compaction:
-{body}
-"
-        ),
+        Some(body) => format!("    compaction:\n{body}\n"),
         None => String::new(),
     };
     let blocks = match mode {
         "dataflow" => concat!(
-            "      a:
-",
-            "        prompt: \"root\"
-",
-            "        schema:
-",
-            "          type: object
-",
-            "          required: [x]
-",
-            "          properties: { x: { type: integer } }
-",
-            "      b:
-",
-            "        prompt: \"leaf {{block.a.output.x}}\"
-",
-            "        schema:
-",
-            "          type: object
-",
-            "          required: [y]
-",
-            "          properties: { y: { type: string } }
-",
+            "      a:\n",
+            "        prompt: \"root\"\n",
+            "        schema:\n",
+            "          type: object\n",
+            "          required: [x]\n",
+            "          properties: { x: { type: integer } }\n",
+            "      b:\n",
+            "        prompt: \"leaf {{block.a.output.x}}\"\n",
+            "        schema:\n",
+            "          type: object\n",
+            "          required: [y]\n",
+            "          properties: { y: { type: string } }\n",
             "        depends_on: [a]",
         ),
         "imperative" => concat!(
-            "      a:
-",
-            "        prompt: \"step a\"
-",
-            "        schema:
-",
-            "          type: object
-",
-            "          required: [x]
-",
-            "          properties: { x: { type: string } }
-",
-            "        transitions:
-",
-            "          - goto: b
-",
-            "      b:
-",
-            "        prompt: \"step b\"
-",
-            "        schema:
-",
-            "          type: object
-",
-            "          required: [y]
-",
+            "      a:\n",
+            "        prompt: \"step a\"\n",
+            "        schema:\n",
+            "          type: object\n",
+            "          required: [x]\n",
+            "          properties: { x: { type: string } }\n",
+            "        transitions:\n",
+            "          - goto: b\n",
+            "      b:\n",
+            "        prompt: \"step b\"\n",
+            "        schema:\n",
+            "          type: object\n",
+            "          required: [y]\n",
             "          properties: { y: { type: string } }",
         ),
-        _ => panic!("compaction_warning_yaml: unknown mode {mode:?}"),
+        _ => panic!("compaction_advisory_yaml: unknown mode {mode:?}"),
     };
     format!(
-        "{workflow_section}functions:
-  f:
-    input: {{ type: object }}
-{function_compaction_section}    blocks:
-{blocks}
-",
+        "{workflow_section}functions:\n  f:\n    input: {{ type: object }}\n{function_compaction_section}    blocks:\n{blocks}\n",
     )
 }
 
-// ---- compaction on dataflow function ------------------------------------
-
 // Function-level `compaction:` declared on a dataflow function (no
-// transitions, only `depends_on` edges) emits BOTH the global
-// `CompactionPlaceholder` advisory AND the dataflow-specific
-// `CompactionOnDataflowFunction` advisory. The two are orthogonal: the
-// placeholder warns the runtime is a no-op today; the dataflow warning
-// pins that even when compaction lands, the config is still silently
-// dropped on the dataflow arm of `FunctionRunner::run_function_with_ctx`
-// because per-block conversations in `dataflow::execute_block` are
-// constructed via `Conversation::new(None)` (no compaction passed in).
+// transitions, only `depends_on` edges) must still reject load, AND the
+// aggregated error must include the dataflow-specific advisory in
+// addition to the placeholder. The two are orthogonal: the placeholder
+// rejects because the runtime is a no-op today; the dataflow advisory
+// pins that even after compaction is implemented, the config would still
+// be silently dropped on the dataflow arm of `FunctionRunner` because
+// `dataflow::execute_block` constructs `Conversation::new(None)` per
+// block. Surfacing both in the same error message preserves diagnostic
+// information.
 #[test]
-fn function_level_compaction_on_dataflow_function_emits_dataflow_warning() {
-    let yaml = compaction_warning_yaml(
+fn dataflow_function_with_function_compaction_rejects_with_dataflow_advisory() {
+    let yaml = compaction_advisory_yaml(
         None,
-        Some(
-            "      keep_recent_tokens: 500
-      reserve_tokens: 800",
-        ),
+        Some("      keep_recent_tokens: 500\n      reserve_tokens: 800"),
         "dataflow",
     );
-    load_workflow_str(&yaml).expect("load");
-    let parsed = parse_workflow(&yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-
-    assert_eq!(
-        count_compaction_on_dataflow_warnings_for_function(&warnings, "f"),
-        1,
-        "expected exactly one CompactionOnDataflowFunction warning for `f`, got: {warnings:?}"
+    let err = load_workflow_str(&yaml).expect_err("compaction: must reject load");
+    let msg = unsupported_feature_message(&err);
+    assert!(
+        msg.contains("function-level `f`"),
+        "error must name the function-level scope: {msg}"
     );
-    // Placeholder still fires because the runtime compaction strategy is a
-    // no-op everywhere; the dataflow warning is additional, not a
-    // replacement.
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "function-level `f`"),
-        1,
-        "placeholder warning must still fire for function-level config: {warnings:?}"
+    assert!(
+        msg.contains("dataflow") && msg.contains("function `f`"),
+        "error must include the dataflow-specific advisory naming `f`: {msg}"
     );
 }
 
 // Workflow-level default `compaction:` inherited by a dataflow function
-// (which declares no override of its own) still emits the dataflow
-// warning, because `resolve_compaction` mirrors the runtime resolution
-// path and the inherited config would also be silently dropped at runtime
-// for the dataflow arm. Pins the inheritance branch of the warning.
+// (which declares no override of its own) must still surface the dataflow
+// advisory in the error message, since the inherited config would also
+// be silently dropped at runtime for the dataflow arm. Pins the
+// inheritance branch of the advisory.
 #[test]
-fn workflow_level_compaction_inherited_by_dataflow_function_emits_dataflow_warning() {
-    let yaml = compaction_warning_yaml(
-        Some(
-            "    keep_recent_tokens: 1000
-    reserve_tokens: 1000",
-        ),
+fn dataflow_function_inheriting_workflow_compaction_rejects_with_dataflow_advisory() {
+    let yaml = compaction_advisory_yaml(
+        Some("    keep_recent_tokens: 1000\n    reserve_tokens: 1000"),
         None,
         "dataflow",
     );
-    load_workflow_str(&yaml).expect("load");
-    let parsed = parse_workflow(&yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-
-    assert_eq!(
-        count_compaction_on_dataflow_warnings_for_function(&warnings, "f"),
-        1,
-        "expected exactly one CompactionOnDataflowFunction warning for `f` via inheritance, got: {warnings:?}"
+    let err = load_workflow_str(&yaml).expect_err("compaction: must reject load");
+    let msg = unsupported_feature_message(&err);
+    assert!(
+        msg.contains("workflow-level"),
+        "error must name the workflow-level scope: {msg}"
     );
-    // Workflow-level placeholder still fires (one).
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "workflow-level"),
-        1
+    assert!(
+        msg.contains("dataflow") && msg.contains("function `f`"),
+        "error must include the dataflow-specific advisory naming `f`: {msg}"
     );
-    // No function-level placeholder — `f` declares no compaction of its own.
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "function-level"),
-        0
+    assert!(
+        !msg.contains("function-level `f`"),
+        "no function-level compaction was configured; placeholder advisory must not mention one: {msg}"
     );
 }
 
-// Imperative function with compaction: only the placeholder fires, the
-// dataflow warning does NOT. Pins the negative case so a future refactor
-// that conflates the two warnings would surface here. `detect_mode`
-// returns `Imperative` whenever any block has a transition, so we add a
-// transition to make it unambiguous.
+// Imperative function with compaction: error contains only the
+// placeholder advisory, NOT the dataflow advisory. Pins the negative
+// case so a future refactor that conflated the two would surface here.
 #[test]
-fn imperative_function_with_compaction_does_not_emit_dataflow_warning() {
-    let yaml = compaction_warning_yaml(
+fn imperative_function_with_compaction_rejects_without_dataflow_advisory() {
+    let yaml = compaction_advisory_yaml(
         None,
-        Some(
-            "      keep_recent_tokens: 500
-      reserve_tokens: 800",
-        ),
+        Some("      keep_recent_tokens: 500\n      reserve_tokens: 800"),
         "imperative",
     );
-    load_workflow_str(&yaml).expect("load");
-    let parsed = parse_workflow(&yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-
-    assert_eq!(
-        count_compaction_on_dataflow_warnings_for_function(&warnings, "f"),
-        0,
-        "imperative function must not emit a dataflow-discard warning, got: {warnings:?}"
+    let err = load_workflow_str(&yaml).expect_err("compaction: must reject load");
+    let msg = unsupported_feature_message(&err);
+    assert!(
+        msg.contains("function-level `f`"),
+        "error must name the function-level scope: {msg}"
     );
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "function-level `f`"),
-        1
+    assert!(
+        !msg.contains("dataflow"),
+        "imperative function must not produce a dataflow advisory: {msg}"
     );
 }
 
 // Single-block function with `compaction:` and NO topology edges (no
 // `transitions:`, no `depends_on:`) — `infer_mode` returns `Imperative`
-// via its no-topology fallback. Pins that the dataflow-discard warning
+// via its no-topology fallback. Pins that the dataflow-discard advisory
 // does NOT fire on this fallback branch (a regression that classified by
 // `has_depends_on` instead of consulting `infer_mode` would pass the
-// existing transition-bearing imperative test but fail this case). The
-// shared `compaction_warning_yaml` helper does not support a single-block
-// shape, so the YAML is inlined here.
+// transition-bearing imperative test but fail this case). The shared
+// `compaction_advisory_yaml` helper does not support a single-block shape,
+// so the YAML is inlined here.
 #[test]
-fn single_block_function_with_compaction_does_not_emit_dataflow_warning() {
+fn single_block_function_with_compaction_rejects_without_dataflow_advisory() {
     let yaml = r#"
 functions:
   f:
@@ -1029,75 +900,66 @@ functions:
           required: [x]
           properties: { x: { type: string } }
 "#;
-    load_workflow_str(yaml).expect("load");
-    let parsed = parse_workflow(yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-
-    assert_eq!(
-        count_compaction_on_dataflow_warnings_for_function(&warnings, "f"),
-        0,
-        "single-block function with no edges must not emit a dataflow-discard warning, got: {warnings:?}"
+    let err = load_workflow_str(yaml).expect_err("compaction: must reject load");
+    let msg = unsupported_feature_message(&err);
+    assert!(
+        msg.contains("function-level `f`"),
+        "error must name the function-level scope: {msg}"
+    );
+    assert!(
+        !msg.contains("dataflow"),
+        "single-block function with no edges must not produce a dataflow advisory: {msg}"
     );
 }
 
 // Dataflow function with NO compaction config (neither function-level nor
-// workflow-level) must not emit the dataflow warning. Pins the gating
-// condition so a future regression that always emits the warning whenever
-// the function is dataflow would surface here.
+// workflow-level) must still load successfully. Pins the gating
+// condition so a future regression that always rejected dataflow
+// functions would surface here.
 #[test]
-fn dataflow_function_without_compaction_emits_no_dataflow_warning() {
-    let yaml = compaction_warning_yaml(None, None, "dataflow");
-    load_workflow_str(&yaml).expect("load");
-    let parsed = parse_workflow(&yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-    assert!(
-        warnings.is_empty(),
-        "expected no warnings when neither workflow nor function declares compaction, got: {warnings:?}"
-    );
+fn dataflow_function_without_compaction_loads() {
+    let yaml = compaction_advisory_yaml(None, None, "dataflow");
+    load_workflow_str(&yaml).expect("dataflow function with no compaction config must still load");
 }
 
-// Function-level compaction on a dataflow function overrides workflow-level;
-// `resolve_compaction` returns Some, so the dataflow warning fires exactly
-// once for the function (not twice). The two placeholder warnings (one
-// workflow, one function) still fire independently.
+// Function-level compaction on a dataflow function overrides workflow-
+// level; the dataflow advisory still fires exactly once for the
+// function (not twice). Both placeholder advisories (one workflow, one
+// function) appear independently, so the error message names both
+// scopes plus the function once for the dataflow advisory.
 #[test]
-fn dataflow_function_with_both_workflow_and_function_compaction_emits_one_dataflow_warning() {
-    let yaml = compaction_warning_yaml(
-        Some(
-            "    keep_recent_tokens: 1000
-    reserve_tokens: 1000",
-        ),
-        Some(
-            "      keep_recent_tokens: 500
-      reserve_tokens: 800",
-        ),
+fn dataflow_function_with_both_workflow_and_function_compaction_mentions_dataflow_once() {
+    let yaml = compaction_advisory_yaml(
+        Some("    keep_recent_tokens: 1000\n    reserve_tokens: 1000"),
+        Some("      keep_recent_tokens: 500\n      reserve_tokens: 800"),
         "dataflow",
     );
-    load_workflow_str(&yaml).expect("load");
-    let parsed = parse_workflow(&yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-
-    assert_eq!(
-        count_compaction_on_dataflow_warnings_for_function(&warnings, "f"),
-        1,
-        "expected exactly one dataflow warning per function regardless of override layering, got: {warnings:?}"
+    let err = load_workflow_str(&yaml).expect_err("compaction: must reject load");
+    let msg = unsupported_feature_message(&err);
+    assert!(
+        msg.contains("workflow-level") && msg.contains("function-level `f`"),
+        "error must mention both placeholder scopes: {msg}"
     );
+    // The dataflow advisory fires exactly once per function regardless
+    // of whether the config came from the override or the inherited
+    // default.
+    let dataflow_mentions = msg.matches("function `f` is dataflow").count();
     assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "workflow-level"),
-        1
-    );
-    assert_eq!(
-        count_compaction_warnings_for_scope(&warnings, "function-level `f`"),
-        1
+        dataflow_mentions, 1,
+        "dataflow advisory must appear exactly once for function `f`, got {dataflow_mentions} in: {msg}"
     );
 }
 
+// Pins the `UnsupportedFeatureAdvisory::CompactionOnDataflowFunction` Display so the
+// per-scope wording the loader joins into the error message stays
+// stable. Other tests assert what `MechError::UnsupportedFeature.message`
+// contains; this test pins the source string.
 #[test]
-fn compaction_on_dataflow_function_warning_display_contains_function_name_and_keywords() {
-    let w = LoadWarning::CompactionOnDataflowFunction {
+fn compaction_on_dataflow_function_advisory_display_contains_function_name_and_keywords() {
+    let w = UnsupportedFeatureAdvisory::CompactionOnDataflowFunction {
         function: "f1".into(),
     };
-    let s = format!("{}", w);
+    let s = format!("{w}");
     assert!(
         s.contains("f1"),
         "Display should mention the function name; got: {s}"
@@ -1108,74 +970,22 @@ fn compaction_on_dataflow_function_warning_display_contains_function_name_and_ke
     );
 }
 
-// Two dataflow functions, each with its own `compaction:` config, must both
-// emit a `CompactionOnDataflowFunction` warning. Pins the multi-function
-// loop in `collect_load_warnings`: a regression that early-returned or
-// deduped after the first dataflow-with-compaction function would surface
-// here. The single-function tests above only exercise the loop body once.
+// Pins the `UnsupportedFeatureAdvisory::CompactionUnimplemented` Display so
+// the per-scope wording the loader joins into the error message stays
+// stable. Sibling to
+// `compaction_on_dataflow_function_advisory_display_contains_function_name_and_keywords`.
 #[test]
-fn two_dataflow_functions_with_compaction_each_emit_dataflow_warning() {
-    let yaml = r#"
-functions:
-  f1:
-    input: { type: object }
-    compaction:
-      keep_recent_tokens: 500
-      reserve_tokens: 800
-    blocks:
-      a:
-        prompt: "root1"
-        schema:
-          type: object
-          required: [x]
-          properties: { x: { type: integer } }
-      b:
-        prompt: "leaf1 {{block.a.output.x}}"
-        schema:
-          type: object
-          required: [y]
-          properties: { y: { type: string } }
-        depends_on: [a]
-  f2:
-    input: { type: object }
-    compaction:
-      keep_recent_tokens: 600
-      reserve_tokens: 900
-    blocks:
-      a:
-        prompt: "root2"
-        schema:
-          type: object
-          required: [x]
-          properties: { x: { type: integer } }
-      b:
-        prompt: "leaf2 {{block.a.output.x}}"
-        schema:
-          type: object
-          required: [y]
-          properties: { y: { type: string } }
-        depends_on: [a]
-"#;
-    load_workflow_str(yaml).expect("load");
-    let parsed = parse_workflow(yaml).expect("parse");
-    let warnings = collect_load_warnings(&parsed);
-
-    assert_eq!(
-        count_compaction_on_dataflow_warnings_for_function(&warnings, "f1"),
-        1,
-        "expected one CompactionOnDataflowFunction warning for `f1`, got: {warnings:?}"
+fn compaction_unimplemented_advisory_display_contains_scope_and_keywords() {
+    let w = UnsupportedFeatureAdvisory::CompactionUnimplemented {
+        scope: "workflow-level".into(),
+    };
+    let s = format!("{w}");
+    assert!(
+        s.contains("workflow-level"),
+        "Display should mention the scope; got: {s}"
     );
-    assert_eq!(
-        count_compaction_on_dataflow_warnings_for_function(&warnings, "f2"),
-        1,
-        "expected one CompactionOnDataflowFunction warning for `f2`, got: {warnings:?}"
-    );
-    let total_dataflow_warnings = warnings
-        .iter()
-        .filter(|w| matches!(w, LoadWarning::CompactionOnDataflowFunction { .. }))
-        .count();
-    assert_eq!(
-        total_dataflow_warnings, 2,
-        "expected exactly two dataflow-discard warnings (one per function), got: {warnings:?}"
+    assert!(
+        s.contains("compaction") && s.contains("not implemented"),
+        "Display should mention `compaction` and `not implemented`; got: {s}"
     );
 }
