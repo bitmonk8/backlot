@@ -300,6 +300,9 @@ fn tag_executor_error(err: MechError, block_id: &str) -> MechError {
 /// forwarded verbatim through both schedulers. The agent receives it via
 /// `AgentRequest.system`; it is never duplicated into the message
 /// history. Pass `None` when the workflow / function declared no system.
+/// Implementors of [`AgentExecutor`] MUST read `AgentRequest.system`
+/// directly; the seam guarantees `history` does not contain a synthesized
+/// system-role message.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_prompt_block(
     workflow: &Workflow,
@@ -360,12 +363,46 @@ pub async fn execute_prompt_block(
         history: conversation.messages().to_vec(),
     };
 
+    // Seam invariant: `Role` has no `System` variant, so the strongest
+    // structural check is that any non-empty history begins with `User`.
+    // This catches an out-of-tree refactor that ever tried to synthesize a
+    // system-role message at `history[0]` instead of using `request.system`.
+    // No `#[should_panic]` negative test exists for this assertion: such a
+    // test would only pin the macro itself (Role::User != Role::Assistant)
+    // since the production producer (`Conversation`) cannot put anything
+    // but `User` first. Positive integration coverage lives in
+    // `agent_request_history_never_leads_with_system_role`.
+    debug_assert!(
+        request
+            .history
+            .first()
+            .is_none_or(|m| m.role == crate::conversation::Role::User),
+        "AgentRequest.history must start with a User message (system is conveyed via .system only); got: {:?}",
+        request.history.first()
+    );
+
     // 5. Dispatch.
     let response = executor
         .run(request)
         .await
         .map_err(|e| tag_executor_error(e, block_id))?;
     let output = response.output;
+
+    // Seam invariant on the response side: `AgentResponse.messages`, when
+    // non-empty, must begin with a `User` message (see the contract on
+    // `AgentResponse::messages`). Without this, an out-of-tree executor
+    // returning e.g. `[Assistant, ...]` would push that shape into the
+    // conversation and the *next* call's pre-dispatch assertion would
+    // fire — catching the violation here pins it to the executor that
+    // produced the bad output rather than the next innocent caller.
+    debug_assert!(
+        response
+            .messages
+            .first()
+            .is_none_or(|m| m.role == crate::conversation::Role::User),
+        "AgentResponse.messages must start with a User message when non-empty (executor contract); got: {:?}",
+        response.messages.first()
+    );
 
     // 6. Buffer messages (commit deferred until validation passes; see module doc).
     let pending_messages = if response.messages.is_empty() {
@@ -1786,5 +1823,77 @@ functions:
         assert_eq!(conv.len(), 2, "original 2 messages must remain unchanged");
         assert_eq!(conv.messages()[0].content, "prior user");
         assert_eq!(conv.messages()[1].content, "prior reply");
+    }
+
+    // ---- seam invariant: history never leads with a system-role message ----
+
+    #[test]
+    fn agent_request_history_never_leads_with_system_role() {
+        // Run two prompt blocks against the same conversation. The second
+        // call's captured `AgentRequest.history` must begin with a User
+        // message (the first turn's user prompt) — never with anything that
+        // resembles a synthesized system message. `Role` has no `System`
+        // variant, so the structural check is: first message is `User`.
+        let wf = load(TRIVIAL);
+        let func = wf.document().functions.get("f").unwrap();
+        let block = match &func.blocks["classify"] {
+            BlockDef::Prompt(p) => p.clone(),
+            _ => panic!("expected prompt"),
+        };
+        let synthesized_system = "helping ada";
+        let mut conv = Conversation::new(None);
+
+        let mut ctx1 = new_ctx(&BTreeMap::new());
+        let first_agent = FakeAgent::fixed(json!({ "category": "first" }));
+        run_blocking(execute_prompt_block(
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx1,
+            &first_agent,
+            &mut conv,
+            Some(synthesized_system),
+        ))
+        .expect("first call must succeed");
+        // First call: empty history (proves system was not injected).
+        assert!(
+            first_agent.last().history.is_empty(),
+            "first call must see empty history; system must not be injected as history[0]"
+        );
+
+        let mut ctx2 = new_ctx(&BTreeMap::new());
+        let second_agent = FakeAgent::fixed(json!({ "category": "second" }));
+        run_blocking(execute_prompt_block(
+            &wf,
+            func,
+            "classify",
+            &block,
+            &mut ctx2,
+            &second_agent,
+            &mut conv,
+            Some(synthesized_system),
+        ))
+        .expect("second call must succeed");
+
+        let history = second_agent.last().history;
+        assert!(
+            !history.is_empty(),
+            "second call must inherit the first turn's messages"
+        );
+        assert_eq!(
+            history[0].role,
+            crate::conversation::Role::User,
+            "history[0] must be User; system is carried via AgentRequest.system"
+        );
+        assert_ne!(
+            history[0].content, synthesized_system,
+            "history[0] must not be the rendered system prompt"
+        );
+        // And the system prompt arrived through the dedicated channel.
+        assert_eq!(
+            second_agent.last().system.as_deref(),
+            Some(synthesized_system)
+        );
     }
 }

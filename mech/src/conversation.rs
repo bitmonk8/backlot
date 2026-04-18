@@ -17,6 +17,10 @@ use crate::schema::{CompactionConfig, FunctionDef, MechDocument};
 
 /// Role tag for messages stored in a [`Conversation`] and forwarded to
 /// the agent via [`crate::exec::agent::AgentRequest::history`].
+///
+/// There is no `System` variant. The rendered system prompt is conveyed
+/// out-of-band via [`crate::exec::agent::AgentRequest::system`] — never as
+/// a message in conversation history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     /// User message (rendered prompt template).
