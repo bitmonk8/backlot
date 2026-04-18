@@ -11,7 +11,7 @@ def main [
   --once                 # Run a single iteration then exit
   --max-issues: int      # Cap total issues per run
   --dry-run              # Skip commit/push, just report
-  --model: string = "claude-opus-4-7"  # Pi model
+  --model: string = "unity-messages/claude-opus-4-7"  # Pi model (provider/model)
   --branch: string = "main"  # Expected git branch
 ] {
   let slack_channel = ($env.SLACK_CHANNEL_ID? | default "C0ATQ1JMV6H")
