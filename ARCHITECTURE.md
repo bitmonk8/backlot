@@ -233,16 +233,17 @@ for the full specification.
 | `schema/mod.rs` | Serde types: `MechDocument`, `FunctionDef`, `BlockDef`, `AgentConfig`, etc. |
 | `schema/registry.rs` | `SchemaRegistry` — compile and validate JSON Schemas, resolve `$ref` |
 | `schema/infer.rs` | Output schema inference (`output: infer`) from terminal block schemas |
+| `schema/mode.rs` | `InferMode` / `infer_mode` — classify a function as Imperative (CFG) or Dataflow from its block edges; consumed by `schema::infer` and `loader` |
 | `validate/` | `validate_workflow` — 24+ load-time checks (§10.1 of spec) |
 | `cel.rs` | CEL compilation (`CelExpression`) and template interpolation (`Template`) |
 | `context.rs` | `ExecutionContext` (per-invocation), `WorkflowState` (workflow-lifetime) |
-| `conversation.rs` | `Conversation` — per-function conversation: dedicated system slot + message history; compaction hook (placeholder) |
+| `conversation.rs` | `Conversation` — per-function message history and compaction hook (placeholder); the system prompt is delivered separately via `AgentRequest.system` and is not stored on the conversation |
 | `exec/prompt.rs` | `execute_prompt_block` — agent cascade, template render, LLM dispatch |
 | `exec/call.rs` | `execute_call_block` — single/uniform/per-call forms, output mapping |
 | `exec/schedule.rs` | `run_function_imperative` — transition evaluation, side-effects |
 | `exec/dataflow.rs` | `run_function_dataflow` — topo-sort, level-sequential scheduling (within-level parallelism is future work) |
-| `exec/function.rs` | `FunctionRunner` — per-invocation dispatch, mode detection, depth limit |
-| `exec/system.rs` | `render_function_system` — single source of truth for function-entry system-prompt rendering (consumed by both imperative and dataflow scheduling paths) |
+| `exec/function.rs` | `FunctionRunner` — per-invocation dispatch, mode detection, depth limit, system-prompt rendering call site |
+| `exec/system.rs` | `render_function_system` — system-prompt template rendering (resolves function-level override over workflow-level default) |
 | `exec/workflow.rs` | `WorkflowRuntime` — top-level entry point, workflow-state initialisation |
 | `exec/agent.rs` | `AgentExecutor` trait, `AgentRequest`, `AgentResponse` — agent seam for testing |
 | `cue_integration.rs` | `MechTask` (`cue::TaskNode`) and `MechStore` (`cue::TaskStore`) — bridges mech to cue orchestration |

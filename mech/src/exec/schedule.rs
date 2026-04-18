@@ -26,7 +26,6 @@ use crate::error::{MechError, MechResult};
 use crate::exec::agent::AgentExecutor;
 use crate::exec::call::{FunctionExecutor, execute_call_block};
 use crate::exec::prompt::execute_prompt_block;
-use crate::exec::system::render_function_system;
 use crate::schema::{BlockDef, FunctionDef, TransitionDef};
 use crate::validate::graph::compute_dominators_with_entry;
 use crate::workflow::Workflow;
@@ -302,6 +301,7 @@ fn find_entry_block(function: &FunctionDef) -> MechResult<String> {
 /// Per §4.6, a function's conversation is created fresh at invocation and
 /// accumulates across prompt blocks along control-flow paths. Call blocks
 /// are conversation-transparent.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_function_imperative(
     workflow: &Workflow,
     function_name: &str,
@@ -310,21 +310,13 @@ pub async fn run_function_imperative(
     agent_executor: &dyn AgentExecutor,
     func_executor: &dyn FunctionExecutor,
     conversation: &mut Conversation,
+    rendered_system: Option<&str>,
 ) -> MechResult<JsonValue> {
     let entry = find_entry_block(function)?;
     // Compute dominators once per invocation so that each transition can
     // efficiently determine which block outputs remain in scope.
     let dominators = compute_dominators_with_entry(function, &entry);
     let mut current_block_id = entry;
-
-    // Render the function's system prompt exactly once at function entry,
-    // mirroring the dataflow scheduler. The rendered value is the single
-    // source of truth passed by reference into each prompt block — never
-    // re-derived per block, never read from `conversation.system()`. This
-    // keeps both schedulers symmetric and makes `run_function_imperative`
-    // robust to callers that construct a fresh `Conversation::new()`
-    // instead of pre-populating system via `Conversation::with_system`.
-    let rendered_system = render_function_system(workflow, function, ctx)?;
 
     let mut step_count: usize = 0;
     loop {
@@ -356,7 +348,7 @@ pub async fn run_function_imperative(
                     ctx,
                     agent_executor,
                     conversation,
-                    rendered_system.as_deref(),
+                    rendered_system,
                 )
                 .await?
             }
@@ -418,6 +410,7 @@ mod tests {
     use crate::conversation::Conversation;
     use crate::exec::agent::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};
     use crate::exec::call::FunctionExecutor;
+    use crate::exec::test_support::{CapturingAgent, assert_all_requests_have_system};
     use crate::loader::WorkflowLoader;
     use crate::schema::ContextVarDef;
     use serde_json::json;
@@ -568,7 +561,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -631,7 +625,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -655,7 +650,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -679,7 +675,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -741,7 +738,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -770,7 +768,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -807,7 +806,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -861,7 +861,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -904,7 +905,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -949,7 +951,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -1011,7 +1014,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .expect_err("guard evaluation error must surface, not be silently swallowed");
 
@@ -1087,7 +1091,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .expect_err("guard error must propagate");
         assert!(
@@ -1161,7 +1166,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -1230,7 +1236,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -1453,7 +1460,8 @@ functions:
             &mut ctx,
             &agent,
             &func_exec,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -1490,35 +1498,11 @@ functions:
         let func = wf.document().functions.get("f").unwrap();
 
         // Capture all requests to verify history.
-        let all_requests: std::sync::Arc<Mutex<Vec<AgentRequest>>> =
-            std::sync::Arc::new(Mutex::new(Vec::new()));
-        let reqs = all_requests.clone();
-        struct CapturingAgent {
-            responses: Mutex<Vec<JsonValue>>,
-            requests: std::sync::Arc<Mutex<Vec<AgentRequest>>>,
-        }
-        impl AgentExecutor for CapturingAgent {
-            fn run<'a>(
-                &'a self,
-                request: AgentRequest,
-            ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
-                self.requests.lock().unwrap().push(request);
-                let output = self.responses.lock().unwrap().remove(0);
-                Box::pin(async move {
-                    Ok(AgentResponse {
-                        output,
-                        messages: vec![],
-                    })
-                })
-            }
-        }
-        let agent = CapturingAgent {
-            responses: Mutex::new(vec![json!({ "val": "A" }), json!({ "result": "B" })]),
-            requests: reqs,
-        };
+        let agent = CapturingAgent::new(vec![json!({ "val": "A" }), json!({ "result": "B" })]);
+        let all_requests = agent.requests.clone();
 
         let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
-        let mut conversation = Conversation::new();
+        let mut conversation = Conversation::new(None);
 
         run_blocking(run_function_imperative(
             &wf,
@@ -1528,6 +1512,7 @@ functions:
             &agent,
             &no_func_executor(),
             &mut conversation,
+            None,
         ))
         .unwrap();
 
@@ -1625,7 +1610,7 @@ functions:
         };
 
         let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
-        let mut conversation = Conversation::new();
+        let mut conversation = Conversation::new(None);
 
         run_blocking(run_function_imperative(
             &wf,
@@ -1635,6 +1620,7 @@ functions:
             &agent,
             &no_func_executor(),
             &mut conversation,
+            None,
         ))
         .unwrap();
 
@@ -1687,42 +1673,18 @@ functions:
         let wf = load(yaml);
         let func = wf.document().functions.get("f").unwrap();
 
-        let all_requests: std::sync::Arc<Mutex<Vec<AgentRequest>>> =
-            std::sync::Arc::new(Mutex::new(Vec::new()));
-        let reqs = all_requests.clone();
-        struct CapturingAgent2 {
-            responses: Mutex<Vec<JsonValue>>,
-            requests: std::sync::Arc<Mutex<Vec<AgentRequest>>>,
-        }
-        impl AgentExecutor for CapturingAgent2 {
-            fn run<'a>(
-                &'a self,
-                request: AgentRequest,
-            ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
-                self.requests.lock().unwrap().push(request);
-                let output = self.responses.lock().unwrap().remove(0);
-                Box::pin(async move {
-                    Ok(AgentResponse {
-                        output,
-                        messages: vec![],
-                    })
-                })
-            }
-        }
-        let agent = CapturingAgent2 {
-            responses: Mutex::new(vec![
-                json!({ "quality": 0.3 }), // attempt 1
-                json!({ "quality": 0.5 }), // attempt 2
-                json!({ "quality": 0.9 }), // attempt 3 → goes to done
-                json!({ "ok": true }),     // done
-            ]),
-            requests: reqs,
-        };
+        let agent = CapturingAgent::new(vec![
+            json!({ "quality": 0.3 }), // attempt 1
+            json!({ "quality": 0.5 }), // attempt 2
+            json!({ "quality": 0.9 }), // attempt 3 → goes to done
+            json!({ "ok": true }),     // done
+        ]);
+        let captured = agent.requests.clone();
 
         let mut fn_decls = BTreeMap::new();
         fn_decls.insert("attempts".into(), decl("integer", json!(0)));
         let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
-        let mut conversation = Conversation::new();
+        let mut conversation = Conversation::new(None);
 
         run_blocking(run_function_imperative(
             &wf,
@@ -1732,10 +1694,11 @@ functions:
             &agent,
             &no_func_executor(),
             &mut conversation,
+            None,
         ))
         .unwrap();
 
-        let requests = all_requests.lock().unwrap();
+        let requests = captured.lock().unwrap();
         // First draft attempt: empty history.
         assert_eq!(requests[0].history.len(), 0);
         // Second draft attempt: 2 messages from first attempt.
@@ -1789,7 +1752,7 @@ functions:
 
         // Low threshold: 100 tokens keep + 100 tokens reserve = 200 total.
         // At ~100 tokens/message, 3+ messages should trigger.
-        let mut conversation = Conversation::new().with_compaction(Some(ResolvedCompaction {
+        let mut conversation = Conversation::new(Some(ResolvedCompaction {
             keep_recent_tokens: 100,
             reserve_tokens: 100,
             custom_fn: None,
@@ -1803,6 +1766,7 @@ functions:
             &agent,
             &no_func_executor(),
             &mut conversation,
+            None,
         ))
         .unwrap();
 
@@ -1841,7 +1805,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -1941,7 +1906,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -2040,7 +2006,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -2100,7 +2067,8 @@ functions:
             &mut ctx,
             &agent,
             &no_func_executor(),
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
+            None,
         ))
         .unwrap();
 
@@ -2119,6 +2087,79 @@ functions:
             ctx.get_block_output("done").unwrap(),
             &json!({ "final_text": "finished" }),
             "done's output must be present"
+        );
+    }
+
+    // Symmetric to dataflow's
+    // `dataflow_passes_consistent_system_to_each_block_via_request_field`:
+    // pass a literal `Some("test-system")` as `rendered_system` and assert
+    // every captured `AgentRequest.system` equals that literal across a
+    // multi-block imperative function. Detects regressions where
+    // `run_function_imperative` silently drops the parameter or fails to
+    // forward it to `execute_prompt_block` on every block.
+    #[test]
+    fn imperative_scheduler_passes_consistent_system_to_each_block_via_request_field() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      a:
+        prompt: "step a"
+        schema:
+          type: object
+          required: [val]
+          properties: { val: { type: string } }
+        transitions:
+          - goto: b
+      b:
+        prompt: "step b"
+        schema:
+          type: object
+          required: [result]
+          properties: { result: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+
+        let agent = CapturingAgent::new(vec![json!({ "val": "A" }), json!({ "result": "B" })]);
+        let captured = agent.requests.clone();
+
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let out = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut Conversation::new(None),
+            Some("test-system"),
+        ))
+        .unwrap();
+        assert_eq!(out, json!({ "result": "B" }));
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 2, "expected one request per prompt block");
+        assert_all_requests_have_system(&reqs, "test-system");
+        // Imperative scheduler must not inject system into history. Verify
+        // by asserting the exact role shape: first block sees an empty
+        // history; second sees exactly the prior [User, Assistant] turn
+        // synthesized by `prompt.rs` (mock returns empty `messages`).
+        assert!(
+            reqs[0].history.is_empty(),
+            "first prompt block must start with empty history"
+        );
+        assert_eq!(
+            reqs[1].history.len(),
+            2,
+            "second prompt block must see exactly the prior [User, Assistant] turn"
+        );
+        assert_eq!(reqs[1].history[0].role, crate::conversation::Role::User);
+        assert_eq!(
+            reqs[1].history[1].role,
+            crate::conversation::Role::Assistant
         );
     }
 }

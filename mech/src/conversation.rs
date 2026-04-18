@@ -15,11 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{CompactionConfig, FunctionDef, MechDocument};
 
-/// Role of a message in a conversation.
+/// Role tag for messages stored in a [`Conversation`] and forwarded to
+/// the agent via [`crate::exec::agent::AgentRequest::history`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
-    /// System prompt — always the first message if present.
-    System,
     /// User message (rendered prompt template).
     User,
     /// Assistant response (LLM output).
@@ -38,13 +37,6 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::System,
-            content: content.into(),
-        }
-    }
-
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -110,24 +102,19 @@ pub fn resolve_compaction(
     cfg.map(ResolvedCompaction::from)
 }
 
-/// Per-function conversation history.
+/// Per-function message history with optional compaction.
 ///
-/// Created fresh at each function invocation. Accumulates messages along
-/// control-flow paths. Call blocks and dataflow blocks do not contribute
-/// to or consume conversation history.
+/// Created fresh at each function invocation and accumulated along
+/// control-flow paths within an imperative function. Dataflow prompt
+/// blocks run with their own fresh `Conversation` (§4.6 rule 3: data
+/// edges do not carry history). Call blocks are conversation-transparent:
+/// they own no `Conversation` and instead delegate to a sub-function
+/// which gets its own fresh `Conversation` via `FunctionRunner`
+/// (§4.6 rule 4).
 ///
-/// The optional system prompt lives in its own slot rather than as the first
-/// element of `messages`. The function-entry render is the single source of
-/// truth: it is supplied to the agent through `AgentRequest.system` rather
-/// than the message history (which would otherwise duplicate the system
-/// prompt for executors that prepend system to history themselves).
-/// [`Self::len`] / [`Self::is_empty`] count message history only — use
-/// [`Self::has_system`] separately when the system slot matters.
-#[derive(Debug, Clone)]
+/// `Default` is equivalent to `Conversation::new(None)`.
+#[derive(Debug, Clone, Default)]
 pub struct Conversation {
-    /// Pre-rendered system prompt, or `None` when no system is configured.
-    /// Stored separately from `messages` to avoid double-rendering.
-    system: Option<String>,
     messages: Vec<Message>,
     compaction: Option<ResolvedCompaction>,
     /// How many times compaction was triggered (for testing).
@@ -135,45 +122,14 @@ pub struct Conversation {
 }
 
 impl Conversation {
-    /// Create an empty conversation with no compaction and no system prompt.
-    pub fn new() -> Self {
+    /// Create an empty conversation with the given compaction configuration
+    /// (`None` to disable compaction).
+    pub fn new(compaction: Option<ResolvedCompaction>) -> Self {
         Self {
-            system: None,
             messages: Vec::new(),
-            compaction: None,
+            compaction,
             compaction_count: 0,
         }
-    }
-
-    /// Create a conversation pre-loaded with a rendered system prompt.
-    ///
-    /// The system prompt is stored in a dedicated slot — it does NOT appear
-    /// in the message list. Prompt blocks read it via [`system()`].
-    pub fn with_system(system: impl Into<String>) -> Self {
-        Self {
-            system: Some(system.into()),
-            messages: Vec::new(),
-            compaction: None,
-            compaction_count: 0,
-        }
-    }
-
-    /// The pre-rendered system prompt, if any.
-    pub fn system(&self) -> Option<&str> {
-        self.system.as_deref()
-    }
-
-    /// Whether this conversation carries a system prompt. Independent of
-    /// the message history — use [`Self::is_empty`] / [`Self::len`] for
-    /// history-only queries.
-    pub fn has_system(&self) -> bool {
-        self.system.is_some()
-    }
-
-    /// Set the compaction configuration.
-    pub fn with_compaction(mut self, compaction: Option<ResolvedCompaction>) -> Self {
-        self.compaction = compaction;
-        self
     }
 
     /// Append a single message.
@@ -186,24 +142,17 @@ impl Conversation {
         self.messages.extend(msgs);
     }
 
-    /// Read access to the message history (user / assistant / tool
-    /// messages). Does NOT include the system prompt — the system slot is
-    /// transported separately through [`Self::system`] /
-    /// `AgentRequest.system`.
+    /// Read access to the message history.
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
 
-    /// Number of messages in the history. Does NOT count the system slot —
-    /// query [`Self::has_system`] separately if that matters.
+    /// Number of messages in the history.
     pub fn len(&self) -> usize {
         self.messages.len()
     }
 
-    /// Whether the message history is empty. Does NOT consider the system
-    /// slot — a conversation that only has a system prompt is still
-    /// `is_empty() == true` from a history-count perspective. Use
-    /// [`Self::has_system`] for the system query.
+    /// Whether the message history is empty.
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
@@ -236,12 +185,6 @@ impl Conversation {
     }
 }
 
-impl Default for Conversation {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ---- Tests ----------------------------------------------------------------
 
 #[cfg(test)]
@@ -251,61 +194,30 @@ mod tests {
 
     #[test]
     fn empty_conversation() {
-        let conv = Conversation::new();
+        let conv = Conversation::new(None);
         assert!(conv.is_empty());
         assert_eq!(conv.len(), 0);
         assert_eq!(conv.messages(), &[]);
     }
 
     #[test]
-    fn conversation_with_system() {
-        // The system prompt lives in its own slot, not as the first element
-        // of `messages()`. `len()` / `is_empty()` report history-only;
-        // `has_system()` is the dedicated system query.
-        let conv = Conversation::with_system("You are helpful.");
-        assert_eq!(conv.system(), Some("You are helpful."));
-        assert!(conv.has_system());
-        assert!(
-            conv.messages().is_empty(),
-            "system must not appear in messages()"
-        );
-        assert_eq!(conv.len(), 0, "len() reports history only");
-        assert!(conv.is_empty(), "is_empty() reports history only");
-    }
-
-    #[test]
-    fn len_and_is_empty_reflect_history_only() {
-        // No system, no messages.
-        let mut conv = Conversation::new();
+    fn len_and_is_empty_track_history() {
+        let mut conv = Conversation::new(None);
         assert_eq!(conv.len(), 0);
         assert!(conv.is_empty());
-        assert!(!conv.has_system());
 
-        // Push history without a system.
         conv.push(Message::user("hi"));
         assert_eq!(conv.len(), 1);
         assert!(!conv.is_empty());
-        assert!(!conv.has_system());
 
-        // System-only — len/is_empty still report the history.
-        let conv = Conversation::with_system("sys");
-        assert_eq!(conv.len(), 0, "history-only count ignores system slot");
-        assert!(conv.is_empty(), "history-only is_empty ignores system slot");
-        assert!(conv.has_system());
-
-        // System + history.
-        let mut conv = Conversation::with_system("sys");
-        conv.push(Message::user("u"));
         conv.push(Message::assistant("a"));
-        assert_eq!(conv.len(), 2, "len = 2 history messages");
-        assert!(!conv.is_empty());
-        assert!(conv.has_system());
-        assert_eq!(conv.messages().len(), 2, "messages() returns history only");
+        assert_eq!(conv.len(), 2);
+        assert_eq!(conv.messages().len(), 2);
     }
 
     #[test]
     fn push_and_push_many() {
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::new(None);
         conv.push(Message::user("hello"));
         conv.push(Message::assistant("hi"));
         conv.push_many(vec![
@@ -321,7 +233,7 @@ mod tests {
 
     #[test]
     fn compaction_not_triggered_when_disabled() {
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::new(None);
         for i in 0..50 {
             conv.push(Message::user(format!("msg {i}")));
         }
@@ -331,7 +243,7 @@ mod tests {
 
     #[test]
     fn compaction_triggered_at_threshold() {
-        let mut conv = Conversation::new().with_compaction(Some(ResolvedCompaction {
+        let mut conv = Conversation::new(Some(ResolvedCompaction {
             keep_recent_tokens: 100,
             reserve_tokens: 100,
             custom_fn: None,
@@ -348,7 +260,7 @@ mod tests {
 
     #[test]
     fn compaction_not_triggered_below_threshold() {
-        let mut conv = Conversation::new().with_compaction(Some(ResolvedCompaction {
+        let mut conv = Conversation::new(Some(ResolvedCompaction {
             keep_recent_tokens: 5000,
             reserve_tokens: 5000,
             custom_fn: None,

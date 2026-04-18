@@ -38,7 +38,9 @@ use std::collections::BTreeMap;
 
 use crate::error::{MechError, MechResult};
 use crate::schema::registry::resolve_schema_ref_in_map;
-use crate::schema::{BlockDef, CallSpec, FunctionDef, JsonValue, MechDocument, SchemaRef};
+use crate::schema::{
+    BlockDef, CallSpec, FunctionDef, InferMode, JsonValue, MechDocument, SchemaRef, infer_mode,
+};
 
 /// Infer concrete output schemas for every function that declares
 /// `output: infer` (or omits `output:`).
@@ -135,31 +137,6 @@ fn snapshot_concrete_outputs(wf: &MechDocument) -> BTreeMap<String, JsonValue> {
         }
     }
     out
-}
-
-/// Execution mode detected from a function's block edges, used during
-/// inference to select the correct multi-terminal schema shape.
-#[derive(PartialEq)]
-enum InferMode {
-    /// Any block has outgoing transitions → imperative (CFG) mode.
-    Imperative,
-    /// No block has transitions, at least one has `depends_on` → dataflow mode.
-    Dataflow,
-}
-
-/// Detect execution mode from a function's block edges (mirrors
-/// `exec::function::detect_mode` without importing from the exec layer).
-fn infer_mode(func: &FunctionDef) -> InferMode {
-    let has_transitions = func.blocks.values().any(|b| !b.transitions().is_empty());
-    if has_transitions {
-        return InferMode::Imperative;
-    }
-    let has_depends = func.blocks.values().any(|b| !b.depends_on().is_empty());
-    if has_depends {
-        InferMode::Dataflow
-    } else {
-        InferMode::Imperative
-    }
 }
 
 /// Collect the terminal block names for a function.

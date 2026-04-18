@@ -263,10 +263,14 @@ println!("{}", serde_json::to_string_pretty(&output)?);
 The legacy `WorkflowLoader` struct is still available for backward compatibility
 but delegates to the free functions above.
 
-Mech emits non-fatal load-time advisories (e.g. `LoadWarning::CompactionPlaceholder`)
-via `tracing::warn!`. Consumers must install a `tracing::Subscriber` to surface
-them in production output; tests that need programmatic access can call
-`mech::loader::collect_load_warnings(&parsed_document)` directly.
+Mech emits non-fatal load-time advisories (e.g. `LoadWarning::CompactionPlaceholder`,
+`LoadWarning::CompactionOnDataflowFunction`) via `tracing::warn!`. Consumers must
+install a `tracing::Subscriber` to surface them in production output; tests that
+need programmatic access can call `mech::loader::collect_load_warnings(&parsed_document)`
+directly. The dataflow-specific advisory fires when a dataflow function has any
+effective `compaction:` config (declared on the function or inherited from the
+workflow-level default), since dataflow blocks are single-turn and the config is
+silently dropped at runtime — see docs/MECH_SPEC.md §4.6.
 
 ## Module structure
 

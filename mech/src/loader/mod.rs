@@ -21,8 +21,9 @@
 //! let wf = load_workflow_str(yaml)?;
 //! ```
 //!
-//! Load-time warnings (non-fatal advisories such as
-//! [`LoadWarning::CompactionPlaceholder`]) are emitted via
+//! Load-time warnings (non-fatal advisories — see the [`LoadWarning`]
+//! enum for all variants, currently [`LoadWarning::CompactionPlaceholder`]
+//! and [`LoadWarning::CompactionOnDataflowFunction`]) are emitted via
 //! `tracing::warn!` for production observability — callers must install a
 //! `tracing` subscriber to see them. Tests use [`collect_load_warnings`]
 //! against a parsed document to inspect the same advisories
@@ -60,6 +61,15 @@ pub enum LoadWarning {
     /// scope (`"workflow-level"` or `"function-level: <name>"`) is
     /// included for diagnostics.
     CompactionPlaceholder { scope: String },
+
+    /// A dataflow function has an effective `compaction:` config (declared
+    /// on the function itself or inherited from the workflow-level
+    /// default), but dataflow blocks are single-turn (§4.6 rule 3): each
+    /// per-block conversation is constructed empty and discarded after one
+    /// prompt+response. Compaction is therefore meaningless on dataflow
+    /// functions and is silently dropped at runtime. The named function is
+    /// the dataflow function whose compaction config is being ignored.
+    CompactionOnDataflowFunction { function: String },
 }
 
 impl std::fmt::Display for LoadWarning {
@@ -68,6 +78,10 @@ impl std::fmt::Display for LoadWarning {
             Self::CompactionPlaceholder { scope } => write!(
                 f,
                 "{scope} `compaction` is configured but compaction is not implemented (placeholder). The hook only increments a counter; messages are NOT summarized. See docs/MECH_SPEC.md §4.6."
+            ),
+            Self::CompactionOnDataflowFunction { function } => write!(
+                f,
+                "function `{function}` is dataflow (no transitions, only `depends_on` edges) but has an effective `compaction:` config; compaction is meaningless for dataflow functions because each block runs a fresh single-turn conversation (§4.6 rule 3) and the config is dropped at runtime. See docs/MECH_SPEC.md §4.6."
             ),
         }
     }
@@ -212,6 +226,9 @@ fn load_impl(
             LoadWarning::CompactionPlaceholder { scope } => {
                 tracing::warn!(workflow = %path_label, scope = %scope, "{w}");
             }
+            LoadWarning::CompactionOnDataflowFunction { function } => {
+                tracing::warn!(workflow = %path_label, function = %function, "{w}");
+            }
         }
     }
 
@@ -310,6 +327,34 @@ pub fn collect_load_warnings(file: &MechDocument) -> Vec<LoadWarning> {
         if func.compaction.is_some() {
             warnings.push(LoadWarning::CompactionPlaceholder {
                 scope: format!("function-level `{name}`"),
+            });
+        }
+
+        // CompactionOnDataflowFunction is orthogonal to the placeholder
+        // warning: the placeholder warns that compaction is a global no-op
+        // today; this warning warns that even when compaction is fully
+        // implemented, the config will still be silently discarded for
+        // dataflow functions because dataflow blocks construct a fresh
+        // single-turn `Conversation::new(None)` per block (§4.6 rule 3) and
+        // never see the function-level conversation. Both warnings can fire
+        // for the same function. Inheritance via workflow-level default is
+        // mirrored here as a pure schema check (function-level overrides,
+        // workflow-level fallback) so the loader does not depend on the
+        // exec or conversation layers -- a dataflow function with no
+        // function-level compaction but a workflow-level default still
+        // warns, because that default would also be silently dropped at
+        // runtime.
+        let has_effective_compaction = func.compaction.is_some()
+            || file
+                .workflow
+                .as_ref()
+                .and_then(|w| w.compaction.as_ref())
+                .is_some();
+        if has_effective_compaction
+            && crate::schema::infer_mode(func) == crate::schema::InferMode::Dataflow
+        {
+            warnings.push(LoadWarning::CompactionOnDataflowFunction {
+                function: name.clone(),
             });
         }
     }

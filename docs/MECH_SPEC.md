@@ -223,7 +223,7 @@ functions:
 
 ### 4.6 Conversation Model
 
-Each function invocation creates a new **conversation** — a system prompt (stored in a dedicated conversation slot, not as a message in the history) plus an ordered list of user/assistant/tool messages that is passed to the LLM on each block execution within that function. Conversation history follows **control edges only**. Data edges carry structured output, never conversation history.
+Each function invocation creates a new **conversation** — an ordered list of user/assistant/tool-call/tool-result messages that is passed to the LLM on each block execution within that function. The conversation does not carry a system slot; the rendered system prompt is delivered separately to the agent via `AgentRequest.system` (see later in this section). Conversation history follows **control edges only**. Data edges carry structured output, never conversation history.
 
 **Core rules:**
 
@@ -243,7 +243,7 @@ In a function with both control edges and data edges, the conversation follows t
 
 A hybrid block (inbound control edge + inbound data edges, per §4.3) inherits conversation from the control edge that activated it. Its data dependencies contribute structured output only.
 
-**System prompts are layered: workflow default + function override.** The workflow file may declare a default `system` field. Each function may override it with its own `system` field. The resolved system prompt is rendered once at function entry and stored in a dedicated `Conversation.system` slot, separate from the message history. It is delivered to the agent through `AgentRequest.system` (not as the first element of the message list) so executors that prepend system to history themselves do not see it duplicated. System prompts support template variables (`{{input.*}}`, `{{context.*}}`), allowing the caller to parameterize persona.
+**System prompts are layered: workflow default + function override.** The workflow file may declare a default `system` field. Each function may override it with its own `system` field. The resolved system prompt is rendered once at function entry by `FunctionRunner` and passed as an explicit parameter through both schedulers (imperative and dataflow) to `execute_prompt_block`. It is never stored on the conversation — the conversation manages history and compaction only. It is delivered to the agent through `AgentRequest.system` (not as the first element of the message list) so executors that prepend system to history themselves do not see it duplicated. System prompts support template variables (`{{input.*}}`, `{{context.*}}`), allowing the caller to parameterize persona.
 
 ```yaml
 workflow:
@@ -265,7 +265,7 @@ functions:
     blocks: { ... }
 ```
 
-If neither the function nor the workflow declares a `system` field, the conversation's system slot is empty and `AgentRequest.system` is `None`. Per-block system prompt variation is not supported — per-block instructions belong in the block's `prompt` template. If a block needs a fundamentally different persona, extract it to a separate function.
+If neither the function nor the workflow declares a `system` field, no system value is rendered and `AgentRequest.system` is `None`. Per-block system prompt variation is not supported — per-block instructions belong in the block's `prompt` template. If a block needs a fundamentally different persona, extract it to a separate function.
 
 **History compaction.** Long-running functions (especially those with cycles) accumulate conversation history that may exceed the model's context window. Mech provides a token-budget compaction mechanism, modeled after Pi Agent's approach.
 
@@ -286,6 +286,10 @@ functions:
 ```
 
 If `compaction` is omitted, the executor uses workflow-level defaults. If no defaults exist, compaction is disabled (the full conversation is sent on every call; the workflow author is responsible for bounding cycles).
+
+**Compaction is meaningless on dataflow functions.** Dataflow blocks are single-turn (rule 3 above): `dataflow::execute_block` constructs a fresh `Conversation::new(None)` per prompt block, so there is no function-level conversation for compaction to apply to. `FunctionRunner` therefore deliberately skips `resolve_compaction` on the dataflow arm, and any `compaction:` config declared on a dataflow function (or inherited from a workflow-level default) is silently dropped at runtime.
+
+**Load-time advisories.** To make the dataflow/compaction interaction discoverable at authoring time, the loader emits `LoadWarning::CompactionOnDataflowFunction { function }` for every dataflow function whose effective compaction config (any `compaction:` declared on the function or inherited from the workflow default) is non-empty. This advisory is orthogonal to `LoadWarning::CompactionPlaceholder`: the placeholder warns that the runtime strategy is a global no-op today, while the dataflow advisory pins that even after compaction is fully implemented, the config will still be discarded for dataflow functions specifically.
 
 **Custom compaction functions.** The `compaction` field accepts an optional `fn` property naming a mech workflow function (or registered Rust handler) that replaces the built-in summarizer. The custom function receives the messages to summarize as input and returns a summary string. This allows domain-specific compaction logic (e.g., preserving specific structured data, using a cheaper model for summarization, or applying non-LLM compression).
 

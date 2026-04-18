@@ -21,7 +21,6 @@ use crate::error::{MechError, MechResult};
 use crate::exec::agent::AgentExecutor;
 use crate::exec::call::{FunctionExecutor, execute_call_block};
 use crate::exec::prompt::execute_prompt_block;
-use crate::exec::system::render_function_system;
 use crate::schema::{BlockDef, FunctionDef};
 use crate::workflow::Workflow;
 
@@ -191,13 +190,7 @@ async fn execute_block(
         BlockDef::Prompt(p) => {
             // Each dataflow prompt block gets a fresh single-turn
             // conversation (§4.6 rule 3: data edges do not carry history).
-            // The system prompt was rendered once at function entry by
-            // `run_function_dataflow` and is passed to `execute_prompt_block`
-            // explicitly via the `system` parameter. Each dataflow block runs
-            // with a fresh empty conversation; the `Conversation.system` slot
-            // is intentionally left unset to keep the slot uniformly empty
-            // across schedulers and avoid double-sourcing the system prompt.
-            let mut conversation = Conversation::new();
+            let mut conversation = Conversation::new(None);
             execute_prompt_block(
                 workflow,
                 function,
@@ -243,15 +236,11 @@ pub async fn run_function_dataflow(
     ctx: &mut ExecutionContext,
     agent_executor: &dyn AgentExecutor,
     func_executor: &dyn FunctionExecutor,
+    rendered_system: Option<&str>,
 ) -> MechResult<JsonValue> {
     let terminals = find_dataflow_terminals(function)?;
     let reachable = backward_reachable(&function.blocks, &terminals);
     let levels = topo_sort_levels(&function.blocks, &reachable)?;
-
-    // Render the system prompt exactly once per function invocation, mirroring
-    // the FunctionRunner pattern. Passed by reference into each block so the
-    // single-render invariant holds across all execution modes.
-    let rendered_system = render_function_system(workflow, function, ctx)?;
 
     // Execute level by level.
     for level in &levels {
@@ -260,7 +249,7 @@ pub async fn run_function_dataflow(
                 workflow,
                 function,
                 block_id,
-                rendered_system.as_deref(),
+                rendered_system,
                 ctx,
                 agent_executor,
                 func_executor,
@@ -293,6 +282,9 @@ mod tests {
     use crate::context::WorkflowState;
     use crate::exec::agent::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};
     use crate::exec::call::FunctionExecutor;
+    use crate::exec::test_support::{
+        CapturingAgent, assert_all_requests_have_system, assert_dataflow_history_empty,
+    };
     use crate::loader::WorkflowLoader;
     use serde_json::json;
     use std::sync::Mutex;
@@ -408,6 +400,7 @@ functions:
             &mut ctx,
             &agent,
             &NoFuncExecutor,
+            None,
         ))
         .unwrap();
 
@@ -474,6 +467,7 @@ functions:
             &mut ctx,
             &agent,
             &NoFuncExecutor,
+            None,
         ))
         .unwrap();
 
@@ -524,6 +518,7 @@ functions:
             &mut ctx,
             &agent,
             &NoFuncExecutor,
+            None,
         ))
         .unwrap();
 
@@ -582,6 +577,7 @@ functions:
             &mut ctx,
             &agent,
             &NoFuncExecutor,
+            None,
         ))
         .unwrap();
 
@@ -679,6 +675,7 @@ functions:
             &mut ctx,
             &agent,
             &NoFuncExecutor,
+            None,
         ))
         .unwrap();
 
@@ -731,6 +728,7 @@ functions:
             &mut ctx,
             &agent,
             &NoFuncExecutor,
+            None,
         ))
         .unwrap();
 
@@ -777,32 +775,8 @@ functions:
         let wf = load(yaml);
         let func = wf.document().functions.get("f").unwrap();
 
-        let captured: std::sync::Arc<std::sync::Mutex<Vec<AgentRequest>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let cap = std::sync::Arc::clone(&captured);
-        struct CapturingAgent {
-            requests: std::sync::Arc<std::sync::Mutex<Vec<AgentRequest>>>,
-            responses: std::sync::Mutex<Vec<JsonValue>>,
-        }
-        impl AgentExecutor for CapturingAgent {
-            fn run<'a>(
-                &'a self,
-                request: AgentRequest,
-            ) -> BoxFuture<'a, Result<AgentResponse, MechError>> {
-                self.requests.lock().unwrap().push(request);
-                let output = self.responses.lock().unwrap().remove(0);
-                Box::pin(async move {
-                    Ok(AgentResponse {
-                        output,
-                        messages: vec![],
-                    })
-                })
-            }
-        }
-        let agent = CapturingAgent {
-            requests: cap,
-            responses: std::sync::Mutex::new(vec![json!({ "x": 7 }), json!({ "merged": "ok" })]),
-        };
+        let agent = CapturingAgent::new(vec![json!({ "x": 7 }), json!({ "merged": "ok" })]);
+        let captured = agent.requests.clone();
 
         let mut ctx = ExecutionContext::new(
             json!({ "user": "ada" }),
@@ -812,6 +786,12 @@ functions:
         )
         .unwrap();
 
+        // This test verifies the dataflow scheduler forwards a
+        // pre-rendered system string to every prompt block; the rendering
+        // call site is exercised separately by tests in `system.rs` and
+        // end-to-end by the FunctionRunner integration test in `function.rs`.
+        let rendered_system = Some("helping ada via dataflow");
+
         let out = run_blocking(run_function_dataflow(
             &wf,
             "f",
@@ -819,34 +799,15 @@ functions:
             &mut ctx,
             &agent,
             &NoFuncExecutor,
+            rendered_system,
         ))
         .unwrap();
         assert_eq!(out, json!({ "merged": "ok" }));
 
         let reqs = captured.lock().unwrap();
         assert_eq!(reqs.len(), 2, "expected one request per prompt block");
-        let expected = "helping ada via dataflow";
-        for (i, r) in reqs.iter().enumerate() {
-            assert_eq!(
-                r.system.as_deref(),
-                Some(expected),
-                "request {i}: system must be the rendered function-entry value"
-            );
-            for m in &r.history {
-                assert_ne!(
-                    m.role,
-                    crate::conversation::Role::System,
-                    "request {i}: history must not duplicate the system role"
-                );
-            }
-        }
-        let distinct: std::collections::HashSet<&str> =
-            reqs.iter().filter_map(|r| r.system.as_deref()).collect();
-        assert_eq!(
-            distinct.len(),
-            1,
-            "expected exactly one distinct rendered system string across all requests, got {distinct:?}"
-        );
+        assert_all_requests_have_system(&reqs, "helping ada via dataflow");
+        assert_dataflow_history_empty(&reqs);
     }
 
     // ---- T9: Inferred keyed-map schema matches runtime output (C-07 fix) --
@@ -925,6 +886,7 @@ functions:
             &mut ctx,
             &agent,
             &NoFuncExecutor,
+            None,
         ))
         .unwrap();
 

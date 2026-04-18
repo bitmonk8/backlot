@@ -1,43 +1,16 @@
-//! Prompt block executor (Deliverable 9, conversation scoping in Deliverable 13).
+//! Prompt block executor.
 //!
-//! Executes a single [`PromptBlock`] in the following ordered steps. Each
-//! label below matches the inline step comment at the corresponding point in
-//! [`execute_prompt_block`], so cross-references stay aligned even as steps
-//! are added or split:
+//! Executes a single [`PromptBlock`]. See the per-step `// 1.`..`// 10.`
+//! comments inside [`execute_prompt_block`] for the canonical pipeline
+//! narrative — those numbered comments are the single source of truth.
 //!
-//! - **Agent cascade** — resolve the effective agent configuration via the
-//!   three-level cascade (workflow → function → block, replace semantics per
-//!   spec §5.5.2). `$ref:#name` string form and the `extends:` field are
-//!   resolved against the workflow-level `agents` map.
-//! - **Render prompt** — render the prompt template by evaluating CEL against
-//!   the current [`ExecutionContext::namespaces`].
-//! - **System prompt** — the explicit `system` parameter is authoritative
-//!   (rendered once at function entry by the caller); no fallback to
-//!   `conversation.system()`.
-//! - **Resolve schema** — resolve the output schema via the compiled registry
-//!   and extract its raw JSON body for the agent request.
-//! - **Build request** — assemble an [`AgentRequest`] (model, system prompt,
-//!   rendered user prompt, grant flags, custom tools, write paths, timeout,
-//!   output schema) including a snapshot of the conversation history taken
-//!   *before* this turn's commit.
-//! - **Dispatch** — invoke the injected [`AgentExecutor`].
-//! - **Buffer messages** — buffer the returned messages (or synthesized
-//!   user+assistant) — do NOT append to the conversation yet.
-//! - **Validate** — validate the returned JSON value against the block's
-//!   declared output schema *before* mutating the conversation. A validation
-//!   failure leaves the conversation unchanged so the caller can retry
-//!   cleanly.
-//! - **Commit history** — append the buffered messages to the function's
-//!   conversation (§4.6).
-//! - **Check compaction** — check the compaction threshold.
-//! - **Record output** — record the validated output under the block's ID in
-//!   the execution context (write-once per invocation).
-//!
-//! Transitions, `set_context` / `set_workflow` side-effects, and block
-//! scheduling are deliberately out of scope — they land in Deliverable 11
-//! (transitions) and the later driver deliverables. Conversation
-//! management (Deliverable 13) is integrated: each prompt block receives
-//! and mutates a [`Conversation`] tracking the function’s message history.
+//! Out of scope: transitions, `set_context` / `set_workflow` side-effects,
+//! and block scheduling all live in the schedulers. Conversation management
+//! is integrated: each prompt block receives a [`Conversation`] and may
+//! mutate it. In imperative mode the conversation accumulates message
+//! history across blocks within the function; in dataflow mode each block
+//! is single-turn and receives a freshly constructed [`Conversation`]
+//! (§4.6 rule 3).
 
 use std::time::Duration;
 
@@ -314,31 +287,19 @@ fn tag_executor_error(err: MechError, block_id: &str) -> MechError {
     }
 }
 
-/// Execute a single prompt block.
-///
-/// Rendering, dispatch, validation, and block-output storage all happen
-/// here. Transitions and `set_context` / `set_workflow` writes are a
-/// separate concern (Deliverable 11).
+/// Execute a single prompt block. See the per-step `// 1.`..`// 10.`
+/// comments in the body for the canonical pipeline narrative.
 ///
 /// The `conversation` parameter carries the function's accumulated
-/// conversation history (§4.6). Updates follow a Buffer→Validate→Commit
-/// protocol: the prompt/response and any tool call/result messages from
-/// the agent loop are first buffered locally (not yet appended), then
-/// schema validation runs against the agent's output, and only if
-/// validation succeeds are the buffered messages committed to the
-/// conversation atomically. On validation failure no messages are
-/// appended, leaving the conversation unchanged so the caller can retry
-/// cleanly.
+/// conversation history (§4.6); updates follow the Buffer→Validate→Commit
+/// protocol (see steps 6–8 below).
 ///
-/// The `system` parameter is the authoritative pre-rendered system
-/// prompt for this invocation. It is rendered exactly once per function
-/// entry by [`FunctionRunner`] / [`run_function_dataflow`] via
-/// [`crate::exec::system::render_function_system`] and passed in
-/// explicitly so the agent receives system through `AgentRequest.system`
-/// only — never duplicated into the message history. Pass `None` when
-/// the workflow / function declared no system. The conversation's own
-/// `system` slot is for the renderer's tracking only and is NOT consulted
-/// here.
+/// The `rendered_system` parameter is the authoritative pre-rendered
+/// system prompt for this invocation, produced by
+/// [`crate::exec::system::render_function_system`] at function entry and
+/// forwarded verbatim through both schedulers. The agent receives it via
+/// `AgentRequest.system`; it is never duplicated into the message
+/// history. Pass `None` when the workflow / function declared no system.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_prompt_block(
     workflow: &Workflow,
@@ -348,37 +309,26 @@ pub async fn execute_prompt_block(
     ctx: &mut ExecutionContext,
     executor: &dyn AgentExecutor,
     conversation: &mut Conversation,
-    system: Option<&str>,
+    rendered_system: Option<&str>,
 ) -> MechResult<JsonValue> {
     let file = workflow.document();
 
     // 1. Agent cascade.
     let resolved_agent = resolve_agent_config(file, function, block)?;
 
-    // 2. Render the prompt template. The loader interns every template at
-    //    load time, so a cache miss is an internal invariant violation.
+    // 2. Render the prompt template (loader interned every template at load time).
     let namespaces = ctx.namespaces();
     let rendered_prompt = render_template(workflow, &block.prompt, &namespaces)?;
 
-    // 3. The explicit `system` parameter is the rendered system prompt.
-    //    Both callers (`FunctionRunner` for imperative mode and the
-    //    dataflow scheduler for dataflow blocks) render once via
-    //    `render_function_system` and pass the result here. We do NOT
-    //    fall back to `conversation.system()` — the conversation slot is
-    //    for the renderer's own tracking, not a source-of-truth for this
-    //    block.
-    let rendered_system = system.map(str::to_owned);
-
-    // 4. Resolve the output schema via the compiled registry.
+    // 3. Resolve the output schema via the compiled registry, then extract
+    //    the raw JSON schema body for the agent request. Named schemas
+    //    (`$ref:#name`) use the registry's pre-expanded body. Inline schemas
+    //    are run through `expand_refs` so that any nested
+    //    `{"$ref": "#name"}` references are substituted with their resolved
+    //    bodies — ensuring both paths produce identical expanded JSON for the
+    //    agent so inline and named schemas remain equivalent.
     let registry = workflow.schemas();
     let resolved_schema = registry.resolve(&block.schema)?;
-
-    // 4b. Extract the raw JSON schema body for the agent request.
-    //     Named schemas (`$ref:#name`) use the registry's pre-expanded body.
-    //     Inline schemas are run through `expand_refs` so that any nested
-    //     `{"$ref": "#name"}` references are substituted with their resolved
-    //     bodies — ensuring both paths produce identical expanded JSON for the
-    //     agent (fix for issue #307: inline vs. named schema equivalence).
     let output_schema_json = match &block.schema {
         SchemaRef::Inline(v) => registry.expand_refs(v)?,
         SchemaRef::Ref(raw) => {
@@ -397,10 +347,10 @@ pub async fn execute_prompt_block(
         }
     };
 
-    // 5. Build the request with conversation history.
+    // 4. Build the request (history snapshot taken pre-commit).
     let request = AgentRequest {
         model: resolved_agent.model,
-        system: rendered_system,
+        system: rendered_system.map(str::to_owned),
         prompt: rendered_prompt.clone(),
         grants: resolved_agent.grants,
         tools: resolved_agent.tools,
@@ -410,16 +360,14 @@ pub async fn execute_prompt_block(
         history: conversation.messages().to_vec(),
     };
 
-    // 6. Dispatch.
+    // 5. Dispatch.
     let response = executor
         .run(request)
         .await
         .map_err(|e| tag_executor_error(e, block_id))?;
     let output = response.output;
 
-    // 6b. Buffer the pending messages without appending to conversation yet.
-    //     History must not be mutated until validation confirms the output is
-    //     valid — a bogus turn in history would pollute retries.
+    // 6. Buffer messages (commit deferred until validation passes; see module doc).
     let pending_messages = if response.messages.is_empty() {
         vec![
             crate::conversation::Message::user(rendered_prompt),
@@ -429,11 +377,7 @@ pub async fn execute_prompt_block(
         response.messages
     };
 
-    // 7. Validate against the declared output schema using the
-    //    pre-compiled validator from the registry. Surface up to the
-    //    first 10 errors so authors see more than the single first failure.
-    //    Validation happens BEFORE mutating conversation so that a failure
-    //    leaves history unchanged.
+    // 7. Validate against the declared output schema (surface up to 10 errors).
     let validator = resolved_schema
         .validator()
         .ok_or_else(|| MechError::WorkflowValidation {
@@ -457,13 +401,13 @@ pub async fn execute_prompt_block(
         });
     }
 
-    // 8. Validation passed — append the buffered messages atomically.
+    // 8. Commit buffered messages to conversation.
     conversation.push_many(pending_messages);
 
-    // 9. Check if compaction should fire (only after a successful append).
+    // 9. Check if compaction should fire.
     conversation.check_compaction();
 
-    // 10. Record under `block.<id>`.
+    // 10. Record output under `block.<id>`.
     ctx.record_block_output(block_id, output.clone())?;
     Ok(output)
 }
@@ -585,7 +529,7 @@ functions:
             &block,
             &mut ctx,
             &agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .expect("execute");
@@ -615,7 +559,7 @@ functions:
             &block,
             &mut ctx,
             &agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .unwrap();
@@ -642,7 +586,7 @@ functions:
             &block,
             &mut ctx,
             &agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .expect_err("schema mismatch must error");
@@ -954,7 +898,7 @@ functions:
             &block,
             &mut ctx,
             &agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .unwrap();
@@ -997,12 +941,12 @@ functions:
 
     // ---- system prompt sourcing -----------------------------------------
 
-    // The `system` parameter is authoritative — `execute_prompt_block`
-    // forwards it verbatim to the agent and does NOT inspect
-    // `conversation.system()`. Function-entry rendering is covered
-    // separately in `function.rs::tests`.
+    // The `rendered_system: Option<&str>` parameter is the sole source —
+    // `execute_prompt_block` forwards it verbatim to the agent. There is
+    // no fallback because the conversation does not carry a system slot.
+    // Function-entry rendering is covered separately in `function.rs::tests`.
     #[test]
-    fn system_parameter_is_forwarded_to_agent_request() {
+    fn rendered_system_parameter_is_forwarded_to_agent_request() {
         let yaml = r#"
 functions:
   f:
@@ -1031,18 +975,19 @@ functions:
             &block,
             &mut ctx,
             &agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             Some("helping ada"),
         ))
         .unwrap();
         assert_eq!(agent.last().system.as_deref(), Some("helping ada"));
     }
 
-    // `system: None` produces `AgentRequest.system: None`.
+    // `rendered_system: None` produces `AgentRequest.system: None`.
     // `execute_prompt_block` does NOT re-render from `function.system`
-    // and does NOT fall back to `conversation.system()`.
+    // — the parameter is the sole source and there is no fallback because
+    // the conversation does not carry a system slot.
     #[test]
-    fn system_is_none_when_caller_passes_none() {
+    fn rendered_system_is_none_when_caller_passes_none() {
         let yaml = r#"
 functions:
   f:
@@ -1064,9 +1009,9 @@ functions:
         };
         let mut ctx = new_ctx(&BTreeMap::new());
         let agent = FakeAgent::fixed(json!({ "category": "x" }));
-        // Even if the conversation carries a system slot, the parameter
-        // wins. Passing `None` here must produce `None` on the request.
-        let mut conv = Conversation::with_system("this should also not appear");
+        // The `rendered_system` parameter is the only source. Passing
+        // `None` here must produce `None` on the request.
+        let mut conv = Conversation::new(None);
         run_blocking(execute_prompt_block(
             &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
         ))
@@ -1106,7 +1051,7 @@ functions:
             &block,
             &mut ctx,
             &agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .expect_err("llm failure");
@@ -1155,7 +1100,7 @@ functions:
             &block,
             &mut ctx,
             &agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .unwrap();
@@ -1179,7 +1124,7 @@ functions:
             &block,
             &mut ctx,
             &agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .expect_err("bad schema");
@@ -1294,7 +1239,7 @@ functions:
             &first_block,
             &mut ctx,
             &first_agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .unwrap();
@@ -1307,7 +1252,7 @@ functions:
             &second_block,
             &mut ctx,
             &second_agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .unwrap();
@@ -1337,7 +1282,7 @@ functions:
             &block,
             &mut ctx,
             &agent,
-            &mut Conversation::new(),
+            &mut Conversation::new(None),
             None,
         ))
         .unwrap();
@@ -1393,7 +1338,7 @@ functions:
                 &block,
                 &mut ctx,
                 &agent,
-                &mut Conversation::new(),
+                &mut Conversation::new(None),
                 None,
             ))
             .expect("conforming output must pass");
@@ -1411,7 +1356,7 @@ functions:
                 &block,
                 &mut ctx,
                 &agent,
-                &mut Conversation::new(),
+                &mut Conversation::new(None),
                 None,
             ))
             .expect_err("non-conforming output must fail");
@@ -1444,7 +1389,7 @@ functions:
             reserve_tokens: 50,
             custom_fn: None,
         };
-        let mut conv = Conversation::new().with_compaction(Some(compaction));
+        let mut conv = Conversation::new(Some(compaction));
 
         run_blocking(execute_prompt_block(
             &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
@@ -1495,7 +1440,7 @@ functions:
             reserve_tokens: 50,
             custom_fn: None,
         };
-        let mut conv = Conversation::new().with_compaction(Some(compaction));
+        let mut conv = Conversation::new(Some(compaction));
 
         let err = run_blocking(execute_prompt_block(
             &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
@@ -1544,7 +1489,7 @@ functions:
                 ],
             })
         });
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::new(None);
 
         run_blocking(execute_prompt_block(
             &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
@@ -1591,7 +1536,7 @@ functions:
                 ],
             })
         });
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::new(None);
 
         let err = run_blocking(execute_prompt_block(
             &wf, func, "classify", &block, &mut ctx, &agent, &mut conv, None,
@@ -1622,7 +1567,7 @@ functions:
         let mut ctx = new_ctx(&BTreeMap::new());
         let agent = FakeAgent::fixed(json!({ "category": "ok" }));
 
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::new(None);
         conv.push(crate::conversation::Message::user("prior user"));
         conv.push(crate::conversation::Message::assistant("prior reply"));
 
@@ -1677,7 +1622,7 @@ functions:
         // Missing `category` — fails the `required` constraint.
         let agent = FakeAgent::fixed(json!({ "wrong": 1 }));
 
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::new(None);
         conv.push(crate::conversation::Message::user("prior user"));
         conv.push(crate::conversation::Message::assistant("prior reply"));
 
@@ -1707,7 +1652,7 @@ functions:
             _ => panic!("expected prompt"),
         };
         let mut ctx = new_ctx(&BTreeMap::new());
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::new(None);
 
         let first_agent = FakeAgent::fixed(json!({ "category": "first" }));
         run_blocking(execute_prompt_block(
@@ -1785,7 +1730,7 @@ functions:
             })
         });
 
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::new(None);
         conv.push(crate::conversation::Message::user("prior user"));
         conv.push(crate::conversation::Message::assistant("prior reply"));
 
@@ -1825,7 +1770,7 @@ functions:
             })
         });
 
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::new(None);
         conv.push(crate::conversation::Message::user("prior user"));
         conv.push(crate::conversation::Message::assistant("prior reply"));
 

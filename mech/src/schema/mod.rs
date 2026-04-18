@@ -38,6 +38,7 @@
 mod agent;
 mod blocks;
 pub mod infer;
+mod mode;
 pub mod registry;
 mod schema_ref;
 mod workflow;
@@ -48,6 +49,7 @@ pub use schema_ref::*;
 pub use workflow::*;
 
 pub use infer::infer_function_outputs;
+pub(crate) use mode::{InferMode, infer_mode};
 pub use registry::{
     ResolvedSchema, SchemaRegistry, parse_named_ref, resolve_schema_ref_in_map,
     resolve_schema_value, try_parse_named_ref, value_matches_json_type,

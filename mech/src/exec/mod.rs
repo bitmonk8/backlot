@@ -16,6 +16,9 @@ pub mod schedule;
 pub mod system;
 pub mod workflow;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use agent::{AgentExecutor, AgentRequest, AgentResponse, BoxFuture};
 pub use call::{FunctionExecutor, execute_call_block};
 pub use dataflow::run_function_dataflow;

@@ -1,9 +1,11 @@
-//! Shared rendering helpers for function-entry concerns.
+//! System-prompt rendering for function entry.
 //!
-//! The system prompt is rendered exactly once per function invocation. Both
-//! the imperative and dataflow scheduling paths use the same helper so the
-//! rendered value is the single source of truth (stored in
-//! [`crate::conversation::Conversation::system`]).
+//! Scope: this module owns exactly one responsibility — rendering the
+//! function-level system prompt (with workflow-level fallback) once per
+//! function invocation, via [`render_function_system`]. It is *not* a
+//! catch-all for shared rendering helpers. Other function-entry helpers
+//! (agent-config cascade, prompt-template rendering, schema resolution,
+//! etc.) belong in their own modules — do not add them here.
 
 use crate::context::ExecutionContext;
 use crate::error::{MechError, MechResult};
@@ -14,9 +16,9 @@ use crate::workflow::Workflow;
 /// context, picking the function-level override before falling back to the
 /// workflow-level default. Returns `None` when no system is configured.
 ///
-/// Single source of truth for system rendering — see
-/// [`crate::conversation::Conversation::system`] for the invariant
-/// (system is rendered exactly once per function invocation).
+/// The caller is responsible for invoking this once per function invocation;
+/// the returned value is the single rendered system value for that
+/// invocation.
 pub(crate) fn render_function_system(
     workflow: &Workflow,
     function: &FunctionDef,

@@ -17,6 +17,8 @@ Thumbs.db
 
 # Local scratch
 /local/
+/review_findings/
+/review_payload.diff
 
 # Test temp directories (AppContainer-safe, project-local)
 /test_tmp/
