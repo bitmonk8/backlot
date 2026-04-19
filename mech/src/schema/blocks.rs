@@ -1,5 +1,8 @@
 //! Block definition types: [`BlockDef`], [`PromptBlock`], [`CallBlock`],
-//! [`TransitionDef`], [`CallSpec`], [`CallEntry`], and [`ParallelStrategy`].
+//! [`BlockCommon`], [`TransitionDef`], [`CallSpec`], [`CallEntry`], and
+//! [`ParallelStrategy`]. Also exports the loader allow-list constants
+//! [`PROMPT_BLOCK_KEYS`] and [`CALL_BLOCK_KEYS`], consumed by
+//! [`crate::loader::reject_unknown_block_fields`].
 
 use std::collections::BTreeMap;
 
@@ -18,6 +21,41 @@ pub enum CelSourceKind {
     Template,
 }
 
+/// Allow-list of valid YAML keys directly under a prompt block (a
+/// `functions.<name>.blocks.<block_name>` entry that has a `prompt:`
+/// key). Union of [`PromptBlock`]'s direct fields and the
+/// [`BlockCommon`] fields it flattens. See
+/// [`crate::loader::reject_unknown_block_fields`] for the rationale —
+/// the loader sweep defends against the unsupported
+/// `#[serde(deny_unknown_fields)]` + `#[serde(flatten)]` combination
+/// (serde-rs/serde#1547).
+pub const PROMPT_BLOCK_KEYS: &[&str] = &[
+    "prompt",
+    "schema",
+    "agent",
+    "depends_on",
+    "set_context",
+    "set_workflow",
+    "transitions",
+];
+
+/// Allow-list of valid YAML keys directly under a call block (a
+/// `functions.<name>.blocks.<block_name>` entry that has a `call:`
+/// key). Union of [`CallBlock`]'s direct fields and the [`BlockCommon`]
+/// fields it flattens. See
+/// [`crate::loader::reject_unknown_block_fields`] for the rationale.
+pub const CALL_BLOCK_KEYS: &[&str] = &[
+    "call",
+    "input",
+    "output",
+    "parallel",
+    "n",
+    "depends_on",
+    "set_context",
+    "set_workflow",
+    "transitions",
+];
+
 /// A prompt or call block. Discrimination is by presence of `prompt` or
 /// `call`. Full validity rules (§5.3) are enforced by
 /// [`crate::validate::validate_workflow`].
@@ -31,36 +69,33 @@ pub enum BlockDef {
 }
 
 impl BlockDef {
+    /// Returns the block's shared fields (`depends_on`, `set_context`,
+    /// `set_workflow`, `transitions`).
+    pub fn common(&self) -> &BlockCommon {
+        match self {
+            BlockDef::Prompt(p) => &p.common,
+            BlockDef::Call(c) => &c.common,
+        }
+    }
+
     /// Returns the block's outgoing transitions.
     pub fn transitions(&self) -> &[TransitionDef] {
-        match self {
-            BlockDef::Prompt(p) => &p.transitions,
-            BlockDef::Call(c) => &c.transitions,
-        }
+        &self.common().transitions
     }
 
     /// Returns the block's data-edge predecessors.
     pub fn depends_on(&self) -> &[String] {
-        match self {
-            BlockDef::Prompt(p) => &p.depends_on,
-            BlockDef::Call(c) => &c.depends_on,
-        }
+        &self.common().depends_on
     }
 
     /// Returns the block's `set_context` mappings.
     pub fn set_context(&self) -> &BTreeMap<String, Expr> {
-        match self {
-            BlockDef::Prompt(p) => &p.set_context,
-            BlockDef::Call(c) => &c.set_context,
-        }
+        &self.common().set_context
     }
 
     /// Returns the block's `set_workflow` mappings.
     pub fn set_workflow(&self) -> &BTreeMap<String, Expr> {
-        match self {
-            BlockDef::Prompt(p) => &p.set_workflow,
-            BlockDef::Call(c) => &c.set_workflow,
-        }
+        &self.common().set_workflow
     }
 
     /// Visit all CEL expression source strings in this block.
@@ -109,20 +144,16 @@ impl BlockDef {
     }
 }
 
-/// A prompt block (§5.1).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PromptBlock {
-    /// Prompt template string.
-    pub prompt: String,
-
-    /// Output schema (inline or `$ref:...`).
-    pub schema: SchemaRef,
-
-    /// Optional agent config override for this block.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<AgentConfigRef>,
-
+/// Fields shared by [`PromptBlock`] and [`CallBlock`].
+///
+/// Embedded into [`PromptBlock`] and [`CallBlock`] with
+/// `#[serde(flatten)]` so these field names appear at the block level on
+/// the wire (YAML/JSON) — the representation is identical to inlining
+/// `depends_on`, `set_context`, `set_workflow`, and `transitions` on
+/// each block struct directly. The `round_trip_parse_reserialize_parse`
+/// test pins this: a `common:` key must never appear in serialized output.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BlockCommon {
     /// Data-edge predecessors.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
@@ -138,6 +169,25 @@ pub struct PromptBlock {
     /// Outbound control edges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transitions: Vec<TransitionDef>,
+}
+
+/// A prompt block (§5.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptBlock {
+    /// Prompt template string.
+    pub prompt: String,
+
+    /// Output schema (inline or `$ref:...`).
+    pub schema: SchemaRef,
+
+    /// Optional agent config override for this block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentConfigRef>,
+
+    /// Shared block fields (see [`BlockCommon`]).
+    #[serde(flatten)]
+    pub common: BlockCommon,
 }
 
 /// A call block (§5.2).
@@ -166,21 +216,9 @@ pub struct CallBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n: Option<u32>,
 
-    /// Data-edge predecessors.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
-
-    /// Writes to function context variables.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub set_context: BTreeMap<String, Expr>,
-
-    /// Writes to workflow context variables.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub set_workflow: BTreeMap<String, Expr>,
-
-    /// Outbound control edges.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub transitions: Vec<TransitionDef>,
+    /// Shared block fields (see [`BlockCommon`]).
+    #[serde(flatten)]
+    pub common: BlockCommon,
 }
 
 /// The three shapes of `call:` (§4.4, §5.2).
@@ -238,10 +276,12 @@ mod tests {
             prompt: "test".into(),
             schema: SchemaRef::Inline(serde_json::json!({"type": "object"})),
             agent: None,
-            depends_on,
-            set_context: Default::default(),
-            set_workflow: Default::default(),
-            transitions,
+            common: BlockCommon {
+                depends_on,
+                set_context: Default::default(),
+                set_workflow: Default::default(),
+                transitions,
+            },
         })
     }
 
@@ -252,10 +292,12 @@ mod tests {
             output: None,
             parallel: None,
             n: None,
-            depends_on,
-            set_context: Default::default(),
-            set_workflow: Default::default(),
-            transitions,
+            common: BlockCommon {
+                depends_on,
+                set_context: Default::default(),
+                set_workflow: Default::default(),
+                transitions,
+            },
         })
     }
 
@@ -293,13 +335,15 @@ mod tests {
             prompt: "prompt template".into(),
             schema: SchemaRef::Inline(serde_json::json!({"type": "object"})),
             agent: None,
-            depends_on: vec![],
-            set_context: BTreeMap::from([("var1".into(), "ctx_expr".into())]),
-            set_workflow: BTreeMap::from([("var2".into(), "wf_expr".into())]),
-            transitions: vec![TransitionDef {
-                when: Some("guard_expr".into()),
-                goto: "next".into(),
-            }],
+            common: BlockCommon {
+                depends_on: vec![],
+                set_context: BTreeMap::from([("var1".into(), "ctx_expr".into())]),
+                set_workflow: BTreeMap::from([("var2".into(), "wf_expr".into())]),
+                transitions: vec![TransitionDef {
+                    when: Some("guard_expr".into()),
+                    goto: "next".into(),
+                }],
+            },
         });
         let mut sources = Vec::new();
         b.visit_cel_sources(&mut |src, kind| sources.push((src.to_string(), kind)));
@@ -321,13 +365,15 @@ mod tests {
             output: Some(BTreeMap::from([("y".into(), "output_expr".into())])),
             parallel: None,
             n: None,
-            depends_on: vec![],
-            set_context: BTreeMap::from([("c".into(), "ctx_expr2".into())]),
-            set_workflow: BTreeMap::from([("w".into(), "wf_expr2".into())]),
-            transitions: vec![TransitionDef {
-                when: Some("guard2".into()),
-                goto: "b".into(),
-            }],
+            common: BlockCommon {
+                depends_on: vec![],
+                set_context: BTreeMap::from([("c".into(), "ctx_expr2".into())]),
+                set_workflow: BTreeMap::from([("w".into(), "wf_expr2".into())]),
+                transitions: vec![TransitionDef {
+                    when: Some("guard2".into()),
+                    goto: "b".into(),
+                }],
+            },
         });
         let mut sources = Vec::new();
         b.visit_cel_sources(&mut |src, kind| sources.push((src.to_string(), kind)));

@@ -229,7 +229,7 @@ for the full specification.
 | Module | Purpose |
 |--------|---------|
 | `lib.rs` | Public API re-exports |
-| `loader/` | `load_workflow(path) → Workflow` — parse → validate → infer → compile CEL |
+| `loader/` | `load_workflow(path) → Workflow` — strict-field sweeps → parse → resolve schemas → validate → infer → reject unsupported features → compile CEL |
 | `schema/mod.rs` | Serde types: `MechDocument`, `FunctionDef`, `BlockDef`, `AgentConfig`, etc. |
 | `schema/registry.rs` | `SchemaRegistry` — compile and validate JSON Schemas, resolve `$ref` |
 | `schema/infer.rs` | Output schema inference (`output: infer`) from terminal block schemas |

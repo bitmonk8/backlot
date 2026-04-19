@@ -36,9 +36,9 @@ pub use loader::{
     load_workflow, load_workflow_str, load_workflow_str_with, load_workflow_with,
 };
 pub use schema::{
-    AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,
-    ContextVarDef, ExecutionConfig, FunctionDef, MechDocument, ParallelStrategy, PromptBlock,
-    ResolvedSchema, SchemaRef, SchemaRegistry, TransitionDef, WorkflowSection,
+    AgentConfig, AgentConfigRef, BlockCommon, BlockDef, CallBlock, CallEntry, CallSpec,
+    CompactionConfig, ContextVarDef, ExecutionConfig, FunctionDef, MechDocument, ParallelStrategy,
+    PromptBlock, ResolvedSchema, SchemaRef, SchemaRegistry, TransitionDef, WorkflowSection,
     infer_function_outputs, parse_named_ref, parse_workflow, resolve_schema_ref_in_map,
     resolve_schema_value, try_parse_named_ref, value_matches_json_type,
 };

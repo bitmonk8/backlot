@@ -8,14 +8,31 @@
 //! inference, full workflow load) lives in [`crate::validate`],
 //! [`crate::schema::infer`], and [`crate::loader`].
 //!
-//! Every schema struct carries `#[serde(deny_unknown_fields)]`. On
-//! [`WorkflowSection`] and [`FunctionDef`] the `#[serde(flatten)]`
-//! attribute on the `defaults` and `overrides` fields embedding
-//! [`ExecutionConfig`] silently disables that attribute on those parents,
-//! so the strict-field check is replaced by a loader-side
-//! sweep; see
-//! [`crate::loader::reject_unknown_workflow_and_function_fields`] for the
-//! rationale.
+//! ## `deny_unknown_fields` and `#[serde(flatten)]`
+//!
+//! Schema structs carry `#[serde(deny_unknown_fields)]` so unknown YAML keys
+//! are rejected at parse time. Five structs deviate, in three ways:
+//!
+//! * [`BlockCommon`] is a serde helper that intentionally omits
+//!   `deny_unknown_fields`. It is never deserialized on its own — it is
+//!   only ever embedded as `#[serde(flatten)]` inside [`PromptBlock`] and
+//!   [`CallBlock`]. Putting `deny_unknown_fields` on it would prevent its
+//!   parents from accepting their own non-flattened keys.
+//! * [`PromptBlock`] and [`CallBlock`] flatten [`BlockCommon`]. In
+//!   serde today, the `#[serde(untagged)]` dispatch on [`BlockDef`]
+//!   plus `deny_unknown_fields` on each variant happens to reject
+//!   unknown block-level keys (the `rejects_unknown_block_field` test
+//!   pins this), but that combination is **not** guaranteed by serde:
+//!   `#[serde(deny_unknown_fields)]` together with `#[serde(flatten)]`
+//!   is officially unsupported (serde-rs/serde#1547). To make rejection
+//!   robust against future serde behavior changes, the loader also runs
+//!   a parallel block-level allow-list sweep — see
+//!   [`crate::loader::reject_unknown_block_fields`].
+//! * [`WorkflowSection`] and [`FunctionDef`] flatten [`ExecutionConfig`] via
+//!   their `defaults` / `overrides` fields. Unlike [`BlockDef`], they are
+//!   not part of an untagged enum, and `serde(flatten)` silently disables
+//!   `deny_unknown_fields` on the parent. The strict-field check is
+//!   replaced by the loader-side sweep referenced above.
 //!
 //! # Design notes
 //!
@@ -115,20 +132,35 @@ mod tests {
         match classify {
             BlockDef::Prompt(p) => {
                 assert!(p.prompt.contains("Classify"));
-                assert_eq!(p.transitions.len(), 3);
-                assert_eq!(p.transitions[2].goto, "general");
-                assert!(p.transitions[2].when.is_none());
+                assert_eq!(p.common.transitions.len(), 3);
+                assert_eq!(p.common.transitions[2].goto, "general");
+                assert!(p.common.transitions[2].when.is_none());
             }
             _ => panic!("classify must be a prompt block"),
         }
 
-        // billing is a call block (single function).
+        // billing is a call block (single function) with depends_on
+        // and a single transition, both populated by the YAML fixture.
         let billing = triage.blocks.get("billing").expect("billing block");
         match billing {
-            BlockDef::Call(c) => match &c.call {
-                CallSpec::Single(name) => assert_eq!(name, "resolve_billing"),
-                other => panic!("expected single call, got {other:?}"),
-            },
+            BlockDef::Call(c) => {
+                match &c.call {
+                    CallSpec::Single(name) => assert_eq!(name, "resolve_billing"),
+                    other => panic!("expected single call, got {other:?}"),
+                }
+                assert_eq!(
+                    c.common.depends_on,
+                    vec!["classify".to_string()],
+                    "billing block must record depends_on from fixture"
+                );
+                assert_eq!(
+                    c.common.transitions.len(),
+                    1,
+                    "billing block must have exactly one transition from fixture"
+                );
+                assert_eq!(c.common.transitions[0].goto, "respond");
+                assert!(c.common.transitions[0].when.is_none());
+            }
             _ => panic!("billing must be a call block"),
         }
 
@@ -140,7 +172,7 @@ mod tests {
                     Some(AgentConfigRef::Ref(s)) => assert_eq!(s, "$ref:#diagnostician"),
                     other => panic!("expected $ref agent, got {other:?}"),
                 }
-                assert!(p.set_context.contains_key("attempts"));
+                assert!(p.common.set_context.contains_key("attempts"));
             }
             _ => panic!("technical must be a prompt block"),
         }
@@ -376,6 +408,33 @@ functions:
     fn round_trip_parse_reserialize_parse() {
         let wf1 = parse_workflow(FULL_EXAMPLE).expect("parse 1");
         let reserialized = serde_yml::to_string(&wf1).expect("reserialize");
+        // BlockCommon is embedded with #[serde(flatten)], so its field
+        // names must appear at the block level — never under a `common:`
+        // key. If anyone removes the `#[serde(flatten)]` attribute, this
+        // assertion fails before the round-trip equality check would.
+        assert!(
+            !reserialized.contains("common:"),
+            "BlockCommon fields must be flat in wire format, got:
+{reserialized}"
+        );
+        // The full-example fixture exercises both `transitions:` and
+        // `depends_on:` at the block level; assert they round-trip as
+        // flat keys (not nested under `common`).
+        assert!(
+            reserialized.contains("transitions:"),
+            "expected flat `transitions:` key in reserialized YAML, got:
+{reserialized}"
+        );
+        assert!(
+            reserialized.contains("depends_on:"),
+            "expected flat `depends_on:` key in reserialized YAML, got:
+{reserialized}"
+        );
+        assert!(
+            reserialized.contains("set_context:"),
+            "expected flat `set_context:` key in reserialized YAML, got:
+{reserialized}"
+        );
         let wf2 = parse_workflow(&reserialized).expect("parse 2");
         assert_eq!(
             wf1, wf2,
@@ -403,6 +462,20 @@ gremlins: 3
         );
     }
 
+    /// Unknown block-level keys must be rejected at parse time. This
+    /// behavior is defended by **two** layers:
+    ///   1. Serde: the `#[serde(untagged)]` [`BlockDef`] dispatch
+    ///      together with `#[serde(deny_unknown_fields)]` on each
+    ///      variant happens to reject unknown keys today (this test
+    ///      exercises that layer directly via [`parse_workflow`]).
+    ///   2. The loader: [`crate::loader::reject_unknown_block_fields`]
+    ///      runs an explicit allow-list sweep before serde, because
+    ///      the serde-side behavior is **not** guaranteed when
+    ///      `#[serde(deny_unknown_fields)]` is combined with
+    ///      `#[serde(flatten)]` (serde-rs/serde#1547).
+    ///
+    /// Either layer alone is sufficient; both exist so a serde upgrade
+    /// that drops the parse-time rejection cannot regress the loader.
     #[test]
     fn rejects_unknown_block_field() {
         let yaml = r#"
@@ -497,7 +570,7 @@ functions:
 
         if let BlockDef::Prompt(p) = &f.blocks["done"] {
             assert_eq!(
-                p.set_context.get("attempts").map(String::as_str),
+                p.common.set_context.get("attempts").map(String::as_str),
                 Some("context.attempts + 1")
             );
         } else {
@@ -548,12 +621,12 @@ functions:
 "#;
         let wf = parse_workflow(yaml).unwrap();
         if let BlockDef::Prompt(p) = &wf.functions["f"].blocks["b"] {
-            assert_eq!(p.transitions.len(), 1);
+            assert_eq!(p.common.transitions.len(), 1);
             assert_eq!(
-                p.transitions[0].when.as_deref(),
+                p.common.transitions[0].when.as_deref(),
                 Some("output.category == 'billing'")
             );
-            assert_eq!(p.transitions[0].goto, "billing");
+            assert_eq!(p.common.transitions[0].goto, "billing");
         } else {
             panic!("expected prompt");
         }

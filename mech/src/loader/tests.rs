@@ -1145,3 +1145,361 @@ functions:
         .expect("strict-field sweep must accept every allow-listed key");
     parse_workflow(yaml).expect("serde must accept the synthetic minimal-but-complete document");
 }
+
+/// Block-level allow-list sweep rejects an unknown key on a prompt block.
+///
+/// Sibling check to `rejects_unknown_block_field` in `schema/mod.rs`: that
+/// test pins the (unsupported-by-serde) parse-time rejection; this one
+/// pins the loader-side defense in
+/// `reject_unknown_block_fields`. The error must name the offending key
+/// and the block path.
+#[test]
+fn block_sweep_rejects_unknown_prompt_block_field() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object }
+        bogus: true
+"#;
+    let err = crate::loader::reject_unknown_block_fields(yaml, None)
+        .expect_err("must reject unknown prompt-block field");
+    let msg = err.to_string();
+    let lower = msg.to_lowercase();
+    assert!(
+        lower.contains("unknown field") && lower.contains("bogus"),
+        "error must mention 'unknown field' and the offending key `bogus`: {msg}"
+    );
+    assert!(
+        msg.contains("functions.f.blocks.b"),
+        "error must mention the offending block path: {msg}"
+    );
+}
+
+/// Block-level allow-list sweep rejects an unknown key on a call block.
+#[test]
+fn block_sweep_rejects_unknown_call_block_field() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        call: g
+        input: { x: "1" }
+        gremlin: 7
+"#;
+    let err = crate::loader::reject_unknown_block_fields(yaml, None)
+        .expect_err("must reject unknown call-block field");
+    let msg = err.to_string();
+    let lower = msg.to_lowercase();
+    assert!(
+        lower.contains("unknown field") && lower.contains("gremlin"),
+        "error must mention 'unknown field' and the offending key `gremlin`: {msg}"
+    );
+    assert!(
+        msg.contains("functions.f.blocks.b"),
+        "error must mention the offending block path: {msg}"
+    );
+}
+
+/// Block-level allow-list sweep accepts a workflow whose blocks use only
+/// known keys (one prompt block exercising every prompt-block key, one
+/// call block exercising every call-block key).
+#[test]
+fn block_sweep_accepts_all_known_block_keys() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      p:
+        prompt: "hi"
+        schema: { type: object }
+        agent: { model: "haiku" }
+        depends_on: []
+        set_context: {}
+        set_workflow: {}
+        transitions:
+          - { goto: c }
+      c:
+        call: g
+        input: { x: "1" }
+        output: { y: "result" }
+        parallel: all
+        n: 1
+        depends_on: []
+        set_context: {}
+        set_workflow: {}
+        transitions: []
+"#;
+    crate::loader::reject_unknown_block_fields(yaml, None)
+        .expect("strict-field sweep must accept all allow-listed block keys");
+    parse_workflow(yaml)
+        .expect("serde must accept the same fixture so allow-list constants stay in sync with struct fields");
+}
+
+/// The block-level allow-list sweep deliberately defers
+/// ambiguous-discriminator rejection (a block carrying BOTH `prompt:`
+/// and `call:`) to serde's untagged-enum dispatch on `BlockDef` during
+/// `parse_workflow` (surfaced as `MechError::YamlParse`), so the sweep
+/// itself must pass the malformed block through untouched.
+#[test]
+fn block_sweep_passes_through_block_with_both_prompt_and_call() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        call: g
+        mystery: 42
+"#;
+    crate::loader::reject_unknown_block_fields(yaml, None).expect(
+        "sweep must pass through ambiguous-discriminator blocks; serde rejects this during parse_workflow (untagged-enum dispatch on BlockDef)",
+    );
+}
+
+/// Sibling of `block_sweep_passes_through_block_with_both_prompt_and_call`:
+/// blocks with NEITHER `prompt:` nor `call:` are also passed through
+/// unchecked. The sweep cannot pick an allow-list without a
+/// discriminator, so missing-discriminator rejection is likewise left to
+/// serde's untagged-enum dispatch on `BlockDef` during `parse_workflow`
+/// (surfaced as `MechError::YamlParse`).
+#[test]
+fn block_sweep_passes_through_block_with_neither_prompt_nor_call() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        mystery: 42
+        another_unknown: "value"
+"#;
+    crate::loader::reject_unknown_block_fields(yaml, None).expect(
+        "sweep must pass through missing-discriminator blocks; serde rejects this during parse_workflow (untagged-enum dispatch on BlockDef)",
+    );
+}
+
+/// Load-pipeline sibling of `block_sweep_rejects_unknown_prompt_block_field`:
+/// pins that an unknown key on a prompt block is rejected by
+/// `load_workflow_str` (i.e. the loader actually wires the sweep into
+/// the pipeline; not just that the sweep returns an error in isolation).
+#[test]
+fn load_rejects_unknown_prompt_block_field_via_load_pipeline() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object }
+        bogus: true
+"#;
+    let err = load_workflow_str(yaml).expect_err("must reject unknown prompt-block field via load");
+    let msg = err.to_string();
+    let lower = msg.to_lowercase();
+    assert!(
+        lower.contains("unknown field") && lower.contains("bogus"),
+        "error must mention 'unknown field' and the offending key `bogus`: {msg}"
+    );
+    assert!(
+        msg.contains("functions.f.blocks.b"),
+        "error must mention the offending block path: {msg}"
+    );
+}
+
+/// Load-pipeline sibling of `block_sweep_rejects_unknown_call_block_field`.
+#[test]
+fn load_rejects_unknown_call_block_field_via_load_pipeline() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        call: g
+        input: { x: "1" }
+        gremlin: 7
+"#;
+    let err = load_workflow_str(yaml).expect_err("must reject unknown call-block field via load");
+    let msg = err.to_string();
+    let lower = msg.to_lowercase();
+    assert!(
+        lower.contains("unknown field") && lower.contains("gremlin"),
+        "error must mention 'unknown field' and the offending key `gremlin`: {msg}"
+    );
+    assert!(
+        msg.contains("functions.f.blocks.b"),
+        "error must mention the offending block path: {msg}"
+    );
+}
+
+/// Companion to `block_sweep_passes_through_block_with_both_prompt_and_call`:
+/// the sweep itself is documented as passing through ambiguous-discriminator
+/// blocks, with rejection deferred to serde's untagged-enum dispatch on
+/// `BlockDef` during `parse_workflow` (surfaced as `MechError::YamlParse`).
+/// Pin that contract end-to-end via `load_workflow_str`. If this ever
+/// returns `Ok`, the passthrough docstring is a lie and the policy must be
+/// revisited.
+#[test]
+fn load_rejects_block_with_both_prompt_and_call_via_load_pipeline() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        call: g
+        mystery: 42
+"#;
+    let err = load_workflow_str(yaml).expect_err("load must reject block with both discriminators");
+    match &err {
+        MechError::YamlParse { path, message } => {
+            // Stable assertions only: the rejection must surface as
+            // `MechError::YamlParse`, the path must be `None` (this fixture
+            // is parsed from a string with no source path), and the message
+            // must be non-empty. We deliberately do NOT pin substrings like
+            // "untagged enum BlockDef" or "functions.f.blocks": those come
+            // from serde-yml internals and are brittle across upgrades.
+            assert!(path.is_none(), "no source path was supplied; got: {path:?}");
+            assert!(!message.is_empty(), "error message must not be empty");
+        }
+        other => panic!("expected MechError::YamlParse, got: {other:?}"),
+    }
+}
+
+/// Companion to `block_sweep_passes_through_block_with_neither_prompt_nor_call`:
+/// pins that `load_workflow_str` rejects a block with no discriminator, even
+/// though the sweep itself passes it through. Same rationale as the
+/// both-discriminators companion above.
+#[test]
+fn load_rejects_block_with_neither_prompt_nor_call_via_load_pipeline() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        mystery: 42
+        another_unknown: "value"
+"#;
+    let err = load_workflow_str(yaml).expect_err("load must reject block with no discriminator");
+    match &err {
+        MechError::YamlParse { path, message } => {
+            // Stable assertions only; see the both-discriminators companion
+            // above for rationale. We avoid pinning serde-yml-internal
+            // substrings ("untagged enum BlockDef", "functions.f.blocks")
+            // because those formats can change across serde-yml upgrades.
+            assert!(path.is_none(), "no source path was supplied; got: {path:?}");
+            assert!(!message.is_empty(), "error message must not be empty");
+        }
+        other => panic!("expected MechError::YamlParse, got: {other:?}"),
+    }
+}
+
+/// Strengthens the error-path location pinning of
+/// `block_sweep_rejects_unknown_prompt_block_field` /
+/// `block_sweep_rejects_unknown_call_block_field`: a single-function /
+/// single-block fixture cannot distinguish "the error names the offending
+/// block" from "the error happens to mention the only block in the file".
+/// This fixture has TWO functions with TWO blocks each and places the
+/// unknown key on `f2`'s second block (`b2`). The error must name
+/// `functions.f2.blocks.b2` and must NOT mention `functions.f1.blocks`.
+#[test]
+fn block_sweep_rejects_unknown_field_at_correct_function_and_block_path() {
+    let yaml = r#"
+functions:
+  f1:
+    input: { type: object }
+    blocks:
+      b1:
+        prompt: "hi"
+        schema: { type: object }
+      b2:
+        call: f2
+        input: {}
+  f2:
+    input: { type: object }
+    blocks:
+      b1:
+        prompt: "hi"
+        schema: { type: object }
+      b2:
+        prompt: "hi"
+        schema: { type: object }
+        mystery: 42
+"#;
+    let err = crate::loader::reject_unknown_block_fields(yaml, None)
+        .expect_err("must reject unknown field on f2.b2");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("functions.f2.blocks.b2"),
+        "error must name the offending function and block by name: {msg}"
+    );
+    assert!(
+        !msg.contains("functions.f1.blocks"),
+        "error must not mention any block under f1 (would indicate a name-mismatch bug): {msg}"
+    );
+}
+
+/// Pins that `reject_unknown_block_fields` wires the `source_path`
+/// argument into the resulting `MechError::YamlParse { path, .. }`. All
+/// other block-sweep tests pass `None`, so a regression that dropped the
+/// path on the floor would go unnoticed.
+#[test]
+fn block_sweep_includes_source_path_in_error() {
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object }
+        bogus: true
+"#;
+    let path = std::path::PathBuf::from("/some/path/workflow.yaml");
+    let err = crate::loader::reject_unknown_block_fields(yaml, Some(&path))
+        .expect_err("must reject unknown prompt-block field");
+    match err {
+        MechError::YamlParse {
+            path: Some(p),
+            message: _,
+        } => {
+            assert_eq!(
+                p,
+                std::path::PathBuf::from("/some/path/workflow.yaml"),
+                "source_path must round-trip into MechError::YamlParse.path"
+            );
+        }
+        other => panic!("expected MechError::YamlParse with Some(path), got {other:?}"),
+    }
+}
+
+/// Pins the `serde_yml::from_str(yaml).map_err(...)` line at the top of
+/// `reject_unknown_block_fields`: syntactically invalid YAML must surface
+/// as `MechError::YamlParse`, not panic or be swallowed.
+#[test]
+fn block_sweep_propagates_yaml_parse_error_on_malformed_input() {
+    let yaml = "functions: {{{ broken";
+    let err = crate::loader::reject_unknown_block_fields(yaml, None)
+        .expect_err("malformed YAML must be rejected");
+    match err {
+        MechError::YamlParse { path, message } => {
+            assert!(path.is_none(), "no source path was supplied; got: {path:?}");
+            assert!(
+                !message.is_empty(),
+                "yaml parse error message must not be empty"
+            );
+        }
+        other => panic!("expected MechError::YamlParse, got: {other:?}"),
+    }
+}

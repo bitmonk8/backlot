@@ -1110,6 +1110,7 @@ The loader performs all of the following checks when a workflow file is loaded. 
 |---|---|---|
 | YAML parse | Error | Workflow file must be valid YAML. |
 | Unknown keys at `workflow:` and `functions.<name>:` scope | Error | Loader rejects any YAML key under `workflow:` or `functions.<name>:` that is not in the schema. Reported as `MechError::YamlParse`. |
+| Unknown keys at `functions.<name>.blocks.<block_name>:` scope | Error | Loader rejects any YAML key under a block definition that is not in `PROMPT_BLOCK_KEYS` or `CALL_BLOCK_KEYS` (selected by the `prompt:`/`call:` discriminator). Reported as `MechError::YamlParse`. |
 | Required top-level fields | Error | `functions` map must exist and be non-empty. |
 | Block type discrimination | Error | Each block must have exactly one of `prompt` or `call`. |
 | Field validity | Error | No forbidden fields per block type (§5.3). |
@@ -1685,7 +1686,7 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 
 ### Deliverable 2 — YAML schema types (parse-only, no validation)
 
-**Scope:** Define the serde structs that mirror the §12 YAML grammar: `MechDocument`, `FunctionDef`, `BlockDef` (enum: `Prompt`, `Call`), `AgentConfig`, `TransitionDef`, `SchemaRef`, `ContextVarDef`, etc. Use `#[serde(deny_unknown_fields)]`. Parse only — no semantic validation. Support the three `call.input` forms (string, uniform list, per-call object list) via an untagged enum. Unknown keys at `workflow:` and `functions.<name>:` scope are rejected (see §10.1).
+**Scope:** Define the serde structs that mirror the §12 YAML grammar: `MechDocument`, `FunctionDef`, `BlockDef` (enum: `Prompt`, `Call`), `AgentConfig`, `TransitionDef`, `SchemaRef`, `ContextVarDef`, etc. Use `#[serde(deny_unknown_fields)]`. `BlockCommon` (the helper struct embedded via `#[serde(flatten)]` in `PromptBlock` and `CallBlock` to share four common fields) intentionally omits `deny_unknown_fields`: it is never deserialized standalone, and adding the attribute would make the flattened view reject the parent's own non-flattened keys (`prompt:` / `call:`) as unknown. Strict rejection of unknown block-level keys is enforced by a loader-side sweep (the `#[serde(deny_unknown_fields)]` + `#[serde(flatten)]` combination on `PromptBlock`/`CallBlock` is officially unsupported — serde-rs/serde#1547 — so the sweep makes rejection robust against future serde behavior changes). Parse only — no semantic validation. Support the three `call.input` forms (string, uniform list, per-call object list) via an untagged enum. Unknown keys at `workflow:`, `functions.<name>:`, and `functions.<name>.blocks.<block_name>:` scope are rejected (see §10.1).
 
 **Tests first:**
 - Parse the §12 worked example end-to-end; assert top-level structure matches.
@@ -1782,7 +1783,7 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 
 ### Deliverable 7 — Workflow loader (end-to-end load pipeline)
 
-**Scope:** Public `WorkflowLoader::load(path) → Workflow`. Composes parse → resolve schemas → validate → infer → compile CEL. Produces an immutable `Workflow` struct ready for execution. No execution yet.
+**Scope:** Public `WorkflowLoader::load(path) → Workflow`. Composes strict-field sweeps (workflow/function and block scopes) → parse → resolve schemas → validate → infer → reject unsupported features → compile CEL. Produces an immutable `Workflow` struct ready for execution. No execution yet.
 
 **Tests first:**
 - Load the §12 worked example; assert function count, block count, agents present.

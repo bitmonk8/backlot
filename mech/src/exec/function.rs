@@ -27,7 +27,7 @@ use crate::exec::call::FunctionExecutor;
 use crate::exec::dataflow::run_function_dataflow;
 use crate::exec::schedule::run_function_imperative;
 use crate::exec::system::render_function_system;
-use crate::schema::{BlockDef, FunctionDef};
+use crate::schema::FunctionDef;
 use crate::workflow::Workflow;
 
 /// Default maximum call depth to prevent infinite recursion.
@@ -50,25 +50,16 @@ pub enum ExecutionMode {
 /// Single-block or unconnected functions default to imperative (the entry
 /// block finder handles them correctly).
 pub fn detect_mode(function: &FunctionDef) -> ExecutionMode {
-    let has_transitions = function.blocks.values().any(|b| {
-        let transitions = match b {
-            BlockDef::Prompt(p) => &p.transitions,
-            BlockDef::Call(c) => &c.transitions,
-        };
-        !transitions.is_empty()
-    });
+    let has_transitions = function
+        .blocks
+        .values()
+        .any(|b| !b.transitions().is_empty());
 
     if has_transitions {
         return ExecutionMode::Imperative;
     }
 
-    let has_depends = function.blocks.values().any(|b| {
-        let deps = match b {
-            BlockDef::Prompt(p) => &p.depends_on,
-            BlockDef::Call(c) => &c.depends_on,
-        };
-        !deps.is_empty()
-    });
+    let has_depends = function.blocks.values().any(|b| !b.depends_on().is_empty());
 
     if has_depends {
         ExecutionMode::Dataflow

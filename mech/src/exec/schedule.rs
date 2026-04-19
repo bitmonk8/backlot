@@ -241,20 +241,6 @@ pub fn apply_side_effects(
     commit_side_effects(staged, ctx)
 }
 
-/// Extract transition list and side-effect maps from a block definition.
-fn block_edges(
-    block: &BlockDef,
-) -> (
-    &[TransitionDef],
-    &BTreeMap<String, String>,
-    &BTreeMap<String, String>,
-) {
-    match block {
-        BlockDef::Prompt(p) => (&p.transitions, &p.set_context, &p.set_workflow),
-        BlockDef::Call(c) => (&c.transitions, &c.set_context, &c.set_workflow),
-    }
-}
-
 /// Find the entry block for imperative-mode execution.
 ///
 /// The entry block is the block with no `depends_on` that is not targeted
@@ -265,8 +251,7 @@ fn find_entry_block(function: &FunctionDef) -> MechResult<String> {
     // Collect all blocks that are transition targets from a DIFFERENT block.
     let mut targeted: BTreeSet<&str> = BTreeSet::new();
     for (src_name, block) in &function.blocks {
-        let (transitions, _, _) = block_edges(block);
-        for t in transitions {
+        for t in block.transitions() {
             if t.goto != *src_name {
                 targeted.insert(&t.goto);
             }
@@ -276,10 +261,7 @@ fn find_entry_block(function: &FunctionDef) -> MechResult<String> {
     // Find blocks with no depends_on.
     let mut no_deps: Vec<&str> = Vec::new();
     for (name, block) in &function.blocks {
-        let has_depends = match block {
-            BlockDef::Prompt(p) => !p.depends_on.is_empty(),
-            BlockDef::Call(c) => !c.depends_on.is_empty(),
-        };
+        let has_depends = !block.depends_on().is_empty();
         if !has_depends {
             no_deps.push(name);
         }
@@ -598,13 +580,13 @@ pub async fn run_function_imperative(
         // this block's writes if commit or transition evaluation errors,
         // before the error propagates. The orchestration is encapsulated in
         // `commit_block_side_effects_then_evaluate`.
-        let (transitions, set_context, set_workflow) = block_edges(block);
+        let common = block.common();
         let result = commit_block_side_effects_then_evaluate(
             workflow,
             &current_block_id,
-            transitions,
-            set_context,
-            set_workflow,
+            &common.transitions,
+            &common.set_context,
+            &common.set_workflow,
             &output,
             ctx,
         )?;
@@ -2037,7 +2019,7 @@ functions:
         let result = evaluate_transitions(
             &wf2,
             "a",
-            &block_a.transitions,
+            &block_a.common.transitions,
             &json!({ "x": "anything" }),
             &ctx,
         )
@@ -2070,7 +2052,7 @@ functions:
             BlockDef::Prompt(p) => p,
             _ => panic!("expected prompt block"),
         };
-        let transitions = check_block.transitions.clone();
+        let transitions = check_block.common.transitions.clone();
         let err =
             evaluate_transitions(&wf, "check", &transitions, &json!({ "status": "ok" }), &ctx)
                 .expect_err("guard evaluation error must propagate as Err");

@@ -1,11 +1,18 @@
 //! End-to-end workflow loader (spec §13).
 //!
-//! Composes strict-field sweep → parse → build schema registry → validate →
+//! Composes strict-field sweeps → parse → resolve schemas → validate →
 //! infer function outputs → reject unsupported features
 //! (`MechError::UnsupportedFeature`) → compile CEL expressions/templates into an
-//! immutable, ready-to-run [`Workflow`] value. The strict-field sweep
-//! ([`reject_unknown_workflow_and_function_fields`]) runs before the YAML
-//! parse and can surface as [`MechError::YamlParse`].
+//! immutable, ready-to-run [`Workflow`] value. Two strict-field sweeps run
+//! before the YAML parse and can surface as [`MechError::YamlParse`]:
+//! [`reject_unknown_workflow_and_function_fields`] (workflow- and
+//! function-scope keys, defending against `#[serde(flatten)]` silently
+//! disabling `#[serde(deny_unknown_fields)]` on those parents) and
+//! [`reject_unknown_block_fields`] (block-scope keys, defending against
+//! the unsupported `#[serde(untagged)]` + `#[serde(flatten)]` +
+//! `#[serde(deny_unknown_fields)]` combination on
+//! [`crate::schema::BlockDef`] / [`crate::schema::PromptBlock`] /
+//! [`crate::schema::CallBlock`] — see serde-rs/serde#1547).
 //!
 //! No execution logic lives here — execution lives in [`crate::exec`]. The
 //! loader's job is to make sure that by the time a [`Workflow`] exists, every
@@ -47,8 +54,9 @@ use std::sync::Arc;
 use crate::cel::{CelExpression, Template};
 use crate::error::{MechError, MechResult};
 use crate::schema::{
-    CelSourceKind, FUNCTION_DEF_KEYS, FunctionDef, MechDocument, SchemaRegistry,
-    WORKFLOW_SECTION_KEYS, infer_function_outputs, parse_workflow,
+    CALL_BLOCK_KEYS, CelSourceKind, FUNCTION_DEF_KEYS, FunctionDef, MechDocument,
+    PROMPT_BLOCK_KEYS, SchemaRegistry, WORKFLOW_SECTION_KEYS, infer_function_outputs,
+    parse_workflow,
 };
 use crate::validate::{AnyModel, ModelChecker, validate_workflow};
 use crate::workflow::{Workflow, WorkflowInner};
@@ -107,9 +115,10 @@ impl std::fmt::Display for UnsupportedFeatureAdvisory {
 
 /// Load, parse, and validate a workflow from disk.
 ///
-/// Pipeline: read file → strict-field sweep (rejects unknown keys at
-/// `workflow:` and `functions.<name>:` scope, surfaces as
-/// [`MechError::YamlParse`]) → parse YAML → build schema registry →
+/// Pipeline: read file → strict-field sweeps (reject unknown keys at
+/// `workflow:`, `functions.<name>:`, and
+/// `functions.<name>.blocks.<block_name>:` scopes, surface as
+/// [`MechError::YamlParse`]) → parse YAML → resolve schemas →
 /// validate → infer function outputs → reject unsupported features
 /// (`MechError::UnsupportedFeature`) → compile CEL expressions and
 /// templates.
@@ -191,15 +200,30 @@ fn load_impl(
     source_path: Option<PathBuf>,
     models: &dyn ModelChecker,
 ) -> MechResult<Workflow> {
-    // 1. Reject unknown YAML keys at `workflow:` and `functions.<name>:`
-    // scope. Each parent embeds `ExecutionConfig` via `#[serde(flatten)]`
-    // on its `defaults` (`WorkflowSection`) or `overrides` (`FunctionDef`)
-    // field, which silently disables `#[serde(deny_unknown_fields)]` on
-    // those parents, so the strict-field check is performed here instead. Runs BEFORE serde
-    // parsing so that a typo like `inputt:` produces an "unknown field"
-    // diagnostic rather than the downstream "missing field `input`".
-    // See [`reject_unknown_workflow_and_function_fields`].
+    // 1. Reject unknown YAML keys via two strict-field sweeps.
+    //
+    // `reject_unknown_workflow_and_function_fields` covers
+    // `workflow:` and `functions.<name>:` scope. Each parent embeds
+    // `ExecutionConfig` via `#[serde(flatten)]` on its `defaults`
+    // (`WorkflowSection`) or `overrides` (`FunctionDef`) field, which
+    // silently disables `#[serde(deny_unknown_fields)]` on those
+    // parents, so the strict-field check is performed here instead.
+    //
+    // `reject_unknown_block_fields` covers
+    // `functions.<name>.blocks.<block_name>:` scope. Each block variant
+    // (`PromptBlock` / `CallBlock`) carries
+    // `#[serde(deny_unknown_fields)]` and flattens `BlockCommon`, and
+    // is dispatched through `#[serde(untagged)]` on `BlockDef` — a
+    // combination serde does not officially support
+    // (serde-rs/serde#1547). The loader-side sweep enforces the
+    // rejection as a load-time invariant that does not depend on serde
+    // internals.
+    //
+    // Both sweeps run BEFORE serde parsing so that a typo like
+    // `inputt:` produces an "unknown field" diagnostic rather than the
+    // downstream "missing field `input`".
     reject_unknown_workflow_and_function_fields(yaml, source_path.as_ref())?;
+    reject_unknown_block_fields(yaml, source_path.as_ref())?;
 
     // 2. Parse YAML.
     let mut file = parse_workflow(yaml).map_err(|e| MechError::YamlParse {
@@ -434,21 +458,18 @@ pub(crate) fn reject_unknown_workflow_and_function_fields(
         return Ok(());
     };
 
-    let key_to_str = |v: &Value| v.as_str().map(str::to_string);
-
     // workflow: scope
     if let Some(workflow_val) = root_map.get(Value::String("workflow".into())) {
         if let Some(workflow_map) = workflow_val.as_mapping() {
-            for (k, _) in workflow_map {
-                if let Some(key) = key_to_str(k) {
-                    if !WORKFLOW_SECTION_KEYS.contains(&key.as_str()) {
-                        return Err(MechError::YamlParse {
-                            path: source_path.cloned(),
-                            message: format!(
-                                "unknown field `{key}` at `workflow`, expected one of {WORKFLOW_SECTION_KEYS:?}"
-                            ),
-                        });
-                    }
+            for k in workflow_map.keys() {
+                let Some(key) = k.as_str() else { continue };
+                if !WORKFLOW_SECTION_KEYS.contains(&key) {
+                    return Err(MechError::YamlParse {
+                        path: source_path.cloned(),
+                        message: format!(
+                            "unknown field `{key}` at `workflow`, expected one of {WORKFLOW_SECTION_KEYS:?}"
+                        ),
+                    });
                 }
             }
         }
@@ -458,21 +479,110 @@ pub(crate) fn reject_unknown_workflow_and_function_fields(
     if let Some(functions_val) = root_map.get(Value::String("functions".into())) {
         if let Some(functions_map) = functions_val.as_mapping() {
             for (fn_name_val, fn_def_val) in functions_map {
-                let fn_name = key_to_str(fn_name_val).unwrap_or_else(|| "<?>".to_string());
                 let Some(fn_def_map) = fn_def_val.as_mapping() else {
                     continue;
                 };
-                for (k, _) in fn_def_map {
-                    if let Some(key) = key_to_str(k) {
-                        if !FUNCTION_DEF_KEYS.contains(&key.as_str()) {
-                            return Err(MechError::YamlParse {
-                                path: source_path.cloned(),
-                                message: format!(
-                                    "unknown field `{key}` at `functions.{fn_name}`, expected one of {FUNCTION_DEF_KEYS:?}"
-                                ),
-                            });
-                        }
+                for k in fn_def_map.keys() {
+                    let Some(key) = k.as_str() else { continue };
+                    if !FUNCTION_DEF_KEYS.contains(&key) {
+                        let fn_name = fn_name_val.as_str().unwrap_or("<?>");
+                        return Err(MechError::YamlParse {
+                            path: source_path.cloned(),
+                            message: format!(
+                                "unknown field `{key}` at `functions.{fn_name}`, expected one of {FUNCTION_DEF_KEYS:?}"
+                            ),
+                        });
                     }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Reject unknown YAML keys at `functions.<name>.blocks.<block_name>:` scope.
+///
+/// Sibling of [`reject_unknown_workflow_and_function_fields`]; runs in
+/// step 1 of `load_impl`, before serde deserialization. The
+/// [`crate::schema::PromptBlock`] / [`crate::schema::CallBlock`] structs
+/// each carry `#[serde(deny_unknown_fields)]` which today (in
+/// combination with the `#[serde(untagged)]` [`crate::schema::BlockDef`]
+/// dispatch) does reject unknown block-level keys, but that interaction
+/// is officially unsupported by serde when combined with
+/// `#[serde(flatten)]` (serde-rs/serde#1547). This sweep enforces the
+/// same rejection as a load-time invariant that does not depend on serde
+/// internals: every key under `functions.<name>.blocks.<block_name>:`
+/// must appear in [`PROMPT_BLOCK_KEYS`] or [`CALL_BLOCK_KEYS`],
+/// selected by the discriminator key (`prompt:` vs `call:`).
+///
+/// Blocks with neither (or both) discriminator keys are passed through
+/// unchecked here; they are diagnosed by serde's untagged-enum
+/// dispatch on `BlockDef` during the subsequent `parse_workflow` step,
+/// which surfaces as [`MechError::YamlParse`].
+///
+/// Non-mapping values for any of the surrounding scopes are passed
+/// through unchecked and caught by the subsequent `parse_workflow` step
+/// as serde type-mismatch errors.
+pub(crate) fn reject_unknown_block_fields(
+    yaml: &str,
+    source_path: Option<&PathBuf>,
+) -> MechResult<()> {
+    use serde_yml::Value;
+
+    let root: Value = serde_yml::from_str(yaml).map_err(|e| MechError::YamlParse {
+        path: source_path.cloned(),
+        message: e.to_string(),
+    })?;
+    let Some(root_map) = root.as_mapping() else {
+        return Ok(());
+    };
+
+    let Some(functions_val) = root_map.get(Value::String("functions".into())) else {
+        return Ok(());
+    };
+    let Some(functions_map) = functions_val.as_mapping() else {
+        return Ok(());
+    };
+
+    for (fn_name_val, fn_def_val) in functions_map {
+        let Some(fn_def_map) = fn_def_val.as_mapping() else {
+            continue;
+        };
+        let Some(blocks_val) = fn_def_map.get(Value::String("blocks".into())) else {
+            continue;
+        };
+        let Some(blocks_map) = blocks_val.as_mapping() else {
+            continue;
+        };
+
+        for (block_name_val, block_def_val) in blocks_map {
+            let Some(block_def_map) = block_def_val.as_mapping() else {
+                continue;
+            };
+
+            let has_prompt = block_def_map.contains_key(Value::String("prompt".into()));
+            let has_call = block_def_map.contains_key(Value::String("call".into()));
+            // Ambiguous / missing-discriminator blocks are diagnosed by
+            // serde's untagged-enum dispatch on `BlockDef` during the
+            // subsequent `parse_workflow` step; do not double-report here.
+            let allow_list: &[&str] = match (has_prompt, has_call) {
+                (true, false) => PROMPT_BLOCK_KEYS,
+                (false, true) => CALL_BLOCK_KEYS,
+                _ => continue,
+            };
+
+            for k in block_def_map.keys() {
+                let Some(key) = k.as_str() else { continue };
+                if !allow_list.contains(&key) {
+                    let fn_name = fn_name_val.as_str().unwrap_or("<?>");
+                    let block_name = block_name_val.as_str().unwrap_or("<?>");
+                    return Err(MechError::YamlParse {
+                        path: source_path.cloned(),
+                        message: format!(
+                            "unknown field `{key}` at `functions.{fn_name}.blocks.{block_name}`, expected one of {allow_list:?}"
+                        ),
+                    });
                 }
             }
         }

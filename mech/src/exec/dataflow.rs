@@ -24,14 +24,6 @@ use crate::exec::prompt::execute_prompt_block;
 use crate::schema::{BlockDef, FunctionDef};
 use crate::workflow::Workflow;
 
-/// Extract `depends_on` list from a block.
-fn block_depends_on(block: &BlockDef) -> &[String] {
-    match block {
-        BlockDef::Prompt(p) => &p.depends_on,
-        BlockDef::Call(c) => &c.depends_on,
-    }
-}
-
 /// Find terminal blocks for dataflow execution.
 ///
 /// If the function declares explicit `terminals`, use those. Otherwise,
@@ -45,17 +37,14 @@ pub fn find_dataflow_terminals(function: &FunctionDef) -> MechResult<Vec<String>
     // Collect all blocks referenced as dependencies.
     let mut depended_upon: BTreeSet<&str> = BTreeSet::new();
     for block in function.blocks.values() {
-        for dep in block_depends_on(block) {
+        for dep in block.depends_on() {
             depended_upon.insert(dep);
         }
     }
 
     let mut terminals: Vec<String> = Vec::new();
     for (name, block) in &function.blocks {
-        let has_transitions = match block {
-            BlockDef::Prompt(p) => !p.transitions.is_empty(),
-            BlockDef::Call(c) => !c.transitions.is_empty(),
-        };
+        let has_transitions = !block.transitions().is_empty();
         if !has_transitions && !depended_upon.contains(name.as_str()) {
             terminals.push(name.clone());
         }
@@ -83,7 +72,7 @@ pub fn backward_reachable(
             continue; // Already visited.
         }
         if let Some(block) = blocks.get(&name) {
-            for dep in block_depends_on(block) {
+            for dep in block.depends_on() {
                 if !reachable.contains(dep) {
                     stack.push(dep.clone());
                 }
@@ -110,7 +99,7 @@ pub fn topo_sort_levels(
     for name in reachable {
         in_degree.entry(name.as_str()).or_insert(0);
         if let Some(block) = blocks.get(name) {
-            for dep in block_depends_on(block) {
+            for dep in block.depends_on() {
                 if reachable.contains(dep) {
                     *in_degree.entry(name.as_str()).or_insert(0) += 1;
                     dependents
@@ -209,15 +198,11 @@ async fn execute_block(
     };
 
     // Apply side effects (set_context, set_workflow) — same as imperative.
-    let (set_context, set_workflow) = match block {
-        BlockDef::Prompt(p) => (&p.set_context, &p.set_workflow),
-        BlockDef::Call(c) => (&c.set_context, &c.set_workflow),
-    };
     crate::exec::schedule::apply_side_effects(
         workflow,
         block_id,
-        set_context,
-        set_workflow,
+        block.set_context(),
+        block.set_workflow(),
         &output,
         ctx,
     )?;
