@@ -51,8 +51,8 @@ pub fn find_dataflow_terminals(function: &FunctionDef) -> MechResult<Vec<String>
     }
 
     if terminals.is_empty() {
-        return Err(MechError::WorkflowValidation {
-            errors: vec!["dataflow mode: no terminal blocks found".into()],
+        return Err(MechError::ExecutionInvariant {
+            message: "dataflow mode: no terminal blocks found".into(),
         });
     }
 
@@ -127,11 +127,11 @@ pub fn topo_sort_levels(
                 break;
             }
             // Cycle detected — should have been caught at load time.
-            return Err(MechError::WorkflowValidation {
-                errors: vec![format!(
+            return Err(MechError::ExecutionInvariant {
+                message: format!(
                     "dataflow cycle detected among: {:?}",
                     remaining.keys().collect::<Vec<_>>()
-                )],
+                ),
             });
         }
 
@@ -171,8 +171,8 @@ async fn execute_block(
     let block = function
         .blocks
         .get(block_id)
-        .ok_or_else(|| MechError::WorkflowValidation {
-            errors: vec![format!("dataflow: block `{block_id}` not found")],
+        .ok_or_else(|| MechError::ExecutionInvariant {
+            message: format!("dataflow: block `{block_id}` not found"),
         })?;
 
     let output = match block {
@@ -310,8 +310,8 @@ mod tests {
             _input: JsonValue,
         ) -> BoxFuture<'a, Result<JsonValue, MechError>> {
             Box::pin(async move {
-                Err(MechError::WorkflowValidation {
-                    errors: vec![format!("unexpected call to `{function_name}`")],
+                Err(MechError::ExecutionInvariant {
+                    message: format!("unexpected call to `{function_name}`"),
                 })
             })
         }

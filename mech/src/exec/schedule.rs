@@ -249,8 +249,8 @@ fn find_entry_block(function: &FunctionDef) -> MechResult<String> {
     }
 
     if no_deps.is_empty() {
-        return Err(MechError::WorkflowValidation {
-            errors: vec!["no entry block found: every block has depends_on".into()],
+        return Err(MechError::ExecutionInvariant {
+            message: "no entry block found: every block has depends_on".into(),
         });
     }
 
@@ -520,18 +520,18 @@ pub async fn run_function_imperative(
     loop {
         step_count += 1;
         if step_count > MAX_IMPERATIVE_STEPS {
-            return Err(MechError::WorkflowValidation {
-                errors: vec![format!(
+            return Err(MechError::ExecutionInvariant {
+                message: format!(
                     "function `{function_name}`: exceeded maximum step count of \n                     {MAX_IMPERATIVE_STEPS}; possible infinite loop (self-loop guard never terminates)"
-                )],
+                ),
             });
         }
 
         let block = function.blocks.get(&current_block_id).ok_or_else(|| {
-            MechError::WorkflowValidation {
-                errors: vec![format!(
+            MechError::ExecutionInvariant {
+                message: format!(
                     "function `{function_name}`: block `{current_block_id}` not found"
-                )],
+                ),
             }
         })?;
 
@@ -660,8 +660,8 @@ mod tests {
             _input: JsonValue,
         ) -> BoxFuture<'a, Result<JsonValue, MechError>> {
             let result = self.responses.get(function_name).cloned().ok_or_else(|| {
-                MechError::WorkflowValidation {
-                    errors: vec![format!("fake: no response for `{function_name}`")],
+                MechError::ExecutionInvariant {
+                    message: format!("fake: no response for `{function_name}`"),
                 }
             });
             Box::pin(async move { result })
@@ -1683,7 +1683,7 @@ functions:
     // guard branch). `BTreeMap` iterates keys alphabetically, so naming
     // the type-correct write `var1` and the type-mismatched write `var2`
     // pins the order: `var1` commits, then `var2` fails its check inside
-    // `commit_side_effects` (`MechError::WorkflowValidation` per
+    // `commit_side_effects` (`MechError::ExecutionInvariant` per
     // `ExecutionContext::set_context` -> `check_type` in
     // `mech/src/context.rs`). Rollback must restore `var1` to its
     // initial.
@@ -1729,12 +1729,12 @@ functions:
         ))
         .expect_err("commit-time type mismatch must propagate");
 
-        // `set_context` raises `MechError::WorkflowValidation` on type
+        // `set_context` raises `MechError::ExecutionInvariant` on type
         // mismatch (see `check_type` in `mech/src/context.rs`). The
         // rollback path must NOT shadow this with `InternalInvariant`.
         assert!(
-            matches!(err, MechError::WorkflowValidation { .. }),
-            "expected WorkflowValidation from commit-time type-check failure, got {err:?}"
+            matches!(err, MechError::ExecutionInvariant { .. }),
+            "expected ExecutionInvariant from commit-time type-check failure, got {err:?}"
         );
 
         // var1's successful first write must be rolled back to its initial.

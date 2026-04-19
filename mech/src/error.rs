@@ -1,8 +1,8 @@
 //! Error types for the mech crate.
 //!
-//! Covers the five runtime error categories from `docs/MECH_SPEC.md` §10.2
-//! plus load-time variants, including the aggregated `WorkflowValidation`
-//! variant populated by `validate.rs`.
+//! Covers the runtime error categories from `docs/MECH_SPEC.md` §10.2 and
+//! load-time variants, including the aggregated `WorkflowValidation` variant
+//! populated by `validate.rs`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,9 +14,13 @@ use thiserror::Error;
 /// Variants are split into two groups:
 ///
 /// * **Runtime errors** (per spec §10.2): raised while executing a workflow.
+///   Includes [`MechError::ExecutionInvariant`] for runtime-only invariant
+///   checks distinct from load-time validation.
 /// * **Load-time errors**: raised while reading, parsing, or validating a
 ///   workflow file. This includes the aggregated `WorkflowValidation` variant
-///   produced by `validate.rs`.
+///   produced **only** by `validate.rs` via the loader. Runtime invariants
+///   raised by the executor must use [`MechError::ExecutionInvariant`]
+///   instead so callers can programmatically distinguish the two.
 #[derive(Debug, Error)]
 pub enum MechError {
     // ---- Runtime errors (§10.2) -------------------------------------------
@@ -123,6 +127,34 @@ pub enum MechError {
         /// The source text of the template string.
         source_text: String,
         /// Parser error message.
+        message: String,
+    },
+
+    /// A runtime invariant was violated.
+    ///
+    /// Raised by the executor for conditions that are not load-time
+    /// validation failures but rather runtime-only invariants — typically
+    /// defense-in-depth checks for conditions the loader should already
+    /// have caught (e.g. a referenced function or block missing at
+    /// execution time), commit-time type compatibility on `set_context` /
+    /// `set_workflow`, or executor exhaustion limits (max call depth,
+    /// max imperative step count).
+    ///
+    /// Distinct from two neighbouring variants:
+    ///
+    /// * [`WorkflowValidation`](MechError::WorkflowValidation) is the
+    ///   aggregated load-time validator output produced by `validate.rs`.
+    ///   Callers wanting to distinguish "the workflow file was malformed"
+    ///   from "the executor caught a runtime invariant" should match on
+    ///   these variants separately.
+    /// * [`InternalInvariant`](MechError::InternalInvariant) signals a
+    ///   defect in mech itself (impossible-by-construction conditions).
+    ///   `ExecutionInvariant` is the right variant when the executor is
+    ///   guarding against a workflow-authoring or load-time-validator
+    ///   gap rather than a mech bug.
+    #[error("execution invariant violated: {message}")]
+    ExecutionInvariant {
+        /// Human-readable description of the invariant that was violated.
         message: String,
     },
 
@@ -252,10 +284,21 @@ pub enum MechError {
         advisories: Vec<String>,
     },
 
-    /// An internal loader invariant was violated at runtime.
+    // ---- Internal (mech bug) --------------------------------------------
+    /// An internal mech invariant was violated.
     ///
-    /// This indicates a bug in the loader or a corrupted [`Workflow`] handle,
-    /// not a user-visible workflow error.
+    /// This indicates a bug in mech itself — the loader, the executor's
+    /// internal bookkeeping (e.g. a corrupted [`Workflow`] handle), or a
+    /// rollback / commit path that reached an unreachable state — not a
+    /// user-visible workflow error.
+    ///
+    /// Use this variant for impossible-by-construction conditions whose
+    /// occurrence implies a defect in mech. For runtime defense-in-depth
+    /// checks against conditions the loader is supposed to have rejected
+    /// (unknown function id, unknown block id, type-checked context
+    /// commit, etc.), use [`MechError::ExecutionInvariant`] instead so
+    /// callers can distinguish "executor caught an authoring/runtime
+    /// invariant" from "mech itself is broken."
     #[error("internal invariant violated: {message}")]
     InternalInvariant {
         /// Description of the violated invariant.
@@ -367,6 +410,23 @@ mod tests {
         assert!(s.contains("bad guard"));
         assert!(s.contains("missing block"));
         assert!(s.contains('2'));
+
+        // ExecutionInvariant: runtime defense-in-depth / commit-time
+        // invariant violation. Display must read as a runtime error and
+        // surface the message verbatim. Distinct from WorkflowValidation
+        // both in variant identity and in Display prefix.
+        let e = MechError::ExecutionInvariant {
+            message: "function `nonexistent` not found in workflow".into(),
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("execution invariant violated"),
+            "Display must signal this is a runtime invariant failure, not a load-time validation failure: {s}"
+        );
+        assert!(
+            s.contains("function `nonexistent` not found in workflow"),
+            "Display must surface the message verbatim: {s}"
+        );
 
         // UnsupportedFeature: must clearly read as an unimplemented-feature
         // failure (not a user authoring mistake), name the feature, and

@@ -106,15 +106,13 @@ fn resolve_agent_ref(
     match reference {
         AgentConfigRef::Ref(raw) => {
             let name =
-                crate::schema::parse_named_ref(raw).map_err(|_| MechError::WorkflowValidation {
-                    errors: vec![format!("malformed agent $ref: `{raw}`")],
+                crate::schema::parse_named_ref(raw).map_err(|_| MechError::ExecutionInvariant {
+                    message: format!("malformed agent $ref: `{raw}`"),
                 })?;
             let base = agents
                 .get(name)
-                .ok_or_else(|| MechError::WorkflowValidation {
-                    errors: vec![format!(
-                        "agent $ref:#{name} does not exist in workflow.agents"
-                    )],
+                .ok_or_else(|| MechError::ExecutionInvariant {
+                    message: format!("agent $ref:#{name} does not exist in workflow.agents"),
                 })?;
             // A bare $ref: the named config may itself use `extends:`.
             resolve_extends_chain(base, agents)
@@ -152,16 +150,14 @@ fn resolve_extends_chain(
             "loader invariant: extends cycle at `{parent_name}` should have been rejected at load time"
         );
         if chain.len() > max_depth {
-            return Err(MechError::WorkflowValidation {
-                errors: vec![format!(
-                    "agent extends chain exceeded bound at `{parent_name}` (cycle?)"
-                )],
+            return Err(MechError::ExecutionInvariant {
+                message: format!("agent extends chain exceeded bound at `{parent_name}` (cycle?)"),
             });
         }
         let parent = agents
             .get(parent_name)
-            .ok_or_else(|| MechError::WorkflowValidation {
-                errors: vec![format!("agent extends target `{parent_name}` not found")],
+            .ok_or_else(|| MechError::ExecutionInvariant {
+                message: format!("agent extends target `{parent_name}` not found"),
             })?;
         chain.push(parent);
         cursor = parent;
@@ -206,16 +202,16 @@ fn parse_timeout(s: &str) -> MechResult<Duration> {
     } else if let Some(n) = s.strip_suffix('h') {
         (n, "h")
     } else {
-        return Err(MechError::WorkflowValidation {
-            errors: vec![format!("invalid timeout `{s}`: missing unit suffix")],
+        return Err(MechError::ExecutionInvariant {
+            message: format!("invalid timeout `{s}`: missing unit suffix"),
         });
     };
-    let n: u64 = num_str.parse().map_err(|_| MechError::WorkflowValidation {
-        errors: vec![format!("invalid timeout `{s}`: bad number")],
+    let n: u64 = num_str.parse().map_err(|_| MechError::ExecutionInvariant {
+        message: format!("invalid timeout `{s}`: bad number"),
     })?;
     if n == 0 {
-        return Err(MechError::WorkflowValidation {
-            errors: vec![format!("invalid timeout `{s}`: timeout must be > 0")],
+        return Err(MechError::ExecutionInvariant {
+            message: format!("invalid timeout `{s}`: timeout must be > 0"),
         });
     }
     Ok(match unit {
@@ -342,8 +338,8 @@ pub async fn execute_prompt_block(
                 })?
         }
         SchemaRef::Infer => {
-            return Err(MechError::WorkflowValidation {
-                errors: vec!["prompt block schema cannot be `infer`".into()],
+            return Err(MechError::ExecutionInvariant {
+                message: "prompt block schema cannot be `infer`".into(),
             });
         }
     };
@@ -415,8 +411,8 @@ pub async fn execute_prompt_block(
     // 7. Validate against the declared output schema (surface up to 10 errors).
     let validator = resolved_schema
         .validator()
-        .ok_or_else(|| MechError::WorkflowValidation {
-            errors: vec!["prompt block schema cannot be `infer`".into()],
+        .ok_or_else(|| MechError::ExecutionInvariant {
+            message: "prompt block schema cannot be `infer`".into(),
         })?;
     let errors: Vec<String> = validator
         .iter_errors(&output)
@@ -1174,8 +1170,8 @@ functions:
         // shapes at load time, so we can't exercise them via YAML.
         fn msg(err: MechError) -> String {
             match err {
-                MechError::WorkflowValidation { errors } => errors.join(" | "),
-                other => panic!("expected WorkflowValidation, got {other:?}"),
+                MechError::ExecutionInvariant { message } => message,
+                other => panic!("expected ExecutionInvariant, got {other:?}"),
             }
         }
         let agents = std::collections::BTreeMap::new();

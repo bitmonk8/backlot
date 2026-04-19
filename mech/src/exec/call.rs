@@ -77,10 +77,10 @@ fn resolve_calls(
                 block
                     .input
                     .as_ref()
-                    .ok_or_else(|| MechError::WorkflowValidation {
-                        errors: vec![format!(
+                    .ok_or_else(|| MechError::ExecutionInvariant {
+                        message: format!(
                             "call block: single function call `{name}` requires block-level `input`"
-                        )],
+                        ),
                     })?;
             let input = render_mapping(workflow, input_mapping, namespaces)?;
             Ok(vec![ResolvedCall {
@@ -93,10 +93,9 @@ fn resolve_calls(
                 block
                     .input
                     .as_ref()
-                    .ok_or_else(|| MechError::WorkflowValidation {
-                        errors: vec![
-                            "call block: uniform list call requires block-level `input`".into(),
-                        ],
+                    .ok_or_else(|| MechError::ExecutionInvariant {
+                        message: "call block: uniform list call requires block-level `input`"
+                            .into(),
                     })?;
             let input = render_mapping(workflow, input_mapping, namespaces)?;
             Ok(names
@@ -129,10 +128,10 @@ pub(crate) fn validate_function_exists(
     block_id: &str,
 ) -> MechResult<()> {
     if !workflow.document().functions.contains_key(fn_name) {
-        return Err(MechError::WorkflowValidation {
-            errors: vec![format!(
+        return Err(MechError::ExecutionInvariant {
+            message: format!(
                 "call block `{block_id}`: function `{fn_name}` is not declared in the workflow"
-            )],
+            ),
         });
     }
     Ok(())
@@ -255,8 +254,8 @@ mod tests {
                 .unwrap()
                 .push((function_name.to_string(), input));
             let result = self.responses.get(function_name).cloned().ok_or_else(|| {
-                MechError::WorkflowValidation {
-                    errors: vec![format!("fake: no canned response for `{function_name}`")],
+                MechError::ExecutionInvariant {
+                    message: format!("fake: no canned response for `{function_name}`"),
                 }
             });
             Box::pin(async move { result })
@@ -874,7 +873,7 @@ functions:
         ))
         .expect_err("should error");
 
-        assert!(matches!(err, MechError::WorkflowValidation { .. }));
+        assert!(matches!(err, MechError::ExecutionInvariant { .. }));
     }
 
     // ---- T13: validate_function_exists accepts/rejects functions -----------
@@ -884,13 +883,13 @@ functions:
         let wf = load(SINGLE_CALL);
         let err = validate_function_exists(&wf, "ghost", "do_call").expect_err("must reject ghost");
         match err {
-            MechError::WorkflowValidation { errors } => {
+            MechError::ExecutionInvariant { message } => {
                 assert!(
-                    errors.iter().any(|e| e.contains("ghost")),
-                    "error should mention `ghost`: {errors:?}"
+                    message.contains("ghost"),
+                    "error should mention `ghost`: {message}"
                 );
             }
-            other => panic!("expected WorkflowValidation, got {other:?}"),
+            other => panic!("expected ExecutionInvariant, got {other:?}"),
         }
     }
 

@@ -1198,6 +1198,14 @@ Per-block timeout (if configured at the executor level) exceeded.
 - **Behavior:** The in-flight LLM call is cancelled. The block fails with a timeout error.
 - **Propagation:** Block failure → function failure.
 
+#### Execution Invariant Violation
+
+The executor caught a runtime invariant violation: either a defense-in-depth check for a condition the loader (§10.1) should already have rejected (e.g. an unknown function or block id reached at execution time), or a runtime-only invariant such as commit-time type compatibility on `set_context` / `set_workflow`, write-once enforcement on block output recording, or executor exhaustion limits (max call depth, max imperative step count).
+
+- **Behavior:** Reported as `MechError::ExecutionInvariant { message }`. The block (and therefore the function) fails immediately.
+- **Propagation:** Block failure → function failure → cue retry/escalation if orchestrated.
+- **Distinction from `WorkflowValidation`:** `MechError::WorkflowValidation` is reserved for the load-time aggregator populated by `validate.rs` (§10.1). Callers wanting to distinguish "the workflow file was malformed" from "the executor caught a runtime invariant" should match on these two variants separately.
+
 #### Cancellation (Parallel Calls)
 
 When `any` or `n_of_m` completes early, remaining functions receive cancellation.
@@ -1666,7 +1674,7 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 
 ### Deliverable 1 — Crate skeleton & error types
 
-**Scope:** Create the `mech` crate. Declare dependencies (`cue`, `reel`, `cel-interpreter`, `serde`, `serde_yaml`, `schemars`, `thiserror`, `tokio`). Define the public error enum covering the 5 runtime error categories (§10) and placeholder load-time error variants. Define `MechResult<T>`. No logic yet — just the module shell and error surface.
+**Scope:** Create the `mech` crate. Declare dependencies (`cue`, `reel`, `cel-interpreter`, `serde`, `serde_yaml`, `schemars`, `thiserror`, `tokio`). Define the public error enum covering the runtime error categories (§10) and placeholder load-time error variants. Define `MechResult<T>`. No logic yet — just the module shell and error surface.
 
 **Tests first:**
 - `error_display_formats_correctly` — each error variant has a human-readable Display impl.

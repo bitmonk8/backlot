@@ -80,10 +80,10 @@ impl WorkflowState {
         let ty = guard
             .declarations
             .get(name)
-            .ok_or_else(|| MechError::WorkflowValidation {
-                errors: vec![format!(
+            .ok_or_else(|| MechError::ExecutionInvariant {
+                message: format!(
                     "set_workflow: variable `{name}` is not declared in workflow.context"
-                )],
+                ),
             })?;
         check_type(name, &ty.clone(), &value, Scope::Workflow)?;
         guard.values.insert(name.to_string(), value);
@@ -167,10 +167,10 @@ impl ExecutionContext {
         let ty = self
             .context_decls
             .get(name)
-            .ok_or_else(|| MechError::WorkflowValidation {
-                errors: vec![format!(
+            .ok_or_else(|| MechError::ExecutionInvariant {
+                message: format!(
                     "set_context: variable `{name}` is not declared in function.context"
-                )],
+                ),
             })?;
         check_type(name, ty, &value, Scope::Function)?;
         self.context_values.insert(name.to_string(), value);
@@ -188,10 +188,10 @@ impl ExecutionContext {
     /// [`clear_block_output`] (used by the dominator-based output clearing on each transition).
     pub fn record_block_output(&mut self, block_id: &str, value: JsonValue) -> MechResult<()> {
         if self.block_outputs.contains_key(block_id) {
-            return Err(MechError::WorkflowValidation {
-                errors: vec![format!(
+            return Err(MechError::ExecutionInvariant {
+                message: format!(
                     "block output for `{block_id}` already recorded; write-once per invocation"
-                )],
+                ),
             });
         }
         self.block_outputs.insert(block_id.to_string(), value);
@@ -210,10 +210,10 @@ impl ExecutionContext {
     pub fn get_block_output(&self, block_id: &str) -> MechResult<&JsonValue> {
         self.block_outputs
             .get(block_id)
-            .ok_or_else(|| MechError::WorkflowValidation {
-                errors: vec![format!(
+            .ok_or_else(|| MechError::ExecutionInvariant {
+                message: format!(
                     "block output for `{block_id}` is not available (block has not executed)"
-                )],
+                ),
             })
     }
 
@@ -273,11 +273,11 @@ impl Scope {
 /// representation in serde_json).
 fn check_type(name: &str, ty: &str, value: &JsonValue, scope: Scope) -> MechResult<()> {
     if !value_matches_json_type(value, ty) {
-        return Err(MechError::WorkflowValidation {
-            errors: vec![format!(
+        return Err(MechError::ExecutionInvariant {
+            message: format!(
                 "{}: variable `{name}` expected type `{ty}`, got value `{value}`",
                 scope.as_str()
-            )],
+            ),
         });
     }
     Ok(())
@@ -359,11 +359,11 @@ mod tests {
         // Type mismatch: integer declared, string assigned.
         let err = ctx.set_context("attempts", json!("nope")).unwrap_err();
         match err {
-            MechError::WorkflowValidation { errors } => {
-                assert!(errors[0].contains("attempts"));
-                assert!(errors[0].contains("integer"));
+            MechError::ExecutionInvariant { message } => {
+                assert!(message.contains("attempts"));
+                assert!(message.contains("integer"));
             }
-            other => panic!("expected WorkflowValidation, got {other:?}"),
+            other => panic!("expected ExecutionInvariant, got {other:?}"),
         }
     }
 
@@ -372,11 +372,11 @@ mod tests {
         let mut ctx = new_ctx();
         let err = ctx.set_context("ghost", json!(1)).unwrap_err();
         match err {
-            MechError::WorkflowValidation { errors } => {
-                assert!(errors[0].contains("ghost"));
-                assert!(errors[0].contains("not declared"));
+            MechError::ExecutionInvariant { message } => {
+                assert!(message.contains("ghost"));
+                assert!(message.contains("not declared"));
             }
-            other => panic!("expected WorkflowValidation, got {other:?}"),
+            other => panic!("expected ExecutionInvariant, got {other:?}"),
         }
     }
 
@@ -470,7 +470,7 @@ mod tests {
         bad.insert("n".to_string(), decl("integer", json!("not-int")));
         let ws = WorkflowState::from_declarations(&BTreeMap::new()).unwrap();
         let err = ExecutionContext::new(json!({}), json!({}), &bad, ws).unwrap_err();
-        assert!(matches!(err, MechError::WorkflowValidation { .. }));
+        assert!(matches!(err, MechError::ExecutionInvariant { .. }));
     }
 
     #[test]
@@ -482,11 +482,11 @@ mod tests {
             .record_block_output("classify", json!({ "category": "other" }))
             .unwrap_err();
         match err {
-            MechError::WorkflowValidation { errors } => {
-                assert!(errors[0].contains("classify"));
-                assert!(errors[0].contains("already recorded"));
+            MechError::ExecutionInvariant { message } => {
+                assert!(message.contains("classify"));
+                assert!(message.contains("already recorded"));
             }
-            other => panic!("expected WorkflowValidation, got {other:?}"),
+            other => panic!("expected ExecutionInvariant, got {other:?}"),
         }
     }
 
@@ -517,10 +517,10 @@ mod tests {
         let ctx = new_ctx();
         let err = ctx.set_workflow("nope", json!(1)).unwrap_err();
         match err {
-            MechError::WorkflowValidation { errors } => {
-                assert!(errors[0].contains("nope"));
+            MechError::ExecutionInvariant { message } => {
+                assert!(message.contains("nope"));
             }
-            other => panic!("expected WorkflowValidation, got {other:?}"),
+            other => panic!("expected ExecutionInvariant, got {other:?}"),
         }
     }
 
@@ -529,11 +529,11 @@ mod tests {
         let ctx = new_ctx();
         let err = ctx.set_workflow("total_calls", json!("five")).unwrap_err();
         match err {
-            MechError::WorkflowValidation { errors } => {
-                assert!(errors[0].contains("total_calls"));
-                assert!(errors[0].contains("integer"));
+            MechError::ExecutionInvariant { message } => {
+                assert!(message.contains("total_calls"));
+                assert!(message.contains("integer"));
             }
-            other => panic!("expected WorkflowValidation, got {other:?}"),
+            other => panic!("expected ExecutionInvariant, got {other:?}"),
         }
     }
 
@@ -542,11 +542,11 @@ mod tests {
         let ctx = new_ctx();
         let err = ctx.get_block_output("classify").unwrap_err();
         match err {
-            MechError::WorkflowValidation { errors } => {
-                assert!(errors[0].contains("classify"));
-                assert!(errors[0].contains("not available"));
+            MechError::ExecutionInvariant { message } => {
+                assert!(message.contains("classify"));
+                assert!(message.contains("not available"));
             }
-            other => panic!("expected WorkflowValidation, got {other:?}"),
+            other => panic!("expected ExecutionInvariant, got {other:?}"),
         }
     }
 
@@ -608,7 +608,7 @@ mod tests {
         let mut bad = BTreeMap::new();
         bad.insert("n".to_string(), decl("integer", json!("not-int")));
         let err = WorkflowState::from_declarations(&bad).unwrap_err();
-        assert!(matches!(err, MechError::WorkflowValidation { .. }));
+        assert!(matches!(err, MechError::ExecutionInvariant { .. }));
     }
     #[test]
     fn float_one_is_not_valid_integer() {
@@ -622,14 +622,13 @@ mod tests {
         let mut ctx = ExecutionContext::new(json!({}), json!({}), &decls, ws).unwrap();
         let err = ctx.set_context("i", json!(1.0)).unwrap_err();
         match err {
-            MechError::WorkflowValidation { errors } => {
+            MechError::ExecutionInvariant { message } => {
                 assert!(
-                    errors[0].contains("integer"),
-                    "error should mention integer: {}",
-                    errors[0]
+                    message.contains("integer"),
+                    "error should mention integer: {message}"
                 );
             }
-            other => panic!("expected WorkflowValidation, got {other:?}"),
+            other => panic!("expected ExecutionInvariant, got {other:?}"),
         }
     }
 
