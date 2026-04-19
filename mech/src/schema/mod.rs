@@ -1,15 +1,21 @@
 //! Serde schema types mirroring the YAML grammar from `docs/MECH_SPEC.md` §12.
 //!
-//! This module is **parse-only**: it defines the struct shapes that a mech
-//! workflow YAML file deserializes into, along with a thin [`parse_workflow`]
-//! helper. It performs **no** semantic validation — no CEL compilation, no
-//! JSON-Schema checking, no `$ref` resolution, no block-field validity rules.
-//! Semantic validation lives in [`crate::validate`], output inference in
-//! [`crate::schema::infer`], and the workflow loader that ties everything
-//! together in [`crate::loader`].
+//! Schema types here are **parse-only** data containers, with one
+//! exception: [`ExecutionConfig`] carries small `resolved_*` accessors that
+//! codify the per-field workflow→function precedence contract documented on
+//! the struct. All other semantic processing (CEL compilation, JSON-Schema
+//! checking, `$ref` resolution, block-field validity rules, output
+//! inference, full workflow load) lives in [`crate::validate`],
+//! [`crate::schema::infer`], and [`crate::loader`].
 //!
-//! Every struct uses `#[serde(deny_unknown_fields)]` so that typos and
-//! accidental fields are caught at load time.
+//! Every schema struct carries `#[serde(deny_unknown_fields)]`. On
+//! [`WorkflowSection`] and [`FunctionDef`] the `#[serde(flatten)]`
+//! attribute on the `defaults` and `overrides` fields embedding
+//! [`ExecutionConfig`] silently disables that attribute on those parents,
+//! so the strict-field check is replaced by a loader-side
+//! sweep; see
+//! [`crate::loader::reject_unknown_workflow_and_function_fields`] for the
+//! rationale.
 //!
 //! # Design notes
 //!
@@ -86,12 +92,12 @@ mod tests {
 
         let defaults = wf.workflow.as_ref().expect("workflow defaults present");
         assert_eq!(
-            defaults.system.as_deref(),
+            defaults.defaults.system.as_deref(),
             Some("You are a customer support agent.")
         );
         assert!(defaults.agents.contains_key("default"));
         assert!(defaults.agents.contains_key("diagnostician"));
-        match &defaults.agent {
+        match &defaults.defaults.agent {
             Some(AgentConfigRef::Ref(s)) => assert_eq!(s, "$ref:#default"),
             other => panic!("expected workflow.agent = $ref:#default, got {other:?}"),
         }
@@ -101,8 +107,8 @@ mod tests {
             .functions
             .get("support_triage")
             .expect("support_triage present");
-        assert!(triage.context.contains_key("attempts"));
-        assert_eq!(triage.context["attempts"].ty, "integer");
+        assert!(triage.overrides.context.contains_key("attempts"));
+        assert_eq!(triage.overrides.context["attempts"].ty, "integer");
 
         // classify is a prompt block with transitions.
         let classify = triage.blocks.get("classify").expect("classify block");
@@ -155,7 +161,7 @@ mod tests {
             .functions
             .get("resolve_billing")
             .expect("resolve_billing present");
-        match &rb.agent {
+        match &rb.overrides.agent {
             Some(AgentConfigRef::Inline(a)) => {
                 assert_eq!(a.extends.as_deref(), Some("default"));
                 assert_eq!(a.grants, Some(vec!["write".to_string()]));
@@ -337,7 +343,7 @@ functions:
         let wf = parse_workflow(yaml).unwrap();
 
         // workflow-level: inline
-        match &wf.workflow.as_ref().unwrap().agent {
+        match &wf.workflow.as_ref().unwrap().defaults.agent {
             Some(AgentConfigRef::Inline(a)) => {
                 assert_eq!(a.model.as_deref(), Some("haiku"));
                 assert_eq!(a.grants, Some(vec!["tools".to_string()]));
@@ -347,7 +353,7 @@ functions:
 
         // function-level: $ref
         let f = &wf.functions["f"];
-        match &f.agent {
+        match &f.overrides.agent {
             Some(AgentConfigRef::Ref(s)) => assert_eq!(s, "$ref:#base"),
             other => panic!("expected function-level $ref agent, got {other:?}"),
         }
@@ -411,12 +417,17 @@ functions:
 "#;
         let err = parse_workflow(yaml).expect_err("must reject unknown block field");
         let msg = err.to_string().to_lowercase();
-        // Because BlockDef is an untagged enum, the error won't always name
-        // the field exactly, but serde's message typically mentions either the
-        // offending field name or indicates that no variant matched.
+        // `BlockDef` is `#[serde(untagged)]`, so serde collapses the
+        // inner "unknown field `bogus`" error from the failing variant
+        // into the aggregate "data did not match any variant of untagged
+        // enum blockdef". The assertion requires either that exact
+        // multi-word phrase plus the specific enum name, or the literal
+        // typo `bogus` — tight enough to distinguish from any unrelated
+        // parse failure.
         assert!(
-            msg.contains("bogus") || msg.contains("did not match") || msg.contains("unknown"),
-            "error should indicate rejection due to unknown block field: {msg}"
+            (msg.contains("did not match any variant") && msg.contains("blockdef"))
+                || msg.contains("bogus"),
+            "error should specifically reject the unknown block field: {msg}"
         );
     }
 
@@ -436,7 +447,7 @@ functions:
         schema: { type: object }
 "#;
         let wf = parse_workflow(yaml).unwrap();
-        let ctx = &wf.workflow.as_ref().unwrap().context;
+        let ctx = &wf.workflow.as_ref().unwrap().defaults.context;
         assert_eq!(ctx["total_calls"].ty, "integer");
         assert_eq!(ctx["total_calls"].initial, serde_json::json!(0));
         assert_eq!(ctx["all_categories"].ty, "array");
@@ -471,15 +482,18 @@ functions:
 "#;
         let wf = parse_workflow(yaml).unwrap();
         let wdef = wf.workflow.as_ref().unwrap();
-        let comp = wdef.compaction.as_ref().unwrap();
+        let comp = wdef.defaults.compaction.as_ref().unwrap();
         assert_eq!(comp.keep_recent_tokens, 2000);
         assert_eq!(comp.reserve_tokens, 4000);
         assert_eq!(comp.func.as_deref(), Some("my_compactor"));
 
         let f = &wf.functions["f"];
         assert_eq!(f.terminals, vec!["done".to_string()]);
-        assert!(f.context.contains_key("attempts"));
-        assert_eq!(f.compaction.as_ref().unwrap().keep_recent_tokens, 500);
+        assert!(f.overrides.context.contains_key("attempts"));
+        assert_eq!(
+            f.overrides.compaction.as_ref().unwrap().keep_recent_tokens,
+            500
+        );
 
         if let BlockDef::Prompt(p) = &f.blocks["done"] {
             assert_eq!(
@@ -592,5 +606,86 @@ functions:
         } else {
             panic!("expected prompt");
         }
+    }
+
+    // ---- ExecutionConfig resolver helpers (T6) ---------------------------
+
+    fn make_compaction(keep: u32) -> CompactionConfig {
+        CompactionConfig {
+            keep_recent_tokens: keep,
+            reserve_tokens: keep * 2,
+            func: None,
+        }
+    }
+
+    #[test]
+    fn execution_config_resolved_system_prefers_self_then_parent_then_none() {
+        let parent = ExecutionConfig {
+            system: Some("parent-sys".to_string()),
+            ..Default::default()
+        };
+        let with_self = ExecutionConfig {
+            system: Some("self-sys".to_string()),
+            ..Default::default()
+        };
+        let empty = ExecutionConfig::default();
+
+        assert_eq!(with_self.resolved_system(Some(&parent)), Some("self-sys"));
+        assert_eq!(empty.resolved_system(Some(&parent)), Some("parent-sys"));
+        assert_eq!(empty.resolved_system(None), None);
+        assert_eq!(with_self.resolved_system(None), Some("self-sys"));
+    }
+
+    #[test]
+    fn execution_config_resolved_agent_prefers_self_then_parent_then_none() {
+        let parent_agent = AgentConfigRef::Ref("$ref:#parent".to_string());
+        let self_agent = AgentConfigRef::Ref("$ref:#self".to_string());
+        let parent = ExecutionConfig {
+            agent: Some(parent_agent.clone()),
+            ..Default::default()
+        };
+        let with_self = ExecutionConfig {
+            agent: Some(self_agent.clone()),
+            ..Default::default()
+        };
+        let empty = ExecutionConfig::default();
+
+        assert_eq!(with_self.resolved_agent(Some(&parent)), Some(&self_agent));
+        assert_eq!(empty.resolved_agent(Some(&parent)), Some(&parent_agent));
+        assert_eq!(empty.resolved_agent(None), None);
+        assert_eq!(with_self.resolved_agent(None), Some(&self_agent));
+    }
+
+    #[test]
+    fn execution_config_resolved_compaction_prefers_self_then_parent_then_none() {
+        let parent = ExecutionConfig {
+            compaction: Some(make_compaction(1000)),
+            ..Default::default()
+        };
+        let with_self = ExecutionConfig {
+            compaction: Some(make_compaction(500)),
+            ..Default::default()
+        };
+        let empty = ExecutionConfig::default();
+
+        assert_eq!(
+            with_self
+                .resolved_compaction(Some(&parent))
+                .map(|c| c.keep_recent_tokens),
+            Some(500)
+        );
+        assert_eq!(
+            empty
+                .resolved_compaction(Some(&parent))
+                .map(|c| c.keep_recent_tokens),
+            Some(1000)
+        );
+        assert_eq!(empty.resolved_compaction(None), None);
+        assert_eq!(
+            with_self
+                .resolved_compaction(None)
+                .map(|c| c.keep_recent_tokens),
+            Some(500)
+        );
     }
 }

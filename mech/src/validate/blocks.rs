@@ -46,10 +46,10 @@ impl Validator<'_> {
         }
 
         // Function-level context declarations
-        self.validate_context_map(&func.context, &floc.clone().with_field("context"));
+        self.validate_context_map(&func.overrides.context, &floc.clone().with_field("context"));
 
         // Function-level agent override
-        if let Some(agent_ref) = &func.agent {
+        if let Some(agent_ref) = &func.overrides.agent {
             let defaults = wf.workflow.as_ref();
             self.validate_agent_ref(
                 agent_ref,
@@ -146,7 +146,7 @@ impl Validator<'_> {
             }
         }
         for key in block.set_context().keys() {
-            if !func.context.contains_key(key) {
+            if !func.overrides.context.contains_key(key) {
                 self.err(
                     bloc.clone().with_field(format!("set_context.{key}")),
                     format!("`set_context.{key}` is not declared in the function's `context`"),
@@ -157,7 +157,7 @@ impl Validator<'_> {
             let declared = wf
                 .workflow
                 .as_ref()
-                .is_some_and(|d| d.context.contains_key(key));
+                .is_some_and(|d| d.defaults.context.contains_key(key));
             if !declared {
                 self.err(
                     bloc.clone().with_field(format!("set_workflow.{key}")),

@@ -97,12 +97,9 @@ pub fn resolve_compaction(
     workflow: &MechDocument,
     function: &FunctionDef,
 ) -> Option<ResolvedCompaction> {
-    let cfg = function.compaction.as_ref().or_else(|| {
-        workflow
-            .workflow
-            .as_ref()
-            .and_then(|w| w.compaction.as_ref())
-    });
+    let cfg = function
+        .overrides
+        .resolved_compaction(workflow.workflow.as_ref().map(|w| &w.defaults));
     cfg.map(ResolvedCompaction::from)
 }
 
@@ -279,11 +276,14 @@ mod tests {
     fn resolve_compaction_function_overrides_workflow() {
         let wf = crate::schema::MechDocument {
             workflow: Some(crate::schema::WorkflowSection {
-                compaction: Some(CompactionConfig {
-                    keep_recent_tokens: 1000,
-                    reserve_tokens: 2000,
-                    func: None,
-                }),
+                defaults: crate::schema::ExecutionConfig {
+                    compaction: Some(CompactionConfig {
+                        keep_recent_tokens: 1000,
+                        reserve_tokens: 2000,
+                        func: None,
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             functions: BTreeMap::new(),
@@ -291,15 +291,15 @@ mod tests {
         let func = crate::schema::FunctionDef {
             input: serde_json::json!({ "type": "object" }),
             output: None,
-            system: None,
-            agent: None,
+            overrides: crate::schema::ExecutionConfig {
+                compaction: Some(CompactionConfig {
+                    keep_recent_tokens: 500,
+                    reserve_tokens: 800,
+                    func: Some("custom".into()),
+                }),
+                ..Default::default()
+            },
             terminals: Vec::new(),
-            context: BTreeMap::new(),
-            compaction: Some(CompactionConfig {
-                keep_recent_tokens: 500,
-                reserve_tokens: 800,
-                func: Some("custom".into()),
-            }),
             blocks: BTreeMap::new(),
         };
 
@@ -313,11 +313,14 @@ mod tests {
     fn resolve_compaction_falls_back_to_workflow() {
         let wf = crate::schema::MechDocument {
             workflow: Some(crate::schema::WorkflowSection {
-                compaction: Some(CompactionConfig {
-                    keep_recent_tokens: 1000,
-                    reserve_tokens: 2000,
-                    func: None,
-                }),
+                defaults: crate::schema::ExecutionConfig {
+                    compaction: Some(CompactionConfig {
+                        keep_recent_tokens: 1000,
+                        reserve_tokens: 2000,
+                        func: None,
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             functions: BTreeMap::new(),
@@ -325,11 +328,8 @@ mod tests {
         let func = crate::schema::FunctionDef {
             input: serde_json::json!({ "type": "object" }),
             output: None,
-            system: None,
-            agent: None,
+            overrides: crate::schema::ExecutionConfig::default(),
             terminals: Vec::new(),
-            context: BTreeMap::new(),
-            compaction: None,
             blocks: BTreeMap::new(),
         };
 
@@ -347,11 +347,8 @@ mod tests {
         let func = crate::schema::FunctionDef {
             input: serde_json::json!({ "type": "object" }),
             output: None,
-            system: None,
-            agent: None,
+            overrides: crate::schema::ExecutionConfig::default(),
             terminals: Vec::new(),
-            context: BTreeMap::new(),
-            compaction: None,
             blocks: BTreeMap::new(),
         };
 

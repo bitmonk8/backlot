@@ -135,8 +135,12 @@ impl<'w> FunctionRunner<'w> {
             "depth": self.current_depth,
         });
 
-        let mut ctx =
-            ExecutionContext::new(input, meta, &function.context, self.workflow_state.clone())?;
+        let mut ctx = ExecutionContext::new(
+            input,
+            meta,
+            &function.overrides.context,
+            self.workflow_state.clone(),
+        )?;
 
         self.run_function_with_ctx(function_name, function, &mut ctx)
             .await
@@ -467,7 +471,7 @@ functions:
             .document()
             .workflow
             .as_ref()
-            .map(|w| &w.context)
+            .map(|w| &w.defaults.context)
             .cloned()
             .unwrap_or_default();
         let ws = WorkflowState::from_declarations(&wf_decls).unwrap();
@@ -633,7 +637,7 @@ functions:
             .document()
             .workflow
             .as_ref()
-            .map(|w| &w.context)
+            .map(|w| &w.defaults.context)
             .cloned()
             .unwrap_or_default();
         let ws = WorkflowState::from_declarations(&wf_decls).unwrap();
@@ -679,7 +683,7 @@ functions:
             .document()
             .workflow
             .as_ref()
-            .map(|w| &w.context)
+            .map(|w| &w.defaults.context)
             .cloned()
             .unwrap_or_default();
         let ws = WorkflowState::from_declarations(&wf_decls).unwrap();
@@ -1281,17 +1285,20 @@ functions:
     #[test]
     fn compaction_config_reaches_runner_when_loader_gate_bypassed() {
         use crate::conversation::resolve_compaction;
-        use crate::schema::{CompactionConfig, MechDocument, WorkflowSection};
+        use crate::schema::{CompactionConfig, ExecutionConfig, MechDocument, WorkflowSection};
 
         // Workflow-level compaction with no function-level override --
         // exercises the inheritance path FunctionRunner relies on.
         let document = MechDocument {
             workflow: Some(WorkflowSection {
-                compaction: Some(CompactionConfig {
-                    keep_recent_tokens: 1000,
-                    reserve_tokens: 800,
-                    func: None,
-                }),
+                defaults: ExecutionConfig {
+                    compaction: Some(CompactionConfig {
+                        keep_recent_tokens: 1000,
+                        reserve_tokens: 800,
+                        func: None,
+                    }),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             functions: BTreeMap::new(),
@@ -1299,11 +1306,8 @@ functions:
         let function = FunctionDef {
             input: json!({ "type": "object" }),
             output: None,
-            system: None,
-            agent: None,
+            overrides: ExecutionConfig::default(),
             terminals: Vec::new(),
-            context: BTreeMap::new(),
-            compaction: None,
             blocks: BTreeMap::new(),
         };
 

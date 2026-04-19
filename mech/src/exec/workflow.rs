@@ -47,7 +47,7 @@ impl<'w> WorkflowRuntime<'w> {
             .document()
             .workflow
             .as_ref()
-            .map(|w| &w.context)
+            .map(|w| &w.defaults.context)
             .cloned()
             .unwrap_or_default();
         let ws = WorkflowState::from_declarations(&wf_context_decls)?;
@@ -71,7 +71,7 @@ impl<'w> WorkflowRuntime<'w> {
             .document()
             .workflow
             .as_ref()
-            .map(|w| &w.context)
+            .map(|w| &w.defaults.context)
             .cloned()
             .unwrap_or_default();
         let ws = WorkflowState::from_declarations(&wf_context_decls)?;

@@ -72,12 +72,15 @@ pub fn resolve_agent_config(
     function: &FunctionDef,
     block: &PromptBlock,
 ) -> MechResult<ResolvedAgentConfig> {
-    // Lowest-priority first; highest-priority wins and *replaces*.
-    let chosen = block
-        .agent
-        .as_ref()
-        .or(function.agent.as_ref())
-        .or_else(|| workflow.workflow.as_ref().and_then(|w| w.agent.as_ref()));
+    // Lowest-priority first; highest-priority wins and *replaces*. The
+    // function/workflow tail (function override -> workflow default) is
+    // resolved by [`ExecutionConfig::resolved_agent`]; the block-level
+    // prefix stays open-coded because it is per-block, not per-function.
+    let chosen = block.agent.as_ref().or_else(|| {
+        function
+            .overrides
+            .resolved_agent(workflow.workflow.as_ref().map(|w| &w.defaults))
+    });
 
     let Some(chosen) = chosen else {
         return Ok(ResolvedAgentConfig::default());
@@ -1251,12 +1254,12 @@ functions:
             _ => panic!(),
         };
         // Build context with the function's declared context vars.
-        let fn_decls = func.context.clone();
+        let fn_decls = func.overrides.context.clone();
         let ws = WorkflowState::from_declarations(
             &wf.document()
                 .workflow
                 .as_ref()
-                .map(|w| w.context.clone())
+                .map(|w| w.defaults.context.clone())
                 .unwrap_or_default(),
         )
         .unwrap();

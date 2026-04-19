@@ -126,7 +126,7 @@ impl MechTask {
             .document()
             .workflow
             .as_ref()
-            .and_then(|w| w.agent.as_ref())
+            .and_then(|w| w.defaults.agent.as_ref())
             .and_then(|a| match a {
                 crate::schema::AgentConfigRef::Inline(cfg) => {
                     cfg.model.as_deref().and_then(parse_model)

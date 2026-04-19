@@ -1,8 +1,11 @@
 //! End-to-end workflow loader (spec §13).
 //!
-//! Composes parse → resolve schemas → validate → infer function outputs →
-//! compile CEL expressions/templates into an immutable, ready-to-run
-//! [`Workflow`] value.
+//! Composes strict-field sweep → parse → build schema registry → validate →
+//! infer function outputs → reject unsupported features
+//! (`MechError::UnsupportedFeature`) → compile CEL expressions/templates into an
+//! immutable, ready-to-run [`Workflow`] value. The strict-field sweep
+//! ([`reject_unknown_workflow_and_function_fields`]) runs before the YAML
+//! parse and can surface as [`MechError::YamlParse`].
 //!
 //! No execution logic lives here — execution lives in [`crate::exec`]. The
 //! loader's job is to make sure that by the time a [`Workflow`] exists, every
@@ -44,8 +47,8 @@ use std::sync::Arc;
 use crate::cel::{CelExpression, Template};
 use crate::error::{MechError, MechResult};
 use crate::schema::{
-    CelSourceKind, FunctionDef, MechDocument, SchemaRegistry, infer_function_outputs,
-    parse_workflow,
+    CelSourceKind, FUNCTION_DEF_KEYS, FunctionDef, MechDocument, SchemaRegistry,
+    WORKFLOW_SECTION_KEYS, infer_function_outputs, parse_workflow,
 };
 use crate::validate::{AnyModel, ModelChecker, validate_workflow};
 use crate::workflow::{Workflow, WorkflowInner};
@@ -104,8 +107,12 @@ impl std::fmt::Display for UnsupportedFeatureAdvisory {
 
 /// Load, parse, and validate a workflow from disk.
 ///
-/// Pipeline: read file → parse YAML → build schema registry → validate →
-/// infer function outputs → compile CEL expressions and templates.
+/// Pipeline: read file → strict-field sweep (rejects unknown keys at
+/// `workflow:` and `functions.<name>:` scope, surfaces as
+/// [`MechError::YamlParse`]) → parse YAML → build schema registry →
+/// validate → infer function outputs → reject unsupported features
+/// (`MechError::UnsupportedFeature`) → compile CEL expressions and
+/// templates.
 ///
 /// A workflow that configures any unimplemented feature (currently
 /// `compaction:` — see the module-level docstring) is rejected with
@@ -184,13 +191,23 @@ fn load_impl(
     source_path: Option<PathBuf>,
     models: &dyn ModelChecker,
 ) -> MechResult<Workflow> {
-    // 1. Parse YAML.
+    // 1. Reject unknown YAML keys at `workflow:` and `functions.<name>:`
+    // scope. Each parent embeds `ExecutionConfig` via `#[serde(flatten)]`
+    // on its `defaults` (`WorkflowSection`) or `overrides` (`FunctionDef`)
+    // field, which silently disables `#[serde(deny_unknown_fields)]` on
+    // those parents, so the strict-field check is performed here instead. Runs BEFORE serde
+    // parsing so that a typo like `inputt:` produces an "unknown field"
+    // diagnostic rather than the downstream "missing field `input`".
+    // See [`reject_unknown_workflow_and_function_fields`].
+    reject_unknown_workflow_and_function_fields(yaml, source_path.as_ref())?;
+
+    // 2. Parse YAML.
     let mut file = parse_workflow(yaml).map_err(|e| MechError::YamlParse {
         path: source_path.clone(),
         message: e.to_string(),
     })?;
 
-    // 2. Build the workflow-level shared schema registry (resolves top-level
+    // 3. Build the workflow-level shared schema registry (resolves top-level
     //    $ref-only documents, compiles every shared schema).
     let empty_schemas = BTreeMap::new();
     let schemas_map = file
@@ -200,7 +217,7 @@ fn load_impl(
         .unwrap_or(&empty_schemas);
     let registry = SchemaRegistry::build(schemas_map)?;
 
-    // 3. Run the §10.1 load-time validation pass. Errors → `MechError::WorkflowValidation`.
+    // 4. Run the §10.1 load-time validation pass. Errors → `MechError::WorkflowValidation`.
     let report = validate_workflow(&file, source_path.as_deref(), models);
     if !report.is_ok() {
         return Err(MechError::WorkflowValidation {
@@ -210,7 +227,7 @@ fn load_impl(
 
     // Ordering invariant:
     //
-    // Validation (step 3) runs BEFORE inference (step 4). Therefore any
+    // Validation (step 4) runs BEFORE inference (step 5). Therefore any
     // rule added to `validate.rs` MUST NOT inspect concrete / resolved
     // function output schemas — functions that declare `output: infer`
     // (or omit `output:` entirely) still have an unresolved schema at
@@ -222,7 +239,7 @@ fn load_impl(
     // call needs to be added here, after `infer_function_outputs`, with a
     // documented contract about which errors are authoritative.
 
-    // 4. Infer function output schemas (`output: infer` / omitted).
+    // 5. Infer function output schemas (`output: infer` / omitted).
     infer_function_outputs(&mut file)?;
 
     // Reject configured-but-unimplemented features (currently only
@@ -239,7 +256,7 @@ fn load_impl(
         return Err(MechError::UnsupportedFeature { advisories });
     }
 
-    // 5. Compile every CEL guard and template in the workflow.
+    // 6. Compile every CEL guard and template in the workflow.
     let mut cel_expressions: BTreeMap<String, Arc<CelExpression>> = BTreeMap::new();
     let mut templates: BTreeMap<String, Arc<Template>> = BTreeMap::new();
     compile_all(&file, &mut cel_expressions, &mut templates)?;
@@ -259,11 +276,15 @@ fn compile_all(
     cel_expressions: &mut BTreeMap<String, Arc<CelExpression>>,
     templates: &mut BTreeMap<String, Arc<Template>>,
 ) -> MechResult<()> {
-    if let Some(system) = file.workflow.as_ref().and_then(|w| w.system.as_ref()) {
+    if let Some(system) = file
+        .workflow
+        .as_ref()
+        .and_then(|w| w.defaults.system.as_ref())
+    {
         intern_template(system, templates)?;
     }
     for func in file.functions.values() {
-        if let Some(system) = &func.system {
+        if let Some(system) = &func.overrides.system {
             intern_template(system, templates)?;
         }
         compile_function(func, cel_expressions, templates)?;
@@ -335,14 +356,14 @@ pub fn collect_unsupported_feature_advisories(
 ) -> Vec<UnsupportedFeatureAdvisory> {
     let mut advisories = Vec::new();
     if let Some(workflow) = &file.workflow {
-        if workflow.compaction.is_some() {
+        if workflow.defaults.compaction.is_some() {
             advisories.push(UnsupportedFeatureAdvisory::CompactionUnimplemented {
                 scope: "workflow-level".to_string(),
             });
         }
     }
     for (name, func) in &file.functions {
-        if func.compaction.is_some() {
+        if func.overrides.compaction.is_some() {
             advisories.push(UnsupportedFeatureAdvisory::CompactionUnimplemented {
                 scope: format!("function-level `{name}`"),
             });
@@ -365,12 +386,10 @@ pub fn collect_unsupported_feature_advisories(
         // function-level compaction but a workflow-level default still
         // produces this advisory, because that default would also be
         // silently dropped at runtime.
-        let has_effective_compaction = func.compaction.is_some()
-            || file
-                .workflow
-                .as_ref()
-                .and_then(|w| w.compaction.as_ref())
-                .is_some();
+        let has_effective_compaction = func
+            .overrides
+            .resolved_compaction(file.workflow.as_ref().map(|w| &w.defaults))
+            .is_some();
         if has_effective_compaction
             && crate::schema::infer_mode(func) == crate::schema::InferMode::Dataflow
         {
@@ -380,6 +399,86 @@ pub fn collect_unsupported_feature_advisories(
         }
     }
     advisories
+}
+
+/// Reject unknown YAML keys at `workflow:` and `functions.<name>:` scope.
+///
+/// Runs in step 1 of `load_impl`, before the typed serde deserialization in
+/// step 2 (`parse_workflow`). This loader-side check exists because each
+/// parent embeds [`crate::schema::ExecutionConfig`] via `#[serde(flatten)]`
+/// on its `defaults` ([`crate::schema::WorkflowSection`]) or `overrides`
+/// ([`crate::schema::FunctionDef`]) field, which silently disables
+/// `#[serde(deny_unknown_fields)]` on those parents.
+/// Without this check, typos like `systm:` or `compactoin:` would parse
+/// successfully with the field defaulted to None/empty.
+///
+/// The allow-lists [`WORKFLOW_SECTION_KEYS`] and [`FUNCTION_DEF_KEYS`] are
+/// kept adjacent to the struct definitions so they stay in sync as schemas
+/// evolve.
+///
+/// Absent or empty `workflow:` / `functions:` sections produce no errors
+/// here. Non-mapping values for `workflow:` or `functions.<name>:` are
+/// passed through unchecked and caught by the subsequent `parse_workflow`
+/// step as serde type-mismatch errors.
+pub(crate) fn reject_unknown_workflow_and_function_fields(
+    yaml: &str,
+    source_path: Option<&PathBuf>,
+) -> MechResult<()> {
+    use serde_yml::Value;
+
+    let root: Value = serde_yml::from_str(yaml).map_err(|e| MechError::YamlParse {
+        path: source_path.cloned(),
+        message: e.to_string(),
+    })?;
+    let Some(root_map) = root.as_mapping() else {
+        return Ok(());
+    };
+
+    let key_to_str = |v: &Value| v.as_str().map(str::to_string);
+
+    // workflow: scope
+    if let Some(workflow_val) = root_map.get(Value::String("workflow".into())) {
+        if let Some(workflow_map) = workflow_val.as_mapping() {
+            for (k, _) in workflow_map {
+                if let Some(key) = key_to_str(k) {
+                    if !WORKFLOW_SECTION_KEYS.contains(&key.as_str()) {
+                        return Err(MechError::YamlParse {
+                            path: source_path.cloned(),
+                            message: format!(
+                                "unknown field `{key}` at `workflow`, expected one of {WORKFLOW_SECTION_KEYS:?}"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // functions.<name>: scope
+    if let Some(functions_val) = root_map.get(Value::String("functions".into())) {
+        if let Some(functions_map) = functions_val.as_mapping() {
+            for (fn_name_val, fn_def_val) in functions_map {
+                let fn_name = key_to_str(fn_name_val).unwrap_or_else(|| "<?>".to_string());
+                let Some(fn_def_map) = fn_def_val.as_mapping() else {
+                    continue;
+                };
+                for (k, _) in fn_def_map {
+                    if let Some(key) = key_to_str(k) {
+                        if !FUNCTION_DEF_KEYS.contains(&key.as_str()) {
+                            return Err(MechError::YamlParse {
+                                path: source_path.cloned(),
+                                message: format!(
+                                    "unknown field `{key}` at `functions.{fn_name}`, expected one of {FUNCTION_DEF_KEYS:?}"
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

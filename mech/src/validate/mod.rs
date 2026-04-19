@@ -101,11 +101,11 @@ impl<'a> Validator<'a> {
         // Workflow-level context
         if let Some(defaults) = &wf.workflow {
             self.validate_context_map(
-                &defaults.context,
+                &defaults.defaults.context,
                 &self.root_loc().with_field("workflow.context"),
             );
             self.validate_named_agents(defaults, models);
-            if let Some(agent_ref) = &defaults.agent {
+            if let Some(agent_ref) = &defaults.defaults.agent {
                 self.validate_agent_ref_strict(
                     agent_ref,
                     defaults,

@@ -989,3 +989,159 @@ fn compaction_unimplemented_advisory_display_contains_scope_and_keywords() {
         "Display should mention `compaction` and `not implemented`; got: {s}"
     );
 }
+
+// --------------------------------------------------------------------------
+// Loader-side strict-field check (T1 / T2).
+//
+// See `reject_unknown_workflow_and_function_fields` for the rationale.
+// These tests pin that behavior at the loader entry point.
+// --------------------------------------------------------------------------
+
+#[test]
+fn rejects_unknown_field_on_workflow_flattened_subset() {
+    // `systm` is a typo of `system`, which lives in the flattened
+    // `ExecutionConfig` subset of `workflow:`.
+    let yaml = r#"
+workflow:
+  systm: "You are a customer support agent."
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object }
+"#;
+    let err = load_workflow_str(yaml).expect_err("must reject typo on workflow.system");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("unknown field") && msg.contains("systm") && msg.contains("workflow"),
+        "error must mention 'unknown field', the offending key, and the path: {msg}"
+    );
+}
+
+#[test]
+fn rejects_unknown_field_on_function_flattened_subset() {
+    // `compactoin` is a typo of `compaction`, in the flattened
+    // `ExecutionConfig` subset of `functions.<name>:`.
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    compactoin:
+      keep_recent_tokens: 500
+      reserve_tokens: 1000
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object }
+"#;
+    let err = load_workflow_str(yaml).expect_err("must reject typo on functions.f.compaction");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("unknown field") && msg.contains("compactoin") && msg.contains("functions.f"),
+        "error must mention 'unknown field', the offending key, and the path: {msg}"
+    );
+}
+
+#[test]
+fn rejects_unknown_field_on_workflow_own_keys() {
+    // `agnts` is a typo of `agents`, which is `WorkflowSection`'s own
+    // (non-flattened) field. The flatten-subset allow-list still rejects
+    // it because the loader-side check uses the union of own + flattened.
+    let yaml = r#"
+workflow:
+  agnts:
+    default: { model: haiku }
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object }
+"#;
+    let err = load_workflow_str(yaml).expect_err("must reject typo on workflow.agents");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("unknown field") && msg.contains("agnts") && msg.contains("workflow"),
+        "error must mention 'unknown field', the offending key, and the path: {msg}"
+    );
+}
+
+#[test]
+fn rejects_unknown_field_on_function_own_keys() {
+    // `inputt` is a typo of `input`, which is `FunctionDef`'s own
+    // (non-flattened) field.
+    let yaml = r#"
+functions:
+  f:
+    inputt: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object }
+"#;
+    let err = load_workflow_str(yaml).expect_err("must reject typo on functions.f.input");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("unknown field") && msg.contains("inputt") && msg.contains("functions.f"),
+        "error must mention 'unknown field', the offending key, and the path: {msg}"
+    );
+}
+
+/// Drift guard for `WORKFLOW_SECTION_KEYS` and `FUNCTION_DEF_KEYS`.
+///
+/// Loads a synthetic minimal-but-complete YAML document that uses every
+/// key in both allow-lists. Asserts that the loader-side strict-field
+/// sweep (`reject_unknown_workflow_and_function_fields`) AND `parse_workflow`
+/// both accept the document. If a future contributor adds a field to
+/// `ExecutionConfig` / `WorkflowSection` / `FunctionDef` and forgets to
+/// update the corresponding `*_KEYS` const, the new field's allow-list
+/// entry will be missing and YAML using it will be rejected as "unknown
+/// field". Adding the new field to this fixture surfaces that regression.
+///
+/// We invoke the strict-field sweep + parser directly rather than the full
+/// `load_workflow_str` because `compaction:` (one of the keys we must
+/// exercise) trips the unsupported-feature gate downstream. The sweep and
+/// the parser are the only stages the allow-lists feed into.
+#[test]
+fn allow_lists_accept_every_documented_key() {
+    let yaml = r##"
+workflow:
+  system: "wf system"
+  agent: { model: "haiku" }
+  agents:
+    base: { model: "haiku" }
+  context:
+    wf_var: { type: integer, initial: 0 }
+  schemas:
+    OutSchema:
+      type: object
+      required: [v]
+      properties:
+        v: { type: string }
+  compaction:
+    keep_recent_tokens: 1000
+    reserve_tokens: 2000
+functions:
+  f:
+    system: "fn system"
+    agent: "$ref:#base"
+    context:
+      fn_var: { type: integer, initial: 0 }
+    compaction:
+      keep_recent_tokens: 500
+      reserve_tokens: 1000
+    input: { type: object }
+    output: "infer"
+    terminals: [done]
+    blocks:
+      done:
+        prompt: "go"
+        schema: "$ref:#OutSchema"
+"##;
+    crate::loader::reject_unknown_workflow_and_function_fields(yaml, None)
+        .expect("strict-field sweep must accept every allow-listed key");
+    parse_workflow(yaml).expect("serde must accept the synthetic minimal-but-complete document");
+}

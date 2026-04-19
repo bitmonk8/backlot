@@ -716,7 +716,7 @@ functions:
         let wf = load(yaml);
         let func = wf.document().functions.get("f").unwrap();
         let agent = SequentialAgent::new(vec![json!({ "val": 10 }), json!({ "result": 20 })]);
-        let fn_decls = func.context.clone();
+        let fn_decls = func.overrides.context.clone();
         let ws = WorkflowState::from_declarations(&BTreeMap::new()).unwrap();
         let mut ctx =
             ExecutionContext::new(json!({}), json!({ "run_id": "r1" }), &fn_decls, ws).unwrap();

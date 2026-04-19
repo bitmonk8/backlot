@@ -24,13 +24,9 @@ pub(crate) fn render_function_system(
     function: &FunctionDef,
     ctx: &ExecutionContext,
 ) -> MechResult<Option<String>> {
-    let system_source = function.system.as_deref().or_else(|| {
-        workflow
-            .document()
-            .workflow
-            .as_ref()
-            .and_then(|w| w.system.as_deref())
-    });
+    let system_source = function
+        .overrides
+        .resolved_system(workflow.document().workflow.as_ref().map(|w| &w.defaults));
     match system_source {
         Some(src) => {
             let ns = ctx.namespaces();
@@ -169,7 +165,7 @@ functions:
         let func_real = wf.document().functions.get("f").unwrap().clone();
         let mut func = func_real;
         // Mutate the system field to a string the loader never saw.
-        func.system = Some("uninterned system template {{input.user}}".to_string());
+        func.overrides.system = Some("uninterned system template {{input.user}}".to_string());
 
         let ctx = new_ctx();
         let err = render_function_system(&wf, &func, &ctx)

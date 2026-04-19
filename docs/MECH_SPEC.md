@@ -1109,6 +1109,7 @@ The loader performs all of the following checks when a workflow file is loaded. 
 | Check | Severity | Description |
 |---|---|---|
 | YAML parse | Error | Workflow file must be valid YAML. |
+| Unknown keys at `workflow:` and `functions.<name>:` scope | Error | Loader rejects any YAML key under `workflow:` or `functions.<name>:` that is not in the schema. Reported as `MechError::YamlParse`. |
 | Required top-level fields | Error | `functions` map must exist and be non-empty. |
 | Block type discrimination | Error | Each block must have exactly one of `prompt` or `call`. |
 | Field validity | Error | No forbidden fields per block type (§5.3). |
@@ -1684,7 +1685,7 @@ Each deliverable should end in a commit with tests passing and review clean. Lat
 
 ### Deliverable 2 — YAML schema types (parse-only, no validation)
 
-**Scope:** Define the serde structs that mirror the §12 YAML grammar: `MechDocument`, `FunctionDef`, `BlockDef` (enum: `Prompt`, `Call`), `AgentConfig`, `TransitionDef`, `SchemaRef`, `ContextVarDef`, etc. Use `#[serde(deny_unknown_fields)]`. Parse only — no semantic validation. Support the three `call.input` forms (string, uniform list, per-call object list) via an untagged enum.
+**Scope:** Define the serde structs that mirror the §12 YAML grammar: `MechDocument`, `FunctionDef`, `BlockDef` (enum: `Prompt`, `Call`), `AgentConfig`, `TransitionDef`, `SchemaRef`, `ContextVarDef`, etc. Use `#[serde(deny_unknown_fields)]`. Parse only — no semantic validation. Support the three `call.input` forms (string, uniform list, per-call object list) via an untagged enum. Unknown keys at `workflow:` and `functions.<name>:` scope are rejected (see §10.1).
 
 **Tests first:**
 - Parse the §12 worked example end-to-end; assert top-level structure matches.

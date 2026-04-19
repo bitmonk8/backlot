@@ -37,10 +37,10 @@ pub use loader::{
 };
 pub use schema::{
     AgentConfig, AgentConfigRef, BlockDef, CallBlock, CallEntry, CallSpec, CompactionConfig,
-    ContextVarDef, FunctionDef, MechDocument, ParallelStrategy, PromptBlock, ResolvedSchema,
-    SchemaRef, SchemaRegistry, TransitionDef, WorkflowSection, infer_function_outputs,
-    parse_named_ref, parse_workflow, resolve_schema_ref_in_map, resolve_schema_value,
-    try_parse_named_ref, value_matches_json_type,
+    ContextVarDef, ExecutionConfig, FunctionDef, MechDocument, ParallelStrategy, PromptBlock,
+    ResolvedSchema, SchemaRef, SchemaRegistry, TransitionDef, WorkflowSection,
+    infer_function_outputs, parse_named_ref, parse_workflow, resolve_schema_ref_in_map,
+    resolve_schema_value, try_parse_named_ref, value_matches_json_type,
 };
 pub use validate::{
     AnyModel, KnownModels, Location, ModelChecker, ValidationIssue, ValidationReport,

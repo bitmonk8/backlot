@@ -695,12 +695,12 @@ functions:
         let wf = load(NAMESPACE_INPUT);
         let func = wf.document().functions.get("caller").unwrap();
         let block = get_call_block(&wf, "caller", "do_call");
-        let fn_decls = func.context.clone();
+        let fn_decls = func.overrides.context.clone();
         let ws = WorkflowState::from_declarations(
             &wf.document()
                 .workflow
                 .as_ref()
-                .map(|w| w.context.clone())
+                .map(|w| w.defaults.context.clone())
                 .unwrap_or_default(),
         )
         .unwrap();
