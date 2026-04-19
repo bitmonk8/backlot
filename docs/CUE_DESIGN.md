@@ -99,6 +99,7 @@ fn create_subtask(
 
 - `mark_fix`: true for fix-loop tasks, false for normal decomposition
 - `inherit_recovery_rounds`: if `Some(n)`, child inherits parent's recovery counter (prevents exponential cost growth)
+- Implementations panic if `parent_id` is not present in the store (store-invariant violation)
 
 **Tree queries:**
 

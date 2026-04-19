@@ -2688,3 +2688,22 @@ async fn branch_verify_fix_task_fails_no_fix_loop() {
         "fix-task branch should not enter its own fix loop"
     );
 }
+
+/// `EpicStore::create_subtask` must panic when the `parent_id` is absent, rather than silently
+/// rooting the child at depth 1. See issue #134.
+#[test]
+#[should_panic(expected = "create_subtask: parent")]
+fn create_subtask_panics_on_missing_parent() {
+    let state = EpicState::new();
+    let log = EventLog::new();
+    let mock_arc = Arc::new(MockBuilder::new().build());
+    let mut store =
+        EpicStore::from_state(state, mock_arc, log, None, LimitsConfig::default(), None);
+    let spec = SubtaskSpec {
+        goal: "child".into(),
+        verification_criteria: vec!["passes".into()],
+        magnitude_estimate: MagnitudeEstimate::Small,
+    };
+    // TaskId(999) was never inserted; this must panic, not silently produce a depth-1 child.
+    let _ = cue::TaskStore::create_subtask(&mut store, TaskId(999), &spec, false, None);
+}

@@ -119,6 +119,11 @@ pub trait TaskStore: Send {
     fn bind_runtime(&mut self);
 
     /// Create a subtask under the given parent, returning the new task ID.
+    ///
+    /// # Panics
+    ///
+    /// Implementations are expected to panic if `parent_id` is not present in the store;
+    /// this is treated as a programmer-error / store-invariant violation, not a recoverable condition.
     fn create_subtask(
         &mut self,
         parent_id: TaskId,

@@ -227,7 +227,15 @@ impl<A: AgentService + 'static> cue::TaskStore for EpicStore<A> {
         mark_fix: bool,
         inherit_recovery_rounds: Option<u32>,
     ) -> TaskId {
-        let parent_depth = self.tasks.get(&parent_id).map_or(0, |t| t.task.depth);
+        // Missing parent indicates a store-invariant violation: callers within this crate
+        // always pass a parent_id that exists. Fail loudly rather than silently rooting the
+        // child at depth 1 (see issue #134).
+        let parent_depth = self
+            .tasks
+            .get(&parent_id)
+            .unwrap_or_else(|| panic!("create_subtask: parent {parent_id:?} not found in store"))
+            .task
+            .depth;
         let child_id = self.next_task_id();
         let mut child = Task::new(
             child_id,
