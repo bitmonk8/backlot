@@ -45,7 +45,7 @@ Mech does not live inside either crate. It is its own compilation unit that brid
 - **Control edge** — A `transition` from one block to another, optionally guarded by a CEL expression (`when`). Evaluated in declaration order; first match wins. Supports cycles (self-loops, backward edges).
 - **Data edge** — A `depends_on` declaration. The block cannot execute until all named dependencies have produced output. Acyclic by definition.
 - **Activation rule** — A block with inbound control edges is *activated* when a transition targets it. A block with only data edges is activated implicitly when its dependencies are met. A block with both requires the transition to fire AND all dependencies to be satisfied. (Control gates activation; data gates readiness.)
-- **Schema** — JSON Schema (inline YAML or `$ref` path) declaring the typed output of a block. Used for load-time validation of downstream template references.
+- **Schema** — JSON Schema (inline YAML or `$ref:#name` reference to a workflow-level named schema) declaring the typed output of a block. Used for load-time validation of downstream template references.
 - **Template expression** — `{{...}}` references interpolated into prompt text. The expression inside the braces is a CEL expression evaluated against the available namespaces (`input`, `output`, `context`, `workflow`, `blocks`). Simple paths like `{{input.text}}` and computed values like `{{context.score >= 0.8 ? "high" : "low"}}` both work. Scoping rules defined in §7.
 - **Guard** — A CEL expression on a transition. Evaluated against the current block's output, function context, and workflow context.
 - **Context** — Mutable typed variables declared with initial values. Two levels: **workflow context** (`workflow.*`, shared across all function invocations) and **function context** (`context.*`, scoped to a single invocation). Variables are pre-declared — blocks can only write to declared variables, and all variables always exist.
@@ -345,7 +345,7 @@ Invokes an LLM with a rendered prompt template. Validates the response against a
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `prompt` | string | Yes | Template string with `{{...}}` CEL expressions (§7). Becomes the user message in the conversation. |
-| `schema` | object \| string | Yes | JSON Schema for the LLM's structured output. Inline YAML object or `$ref` string path (§8). |
+| `schema` | object \| string | Yes | JSON Schema for the LLM's structured output. Inline YAML object or `$ref:#name` (workflow-level named schema). See §8.1. |
 | `agent` | object \| string | No | Agent configuration for this block. Inline object or `$ref:#name`. If omitted, inherits from function or workflow default. External file refs (`$ref:path`) are reserved for future use and rejected at validation. See §5.5. |
 | `transitions` | list | No | Outbound control edges. Each entry has `goto` (required) and `when` (optional CEL guard). See §6. |
 | `depends_on` | list of strings | No | Block names whose outputs must be available before this block executes. Acyclic (enforced at load time). |
@@ -858,7 +858,7 @@ prompt: |
 
 Every prompt block declares a `schema` — a JSON Schema that defines the expected structure of the LLM's output. Schemas serve two purposes: they constrain the LLM's response (via flick's structured output) and they enable load-time type checking of downstream template references.
 
-### 8.1 Inline vs. External Schemas
+### 8.1 Inline vs. Named Schemas
 
 The `schema` field accepts two forms:
 
@@ -873,15 +873,15 @@ schema:
     confidence: { type: number, minimum: 0, maximum: 1 }
 ```
 
-**External `$ref`** (for large or shared schemas):
+**Named reference** to a workflow-level schema (for schemas reused across blocks — see §8.5):
 
 ```yaml
-schema: "$ref:schemas/resolution.json"
+schema: "$ref:#resolution"
 ```
 
-The `$ref:` prefix signals an external file path. The path is relative to the workflow file's directory. The referenced file must contain a valid JSON Schema document (JSON or YAML format). The schema is loaded and inlined at load time — no runtime file access.
+External file references (e.g. `schema: "$ref:schemas/resolution.json"`) are **not currently supported**; only inline schemas and in-document `$ref:#name` references resolve. The `$ref:` prefix without a leading `#` is reserved for future file-ref loading and is rejected at validation time.
 
-**Detection:** The deserializer distinguishes the two forms by type: `string` starting with `$ref:` → external file path; `object` → inline schema.
+**Detection:** The deserializer distinguishes forms by type: `string` → `$ref:` reference; `object` → inline schema. Reference strings are resolved at validation time: `$ref:#name` resolves against the workflow-level `schemas` map; any other `$ref:` prefix is reserved for future use and is rejected.
 
 ### 8.2 Schema Requirements
 
@@ -897,11 +897,11 @@ At workflow load time, the loader performs these schema checks:
 
 | Check | Description |
 |---|---|
-| Schema parse | Inline YAML parses to valid JSON Schema; external `$ref` file exists and parses. |
+| Schema parse | Inline YAML parses to valid JSON Schema. |
 | Root type | Schema root `type` is `object`. |
 | Required fields | `required` is non-empty. |
 | Template type checking | For each `{{blocks.<name>.output.field}}` reference in downstream blocks, verify that the referenced block's schema declares the field and its type is compatible with the usage context. |
-| Circular `$ref` | External schemas that reference each other are a load-time error. |
+| Circular `$ref:#name` | Workflow-level schemas in the `schemas` map that reference each other via `$ref:#name` chains are a load-time error. |
 
 **Template type checking** is best-effort static analysis. The loader traces field access paths in CEL expressions (e.g., `blocks.foo.output.field.subfield`) through the schema's `properties` tree and verifies the field exists. Type mismatches (e.g., referencing `output.count` as a string when the schema declares it as `integer`) produce warnings, not errors — the LLM may return compatible values that don't match the JSON Schema type precisely. Computed CEL expressions (ternary, function calls) are not type-checked beyond verifying that referenced variables exist.
 
@@ -918,7 +918,7 @@ After each LLM call, the executor validates the response against the block's sch
 
 ### 8.5 Schema Composition
 
-Schemas can use JSON Schema composition keywords (`allOf`, `anyOf`, `oneOf`) for complex types. `$ref` within an inline schema references a definition within the same schema document (JSON Pointer), not an external file — external files use the `$ref:` prefix at the `schema` field level.
+Schemas can use JSON Schema composition keywords (`allOf`, `anyOf`, `oneOf`) for complex types. The `$ref:#name` form at the `schema` field level resolves against the workflow-level `schemas` map (§8.1). A nested object whose **only** key is `$ref` and whose value is `#name` (no `/` in the fragment) is also resolved against the workflow-level `schemas` map; standard JSON Pointer fragments (containing `/`, e.g. `#/definitions/Foo`), and `$ref` objects with sibling keys, are passed through to the JSON Schema engine unchanged.
 
 ```yaml
 schema:
@@ -957,7 +957,7 @@ functions:
         schema: "$ref:#resolution"
 ```
 
-`$ref:#name` references the workflow-level `schemas` map. `$ref:path/file.json` references an external file. Plain `$ref` within a JSON Schema object uses standard JSON Schema `$ref` semantics (JSON Pointer).
+`$ref:#name` references the workflow-level `schemas` map. Inside a JSON Schema body, an object whose **only** key is `$ref` with value `#name` (no slash) likewise resolves against the workflow-level `schemas` map; standard JSON Pointer fragments (`#/...`), and `$ref` objects with sibling keys, are handled by the JSON Schema engine.
 
 ## 9. Context & State
 
@@ -1135,7 +1135,8 @@ The loader performs all of the following checks when a workflow file is loaded. 
 | Check | Severity | Description |
 |---|---|---|
 | Schema validity | Error | All schemas parse as valid JSON Schema. Root type is `object`. `required` is non-empty. |
-| External schema resolution | Error | All `$ref:` paths resolve to existing files. Workflow-level `$ref:#name` references exist in `schemas` map. |
+| Schema `$ref:#name` resolution | Error | `schema: "$ref:#name"` and `output: "$ref:#name"` targets must exist in the workflow-level `schemas` map. |
+| Schema external file `$ref` | Error | `schema: "$ref:path"` and `output: "$ref:path"` (no leading `#`) are reserved for future use and are rejected at validation time (see §8.1). |
 | Template reference resolution | Error | `{{blocks.<name>.output.field}}` — the named block exists, the field exists in its schema. |
 | Template reference reachability | Error | The referenced block is guaranteed to have executed before the referencing block (domination or `depends_on`). |
 | CEL compilation | Error | All `when` guards and `set_context` expressions compile as valid CEL. |
@@ -1374,7 +1375,7 @@ functions:
       required: [...]
       properties: { ... }
 
-    output: <object | "$ref:path" | "$ref:#name" | "infer">  # optional — output schema (default: infer)
+    output: <object | "$ref:#name" | "infer">  # optional — output schema (default: infer)
 
     system: <string>                            # optional — override workflow system prompt
     agent: <object | "$ref:#name">            # optional — override workflow agent config (§5.5)
@@ -1396,7 +1397,7 @@ functions:
       # ── Prompt Block ──
       <block_name>:                             # identifier: [a-z][a-z0-9_]*, not input/output/context
         prompt: <string>                        # required — template string ({{CEL}} expressions)
-        schema: <object | "$ref:path" | "$ref:#name">  # required — output JSON Schema
+        schema: <object | "$ref:#name">              # required — output JSON Schema
         agent: <object | "$ref:#name">             # optional — override function/workflow agent config (§5.5)
 
         depends_on: [<block_name>, ...]         # optional — data edges (must be acyclic)
@@ -1467,14 +1468,14 @@ functions:
 | `workflow.schemas` | Map of name → JSON Schema object | Top-level |
 | `workflow.compaction` | Compaction config object | Top-level |
 | `function.input` | JSON Schema (root type: object) | Function |
-| `function.output` | JSON Schema object, `$ref` string, or `"infer"` | Function (optional, default: `infer`) |
+| `function.output` | JSON Schema object, `"$ref:#name"` (workflow-level named schema), or `"infer"` | Function (optional, default: `infer`) |
 | `function.system` | Template string | Function |
 | `function.agent` | Agent config object or `$ref` string | Function (optional) |
 | `function.terminals` | List of block name strings | Function |
 | `function.context` | Map of variable name → `{ type, initial }` | Function (optional) |
 | `function.compaction` | Compaction config object | Function |
 | `block.prompt` | Template string | Prompt block |
-| `block.schema` | JSON Schema object or `$ref` string | Prompt block |
+| `block.schema` | JSON Schema object or `"$ref:#name"` (workflow-level named schema) | Prompt block |
 | `block.agent` | Agent config object or `$ref` string | Prompt block (optional) |
 | `agent.model` | Model name string | Agent config |
 | `agent.grant` | List of grant strings (`tools`, `write`, `network`) | Agent config (optional) |
@@ -2177,13 +2178,13 @@ blocks:
 
 #### Key Design Decisions
 
-**Inline vs. external schemas** — Inlining the JSON Schema directly as YAML keeps the workflow self-contained. For large, reused schemas, support a `$ref` string:
+**Inline vs. named schemas** — Inlining the JSON Schema directly as YAML keeps the workflow self-contained. For schemas reused across blocks, define them in the workflow-level `schemas` map and reference by name (see §8.5):
 
 ```yaml
-schema: "./schemas/resolution.json"
+schema: "$ref:#resolution"
 ```
 
-The deserializer detects `string` vs. `object` for the `schema` field and loads accordingly.
+The deserializer detects `string` (treated as a `$ref:#name` reference) vs. `object` (treated as an inline schema) for the `schema` field. See §8.1 for full rules.
 
 **Fallback transition** — A transition entry with no `when` key is the unconditional fallback. Last-wins-by-position is predictable and matches how people read YAML lists top-to-bottom. Cleaner than a magic `when: "true"` CEL literal.
 

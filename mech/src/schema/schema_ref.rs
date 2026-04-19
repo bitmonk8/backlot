@@ -6,13 +6,15 @@ use serde::{Deserialize, Serialize};
 
 use super::JsonValue;
 
-/// A JSON Schema reference: inline, external/named ref, or the literal
+/// A JSON Schema reference: inline schema, named ref, or the literal
 /// `"infer"` (function output only).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchemaRef {
     /// The string `"infer"` — requests automatic inference (function output).
     Infer,
-    /// `$ref:#name` or `$ref:path`.
+    /// A `$ref:` string. Only `$ref:#name` (workflow-level named schema) is
+    /// currently supported; `$ref:path` (external file) is reserved for
+    /// future use and rejected at validation time. See MECH_SPEC §8.1.
     Ref(String),
     /// Inline JSON Schema object.
     Inline(JsonValue),

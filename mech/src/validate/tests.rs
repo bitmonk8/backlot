@@ -1035,6 +1035,46 @@ functions:
     assert_err_contains(&r, "reserved for future use");
 }
 
+// ---- Schema ref checks ----
+
+#[test]
+fn schema_ref_external_file_rejected() {
+    // External file schema refs (e.g. `$ref:schemas/resolution.json`) are
+    // reserved for future use and must produce a validation error. See
+    // MECH_SPEC §8.1.
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: "$ref:schemas/resolution.json"
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "external file schema $ref");
+    assert_err_contains(&r, "reserved for future use");
+}
+
+#[test]
+fn schema_ref_external_file_rejected_for_function_output() {
+    // Function-level `output:` schema refs route through the same validator;
+    // external file refs are reserved for future use. See MECH_SPEC §8.1.
+    let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    output: "$ref:schemas/out.yaml"
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "external file schema $ref");
+    assert_err_contains(&r, "reserved for future use");
+}
+
 // ---- Multiple errors collected in one pass ----
 
 #[test]
