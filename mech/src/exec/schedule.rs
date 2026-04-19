@@ -2,9 +2,10 @@
 //! scoping for prompt blocks.
 //!
 //! Implements imperative-mode function execution: starting at the entry block,
-//! execute block → apply `set_context` / `set_workflow` side-effects →
-//! evaluate transitions → advance to the next block, until a terminal block is
-//! reached.
+//! execute block → stage `set_context` / `set_workflow` side-effects →
+//! commit them → evaluate transitions (rolling back the commits if
+//! transition evaluation errors) → advance to the next block, until a
+//! terminal block is reached.
 //!
 //! Per `docs/MECH_SPEC.md`:
 //! - §6.2: transitions evaluated top-to-bottom, first match wins
@@ -13,6 +14,9 @@
 //! - §6.5: no matching transition → de facto terminal
 //! - §9.3: `set_context` / `set_workflow` evaluated atomically, applied
 //!   before transitions
+//! - §9.3 rule 7: a guard error after commit rolls back this block's
+//!   `set_context` / `set_workflow` writes (per-touched-key) before the
+//!   error propagates
 //! - §10.2: guard evaluation error → block failure (MechError::GuardEvaluationError)
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -123,20 +127,16 @@ pub(crate) struct StagedSideEffects {
     workflow_writes: Vec<(String, JsonValue)>,
 }
 
-/// Evaluate `set_context` and `set_workflow` expressions WITHOUT applying any
-/// writes. Per §9.3 expressions within each field are evaluated atomically
-/// against the pre-write state. The returned [`StagedSideEffects`] can be
-/// committed via [`commit_side_effects`].
+/// Evaluate `set_context` and `set_workflow` expressions WITHOUT applying
+/// any writes. Per §9.3 expressions within each field are evaluated
+/// atomically against the pre-write state. Returns a [`StagedSideEffects`]
+/// the caller may choose to commit (via [`commit_side_effects`]) or
+/// discard.
 ///
-/// Stage and commit are split as forward-prep: a future deferred-commit
-/// design could evaluate transition guards before mutating state. The
-/// current imperative loop does NOT defer — it stages, commits, then
-/// evaluates transitions in that order (matches spec §9.3 / §9.4 which
-/// require guards to observe post-write state, e.g. the `attempts` counter
-/// pattern). A guard error after the commit therefore leaves the staged
-/// writes already applied to `ctx`. Cue retry constructs a fresh
-/// `WorkflowState` per attempt, so retries still start from a clean slate
-/// even though there is no rollback inside a single attempt.
+/// This function only stages; the decision to commit, snapshot for
+/// rollback, evaluate transitions, or roll back belongs to the caller.
+/// See [`commit_block_side_effects_then_evaluate`] for the canonical
+/// orchestration used by [`run_function_imperative`].
 pub(crate) fn stage_side_effects(
     workflow: &Workflow,
     set_context: &BTreeMap<String, String>,
@@ -185,6 +185,15 @@ pub(crate) fn stage_side_effects(
 
 /// Commit previously-staged side effects. Per §9.3 `set_context` writes are
 /// applied first, then `set_workflow` writes.
+///
+/// **Caution:** on partial failure (e.g. a type-check failure on the
+/// second of two writes after the first lands) the store is left
+/// half-committed; this function does not snapshot or roll back. Callers
+/// that need rollback semantics MUST snapshot via
+/// [`snapshot_prior_values`] before invocation and call
+/// [`restore_from_snapshot`] on `Err`. Today the only caller that does
+/// this is [`commit_block_side_effects_then_evaluate`]; the dataflow
+/// caller [`apply_side_effects`] deliberately does not — see its docs.
 pub(crate) fn commit_side_effects(
     staged: StagedSideEffects,
     ctx: &mut ExecutionContext,
@@ -199,21 +208,27 @@ pub(crate) fn commit_side_effects(
 }
 
 /// Apply `set_context` and `set_workflow` side-effects after a block produces
-/// output. Stages then immediately commits — there is no deferred-commit
-/// path today (see [`stage_side_effects`] for the rationale behind keeping
-/// the split).
+/// output. Stages then immediately commits with no rollback path — only the
+/// imperative scheduler wires rollback through [`stage_side_effects`] +
+/// [`commit_side_effects`] + [`snapshot_prior_values`] /
+/// [`restore_from_snapshot`], because dataflow blocks have no transition
+/// guards and therefore cannot trigger §9.3 rule 7 (rollback on guard
+/// error).
 ///
-/// Per §9.3:
-/// 1. Expressions within each field are evaluated atomically against the
-///    pre-write state.
-/// 2. `set_context` writes are applied first, then `set_workflow` writes.
-/// 3. The imperative scheduler evaluates transitions AFTER this commit, so
-///    guards observe the post-write state. A guard error at that point
-///    leaves the writes already applied; cue retry starts from a fresh
-///    `WorkflowState`.
+/// Per §9.3, expressions within each field are evaluated atomically against
+/// the pre-write state (rule 3), and `set_context` writes are applied
+/// before `set_workflow` writes (rule 4).
 ///
-/// The dataflow scheduler also calls this directly because dataflow blocks
-/// have no transition guards.
+/// Dataflow blocks declare no transitions, so there is no post-commit guard
+/// step here and nothing to roll back.
+///
+/// **Partial-commit acceptance (dataflow path):** the dataflow path
+/// accepts partial-commit on commit failure because (a) dataflow blocks
+/// have no transitions to evaluate and the function will fail outright on
+/// commit error, and (b) §10.x dataflow failure semantics already treat
+/// the function as failed; rollback would not change the observable
+/// outcome. This is the deliberate divergence from the imperative path
+/// flagged in [`commit_side_effects`]'s caution note.
 pub fn apply_side_effects(
     workflow: &Workflow,
     _block_id: &str,
@@ -292,11 +307,231 @@ fn find_entry_block(function: &FunctionDef) -> MechResult<String> {
     }
 }
 
+/// Snapshot of pre-commit values for the keys touched by a single block's
+/// staged side effects. Captured per-key (not whole-state) so that
+/// rollback after a guard error does not clobber concurrent
+/// `set_workflow` writes from sibling parallel function invocations
+/// (spec §9.6).
+struct PreCommitSnapshot {
+    /// Pre-commit `context.*` values for the keys this block writes.
+    context_prior: BTreeMap<String, JsonValue>,
+    /// Pre-commit `workflow.*` values for the keys this block writes.
+    workflow_prior: BTreeMap<String, JsonValue>,
+}
+
+/// Capture the pre-commit values of exactly the keys appearing in
+/// `staged`. Must be called BEFORE [`commit_side_effects`].
+///
+/// Limited to the touched-key set per §9.6: a function-context snapshot
+/// could safely capture the whole map (per-invocation), but workflow state
+/// is shared with parallel sibling functions; restoring the whole snapshot
+/// would clobber their concurrent writes.
+///
+/// Returns `Err(MechError::InternalInvariant)` if any touched key has no
+/// current value: declared `context.*` keys are always initialised from
+/// their `initial`, and `set_workflow` targets are validated against
+/// `workflow.context` declarations at load time, so absence here means
+/// the underlying store is corrupt rather than a recoverable runtime
+/// condition.
+fn snapshot_prior_values(
+    staged: &StagedSideEffects,
+    ctx: &ExecutionContext,
+) -> MechResult<PreCommitSnapshot> {
+    let mut context_prior: BTreeMap<String, JsonValue> = BTreeMap::new();
+    for (name, _) in &staged.context_writes {
+        let v = ctx
+            .get_context(name)
+            .ok_or_else(|| MechError::InternalInvariant {
+                message: format!(
+                    "snapshot: declared context variable `{name}` has no current value"
+                ),
+            })?;
+        context_prior.insert(name.clone(), v.clone());
+    }
+    let mut workflow_prior: BTreeMap<String, JsonValue> = BTreeMap::new();
+    let ws = ctx.workflow_state();
+    for (name, _) in &staged.workflow_writes {
+        let v = ws.get(name).ok_or_else(|| MechError::InternalInvariant {
+            message: format!("snapshot: declared workflow variable `{name}` has no current value"),
+        })?;
+        workflow_prior.insert(name.clone(), v);
+    }
+    Ok(PreCommitSnapshot {
+        context_prior,
+        workflow_prior,
+    })
+}
+
+/// Restore the values captured by [`snapshot_prior_values`]. Used on the
+/// commit-failure and guard-error paths only — successful transitions
+/// retain the writes.
+///
+/// Best-effort: attempts every restoration regardless of intermediate
+/// failure; aggregates all errors into a single `MechError::InternalInvariant`.
+/// The function is documented to fire only on store corruption (the values
+/// being restored were already type-correct when captured), so abandoning
+/// half the work on the first failure would only worsen recovery
+/// diagnostics.
+///
+/// Restoration order matches commit order (context first, then workflow)
+/// rather than reverse order: per §9.3 rule 4 the two stores are
+/// independent at the per-key level so order does not affect correctness;
+/// matching commit order keeps the rollback path symmetric with the commit
+/// path it undoes.
+///
+/// The values being restored were already type-correct when captured (we
+/// just read them out of the same store), so `set_context` /
+/// `set_workflow` should not fail. If they do, surface as
+/// `MechError::InternalInvariant` rather than swallowing — that indicates
+/// a corrupted declaration table or a concurrent declaration mutation,
+/// not a recoverable workflow condition.
+///
+/// **Parallel-sibling caveats (future work):** once within-level
+/// parallelism lands, three sibling-interaction hazards apply. (1) For
+/// keys this block touched, a sibling commit between this block's
+/// snapshot and rollback is clobbered by the rollback (same-key
+/// last-write-wins per §9.6). (2) On commit-failure rollback,
+/// `restore_from_snapshot` writes back EVERY captured snapshot value,
+/// including for keys whose commit attempt was never reached, so sibling
+/// writes to those untouched-by-this-block keys are also clobbered. (3)
+/// The snapshot itself is non-atomic: per-key reads release the workflow
+/// mutex between keys, so a captured snapshot may already mix pre- and
+/// post-sibling-write values across different keys.
+// TODO(parallel-siblings): revisit when within-level parallelism lands;
+// see §9.6.
+fn restore_from_snapshot(
+    snapshot: PreCommitSnapshot,
+    ctx: &mut ExecutionContext,
+) -> MechResult<()> {
+    let mut failures: Vec<String> = Vec::new();
+    for (name, value) in snapshot.context_prior {
+        if let Err(e) = ctx.set_context(&name, value) {
+            failures.push(format!(
+                "failed to restore context.{name} during rollback: {e}"
+            ));
+        }
+    }
+    for (name, value) in snapshot.workflow_prior {
+        if let Err(e) = ctx.set_workflow(&name, value) {
+            failures.push(format!(
+                "failed to restore workflow.{name} during rollback: {e}"
+            ));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(MechError::InternalInvariant {
+            message: format!("rollback: {}", failures.join("; ")),
+        })
+    }
+}
+
+/// Stage → snapshot → commit (rollback on failure) → evaluate transitions
+/// (rollback on failure) → return the [`TransitionResult`].
+///
+/// This is the canonical post-block side-effect orchestration used by
+/// [`run_function_imperative`]. Per §9.3 rule 4 `set_context` is applied
+/// before `set_workflow` and transitions are evaluated after both
+/// complete (so guards observe the post-write state — e.g. the §9.4
+/// `attempts` counter pattern). Per §9.3 rule 7, if commit itself fails
+/// part-way (e.g. type-check failure on the second of two writes) or if a
+/// post-commit transition guard errors, this block's writes are rolled
+/// back to their pre-commit values via [`restore_from_snapshot`] before
+/// the original error propagates. Snapshot scope is per-touched-key so
+/// the rollback does not clobber concurrent `set_workflow` writes from
+/// parallel sibling functions for *different* keys (§9.6); see the
+/// lost-update caveat on [`restore_from_snapshot`] for the same-key case.
+///
+/// Successful transition evaluation retains the writes — the §9.4 retry
+/// counter pattern is unaffected.
+///
+/// **Rollback scope (intentional asymmetry):** rollback covers
+/// `set_context` and `set_workflow` writes only. Block output recording
+/// (in `ctx.block_outputs`) and conversation message append (for prompt
+/// blocks) happen during block execution, BEFORE this helper is called,
+/// and are intentionally NOT rolled back. The function returns `Err`, so
+/// the caller should treat the partial state as opaque; subsequent block
+/// visits (under cue retry, dominator-driven output clearing, etc.)
+/// re-establish the right state. A future reader extending the rollback
+/// set should note that the conversation in particular is not unwindable
+/// — there is no "pop the last N messages" hook on `Conversation`.
+fn commit_block_side_effects_then_evaluate(
+    workflow: &Workflow,
+    block_id: &str,
+    transitions: &[TransitionDef],
+    set_context: &BTreeMap<String, String>,
+    set_workflow: &BTreeMap<String, String>,
+    output: &JsonValue,
+    ctx: &mut ExecutionContext,
+) -> MechResult<TransitionResult> {
+    let staged = stage_side_effects(workflow, set_context, set_workflow, output, ctx)?;
+    let snapshot = snapshot_prior_values(&staged, ctx)?;
+
+    // Commit the staged writes. If commit fails part-way (e.g. a type-check
+    // failure on the second of two writes), roll back any partial writes
+    // before propagating the commit error so direct callers do not observe
+    // partial side effects (§9.3 rule 7).
+    if let Err(commit_err) = commit_side_effects(staged, ctx) {
+        if let Err(restore_err) = restore_from_snapshot(snapshot, ctx) {
+            // Preserve the original commit error as the user-facing root
+            // cause.
+            // TODO(logging-facade): surface the rollback failure via tracing
+            // once mech adopts a logging facade; eprintln! is the interim
+            // mechanism.
+            eprintln!(
+                "warning: rollback after commit failure in block `{block_id}` failed: \
+                 {restore_err}; original commit error: {commit_err}"
+            );
+        }
+        return Err(commit_err);
+    }
+
+    // Evaluate transitions; on ANY error from evaluation (not just
+    // GuardEvaluationError — InternalInvariant from a missing pre-compiled
+    // guard expression also lands here) roll back the writes we just
+    // committed for this block before propagating the original error. The
+    // user-facing root cause is the transition error, not any failure of
+    // the rollback itself.
+    match evaluate_transitions(workflow, block_id, transitions, output, ctx) {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            if let Err(restore_err) = restore_from_snapshot(snapshot, ctx) {
+                // Preserve the original transition error as the user-facing
+                // root cause.
+                // TODO(logging-facade): surface the rollback failure via
+                // tracing once mech adopts a logging facade; eprintln! is the
+                // interim mechanism.
+                eprintln!(
+                    "warning: rollback after transition error in block `{block_id}` failed: \
+                     {restore_err}; original transition error: {e}"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
 /// Run a single function to completion in imperative mode.
 ///
 /// Starts at the entry block, executes block → side effects → transitions →
 /// next block until a terminal block is reached. Returns the terminal block's
 /// output.
+///
+/// Per §9.3 rule 4 `set_context` writes are applied first, then
+/// `set_workflow` writes; transitions are evaluated after both complete.
+/// Per §9.3 rule 7, if the post-commit transition guard errors (or commit
+/// itself fails part-way) the block's writes are rolled back to their
+/// pre-commit values before the error propagates, so direct callers
+/// observe a clean pre-block state on `Err(GuardEvaluationError)`. The
+/// rollback is per-touched-key so it preserves concurrent
+/// `set_workflow` writes to *different* keys from parallel sibling
+/// functions (§9.6); see the lost-update caveat on
+/// [`restore_from_snapshot`] for the same-key case. Successful transitions
+/// retain the writes (the §9.4 retry counter pattern is unaffected). Cue
+/// retry isolation via a fresh `WorkflowState` per attempt is
+/// belt-and-braces; direct callers of `run_function_imperative` also
+/// observe clean state on guard error.
 ///
 /// Per §4.6, a function's conversation is created fresh at invocation and
 /// accumulates across prompt blocks along control-flow paths. Call blocks
@@ -359,21 +594,20 @@ pub async fn run_function_imperative(
             }
         };
 
-        // Per spec §9.3 rule 4: `set_context` writes are applied first,
-        // then `set_workflow` writes; transitions are evaluated after both
-        // complete (so guards observe the post-write state, e.g. the
-        // `attempts` counter pattern in §9.4). We therefore stage, commit,
-        // then evaluate transitions in that order. A guard error after
-        // commit means the side-effect writes survive into a cue retry of
-        // the same `WorkflowRuntime`, but the cue integration creates a
-        // fresh `WorkflowState` per `WorkflowRuntime::run`, so retry
-        // semantics still observe a clean slate.
+        // Per §9.3 rule 7 the side-effect / transition dance must roll back
+        // this block's writes if commit or transition evaluation errors,
+        // before the error propagates. The orchestration is encapsulated in
+        // `commit_block_side_effects_then_evaluate`.
         let (transitions, set_context, set_workflow) = block_edges(block);
-        let staged = stage_side_effects(workflow, set_context, set_workflow, &output, ctx)?;
-        commit_side_effects(staged, ctx)?;
-
-        // Evaluate transitions.
-        let result = evaluate_transitions(workflow, &current_block_id, transitions, &output, ctx)?;
+        let result = commit_block_side_effects_then_evaluate(
+            workflow,
+            &current_block_id,
+            transitions,
+            set_context,
+            set_workflow,
+            &output,
+            ctx,
+        )?;
 
         match result {
             TransitionResult::Terminal => return Ok(output),
@@ -1036,21 +1270,25 @@ functions:
         }
     }
 
-    // Regression pinning the current `run_function_imperative` ordering:
-    // `commit_side_effects` runs BEFORE `evaluate_transitions`, so a
-    // `set_context` write performed by a block whose subsequent guard
-    // errors is already applied to `ctx` by the time the function returns
-    // `Err(GuardEvaluationError)`. Direct callers of `run_function_imperative`
-    // (it is `pub` and re-exported from `mech::lib`) therefore observe
-    // partial-write side effects on guard failure. The cue runtime masks
-    // this by constructing a fresh `WorkflowState` per attempt
-    // (`MechTask::execute_leaf`), but library callers do not get that
-    // isolation for free. When the bug is fixed (e.g. by deferring commit
-    // until after guard evaluation, or rolling back on guard error) this
-    // test will need to be updated to assert the writes were rolled back.
-    // Tracked in issue #463.
+    // `run_function_imperative` rolls back `set_context` writes made by a
+    // block whose subsequent transition guard errors, so direct callers
+    // (the function is `pub` and re-exported from `mech::lib`) observe the
+    // pre-block context state on `Err(GuardEvaluationError)` rather than
+    // partial-write side effects. The rollback is per-touched-key (not a
+    // whole-context snapshot) so it cannot clobber concurrent
+    // `set_workflow` writes from parallel sibling functions (§9.6).
+    // Successful transitions still retain the writes — the §9.4 retry
+    // counter pattern is unaffected.
     #[test]
-    fn committed_side_effects_survive_guard_error_under_run_function_imperative() {
+    fn set_context_writes_rolled_back_on_guard_evaluation_error_in_run_function_imperative() {
+        // the FIRST transition exists solely to falsify a no-op
+        // commit. If `set_context` did not actually run, `context.attempts`
+        // is still `0` and the function would transition to the terminal
+        // `should_not_take_this` block (returning `Ok(...)` and breaking
+        // `expect_err`). The expected path is: commit applies (attempts
+        // becomes 1), the first guard is false, the second guard errors at
+        // runtime, the scheduler rolls back, and we observe `attempts == 0`
+        // again. This pins BOTH "commit was applied" AND "rollback ran".
         let yaml = r#"
 functions:
   f:
@@ -1067,9 +1305,19 @@ functions:
         set_context:
           attempts: "context.attempts + 1"
         transitions:
+          # Witness that commit happened: if it did not, `attempts == 0`
+          # still holds and we'd take this branch instead of erroring.
+          - when: 'context.attempts == 0'
+            goto: should_not_take_this
           # Guard errors at runtime: strings have no attribute `.deep`.
           - when: 'output.status.deep.field == "x"'
             goto: unreachable
+      should_not_take_this:
+        prompt: "should not happen"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
       unreachable:
         prompt: "unreachable"
         schema:
@@ -1079,10 +1327,120 @@ functions:
 "#;
         let wf = load(yaml);
         let func = wf.document().functions.get("f").unwrap();
-        let agent = SequentialAgent::new(vec![json!({ "status": "ok" })]);
+        // Two responses: one for `check`, one for the (only-reachable-if-
+        // commit-was-noop) `should_not_take_this` block. The second is
+        // never consumed on the expected path; it exists so the
+        // falsification path returns `Ok(...)` cleanly rather than failing
+        // on an exhausted-agent error (which would mask the real
+        // "commit-was-noop" diagnosis).
+        let agent = SequentialAgent::new(vec![
+            json!({ "status": "ok" }),
+            json!({ "r": "unexpected" }),
+        ]);
         let mut fn_decls = BTreeMap::new();
         fn_decls.insert("attempts".into(), decl("integer", json!(0)));
         let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+        let mut conv = Conversation::new(None);
+
+        let err = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut conv,
+            None,
+        ))
+        .expect_err("guard error must propagate");
+        assert!(
+            matches!(err, MechError::GuardEvaluationError { .. }),
+            "expected GuardEvaluationError to propagate unchanged, got {err:?}"
+        );
+
+        // The `set_context` write `attempts: context.attempts + 1` committed
+        // (so the post-write state was visible to the guard, per §9.4) but
+        // because the guard then errored the scheduler restored the prior
+        // value (the initial `0`). Direct callers therefore observe a clean
+        // pre-block context.
+        assert_eq!(
+            ctx.get_context("attempts"),
+            Some(&json!(0)),
+            "set_context write must be rolled back when the same block's guard errors"
+        );
+
+        // conversation messages from the failing block are intentionally
+        // NOT rolled back (see the rollback-asymmetry note on
+        // `commit_block_side_effects_then_evaluate`). The block executed its
+        // prompt, schema-validated the response, and committed both messages
+        // (user prompt + assistant reply) BEFORE the side-effect/transition
+        // dance ran. So we expect exactly 2 messages.
+        assert_eq!(
+            conv.len(),
+            2,
+            "conversation messages from the failing block must be retained \
+             (per the rollback-asymmetry doc on commit_block_side_effects_then_evaluate)"
+        );
+    }
+
+    // Sibling regression for `set_workflow`: the rollback path must restore
+    // workflow-state writes too, otherwise a future change that wires
+    // rollback for context only (or vice versa) would silently regress one
+    // half. Read back through the `WorkflowState` handle directly so the
+    // assertion does not depend on `ExecutionContext` plumbing.
+    #[test]
+    fn set_workflow_writes_rolled_back_on_guard_evaluation_error_in_run_function_imperative() {
+        // see the comment on
+        // `set_context_writes_rolled_back_on_guard_evaluation_error_in_run_function_imperative`
+        // for the rationale behind the first transition. The mechanism here
+        // reads `workflow.total` instead of `context.attempts`.
+        let yaml = r#"
+workflow:
+  context:
+    total: { type: integer, initial: 0 }
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      check:
+        prompt: "check"
+        schema:
+          type: object
+          required: [status]
+          properties: { status: { type: string } }
+        set_workflow:
+          total: "workflow.total + 1"
+        transitions:
+          # Witness that commit happened: if it did not, `workflow.total ==
+          # 0` still holds and we'd take this branch instead of erroring.
+          - when: 'workflow.total == 0'
+            goto: should_not_take_this
+          # Guard errors at runtime: strings have no attribute `.deep`.
+          - when: 'output.status.deep.field == "x"'
+            goto: unreachable
+      should_not_take_this:
+        prompt: "should not happen"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
+      unreachable:
+        prompt: "unreachable"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![
+            json!({ "status": "ok" }),
+            json!({ "r": "unexpected" }),
+        ]);
+        let mut wf_decls = BTreeMap::new();
+        wf_decls.insert("total".into(), decl("integer", json!(0)));
+        let ws = WorkflowState::from_declarations(&wf_decls).unwrap();
+        let mut ctx = new_ctx_with_workflow(json!({}), &BTreeMap::new(), ws.clone());
 
         let err = run_blocking(run_function_imperative(
             &wf,
@@ -1097,17 +1455,337 @@ functions:
         .expect_err("guard error must propagate");
         assert!(
             matches!(err, MechError::GuardEvaluationError { .. }),
+            "expected GuardEvaluationError to propagate unchanged, got {err:?}"
+        );
+
+        // The `set_workflow` write `total: workflow.total + 1` committed
+        // before the guard ran, then the guard errored. The scheduler must
+        // have restored the prior workflow value via the `WorkflowState`
+        // handle, so a sibling reader observes the initial `0` rather than
+        // the partial increment.
+        assert_eq!(
+            ws.get("total"),
+            Some(json!(0)),
+            "set_workflow write must be rolled back when the same block's guard errors"
+        );
+    }
+
+    // Both `set_context` AND `set_workflow` writes by the same block
+    // must be rolled back together when that block's transition guard
+    // errors. Pins that `restore_from_snapshot` runs both loops to
+    // completion (regression guard for someone hoisting one out).
+    #[test]
+    fn both_context_and_workflow_writes_rolled_back_on_guard_evaluation_error_in_run_function_imperative()
+     {
+        // see the comment on
+        // `set_context_writes_rolled_back_on_guard_evaluation_error_in_run_function_imperative`
+        // for the rationale behind the first transition. The combined
+        // disjunction here pins that BOTH writes committed before rollback
+        // (a no-op on either alone would still satisfy `attempts == 0` or
+        // `workflow.total == 0` and route to `should_not_take_this`).
+        let yaml = r#"
+workflow:
+  context:
+    total: { type: integer, initial: 0 }
+functions:
+  f:
+    input: { type: object }
+    context:
+      attempts: { type: integer, initial: 0 }
+    blocks:
+      check:
+        prompt: "check"
+        schema:
+          type: object
+          required: [status]
+          properties: { status: { type: string } }
+        set_context:
+          attempts: "context.attempts + 1"
+        set_workflow:
+          total: "workflow.total + 1"
+        transitions:
+          # Witness that BOTH commits happened: if either was a no-op the
+          # corresponding sentinel still equals `0` and we'd take this
+          # branch.
+          - when: 'context.attempts == 0 || workflow.total == 0'
+            goto: should_not_take_this
+          # Guard errors at runtime: strings have no attribute `.deep`.
+          - when: 'output.status.deep.field == "x"'
+            goto: unreachable
+      should_not_take_this:
+        prompt: "should not happen"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
+      unreachable:
+        prompt: "unreachable"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![
+            json!({ "status": "ok" }),
+            json!({ "r": "unexpected" }),
+        ]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("attempts".into(), decl("integer", json!(0)));
+        let mut wf_decls = BTreeMap::new();
+        wf_decls.insert("total".into(), decl("integer", json!(0)));
+        let ws = WorkflowState::from_declarations(&wf_decls).unwrap();
+        let mut ctx = new_ctx_with_workflow(json!({}), &fn_decls, ws.clone());
+
+        let err = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut Conversation::new(None),
+            None,
+        ))
+        .expect_err("guard error must propagate");
+        assert!(
+            matches!(err, MechError::GuardEvaluationError { .. }),
+            "expected GuardEvaluationError to propagate unchanged, got {err:?}"
+        );
+
+        // Both halves of the rollback must run.
+        assert_eq!(
+            ctx.get_context("attempts"),
+            Some(&json!(0)),
+            "set_context write must be rolled back alongside set_workflow"
+        );
+        assert_eq!(
+            ws.get("total"),
+            Some(json!(0)),
+            "set_workflow write must be rolled back alongside set_context"
+        );
+    }
+
+    // When a later block's guard errors, only THAT block's writes
+    // are rolled back; writes committed by prior blocks on the executed
+    // path must survive. Pins per-block snapshot scope (prevents a future
+    // "snapshot at function entry" regression).
+    #[test]
+    fn prior_block_writes_survive_on_guard_evaluation_error_in_later_block_in_run_function_imperative()
+     {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      x: { type: integer, initial: 0 }
+      y: { type: integer, initial: 0 }
+    blocks:
+      a:
+        prompt: "a"
+        schema:
+          type: object
+          required: [ok]
+          properties: { ok: { type: boolean } }
+        set_context:
+          x: "7"
+        transitions:
+          - goto: b
+      b:
+        prompt: "b"
+        schema:
+          type: object
+          required: [status]
+          properties: { status: { type: string } }
+        set_context:
+          y: "11"
+        transitions:
+          # Guard errors at runtime: strings have no attribute `.deep`.
+          - when: 'output.status.deep.field == "x"'
+            goto: unreachable
+      unreachable:
+        prompt: "unreachable"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![json!({ "ok": true }), json!({ "status": "ok" })]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("x".into(), decl("integer", json!(0)));
+        fn_decls.insert("y".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+        let mut conv = Conversation::new(None);
+
+        let err = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut conv,
+            None,
+        ))
+        .expect_err("guard error in block b must propagate");
+        assert!(
+            matches!(err, MechError::GuardEvaluationError { .. }),
             "expected GuardEvaluationError, got {err:?}"
         );
 
-        // Pinning current behavior: the `set_context` write committed before
-        // the guard ran, and the guard error did NOT roll it back. When the
-        // commit-vs-guard ordering is fixed, this assertion will flip to
-        // `Some(&json!(0))` (or to the initial value).
+        // Block A's write to `x` survives — its block boundary already
+        // closed with a successful guard evaluation.
         assert_eq!(
-            ctx.get_context("attempts"),
-            Some(&json!(1)),
-            "current behavior: committed side effects survive a subsequent guard error"
+            ctx.get_context("x"),
+            Some(&json!(7)),
+            "prior block A's write must NOT be rolled back when later block B's guard errors"
+        );
+        // Block B's write to `y` is rolled back to its initial.
+        assert_eq!(
+            ctx.get_context("y"),
+            Some(&json!(0)),
+            "block B's write must be rolled back because B's own guard errored"
+        );
+
+        // both blocks A and B executed their prompts and committed
+        // their (user, assistant) message pairs to the conversation BEFORE
+        // the side-effect/transition dance ran for each. Block B's guard
+        // error rolls back B's `set_context` write but leaves the
+        // conversation untouched (per the rollback-asymmetry note on
+        // `commit_block_side_effects_then_evaluate`). Two blocks * two
+        // messages each = 4.
+        assert_eq!(
+            conv.len(),
+            4,
+            "conversation messages from BOTH blocks (including the failing one) must be retained \
+             (per the rollback-asymmetry doc on commit_block_side_effects_then_evaluate)"
+        );
+    }
+
+    // When a guard errors on a block that wrote NEITHER set_context
+    // NOR set_workflow, the rollback path is a no-op restore on an empty
+    // snapshot. The original guard error must still propagate (not be
+    // shadowed by anything from the empty rollback path).
+    #[test]
+    fn original_guard_error_propagates_even_if_no_rollback_needed_in_run_function_imperative() {
+        // Reuse the GUARD_ERROR YAML: block `check` declares no
+        // set_context / set_workflow and its guard errors at runtime.
+        let wf = load(GUARD_ERROR);
+        let func = wf.document().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![json!({ "status": "ok" })]);
+        let mut ctx = new_ctx(json!({}), &BTreeMap::new(), &BTreeMap::new());
+
+        let err = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut Conversation::new(None),
+            None,
+        ))
+        .expect_err("guard error must surface even when there is nothing to roll back");
+        // Mirrors the field-level checks in
+        // `guard_evaluation_error_propagates_as_block_failure` (variant +
+        // block + expression + non-empty message). The matched
+        // `GuardEvaluationError` variant (rather than `InternalInvariant`)
+        // is itself the assertion that the empty-snapshot rollback path
+        // executed without producing its own error — a rollback failure
+        // would surface as `InternalInvariant`.
+        match err {
+            MechError::GuardEvaluationError {
+                block,
+                expression,
+                message,
+            } => {
+                assert_eq!(block, "check");
+                assert!(
+                    expression.contains("output.status.deep.field"),
+                    "expected expression to mention `output.status.deep.field`, got: {expression}"
+                );
+                assert!(!message.is_empty(), "guard error message must be non-empty");
+            }
+            other => panic!(
+                "expected MechError::GuardEvaluationError to propagate even with empty snapshot, got {other:?}"
+            ),
+        }
+    }
+
+    // a commit-time type-check failure on the second of two writes
+    // exercises the commit-failure branch of
+    // `commit_block_side_effects_then_evaluate` (not the post-commit
+    // guard branch). `BTreeMap` iterates keys alphabetically, so naming
+    // the type-correct write `var1` and the type-mismatched write `var2`
+    // pins the order: `var1` commits, then `var2` fails its check inside
+    // `commit_side_effects` (`MechError::WorkflowValidation` per
+    // `ExecutionContext::set_context` -> `check_type` in
+    // `mech/src/context.rs`). Rollback must restore `var1` to its
+    // initial.
+    #[test]
+    fn commit_failure_triggers_rollback_in_run_function_imperative() {
+        let yaml = r#"
+functions:
+  f:
+    input: { type: object }
+    context:
+      var1: { type: integer, initial: 0 }
+      var2: { type: integer, initial: 0 }
+    blocks:
+      check:
+        prompt: "check"
+        schema:
+          type: object
+          required: [r]
+          properties: { r: { type: string } }
+        set_context:
+          # Alphabetical iteration: var1 commits first (integer 1, OK),
+          # then var2 fails the integer type-check (string "foo").
+          var1: "1"
+          var2: '"foo"'
+"#;
+        let wf = load(yaml);
+        let func = wf.document().functions.get("f").unwrap();
+        let agent = SequentialAgent::new(vec![json!({ "r": "ok" })]);
+        let mut fn_decls = BTreeMap::new();
+        fn_decls.insert("var1".into(), decl("integer", json!(0)));
+        fn_decls.insert("var2".into(), decl("integer", json!(0)));
+        let mut ctx = new_ctx(json!({}), &fn_decls, &BTreeMap::new());
+
+        let err = run_blocking(run_function_imperative(
+            &wf,
+            "f",
+            func,
+            &mut ctx,
+            &agent,
+            &no_func_executor(),
+            &mut Conversation::new(None),
+            None,
+        ))
+        .expect_err("commit-time type mismatch must propagate");
+
+        // `set_context` raises `MechError::WorkflowValidation` on type
+        // mismatch (see `check_type` in `mech/src/context.rs`). The
+        // rollback path must NOT shadow this with `InternalInvariant`.
+        assert!(
+            matches!(err, MechError::WorkflowValidation { .. }),
+            "expected WorkflowValidation from commit-time type-check failure, got {err:?}"
+        );
+
+        // var1's successful first write must be rolled back to its initial.
+        assert_eq!(
+            ctx.get_context("var1"),
+            Some(&json!(0)),
+            "var1's committed write must be rolled back when var2's commit fails"
+        );
+        // var2's commit was never reached, so it is still at its initial.
+        assert_eq!(
+            ctx.get_context("var2"),
+            Some(&json!(0)),
+            "var2 was never committed; it must remain at its initial value"
         );
     }
 

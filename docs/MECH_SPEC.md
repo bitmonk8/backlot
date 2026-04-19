@@ -1037,6 +1037,7 @@ set_workflow:
 4. `set_context` writes are applied first, then `set_workflow` writes. Transitions are evaluated after both complete.
 5. **Undeclared variable:** A key in `set_context` that is not declared in the function's `context`, or a key in `set_workflow` that is not declared in `workflow.context`, is a **load-time error**.
 6. **Type mismatch:** If static analysis can determine that the expression produces a type incompatible with the declaration, it is a load-time **warning**.
+7. **Guard-error rollback:** If a transition guard for the same block raises a runtime error after the `set_context` / `set_workflow` writes have been committed (§10.2 *Guard Evaluation Error*), the block's writes are rolled back to their pre-commit values before the error propagates. Rollback is per-touched-key (not a whole-state snapshot) so it does not clobber concurrent `set_workflow` writes from parallel sibling functions to *different* keys (§9.6). Concurrent writes to the *same* key from a sibling that lands between this block's snapshot and its rollback are clobbered by the restoration ("last write wins" per §9.6); narrowing-to-different-keys is the precise contract. Rule 4 still holds: guards that succeed observe the post-write state (e.g. the §9.4 retry counter pattern is unaffected — only the error path rolls back).
 
 ### 9.4 Context in Cycles
 
@@ -1174,6 +1175,7 @@ The LLM returned output that does not validate against the block's JSON Schema.
 A CEL guard expression raises a runtime error (e.g., type mismatch, division by zero).
 
 - **Behavior:** The block fails. The error message includes the block name, the guard expression, and the CEL error.
+- **Rollback:** Before the error propagates, the block's `set_context` and `set_workflow` writes are rolled back to their pre-commit values (per §9.3 rule 7). Direct callers of the function therefore observe the pre-block context and workflow state on `Err(GuardEvaluationError)` rather than the partial post-write state the failing guard observed.
 - **Propagation:** Block failure → function failure → cue retry/escalation if orchestrated.
 
 **Rationale:** Mech's static validation (§10.1) catches the vast majority of guard errors at load time — variable scope, field existence, type compatibility, and optional-field safety (`has()` requirement). A guard error that survives load-time checks indicates a bug in the workflow or the executor, not a recoverable condition. Failing loudly makes these bugs visible immediately rather than masking them behind a silent false evaluation and unpredictable control flow.
