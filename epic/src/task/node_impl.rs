@@ -59,8 +59,7 @@ impl<A: AgentService> EpicTask<A> {
         match vault.reorganize().await {
             Ok((report, _warnings, meta)) => {
                 let session_meta = crate::agent::session_meta_from_vault(&meta);
-                self.task.accumulate_usage(&session_meta);
-                self.emit_usage_event();
+                self.accumulate_and_emit_usage(&session_meta);
                 rt.events.emit(Event::VaultReorganizeCompleted {
                     merged: report.merged.len(),
                     restructured: report.restructured.len(),
@@ -88,8 +87,7 @@ impl<A: AgentService> EpicTask<A> {
         match result {
             Ok((_refs, _warnings, meta)) => {
                 let session_meta = crate::agent::session_meta_from_vault(&meta);
-                self.task.accumulate_usage(&session_meta);
-                self.emit_usage_event();
+                self.accumulate_and_emit_usage(&session_meta);
                 rt.events.emit(Event::VaultRecorded {
                     task_id: self.task.id,
                     document: name.to_string(),
@@ -101,12 +99,17 @@ impl<A: AgentService> EpicTask<A> {
         }
     }
 
-    /// Emit usage updated event.
-    fn emit_usage_event(&self) {
+    /// Accumulate `meta` into the task's running usage and emit `Event::UsageUpdated`
+    /// with the per-phase cost delta. Centralising the before/after capture here
+    /// keeps every call site honest about reporting per-phase cost.
+    fn accumulate_and_emit_usage(&mut self, meta: &SessionMeta) {
+        let before = self.task.usage.cost_usd;
+        self.task.accumulate_usage(meta);
+        let phase_cost_usd = self.task.usage.cost_usd - before;
         let rt = self.rt();
         rt.events.emit(Event::UsageUpdated {
             task_id: self.task.id,
-            phase_cost_usd: 0.0,
+            phase_cost_usd,
             total_cost_usd: self.task.usage.cost_usd,
         });
     }
@@ -255,8 +258,7 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
             .agent
             .verify_branch_correctness(&task_ctx, verify_model)
             .await?;
-        self.task.accumulate_usage(&correctness.meta);
-        self.emit_usage_event();
+        self.accumulate_and_emit_usage(&correctness.meta);
 
         if let Some(outcome) = self.branch_fail_outcome(correctness.value.outcome) {
             return Ok(outcome);
@@ -267,8 +269,7 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
             .agent
             .verify_branch_completeness(&task_ctx, verify_model)
             .await?;
-        self.task.accumulate_usage(&completeness.meta);
-        self.emit_usage_event();
+        self.accumulate_and_emit_usage(&completeness.meta);
 
         if let Some(outcome) = self.branch_fail_outcome(completeness.value.outcome) {
             return Ok(outcome);
@@ -279,8 +280,7 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
             .agent
             .verify_branch_simplification(&task_ctx, verify_model)
             .await?;
-        self.task.accumulate_usage(&simplification.meta);
-        self.emit_usage_event();
+        self.accumulate_and_emit_usage(&simplification.meta);
 
         if let Some(outcome) = self.branch_fail_outcome(simplification.value.outcome) {
             return Ok(outcome);
@@ -312,8 +312,7 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
             .await
         {
             Ok(agent_result) => {
-                self.task.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event();
+                self.accumulate_and_emit_usage(&agent_result.meta);
                 let decomposition = agent_result.value;
                 if decomposition.subtasks.is_empty() {
                     Ok(Err("fix agent produced no subtasks".into()))
@@ -337,8 +336,7 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
         let task_ctx = self.build_task_context(ctx);
         let decision = match rt.agent.checkpoint(&task_ctx, child_discoveries).await {
             Ok(agent_result) => {
-                self.task.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event();
+                self.accumulate_and_emit_usage(&agent_result.meta);
                 agent_result.value
             }
             Err(e) => {
@@ -415,8 +413,7 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
         let rt = self.rt_arc();
         let task_ctx = self.build_task_context(ctx);
         let agent_result = rt.agent.assess(&task_ctx).await?;
-        self.task.accumulate_usage(&agent_result.meta);
-        self.emit_usage_event();
+        self.accumulate_and_emit_usage(&agent_result.meta);
         Ok(agent_result.value)
     }
 
@@ -428,8 +425,7 @@ impl<A: AgentService + 'static> cue::TaskNode for EpicTask<A> {
         let rt = self.rt_arc();
         let task_ctx = self.build_task_context(ctx);
         let agent_result = rt.agent.design_and_decompose(&task_ctx, model).await?;
-        self.task.accumulate_usage(&agent_result.meta);
-        self.emit_usage_event();
+        self.accumulate_and_emit_usage(&agent_result.meta);
         Ok(agent_result.value)
     }
 }
@@ -470,8 +466,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
                 };
             }
         };
-        self.task.accumulate_usage(&agent_result.meta);
-        self.emit_usage_event();
+        self.accumulate_and_emit_usage(&agent_result.meta);
 
         match agent_result.value.outcome {
             VerificationOutcome::Pass => {
@@ -599,8 +594,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
             } else {
                 rt.agent.execute_leaf(&ctx, current_model).await?
             };
-            self.task.accumulate_usage(&agent_result.meta);
-            self.emit_usage_event();
+            self.accumulate_and_emit_usage(&agent_result.meta);
 
             let cue::LeafResult {
                 outcome,
@@ -677,8 +671,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
         let ctx = self.build_task_context(tree);
         match rt.agent.verify(&ctx, verify_model).await {
             Ok(agent_result) => {
-                self.task.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event();
+                self.accumulate_and_emit_usage(&agent_result.meta);
                 match agent_result.value.outcome {
                     VerificationOutcome::Pass => {
                         if let Some(reason) = self.try_file_level_review(tree).await {
@@ -713,8 +706,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
                 return Some(format!("file-level review error: {e}"));
             }
         };
-        self.task.accumulate_usage(&review_result.meta);
-        self.emit_usage_event();
+        self.accumulate_and_emit_usage(&review_result.meta);
 
         let passed = review_result.value.outcome == VerificationOutcome::Pass;
         rt.events.emit(Event::FileLevelReviewCompleted {
@@ -742,8 +734,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
                 return Some(format!("leaf simplification review error: {e}"));
             }
         };
-        self.task.accumulate_usage(&review_result.meta);
-        self.emit_usage_event();
+        self.accumulate_and_emit_usage(&review_result.meta);
 
         let passed = review_result.value.outcome == VerificationOutcome::Pass;
         rt.events.emit(Event::LeafSimplificationReviewCompleted {
@@ -784,8 +775,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
         let task_ctx = self.build_task_context(ctx);
         let strategy = match rt.agent.assess_recovery(&task_ctx, failure).await {
             Ok(agent_result) => {
-                self.task.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event();
+                self.accumulate_and_emit_usage(&agent_result.meta);
                 match agent_result.value {
                     Some(s) => s,
                     None => {
@@ -823,8 +813,7 @@ impl<A: AgentService + 'static> EpicTask<A> {
             .await
         {
             Ok(agent_result) => {
-                self.task.accumulate_usage(&agent_result.meta);
-                self.emit_usage_event();
+                self.accumulate_and_emit_usage(&agent_result.meta);
                 agent_result.value
             }
             Err(e) => {
@@ -861,4 +850,117 @@ impl<A: AgentService + 'static> EpicTask<A> {
 enum RetryMode {
     Execute,
     Fix { initial_failure: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::project::LimitsConfig;
+    use crate::events::{Event, EventLog};
+    use crate::task::{Model, Task, TaskId, TaskPath, TaskPhase};
+    use crate::test_support::MockAgentService;
+    use cue::SessionMeta;
+    use std::sync::Arc;
+
+    fn make_usage_event_test_node() -> EpicTask<MockAgentService> {
+        let log = EventLog::new();
+        let rt = Arc::new(TaskRuntime {
+            agent: Arc::new(MockAgentService::new()),
+            events: log,
+            vault: None,
+            limits: LimitsConfig::default(),
+            project_root: None,
+        });
+        let mut task = Task::new(TaskId(1), Some(TaskId(0)), "t".into(), vec![], 1);
+        task.path = Some(TaskPath::Leaf);
+        task.current_model = Some(Model::Haiku);
+        task.phase = TaskPhase::Executing;
+        EpicTask::new(task, Some(rt))
+    }
+
+    fn usage_updates(log: &EventLog) -> Vec<(f64, f64)> {
+        log.snapshot()
+            .iter()
+            .filter_map(|e| match e {
+                Event::UsageUpdated {
+                    phase_cost_usd,
+                    total_cost_usd,
+                    ..
+                } => Some((*phase_cost_usd, *total_cost_usd)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// First accumulation: phase delta equals the meta's cost; total matches.
+    #[test]
+    fn accumulate_and_emit_usage_reports_phase_delta() {
+        let mut node = make_usage_event_test_node();
+
+        let meta = SessionMeta {
+            cost_usd: 0.42,
+            ..SessionMeta::default()
+        };
+        node.accumulate_and_emit_usage(&meta);
+
+        let updates = usage_updates(&node.rt().events);
+        assert_eq!(
+            updates.len(),
+            1,
+            "expected exactly one UsageUpdated event, got {}",
+            updates.len()
+        );
+        let (phase, total) = updates[0];
+        assert!(
+            (phase - 0.42).abs() < 1e-9,
+            "phase_cost_usd should equal injected meta cost, got {phase}"
+        );
+        assert!(
+            (total - 0.42).abs() < 1e-9,
+            "total_cost_usd should equal accumulated total, got {total}"
+        );
+    }
+
+    /// Second accumulation: phase delta reflects only the second call, while
+    /// total reflects the sum of both — `phase_cost_usd` must not equal
+    /// `total_cost_usd` and must not be zero.
+    #[test]
+    fn accumulate_and_emit_usage_phase_delta_excludes_prior_total() {
+        let mut node = make_usage_event_test_node();
+
+        node.accumulate_and_emit_usage(&SessionMeta {
+            cost_usd: 0.10,
+            ..SessionMeta::default()
+        });
+        node.accumulate_and_emit_usage(&SessionMeta {
+            cost_usd: 0.05,
+            ..SessionMeta::default()
+        });
+
+        let updates = usage_updates(&node.rt().events);
+        assert_eq!(
+            updates.len(),
+            2,
+            "expected exactly two UsageUpdated events, got {}",
+            updates.len()
+        );
+        let (first_phase, first_total) = updates[0];
+        assert!(
+            (first_phase - 0.10).abs() < 1e-9,
+            "first phase_cost_usd should be 0.10, got {first_phase}"
+        );
+        assert!(
+            (first_total - 0.10).abs() < 1e-9,
+            "first total_cost_usd should be 0.10, got {first_total}"
+        );
+        let (phase, total) = updates[1];
+        assert!(
+            (phase - 0.05).abs() < 1e-9,
+            "second phase_cost_usd should be the second-call delta, got {phase}"
+        );
+        assert!(
+            (total - 0.15).abs() < 1e-9,
+            "total_cost_usd should sum both accumulations, got {total}"
+        );
+    }
 }

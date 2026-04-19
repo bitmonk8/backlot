@@ -99,9 +99,12 @@ pub enum Event {
     TaskLimitReached {
         task_id: TaskId,
     },
+    /// Emitted after a task accumulates usage from a completed agent or vault call.
     UsageUpdated {
         task_id: TaskId,
+        /// Per-phase delta in USD: cost added by the just-completed agent or vault call.
         phase_cost_usd: f64,
+        /// Running total cost for the task in USD across all phases.
         total_cost_usd: f64,
     },
     VaultBootstrapCompleted {

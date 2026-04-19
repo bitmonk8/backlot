@@ -720,7 +720,7 @@ RecoveryStarted { task_id, round }
 RecoveryPlanSelected { task_id, approach }
 RecoverySubtasksCreated { task_id, count, round }
 TaskLimitReached { task_id }
-UsageUpdated { task_id, phase_cost_usd, total_cost_usd }
+UsageUpdated { task_id, phase_cost_usd, total_cost_usd }   // phase_cost_usd is the delta added by the just-completed phase; total_cost_usd is the running total
 VaultBootstrapCompleted { cost_usd }
 VaultRecorded { task_id, document }
 VaultReorganizeCompleted { merged, restructured, deleted }
