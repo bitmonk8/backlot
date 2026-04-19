@@ -60,7 +60,15 @@ def main [
   slack-report $pi_agent_args $slack_channel $"Fix-issues loop started. ($initial_count) open issues."
 
   # --- Main loop ---
+  let stop_file = ".stop-fix-loop"
   loop {
+    # Check for graceful stop request
+    if ($stop_file | path exists) {
+      rm $stop_file
+      print $"Stop requested via ($stop_file) — exiting cleanly"
+      break
+    }
+
     # Check max issues cap
     if $max_issues != null and $total_attempted >= $max_issues {
       print $"Reached max issues cap \(($max_issues)\)"
