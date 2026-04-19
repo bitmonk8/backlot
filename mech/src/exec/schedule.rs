@@ -91,15 +91,9 @@ pub fn evaluate_transitions(
                 return Ok(TransitionResult::Goto(t.goto.clone()));
             }
             Some(guard_src) => {
-                let cel_expr = workflow.cel_expression(guard_src).ok_or_else(|| {
-                    // Loader invariant: every guard is compiled at load time. A
-                    // miss here is a runtime corruption of the Workflow handle.
-                    MechError::InternalInvariant {
-                        message: format!(
-                            "guard `{guard_src}` should have been compiled at load time"
-                        ),
-                    }
-                })?;
+                // Loader invariant: every guard is compiled at load time. A
+                // miss here is a runtime corruption of the Workflow handle.
+                let cel_expr = workflow.require_cel(guard_src)?;
                 match cel_expr.evaluate_guard(&ns) {
                     Ok(true) => return Ok(TransitionResult::Goto(t.goto.clone())),
                     Ok(false) => continue,
@@ -149,14 +143,7 @@ pub(crate) fn stage_side_effects(
     // Evaluate all set_context expressions atomically (all see pre-write state).
     let mut context_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_context.len());
     for (var_name, expr_src) in set_context {
-        let cel_expr =
-            workflow
-                .cel_expression(expr_src)
-                .ok_or_else(|| MechError::InternalInvariant {
-                    message: format!(
-                        "set_context expression `{expr_src}` should have been compiled at load time"
-                    ),
-                })?;
+        let cel_expr = workflow.require_cel(expr_src)?;
         let cel_value = cel_expr.evaluate(&ns)?;
         let json_value = cel_value_to_json(&cel_value)?;
         context_writes.push((var_name.clone(), json_value));
@@ -165,13 +152,7 @@ pub(crate) fn stage_side_effects(
     // Evaluate all set_workflow expressions atomically (all see pre-write state).
     let mut workflow_writes: Vec<(String, JsonValue)> = Vec::with_capacity(set_workflow.len());
     for (var_name, expr_src) in set_workflow {
-        let cel_expr = workflow.cel_expression(expr_src).ok_or_else(|| {
-            MechError::InternalInvariant {
-                message: format!(
-                    "set_workflow expression `{expr_src}` should have been compiled at load time"
-                ),
-            }
-        })?;
+        let cel_expr = workflow.require_cel(expr_src)?;
         let cel_value = cel_expr.evaluate(&ns)?;
         let json_value = cel_value_to_json(&cel_value)?;
         workflow_writes.push((var_name.clone(), json_value));

@@ -8,7 +8,9 @@
 //! etc.) belong in their own modules — do not add them here.
 
 use crate::context::ExecutionContext;
-use crate::error::{MechError, MechResult};
+#[cfg(test)]
+use crate::error::MechError;
+use crate::error::MechResult;
 use crate::schema::FunctionDef;
 use crate::workflow::Workflow;
 
@@ -30,13 +32,7 @@ pub(crate) fn render_function_system(
     match system_source {
         Some(src) => {
             let ns = ctx.namespaces();
-            let tmpl = workflow
-                .template(src)
-                .ok_or_else(|| MechError::InternalInvariant {
-                    message: format!(
-                        "system template `{src}` should have been interned at load time"
-                    ),
-                })?;
+            let tmpl = workflow.require_template(src)?;
             Ok(Some(tmpl.render(&ns)?))
         }
         None => Ok(None),
