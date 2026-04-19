@@ -155,7 +155,9 @@ def main [
 # Run a Pi extension command that prints JSON. No LLM involved.
 # Pi print mode routes extension console.log to stderr, so check both streams.
 def run-pi-data-command [command: string]: nothing -> any {
-  let result = (do { ^pi -p --no-session $command } | complete)
+  let session_dir = ".pi/sessions"
+  mkdir $session_dir
+  let result = (do { ^pi -p --session-dir $session_dir $command } | complete)
   if $result.exit_code != 0 {
     print $"ERROR: pi command '($command)' failed \(exit ($result.exit_code)\)"
     return null
