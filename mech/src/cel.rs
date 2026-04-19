@@ -6,8 +6,7 @@
 //!
 //! # Namespaces
 //!
-//! Per Deliverable 3 of the mech implementation plan (spec §13), five
-//! namespaces are bound at evaluation time:
+//! Per spec §13, five namespaces are bound at evaluation time:
 //!
 //! * `input`     — function or block input
 //! * `context`   — function-local declared variables

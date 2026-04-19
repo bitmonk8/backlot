@@ -90,7 +90,6 @@ impl Validator<'_> {
                             stack.push((next, 0));
                         }
                         Some(1) => {
-                            // Issue #52: fix edge direction in message.
                             // `next` is a prerequisite of `node` (data flows next → node).
                             self.err(
                                 floc.clone().with_block(node).with_field("depends_on"),

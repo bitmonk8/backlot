@@ -1,4 +1,4 @@
-//! Call block executor (Deliverable 10).
+//! Call block executor.
 //!
 //! Executes a single [`CallBlock`]:
 //!
@@ -16,7 +16,7 @@
 //!    [`ExecutionContext::record_block_output`].
 //!
 //! Transitions, `set_context` / `set_workflow` side-effects, and block
-//! scheduling are out of scope (Deliverable 11+).
+//! scheduling live in [`crate::exec::schedule`].
 
 use std::collections::BTreeMap;
 
@@ -29,8 +29,8 @@ use crate::exec::agent::BoxFuture;
 use crate::schema::{CallBlock, CallSpec, FunctionDef};
 use crate::workflow::Workflow;
 
-/// Callback for invoking a function by name. The workflow driver (D12)
-/// supplies the production implementation; tests inject a fake.
+/// Callback for invoking a function by name. The workflow driver supplies
+/// the production implementation; tests inject a fake.
 pub trait FunctionExecutor: Send + Sync {
     /// Invoke a named function with the given resolved input.
     fn call<'a>(
@@ -170,7 +170,7 @@ fn build_output_mapping_namespaces(
 ///
 /// Resolves input, invokes functions sequentially, computes block output,
 /// and records it in the execution context. Transitions and `set_context` /
-/// `set_workflow` writes are a separate concern (Deliverable 11).
+/// `set_workflow` writes are handled by [`crate::exec::schedule`].
 pub async fn execute_call_block(
     workflow: &Workflow,
     _function: &FunctionDef,

@@ -1,4 +1,4 @@
-//! Cue integration for mech workflows (Deliverable 14).
+//! Cue integration for mech workflows.
 //!
 //! Implements [`MechTask`] as a [`cue::TaskNode`] and [`MechStore`] as a
 //! [`cue::TaskStore`].  A mech function invocation maps to one cue leaf task.

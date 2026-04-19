@@ -1,4 +1,4 @@
-//! Execution context & state management (Deliverable 8).
+//! Execution context & state management.
 //!
 //! An [`ExecutionContext`] holds the runtime state for a single function
 //! invocation: function `input`, per-invocation declared `context.*`

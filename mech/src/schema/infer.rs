@@ -1,4 +1,4 @@
-//! Function output schema inference (§13 Deliverable 6, C-07 fix).
+//! Function output schema inference (spec §13).
 //!
 //! When a function declares `output: infer` (or omits `output:` entirely, which
 //! per §4.2 defaults to `infer`), the concrete output schema is derived by
@@ -19,8 +19,8 @@
 //!   (In CFG mode only one terminal is ever reached per execution, so the
 //!   output schema is always that one terminal's schema.)
 //!
-//! This module runs **after** load-time validation (§13 Deliverable 5) and
-//! **before** the end-to-end loader (Deliverable 7). It mutates the parsed
+//! This module runs **after** load-time validation and **before** the
+//! end-to-end loader. It mutates the parsed
 //! [`MechDocument`] in place, replacing every `output: infer` with a concrete
 //! inline schema.
 //!

@@ -1,4 +1,4 @@
-//! Conversation management and history scoping (Deliverable 13).
+//! Conversation management and history scoping.
 //!
 //! Per `docs/MECH_SPEC.md` §4.6:
 //!
@@ -8,8 +8,8 @@
 //! * Call blocks are conversation-transparent — callees start fresh.
 //! * Dataflow blocks are single-turn (no shared history).
 //! * Self-loops and backward edges accumulate history intentionally.
-//! * Compaction hooks exist as an extension point (actual strategy is a
-//!   no-op placeholder in this deliverable).
+//! * Compaction hooks exist as an extension point; the current strategy is a
+//!   no-op placeholder.
 
 use serde::{Deserialize, Serialize};
 
@@ -168,12 +168,11 @@ impl Conversation {
 
     /// Check whether compaction should fire and record the trigger.
     ///
-    /// This is a placeholder: D13 establishes the extension point but does
-    /// not implement actual summarization. The method estimates token usage
-    /// from message count (rough heuristic: 100 tokens per message) and
-    /// triggers when the estimate exceeds the configured threshold. When
-    /// triggered, it increments the compaction counter but does not modify
-    /// the message list.
+    /// Estimates token usage from message count (rough heuristic: 100 tokens
+    /// per message) and triggers when the estimate exceeds the configured
+    /// threshold. When triggered, it increments the compaction counter but
+    /// does not modify the message list. Actual summarization is not yet
+    /// implemented.
     pub fn check_compaction(&mut self) {
         let Some(cfg) = &self.compaction else {
             return;

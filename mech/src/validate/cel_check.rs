@@ -164,8 +164,8 @@ fn walk_member_field_access(expr: &cel_parser::Expression, out: &mut BTreeSet<Ve
 
 // ---- Validator methods ----------------------------------------------------
 
-/// Context struct for validate_cel_expr parameters (Issue #4: removes
-/// `#[allow(clippy::too_many_arguments)]`).
+/// Context struct bundling validate_cel_expr parameters to keep its
+/// signature small.
 struct CelCheckCtx<'a> {
     block_fields: &'a BTreeMap<String, BTreeSet<String>>,
     dominators: &'a BTreeMap<String, BTreeSet<String>>,
@@ -176,7 +176,6 @@ struct CelCheckCtx<'a> {
 }
 
 impl Validator<'_> {
-    /// Issue #56: removed unused `_fn_name` parameter.
     pub(crate) fn validate_cel_and_templates(
         &mut self,
         func: &FunctionDef,
@@ -192,7 +191,7 @@ impl Validator<'_> {
         for (name, block) in &func.blocks {
             let bloc = floc.clone().with_block(name);
 
-            // Shared: set_context, set_workflow, transitions (Issue #4)
+            // Shared: set_context, set_workflow, transitions.
             for (k, expr) in block.set_context() {
                 let field_loc = bloc.clone().with_field(format!("set_context.{k}"));
                 self.validate_cel_expr(
@@ -344,7 +343,6 @@ impl Validator<'_> {
         }
     }
 
-    /// Issue #48: renamed from `check_template` → `validate_template`.
     fn validate_template(
         &mut self,
         source: &str,
@@ -357,7 +355,6 @@ impl Validator<'_> {
         }
     }
 
-    /// Issue #48: renamed from `check_cel_expr` → `validate_cel_expr`.
     fn validate_cel_expr(
         &mut self,
         expr_src: &str,
@@ -405,8 +402,7 @@ impl Validator<'_> {
             }
         }
 
-        // Block reference resolution + reachability (Issue #55: removed
-        // Option wrapper from block_refs).
+        // Block reference resolution + reachability.
         for (target_block, field) in &refs.block_refs {
             if ctx.forbid_blocks {
                 continue;
@@ -447,8 +443,6 @@ impl Validator<'_> {
         }
     }
 
-    /// Issue #48: renamed from `check_cel_optional_field_safety` →
-    /// `validate_cel_optional_field_safety`.
     fn validate_cel_optional_field_safety(
         &mut self,
         expr_src: &str,

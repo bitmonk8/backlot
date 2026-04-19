@@ -1,4 +1,4 @@
-//! Workflow runtime (Deliverable 12).
+//! Workflow runtime.
 //!
 //! [`WorkflowRuntime`] is the top-level entry point for executing a mech
 //! workflow. It initialises the shared [`WorkflowState`] from

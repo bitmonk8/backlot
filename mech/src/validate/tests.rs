@@ -1067,7 +1067,7 @@ fn worked_example_validates_clean() {
     );
 }
 
-// ---- Deliverable 5: source location population ----
+// ---- Source location population ----
 
 #[test]
 fn issue_location_populated_for_block_field_error() {
@@ -1134,7 +1134,7 @@ functions:
     assert_eq!(issue.location.field.as_deref(), Some("name"));
 }
 
-// ---- Deliverable 5 §10.1 coverage tests ----
+// ---- Spec §10.1 coverage tests ----
 
 #[test]
 fn block_with_both_prompt_and_call_rejected() {
@@ -1152,7 +1152,7 @@ functions:
     let err = parse_workflow(yaml).err().unwrap_or_else(|| {
         panic!(
             "expected a parse error for a block with both `prompt` and `call`; \
-                 parser accepted the input — validator-level `exactly one` check must be added"
+                 the untagged enum should fail to deserialize a block carrying both fields"
         )
     });
     let msg = err.to_string().to_lowercase();
@@ -1178,7 +1178,7 @@ functions:
     let err = parse_workflow(yaml).err().unwrap_or_else(|| {
         panic!(
             "expected a parse error for a block with neither `prompt` nor `call`; \
-                 parser accepted the input — validator-level discrimination check must be added"
+                 the untagged enum should fail to deserialize a block carrying neither field"
         )
     });
     let _ = err.to_string();

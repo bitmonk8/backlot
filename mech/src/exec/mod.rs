@@ -1,11 +1,15 @@
 //! Runtime execution primitives.
 //!
-//! Deliverable 9 lands the prompt block executor and the `AgentExecutor` seam
-//! used to inject a fake agent in tests. Deliverable 10 adds the call block
-//! executor and the `FunctionExecutor` seam. Deliverable 11 adds transition
-//! evaluation, `set_context`/`set_workflow` side-effects, and imperative-mode
-//! function execution. Deliverable 12 adds the function executor, workflow
-//! runtime, and dataflow scheduler.
+//! * [`prompt`] — prompt block executor, plus the [`AgentExecutor`] seam used
+//!   to inject a fake agent in tests.
+//! * [`call`] — call block executor, plus the [`FunctionExecutor`] seam.
+//! * [`schedule`] — transition evaluation, `set_context`/`set_workflow`
+//!   side-effects, imperative-mode function execution, and conversation
+//!   scoping for prompt blocks.
+//! * [`function`] — per-function executor.
+//! * [`workflow`] — workflow-level runtime entry point.
+//! * [`dataflow`] — dataflow-mode scheduler for functions wired only by
+//!   `depends_on`.
 
 pub mod agent;
 pub mod call;

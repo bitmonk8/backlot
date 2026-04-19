@@ -1,4 +1,4 @@
-//! Dataflow scheduler (Deliverable 12).
+//! Dataflow scheduler.
 //!
 //! Implements pure-dataflow execution for functions whose blocks are connected
 //! only by `depends_on` edges (no transitions). Algorithm per spec §4.3:

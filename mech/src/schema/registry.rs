@@ -11,7 +11,7 @@
 //!
 //! # Responsibilities
 //!
-//! Per `docs/MECH_SPEC.md` §13 Deliverable 4:
+//! Per `docs/MECH_SPEC.md` §13:
 //!
 //! * Build a [`SchemaRegistry`] from the workflow-level `schemas:` map.
 //! * Detect cycles among shared schemas (a schema referencing another via
@@ -23,7 +23,7 @@
 //! * Resolve any [`SchemaRef`] used inside a workflow to a [`ResolvedSchema`]
 //!   — either a compiled validator (for inline / named schemas) or the
 //!   [`ResolvedSchema::Infer`] marker for `output: infer`, whose actual
-//!   schema is filled in later by Deliverable 6.
+//!   schema is filled in later by [`crate::schema::infer`].
 //! * Validate JSON values against resolved schemas, surfacing the JSON Pointer
 //!   path of the first failing field.
 //!
@@ -59,8 +59,9 @@ pub enum ResolvedSchema<'r> {
     /// A freshly compiled inline schema. Owned because inline schemas appear
     /// at arbitrary points in a workflow and are not stored in the registry.
     Inline(Box<Validator>),
-    /// The literal `infer` placeholder. Inference is deferred to Deliverable
-    /// 6; calling [`ResolvedSchema::validate`] on this variant errors.
+    /// The literal `infer` placeholder. Inference is deferred to
+    /// [`crate::schema::infer`]; calling [`ResolvedSchema::validate`] on this
+    /// variant errors.
     Infer,
 }
 
@@ -155,7 +156,7 @@ impl SchemaRegistry {
     /// * `SchemaRef::Inline(v)` compiles `v` as a fresh JSON Schema.
     /// * `SchemaRef::Ref("$ref:#name")` looks `name` up in the registry.
     /// * `SchemaRef::Ref("$ref:path")` is reserved for external files
-    ///   (Deliverable 7) and currently errors with [`MechError::SchemaRefUnsupported`].
+    ///   and currently errors with [`MechError::SchemaRefUnsupported`].
     /// * `SchemaRef::Infer` returns [`ResolvedSchema::Infer`].
     pub fn resolve<'r>(&'r self, schema_ref: &SchemaRef) -> MechResult<ResolvedSchema<'r>> {
         match schema_ref {

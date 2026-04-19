@@ -4,9 +4,9 @@
 //! workflow YAML file deserializes into, along with a thin [`parse_workflow`]
 //! helper. It performs **no** semantic validation — no CEL compilation, no
 //! JSON-Schema checking, no `$ref` resolution, no block-field validity rules.
-//! Semantic validation lives in [`crate::validate`] and output inference in
-//! [`crate::schema::infer`]; the workflow loader that ties everything together
-//! lands in a later deliverable.
+//! Semantic validation lives in [`crate::validate`], output inference in
+//! [`crate::schema::infer`], and the workflow loader that ties everything
+//! together in [`crate::loader`].
 //!
 //! Every struct uses `#[serde(deny_unknown_fields)]` so that typos and
 //! accidental fields are caught at load time.

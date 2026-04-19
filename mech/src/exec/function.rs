@@ -1,4 +1,4 @@
-//! Function executor (Deliverable 12).
+//! Function executor.
 //!
 //! [`FunctionRunner`] executes a single named function within a workflow:
 //!

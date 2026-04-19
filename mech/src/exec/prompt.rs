@@ -1331,7 +1331,7 @@ functions:
         assert_eq!(req.timeout, None);
     }
 
-    // ---- Issue #62: nested $ref:#name in shared schemas -------------------
+    // ---- Nested $ref:#name in shared schemas -----------------------------
 
     #[test]
     fn shared_schema_with_nested_ref_validates_correctly() {

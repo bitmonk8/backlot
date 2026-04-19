@@ -209,7 +209,7 @@ pub enum MechError {
     #[error("cannot validate against deferred `infer` schema")]
     SchemaInferDeferred,
 
-    /// Function output schema inference failed (§13 Deliverable 6).
+    /// Function output schema inference failed (spec §13).
     ///
     /// Raised when a function declares `output: infer` (or omits `output:`)
     /// but its terminal blocks produce incompatible schemas, or no terminal

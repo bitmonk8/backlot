@@ -1,10 +1,10 @@
-//! End-to-end workflow loader (spec §13, Deliverable 7).
+//! End-to-end workflow loader (spec §13).
 //!
 //! Composes parse → resolve schemas → validate → infer function outputs →
 //! compile CEL expressions/templates into an immutable, ready-to-run
 //! [`Workflow`] value.
 //!
-//! No execution logic lives here — that arrives in later deliverables. The
+//! No execution logic lives here — execution lives in [`crate::exec`]. The
 //! loader's job is to make sure that by the time a [`Workflow`] exists, every
 //! load-time check from the spec has succeeded and every CEL expression and
 //! template has been compiled exactly once.

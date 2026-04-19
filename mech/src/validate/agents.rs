@@ -50,7 +50,8 @@ impl Validator<'_> {
         // (line 24-28), so this walk cannot discover new cycles that weren't
         // already flagged. It is kept as a safety net in case `extends` is
         // allowed on named agents in the future.
-        // Issue #51: deduplicate missing extends target reports.
+        // Deduplicate missing extends target reports so each missing
+        // name is flagged only once across the whole walk.
         let mut reported_missing: BTreeSet<String> = BTreeSet::new();
         for name in defaults.agents.keys() {
             let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -120,8 +121,8 @@ impl Validator<'_> {
 
     /// Validate an agent reference that requires `WorkflowSection`.
     ///
-    /// Renamed from `validate_agent_ref` → `validate_agent_ref_strict` for
-    /// clarity (Issue #50): this form requires defaults to be present.
+    /// This strict form requires `workflow.agents` defaults to be present;
+    /// callers without defaults should use [`Self::validate_agent_ref`].
     pub(crate) fn validate_agent_ref_strict(
         &mut self,
         agent_ref: &AgentConfigRef,
@@ -172,11 +173,11 @@ impl Validator<'_> {
         }
     }
 
-    /// Validate an agent reference with optional defaults (Issue #50).
+    /// Validate an agent reference with optional defaults.
     ///
-    /// Renamed from `validate_agent_ref_with_defaults` → `validate_agent_ref`
-    /// for clarity: this is the general-purpose form that handles the case
-    /// when no workflow defaults are declared.
+    /// General-purpose form: dispatches to [`Self::validate_agent_ref_strict`]
+    /// when defaults are present, otherwise rejects `extends` and named
+    /// `$ref` because there are no `workflow.agents` to resolve against.
     pub(crate) fn validate_agent_ref(
         &mut self,
         agent_ref: &AgentConfigRef,

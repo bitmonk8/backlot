@@ -1,5 +1,5 @@
-//! Transition evaluation and block scheduling (Deliverable 11, conversation
-//! scoping in Deliverable 13).
+//! Transition evaluation and block scheduling, including conversation
+//! scoping for prompt blocks.
 //!
 //! Implements imperative-mode function execution: starting at the entry block,
 //! execute block → apply `set_context` / `set_workflow` side-effects →

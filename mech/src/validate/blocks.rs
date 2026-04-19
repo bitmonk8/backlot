@@ -135,8 +135,8 @@ impl Validator<'_> {
         models: &dyn ModelChecker,
         bloc: &Location,
     ) {
-        // Shared validation using BlockDef accessors (Issue #4):
-        // depends_on, set_context, set_workflow, transitions
+        // Shared validation using BlockDef accessors:
+        // depends_on, set_context, set_workflow, transitions.
         for dep in block.depends_on() {
             if !func.blocks.contains_key(dep) {
                 self.err(
@@ -324,7 +324,6 @@ impl Validator<'_> {
         }
     }
 
-    /// Issue #48: renamed from `check_call_fn` → `validate_call_fn`.
     fn validate_call_fn(
         &mut self,
         name: &str,

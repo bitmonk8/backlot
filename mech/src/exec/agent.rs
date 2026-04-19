@@ -1,4 +1,4 @@
-//! Agent executor abstraction (Deliverable 9).
+//! Agent executor abstraction.
 //!
 //! `AgentExecutor` is the seam between mech's prompt block executor and the
 //! agent runtime (reel). It lives in mech so tests can inject a deterministic
@@ -10,12 +10,11 @@
 //! [`serde_json::Value`] output which mech then validates against the
 //! declared schema.
 //!
-//! The production impl that wraps `reel::Agent` will land alongside the
-//! function/workflow driver in a later deliverable — the full reel
-//! [`reel::RequestConfig`] wiring (provider registry, structured-output
-//! plumbing, tool registry) is an executor-wiring concern that does not
-//! belong inside a single prompt-block dispatch. The trait shape is what D9
-//! locks down.
+//! The production implementation that wraps `reel::Agent` lives alongside the
+//! function/workflow driver. Full reel `reel::RequestConfig` wiring
+//! (provider registry, structured-output plumbing, tool registry) is an
+//! executor-wiring concern that does not belong inside a single prompt-block
+//! dispatch — this trait keeps that surface narrow.
 
 use std::pin::Pin;
 use std::time::Duration;
