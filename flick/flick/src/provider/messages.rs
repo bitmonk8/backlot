@@ -224,6 +224,7 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
 }
 
 /// Build the `cache_control` JSON value for the given retention, or `None` for `CacheRetention::None`.
+/// `ttl` is a string per Anthropic prompt-caching docs (https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching).
 fn build_cache_control_value(retention: CacheRetention) -> Option<serde_json::Value> {
     match retention {
         CacheRetention::None => None,
