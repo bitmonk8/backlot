@@ -78,10 +78,10 @@ def build-progress-summary [
   let new_commit_count = ($new_commits | length)
 
   # Latest session file = currently active or most recent agent call.
-  let sessions = (
-    ls $"($session_dir)/*.jsonl"
-    | sort-by modified --reverse
-  )
+  # Interpolated strings aren't auto-globbed; convert with `into glob`.
+  # `ls` also errors on zero matches, so wrap in try.
+  let pattern = ($"($session_dir)/*.jsonl" | into glob)
+  let sessions = (try { ls $pattern | sort-by modified --reverse } catch { [] })
   let active_status = if ($sessions | is-empty) {
     "no session files yet"
   } else {
