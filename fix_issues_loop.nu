@@ -204,7 +204,7 @@ def slack-report [pi_args: list<string>, channel: string, message: string] {
   mkdir $session_dir
   let tmp = $"($session_dir)/.tmp-slack-msg.md"
   $message | save -f $tmp
-  let prompt = $"Send a Slack message to channel ($channel). The message body is in the attached file. Send its contents verbatim — do not modify, summarize, paraphrase, or add any commentary. Preserve all newlines and markdown exactly as written."
+  let prompt = $"Use the slack_send_message tool \(NOT slack_send_message_draft\) to post immediately to channel ($channel). The message body is in the attached file. Send its contents verbatim — do not modify, summarize, paraphrase, or add any commentary. Preserve all newlines and markdown exactly as written. This is automated unattended reporting; the message has already been reviewed, so do not create a draft or wait for confirmation — just send."
   let result = (do { ^pi -p --session-dir $session_dir $"@($tmp)" $prompt } | complete)
   if $result.exit_code != 0 {
     print $"WARNING: Slack report failed: ($result.stderr)"
