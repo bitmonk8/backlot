@@ -346,7 +346,7 @@ Invokes an LLM with a rendered prompt template. Validates the response against a
 |---|---|---|---|
 | `prompt` | string | Yes | Template string with `{{...}}` CEL expressions (§7). Becomes the user message in the conversation. |
 | `schema` | object \| string | Yes | JSON Schema for the LLM's structured output. Inline YAML object or `$ref` string path (§8). |
-| `agent` | object \| string | No | Agent configuration for this block. Inline object, `$ref:#name`, or `$ref:path`. If omitted, inherits from function or workflow default. See §5.5. |
+| `agent` | object \| string | No | Agent configuration for this block. Inline object or `$ref:#name`. If omitted, inherits from function or workflow default. External file refs (`$ref:path`) are reserved for future use and rejected at validation. See §5.5. |
 | `transitions` | list | No | Outbound control edges. Each entry has `goto` (required) and `when` (optional CEL guard). See §6. |
 | `depends_on` | list of strings | No | Block names whose outputs must be available before this block executes. Acyclic (enforced at load time). |
 | `set_context` | object | No | CEL expressions writing to function context variables. Keys must be declared in the function's `context`. See §9. |
@@ -541,7 +541,9 @@ workflow:
   agent: "$ref:#reader"          # workflow default references a named config
 ```
 
-Named configs are base definitions only. They are defined once and referenced by name via `$ref:#name` (inline string form) or `extends` (inside an inline agent block at function or block level). External files are also supported: `$ref:agents/reader.yaml`.
+Named configs are base definitions only. They are defined once and referenced by name via `$ref:#name` (inline string form) or `extends` (inside an inline agent block at function or block level).
+
+External file references (e.g. `$ref:agents/reader.yaml`) are **not currently supported** for agent configs; only in-document `$ref:#name` references resolve. The `$ref:` prefix without a leading `#` is reserved for future file-ref loading and is rejected at validation time.
 
 Named configs may **not** use `extends` themselves — `extends` is only permitted on inline agent configs (function-level or block-level). A named agent entry in `workflow.agents` that contains an `extends` field is a load-time error (see §12.1).
 
@@ -573,15 +575,7 @@ agent:
   grant: [tools]
 ```
 
-**External file reference:**
-
-```yaml
-agent: "$ref:agents/reader.yaml"
-```
-
-External files are loaded and inlined at load time, like schema `$ref`. The path is relative to the workflow file's directory.
-
-**Detection:** The deserializer distinguishes forms by type: `string` starting with `$ref:` → reference (named or file); `object` → inline config (check for `extends` field to resolve base).
+**Detection:** The deserializer distinguishes forms by type: `string` starting with `$ref:` → named reference (`$ref:#name`); `object` → inline config (check for `extends` field to resolve base). External file refs are reserved for future use and currently produce a validation error.
 
 #### 5.5.5 Grant Semantics
 
@@ -1153,7 +1147,7 @@ The loader performs all of the following checks when a workflow file is loaded. 
 | Agent write_paths without write grant | Warning | `agent.write_paths` is specified but `agent.grant` does not include `write`. |
 | Agent extends resolution | Error | `agent.extends` target must exist in workflow-level `agents` map. |
 | Agent `$ref:#name` resolution | Error | `agent: "$ref:#name"` target must exist in workflow-level `agents` map. |
-| Agent `$ref:path` resolution | Error | `agent: "$ref:path"` file must exist and parse as a valid agent config. |
+| Agent external file `$ref` | Error | `agent: "$ref:path"` (no leading `#`) is reserved for future use and is rejected at validation time (see §5.5.3). |
 | Agent `extends` cycle | Error | Circular `extends` chains in named agent configs (e.g., A extends B extends A). |
 | Input schema match | Error | Call block `input` fields must provide all `required` fields declared in the called function's `input` schema. For per-call lists, each entry's `input` is validated against its own target function's schema. |
 | Per-call list consistency | Error | A per-call list block must not have a block-level `input`. A uniform-list or single-function block must have a block-level `input`. Per-call entries must each have `fn` and `input` fields. |
@@ -1340,7 +1334,7 @@ Complete annotated schema for the workflow file format. All fields shown; option
 workflow:                                       # optional — workflow-level defaults
   system: <string>                              # optional — default system prompt (template vars allowed)
 
-  agent: <object | "$ref:#name" | "$ref:path">  # optional — default agent config (§5.5)
+  agent: <object | "$ref:#name">              # optional — default agent config (§5.5)
   #   model: <string>                           #   flick model name
   #   grant: [tools, write, network]            #   ToolGrant flags
   #   tools: [<tool_name>, ...]                 #   custom tool names (registered by executor)
@@ -1383,7 +1377,7 @@ functions:
     output: <object | "$ref:path" | "$ref:#name" | "infer">  # optional — output schema (default: infer)
 
     system: <string>                            # optional — override workflow system prompt
-    agent: <object | "$ref:#name" | "$ref:path">  # optional — override workflow agent config (§5.5)
+    agent: <object | "$ref:#name">            # optional — override workflow agent config (§5.5)
     terminals: [<block_name>, ...]              # optional — explicit terminal blocks (auto-detected if omitted)
 
     context:                                    # optional — function-level context variables
@@ -1403,7 +1397,7 @@ functions:
       <block_name>:                             # identifier: [a-z][a-z0-9_]*, not input/output/context
         prompt: <string>                        # required — template string ({{CEL}} expressions)
         schema: <object | "$ref:path" | "$ref:#name">  # required — output JSON Schema
-        agent: <object | "$ref:#name" | "$ref:path">   # optional — override function/workflow agent config (§5.5)
+        agent: <object | "$ref:#name">             # optional — override function/workflow agent config (§5.5)
 
         depends_on: [<block_name>, ...]         # optional — data edges (must be acyclic)
 

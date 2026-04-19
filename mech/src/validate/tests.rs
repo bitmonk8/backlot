@@ -986,6 +986,55 @@ functions:
     assert_err_contains(&r, "is not a named agent");
 }
 
+#[test]
+fn agent_ref_external_file_rejected() {
+    // External file agent refs (e.g. `$ref:agents/reader.yaml`) are reserved
+    // for future use and must produce a validation error. See MECH_SPEC §5.5.3.
+    let yaml = r#"
+workflow:
+  agents:
+    a:
+      model: sonnet
+  agent: "$ref:agents/reader.yaml"
+functions:
+  f:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "external file agent $ref");
+    assert_err_contains(&r, "reserved for future use");
+}
+
+#[test]
+fn agent_ref_external_file_rejected_at_function_and_block() {
+    // The non-strict validation entry point (function/block-level agent refs)
+    // must also reject external file refs. See MECH_SPEC §5.5.3.
+    let yaml = r#"
+workflow:
+  agents:
+    a:
+      model: sonnet
+  agent: "$ref:#a"
+functions:
+  f:
+    input: { type: object }
+    agent: "$ref:agents/fn_agent.yaml"
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+        agent: "$ref:agents/blk_agent.yaml"
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "agents/fn_agent.yaml");
+    assert_err_contains(&r, "agents/blk_agent.yaml");
+    assert_err_contains(&r, "reserved for future use");
+}
+
 // ---- Multiple errors collected in one pass ----
 
 #[test]

@@ -159,7 +159,7 @@ impl Validator<'_> {
                     Err(crate::error::MechError::SchemaRefUnsupported { .. }) => {
                         self.err(
                             loc,
-                            format!("external file agent $ref `{raw}` is not supported; only `$ref:#name` references are allowed"),
+                            format!("external file agent $ref `{raw}` is not supported (reserved for future use); use `$ref:#name`"),
                         );
                     }
                     Err(crate::error::MechError::SchemaRefMalformed { .. }) => {
