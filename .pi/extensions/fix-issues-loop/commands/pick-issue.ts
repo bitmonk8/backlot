@@ -81,7 +81,7 @@ export function registerPickIssue(pi: ExtensionAPI) {
           "--repo", "bitmonk8/backlot",
           "--state", "open",
           "--json", "number,title,labels,state",
-          "--limit", "100",
+          "--limit", "5000",
           ...labelArgs,
         ],
         { timeout: 30000 }
