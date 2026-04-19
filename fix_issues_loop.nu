@@ -37,8 +37,12 @@ def main [
   if $type != null { $filter_args = $"($filter_args) --type=($type)" }
   $filter_args = ($filter_args | str trim)
 
+  # --- Session storage (project-local, gitignored) ---
+  let session_dir = ".pi/sessions"
+  mkdir $session_dir
+
   # --- Build pi args for agent commands (implement, commit-push-check) ---
-  mut pi_agent_args = ["-p" "--no-session"]
+  mut pi_agent_args = ["-p" "--session-dir" $session_dir]
   if $model != null { $pi_agent_args = ($pi_agent_args | append ["--model" $model]) }
 
   # --- State ---
@@ -190,9 +194,16 @@ def run-pi-agent [pi_args: list<string>, command: string]: nothing -> int {
 }
 
 # Send a Slack message via Pi with MCP Slack tool.
+# The message is written to a temp file and passed via pi's @file syntax to
+# avoid Nu's batch-file argument restriction (which forbids newlines in args
+# when invoking .cmd shims like pi.cmd on Windows).
 def slack-report [pi_args: list<string>, channel: string, message: string] {
-  let prompt = $"Send a Slack message to channel ($channel) with this exact text \(do not modify, summarize, or add commentary; preserve all newlines and markdown\):\n\n($message)"
-  let result = (do { ^pi -p --no-session $prompt } | complete)
+  let session_dir = ".pi/sessions"
+  mkdir $session_dir
+  let tmp = $"($session_dir)/.tmp-slack-msg.md"
+  $message | save -f $tmp
+  let prompt = $"Send a Slack message to channel ($channel). The message body is in the attached file. Send its contents verbatim — do not modify, summarize, paraphrase, or add any commentary. Preserve all newlines and markdown exactly as written."
+  let result = (do { ^pi -p --session-dir $session_dir $"@($tmp)" $prompt } | complete)
   if $result.exit_code != 0 {
     print $"WARNING: Slack report failed: ($result.stderr)"
   }

@@ -22,3 +22,9 @@ Thumbs.db
 
 # Test temp directories (AppContainer-safe, project-local)
 /test_tmp/
+
+# Pi session logs from fix_issues_loop.nu (and ad-hoc pi runs)
+/.pi/sessions/
+
+# Stop sentinel for fix_issues_loop.nu
+/.stop-fix-loop
