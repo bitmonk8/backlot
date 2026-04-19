@@ -92,7 +92,8 @@ def main [
     let issue_num = ($picked | get number)
     let issue_title = ($picked | get title)
     print $"--- Attempting issue #($issue_num): ($issue_title) ---"
-    slack-report $pi_agent_args $slack_channel $"Working on #($issue_num): ($issue_title)"
+    let issue_detail_msg = (build-issue-detail-msg $issue_num $issue_title)
+    slack-report $pi_agent_args $slack_channel $":hammer_and_wrench: Working on #($issue_num): ($issue_title)\n\n($issue_detail_msg)"
     $total_attempted = $total_attempted + 1
 
     # --- Implement ---
@@ -102,7 +103,7 @@ def main [
       $total_failed = $total_failed + 1
       $consecutive_failures = $consecutive_failures + 1
       $issues_skipped = ($issues_skipped | append $issue_num)
-      slack-report $pi_agent_args $slack_channel $":x: Failed #($issue_num): ($issue_title) — implement failed"
+      slack-report $pi_agent_args $slack_channel $":x: Failed #($issue_num): ($issue_title) — implement failed\n\n($issue_detail_msg)"
       do-backoff $consecutive_failures
       if $once { break }
       continue
@@ -120,7 +121,7 @@ def main [
         $total_failed = $total_failed + 1
         $consecutive_failures = $consecutive_failures + 1
         $issues_skipped = ($issues_skipped | append $issue_num)
-        slack-report $pi_agent_args $slack_channel $":x: Failed #($issue_num): ($issue_title) — commit/push failed"
+        slack-report $pi_agent_args $slack_channel $":x: Failed #($issue_num): ($issue_title) — commit/push failed\n\n($issue_detail_msg)"
         if $once { break }
         continue
       }
@@ -135,7 +136,7 @@ def main [
     print $"SUCCESS: Fixed issue #($issue_num)"
     $total_succeeded = $total_succeeded + 1
     $consecutive_failures = 0
-    slack-report $pi_agent_args $slack_channel $":white_check_mark: Fixed #($issue_num): ($issue_title)"
+    slack-report $pi_agent_args $slack_channel $":white_check_mark: Fixed #($issue_num): ($issue_title)\n\n($issue_detail_msg)"
 
     if $once { break }
   }
@@ -190,11 +191,39 @@ def run-pi-agent [pi_args: list<string>, command: string]: nothing -> int {
 
 # Send a Slack message via Pi with MCP Slack tool.
 def slack-report [pi_args: list<string>, channel: string, message: string] {
-  let prompt = $"Send a Slack message to channel ($channel) with this exact text: ($message)"
+  let prompt = $"Send a Slack message to channel ($channel) with this exact text \(do not modify, summarize, or add commentary; preserve all newlines and markdown\):\n\n($message)"
   let result = (do { ^pi -p --no-session $prompt } | complete)
   if $result.exit_code != 0 {
     print $"WARNING: Slack report failed: ($result.stderr)"
   }
+}
+
+# Build a Slack-formatted block describing an issue: labels, URL, body (truncated).
+# Falls back to a minimal one-liner if `gh issue view` fails.
+def build-issue-detail-msg [issue_num: int, issue_title: string]: nothing -> string {
+  let result = (do { gh issue view $issue_num --repo bitmonk8/backlot --json body,labels,url } | complete)
+  if $result.exit_code != 0 {
+    return $"_\(could not fetch issue details: ($result.stderr | str trim)\)_"
+  }
+
+  let parsed = (try { $result.stdout | from json } catch { null })
+  if $parsed == null {
+    return "_(could not parse issue details)_"
+  }
+
+  let labels = ($parsed.labels | get name | str join ", ")
+  let url = ($parsed.url? | default "")
+  let raw_body = ($parsed.body? | default "" | str trim)
+  let max_body = 1500
+  let body = if (($raw_body | str length) > $max_body) {
+    let head = ($raw_body | str substring 0..$max_body)
+    $"($head)\n\n_[truncated; see issue for full body]_"
+  } else {
+    $raw_body
+  }
+  let body_section = if ($body | is-empty) { "" } else { $"\n\n($body)" }
+
+  $"*Labels:* ($labels)\n*URL:* ($url)($body_section)"
 }
 
 # Exponential backoff: min(30 * 2^(n-1), 600) seconds.
