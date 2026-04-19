@@ -176,7 +176,7 @@ Failed  ← (any state)
 
 ### Usage Tracking
 
-**`SessionMeta`** — Per-agent-call metadata: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `cost_usd`, `tool_calls`, `total_latency_ms`.
+**`SessionMeta`** — Per-agent-call metadata: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `cost_usd`, `tool_calls`, `total_latency_ms`. Implements `AddAssign<&SessionMeta>` and `AddAssign<SessionMeta>` so that callers folding multiple metas (e.g., research-pipeline cost folding) use `meta += other` rather than enumerating fields. The impl uses an exhaustive struct destructure (no `..` rest pattern), so adding a new field to `SessionMeta` produces a compile error in the impl until the field is folded in.
 
 **`AgentResult<T>`** — Wraps a result value with `SessionMeta`.
 

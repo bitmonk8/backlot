@@ -171,13 +171,7 @@ impl ReelAgent {
         // Fold research pipeline costs into session metadata.
         if let Some(sink) = research_sink {
             for vault_meta in sink.lock().unwrap().drain(..) {
-                meta.input_tokens += vault_meta.input_tokens;
-                meta.output_tokens += vault_meta.output_tokens;
-                meta.cache_creation_input_tokens += vault_meta.cache_creation_input_tokens;
-                meta.cache_read_input_tokens += vault_meta.cache_read_input_tokens;
-                meta.cost_usd += vault_meta.cost_usd;
-                meta.tool_calls += vault_meta.tool_calls;
-                meta.total_latency_ms += vault_meta.total_latency_ms;
+                meta += vault_meta;
             }
         }
 

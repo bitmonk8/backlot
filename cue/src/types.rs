@@ -166,6 +166,40 @@ pub struct SessionMeta {
     pub total_latency_ms: u64,
 }
 
+// Centralized accumulation so that adding a new numeric field to `SessionMeta`
+// only requires updating this impl, eliminating the silent-data-loss risk of
+// per-field `+=` enumerations at every call site.
+impl std::ops::AddAssign<&Self> for SessionMeta {
+    fn add_assign(&mut self, rhs: &Self) {
+        // Exhaustive destructure (no `..` rest pattern) of the rhs so that
+        // adding a new field to `SessionMeta` produces a compile error here
+        // (E0027: "pattern does not mention field"), forcing the new field
+        // to be folded into the accumulation.
+        let Self {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            cost_usd,
+            tool_calls,
+            total_latency_ms,
+        } = rhs;
+        self.input_tokens += input_tokens;
+        self.output_tokens += output_tokens;
+        self.cache_creation_input_tokens += cache_creation_input_tokens;
+        self.cache_read_input_tokens += cache_read_input_tokens;
+        self.cost_usd += cost_usd;
+        self.tool_calls += tool_calls;
+        self.total_latency_ms += total_latency_ms;
+    }
+}
+
+impl std::ops::AddAssign for SessionMeta {
+    fn add_assign(&mut self, rhs: Self) {
+        *self += &rhs;
+    }
+}
+
 /// Agent call result with observability metadata.
 #[derive(Debug)]
 pub struct AgentResult<T> {
@@ -420,5 +454,53 @@ mod tests {
             rationale: "other".into(),
         };
         assert_ne!(a, c);
+    }
+
+    // Guard against silent data loss when adding a new numeric field to
+    // `SessionMeta`: this test sums two distinct, non-overlapping metas and
+    // asserts every field on the sum equals the expected total. If a new field
+    // is added without updating `AddAssign`, the destructuring pattern in the
+    // impl will fail to compile.
+    #[test]
+    fn session_meta_add_assign_sums_all_fields() {
+        let mut a = SessionMeta {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_creation_input_tokens: 3,
+            cache_read_input_tokens: 4,
+            cost_usd: 5.5,
+            tool_calls: 6,
+            total_latency_ms: 7,
+        };
+        let b = SessionMeta {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_creation_input_tokens: 30,
+            cache_read_input_tokens: 40,
+            cost_usd: 50.25,
+            tool_calls: 60,
+            total_latency_ms: 70,
+        };
+        a += &b;
+        assert_eq!(a.input_tokens, 11);
+        assert_eq!(a.output_tokens, 22);
+        assert_eq!(a.cache_creation_input_tokens, 33);
+        assert_eq!(a.cache_read_input_tokens, 44);
+        assert!((a.cost_usd - 55.75).abs() < f64::EPSILON);
+        assert_eq!(a.tool_calls, 66);
+        assert_eq!(a.total_latency_ms, 77);
+
+        // Verify owned-rhs (`AddAssign<Self>`) sums every field, not just one,
+        // so a future change that stops delegating to `AddAssign<&Self>` cannot
+        // silently drop fields.
+        let mut c = SessionMeta::default();
+        c += b;
+        assert_eq!(c.input_tokens, 10);
+        assert_eq!(c.output_tokens, 20);
+        assert_eq!(c.cache_creation_input_tokens, 30);
+        assert_eq!(c.cache_read_input_tokens, 40);
+        assert!((c.cost_usd - 50.25).abs() < f64::EPSILON);
+        assert_eq!(c.tool_calls, 60);
+        assert_eq!(c.total_latency_ms, 70);
     }
 }
