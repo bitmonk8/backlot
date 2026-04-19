@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Validate-time template scanner now matches the compile-time scanner
+  exactly: it tracks brace-nesting depth (so `{{ size({"a": 1}) }}` and
+  similar map literals are recognized as a single expression) and reports
+  empty `{{  }}` segments as validation issues instead of silently
+  dropping them. Both paths now share a single private
+  `scan_template_segments` byte-level scanner in `mech/src/cel.rs`,
+  eliminating the duplicated state machine that root-caused the divergence.
+  See [#364](https://github.com/bitmonk8/backlot/issues/364) (Q-01) and
+  [#368](https://github.com/bitmonk8/backlot/issues/368) (C-01).
+
 - `run_function_imperative` now rolls back the failing block's
   `set_context` and `set_workflow` writes before propagating
   `Err(GuardEvaluationError)` (or any other transition-evaluation error,

@@ -293,7 +293,7 @@ the config would be silently dropped at runtime even after compaction lands.
 | `validate/cel_check.rs` | CEL/template validation: scope, reachability, optional field safety, AST walkers |
 | `validate/graph.rs` | Dataflow cycles, unreachable blocks, dominator computation, transitive closures, parallel conflicts |
 | `validate/helpers.rs` | Utility functions (identifier checks, block writes, terminals), schema field collection, constants |
-| `cel.rs` | CEL compilation/evaluation, template interpolation, namespace bindings (`blocks`/`block` alias), reference extraction |
+| `cel.rs` | CEL compilation/evaluation, template interpolation, namespace bindings (`blocks`/`block` alias), reference extraction; single shared `scan_template_segments` byte-level scanner used by both compile and validate paths |
 | `context.rs` | `ExecutionContext`, `WorkflowState`, runtime type checking |
 | `exec/` | Block executors, transition evaluation, function runners, workflow runtime |
 | `loader.rs` | Free-function loader API (`load_workflow`, `load_workflow_str`) — parse → validate → infer → compile pipeline |

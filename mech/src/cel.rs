@@ -315,19 +315,52 @@ impl Template {
     }
 }
 
-fn parse_template(source: &str) -> MechResult<Vec<Segment>> {
+/// One raw segment of a template after grammar-only scanning.
+///
+/// This intermediate form is produced by [`scan_template_segments`] and
+/// consumed by both `parse_template` (compile path) and
+/// [`extract_template_exprs`] (validate path). The scanner does not call
+/// `CelExpression::compile`; expression compilation is the caller's job.
+enum RawSegment<'a> {
+    /// A literal slice of the source between expressions. Always non-empty
+    /// when emitted.
+    Literal(&'a str),
+    /// An expression slice between `{{` and `}}`, untrimmed. The leading
+    /// `{{` byte offset is reported via [`ScanError`] when scanning fails;
+    /// successful segments do not carry it because no consumer needs it.
+    Expr { expr_src: &'a str },
+}
+
+/// Grammar-only error from [`scan_template_segments`].
+#[derive(Debug)]
+enum ScanError {
+    /// A `{{` opened at `offset` but no matching `}}` was found.
+    Unterminated { offset: usize },
+    /// A `{{ ... }}` pair at `offset` contained only whitespace.
+    EmptyExpression { offset: usize },
+}
+
+/// The single byte-level template scanner shared by the compile and validate
+/// paths.
+///
+/// Tracks CEL string-literal state (single and double quoted, with `\` as an
+/// escape that consumes the following byte) and curly-brace nesting depth so
+/// that `}}` inside a CEL string literal or a CEL map literal is not treated
+/// as the closing delimiter. Returns slices into `source`; emits
+/// [`RawSegment::Literal`] only for non-empty literal runs.
+fn scan_template_segments(source: &str) -> Result<Vec<RawSegment<'_>>, ScanError> {
     let bytes = source.as_bytes();
-    let mut segments = Vec::new();
-    let mut literal = String::new();
-    let mut i = 0;
+    let mut segments: Vec<RawSegment<'_>> = Vec::new();
+    let mut literal_start = 0usize;
+    let mut i = 0usize;
     while i < bytes.len() {
         if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            // Start of an expression; flush literal and scan for closing `}}`.
-            if !literal.is_empty() {
-                segments.push(Segment::Literal(std::mem::take(&mut literal)));
+            // Flush any pending literal.
+            if literal_start < i {
+                segments.push(RawSegment::Literal(&source[literal_start..i]));
             }
-            let start = i + 2;
-            let mut j = start;
+            let expr_start = i + 2;
+            let mut j = expr_start;
             let mut found = false;
             // Track CEL string literal state while scanning for `}}`. Raw
             // strings (`r"..."`) are not specially handled; backslashes are
@@ -371,47 +404,51 @@ fn parse_template(source: &str) -> MechResult<Vec<Segment>> {
                 j += 1;
             }
             if !found {
-                return Err(MechError::TemplateParse {
-                    source_text: source.to_string(),
-                    message: format!("unterminated `{{{{` at byte offset {i}"),
-                });
+                return Err(ScanError::Unterminated { offset: i });
             }
-            let expr_src = &source[start..j];
-            let trimmed = expr_src.trim();
-            if trimmed.is_empty() {
-                return Err(MechError::TemplateParse {
-                    source_text: source.to_string(),
-                    message: format!("empty expression at byte offset {i}"),
-                });
+            let expr_src = &source[expr_start..j];
+            if expr_src.trim().is_empty() {
+                return Err(ScanError::EmptyExpression { offset: i });
             }
-            let expr = CelExpression::compile(trimmed)?;
-            segments.push(Segment::Expr(expr));
+            segments.push(RawSegment::Expr { expr_src });
             i = j + 2;
+            literal_start = i;
         } else {
-            // Consume one UTF-8 scalar at a time.
-            let ch_len = utf8_char_len(bytes[i]);
-            literal.push_str(&source[i..i + ch_len]);
-            i += ch_len;
+            // ASCII delimiters (`{`, `}`, `"`, `'`, `\`) cannot appear inside
+            // a UTF-8 multi-byte sequence (those bytes are all >= 0x80), so a
+            // plain byte advance keeps the literal slice on a UTF-8 boundary.
+            i += 1;
         }
     }
-    if !literal.is_empty() {
-        segments.push(Segment::Literal(literal));
+    if literal_start < bytes.len() {
+        segments.push(RawSegment::Literal(&source[literal_start..]));
     }
     Ok(segments)
 }
 
-fn utf8_char_len(first: u8) -> usize {
-    // Stray continuation bytes (0x80..0xC0) are treated as length 1 to make
-    // forward progress on malformed input rather than panicking.
-    if first < 0xC0 {
-        1
-    } else if first < 0xE0 {
-        2
-    } else if first < 0xF0 {
-        3
-    } else {
-        4
+fn parse_template(source: &str) -> MechResult<Vec<Segment>> {
+    let raw = scan_template_segments(source).map_err(|e| match e {
+        ScanError::Unterminated { offset } => MechError::TemplateParse {
+            source_text: source.to_string(),
+            message: format!("unterminated `{{{{` at byte offset {offset}"),
+        },
+        ScanError::EmptyExpression { offset } => MechError::TemplateParse {
+            source_text: source.to_string(),
+            message: format!("empty expression at byte offset {offset}"),
+        },
+    })?;
+    let mut segments = Vec::with_capacity(raw.len());
+    for seg in raw {
+        match seg {
+            RawSegment::Literal(s) => segments.push(Segment::Literal(s.to_string())),
+            RawSegment::Expr { expr_src } => {
+                let trimmed = expr_src.trim();
+                let expr = CelExpression::compile(trimmed)?;
+                segments.push(Segment::Expr(expr));
+            }
+        }
     }
+    Ok(segments)
 }
 
 fn append_rendered(out: &mut String, value: &Value, source_text: &str) -> MechResult<()> {
@@ -608,61 +645,48 @@ pub fn flatten_member_chain(expr: &Expression) -> Option<(String, Vec<String>)> 
 
 /// Extract `{{ ... }}` expression segments from a template string for
 /// validation. Parsing errors are appended to `errors`.
+///
+/// Shares the byte-level scanner with the compile path
+/// ([`scan_template_segments`]) so validate-time grammar checks match
+/// compile-time exactly: brace-nested expressions like `{{ size({"a": 1}) }}`
+/// scan as one expression, and empty `{{  }}` segments are reported as
+/// validation issues rather than silently dropped.
+///
+/// Failure semantics are all-or-nothing: when the scanner returns any
+/// `ScanError` (unterminated `{{` or empty `{{  }}`), this function pushes
+/// exactly one `ValidationIssue` describing the first offending segment
+/// and returns an empty `Vec`, even if earlier segments would have been
+/// well-formed. This matches the compile path's all-or-nothing failure
+/// (`parse_template` returns one `MechError::TemplateParse`) so callers
+/// see the same go/no-go decision at validate time and at compile time.
 pub fn extract_template_exprs(
     source: &str,
     loc: &Location,
     errors: &mut Vec<ValidationIssue>,
 ) -> Vec<String> {
-    let bytes = source.as_bytes();
-    let mut out: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            let start = i + 2;
-            let mut j = start;
-            let mut quote: Option<u8> = None;
-            let mut found = false;
-            while j + 1 < bytes.len() {
-                let b = bytes[j];
-                if let Some(q) = quote {
-                    if b == b'\\' && j + 1 < bytes.len() {
-                        j += 2;
-                        continue;
-                    }
-                    if b == q {
-                        quote = None;
-                    }
-                    j += 1;
-                    continue;
-                }
-                if b == b'"' || b == b'\'' {
-                    quote = Some(b);
-                    j += 1;
-                    continue;
-                }
-                if b == b'}' && bytes[j + 1] == b'}' {
-                    found = true;
-                    break;
-                }
-                j += 1;
-            }
-            if !found {
-                errors.push(ValidationIssue::new(
-                    loc.clone(),
-                    "unterminated `{{` in template",
-                ));
-                return out;
-            }
-            let trimmed = source[start..j].trim().to_string();
-            if !trimmed.is_empty() {
-                out.push(trimmed);
-            }
-            i = j + 2;
-        } else {
-            i += 1;
+    match scan_template_segments(source) {
+        Ok(segments) => segments
+            .into_iter()
+            .filter_map(|seg| match seg {
+                RawSegment::Expr { expr_src } => Some(expr_src.trim().to_string()),
+                RawSegment::Literal(_) => None,
+            })
+            .collect(),
+        Err(ScanError::Unterminated { offset }) => {
+            errors.push(ValidationIssue::new(
+                loc.clone(),
+                format!("unterminated `{{{{` at byte offset {offset} in template"),
+            ));
+            Vec::new()
+        }
+        Err(ScanError::EmptyExpression { offset }) => {
+            errors.push(ValidationIssue::new(
+                loc.clone(),
+                format!("empty `{{{{  }}}}` expression at byte offset {offset} in template"),
+            ));
+            Vec::new()
         }
     }
-    out
 }
 
 // ---- Tests ----------------------------------------------------------------
@@ -765,6 +789,212 @@ mod tests {
     fn template_empty_expression_errors() {
         let err = Template::compile("bad {{  }} seg").unwrap_err();
         assert!(matches!(err, MechError::TemplateParse { .. }));
+    }
+
+    // --- extract_template_exprs (validate path) tests ---
+    //
+    // After Q-01 the validate-time scanner shares one byte loop with the
+    // compile-time path, so these tests pin down that grammar errors caught
+    // at compile are also caught at validate, and that brace-nested or
+    // string-quoted `}}` is not mistaken for the closing delimiter.
+
+    fn validate_loc() -> Location {
+        Location::root(None)
+    }
+
+    #[test]
+    fn extract_template_exprs_reports_unterminated() {
+        let mut errors = Vec::new();
+        let out = extract_template_exprs("hello {{input.name", &validate_loc(), &mut errors);
+        assert!(out.is_empty(), "expected no exprs returned, got {out:?}");
+        assert_eq!(errors.len(), 1, "expected one validation issue");
+        assert!(
+            errors[0].message.contains("unterminated"),
+            "expected unterminated message, got {:?}",
+            errors[0].message
+        );
+    }
+
+    #[test]
+    fn extract_template_exprs_reports_empty_expression() {
+        // Regression test for C-01: validate path used to silently drop
+        // empty `{{  }}` expressions; it must now report them.
+        let mut errors = Vec::new();
+        let out = extract_template_exprs("bad {{  }} seg", &validate_loc(), &mut errors);
+        assert!(out.is_empty(), "expected no exprs returned, got {out:?}");
+        assert_eq!(errors.len(), 1, "expected one validation issue");
+        assert!(
+            errors[0].message.contains("empty"),
+            "expected empty-expression message, got {:?}",
+            errors[0].message
+        );
+    }
+
+    #[test]
+    fn extract_template_exprs_handles_closing_braces_inside_string_literal() {
+        // `{{ "}}" }}` — the inner `}}` is inside a CEL string literal and
+        // must not terminate the template expression. Should yield exactly
+        // one expression and no errors.
+        let mut errors = Vec::new();
+        let out = extract_template_exprs("{{ \"}}\" }}", &validate_loc(), &mut errors);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(out, vec!["\"}}\"".to_string()]);
+    }
+
+    #[test]
+    fn extract_template_exprs_handles_braces_inside_cel_map_literal() {
+        // `{{ size({"a": 1}) }}` — sanity check that brace-nested map
+        // literals (separated from `}}` by other tokens) scan as one
+        // expression.
+        let mut errors = Vec::new();
+        let out = extract_template_exprs("{{ size({\"a\": 1}) }}", &validate_loc(), &mut errors);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(out, vec!["size({\"a\": 1})".to_string()]);
+    }
+
+    #[test]
+    fn extract_template_exprs_handles_map_literal_adjacent_to_close() {
+        // Direct C-01 regression test: `{{ {"x": 1}}}` has the map's
+        // closing `}` IMMEDIATELY adjacent to the template's `}}`. Without
+        // brace-depth tracking the old validate-time scanner would treat
+        // bytes 10..12 (`}}` at positions of map-close + first template-
+        // close) as the template terminator and return the malformed
+        // expression ` {"x": 1` instead of ` {"x": 1}`. This test fails
+        // on the pre-Q-01 scanner and passes on the unified scanner.
+        let mut errors = Vec::new();
+        let out = extract_template_exprs("{{ {\"x\": 1}}}", &validate_loc(), &mut errors);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(out, vec!["{\"x\": 1}".to_string()]);
+    }
+
+    #[test]
+    fn extract_template_exprs_returns_nothing_when_any_segment_is_empty() {
+        // Locks in the all-or-nothing semantics of `extract_template_exprs`:
+        // when the scanner reports `EmptyExpression`, the validate path
+        // returns no expressions at all (matching the compile path's
+        // all-or-nothing failure), even if earlier segments would have
+        // been valid. Documenting this avoids future drift toward
+        // "collect partial results plus errors" that would re-diverge
+        // from the compile path.
+        let mut errors = Vec::new();
+        let out = extract_template_exprs("{{x}} {{}}", &validate_loc(), &mut errors);
+        assert!(
+            out.is_empty(),
+            "expected no exprs returned (all-or-nothing), got {out:?}"
+        );
+        assert_eq!(errors.len(), 1, "expected one validation issue");
+        assert!(
+            errors[0].message.contains("empty"),
+            "expected empty-expression message, got {:?}",
+            errors[0].message
+        );
+    }
+
+    #[test]
+    fn compile_and_validate_scanners_reject_the_same_inputs() {
+        // Companion to `compile_and_validate_scanners_agree_on_segmentation`:
+        // for templates that should fail, both paths must reject. Locks in
+        // error parity (compile -> `MechError::TemplateParse`, validate ->
+        // `ValidationIssue`) so that a future change splitting the two
+        // paths cannot silently regress validate-time error coverage
+        // (the original C-01 defect).
+        let cases = [
+            "hello {{input.name",   // unterminated
+            "a {{ }} b",            // empty expression
+            "{{x}} {{}}",           // mixed: valid then empty
+            "oops {{ {\"x\": 1} }", // unterminated nested map
+        ];
+        // Extract the `byte offset N` integer from a message string. Both
+        // paths use the same wording, so we tolerate either path's exact
+        // template; we only care that the integer matches.
+        fn extract_offset(msg: &str) -> usize {
+            let (_, tail) = msg
+                .split_once("byte offset ")
+                .unwrap_or_else(|| panic!("message does not contain `byte offset N`: {msg:?}"));
+            let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits
+                .parse()
+                .unwrap_or_else(|e| panic!("failed to parse offset from {msg:?}: {e}"))
+        }
+        for src in cases {
+            let compile_err = parse_template(src).expect_err("compile path should reject");
+            let compile_msg = match &compile_err {
+                MechError::TemplateParse { message, .. } => message.clone(),
+                other => panic!("expected TemplateParse for {src:?}, got {other:?}"),
+            };
+            let mut errors = Vec::new();
+            let _ = extract_template_exprs(src, &validate_loc(), &mut errors);
+            assert_eq!(
+                errors.len(),
+                1,
+                "validate path should report exactly one issue for {src:?}, got {errors:?}"
+            );
+            let validate_msg = &errors[0].message;
+            assert_eq!(
+                extract_offset(&compile_msg),
+                extract_offset(validate_msg),
+                "compile and validate must report the same byte offset for {src:?}: \
+                 compile={compile_msg:?} validate={validate_msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_with_literal_close_brace_is_treated_as_text() {
+        // A bare `}` outside any `{{...}}` is just a literal byte; the
+        // outer scanner loop must not treat it specially. Locks in this
+        // edge case so a future refactor that hoists brace-depth tracking
+        // to the outer loop cannot regress it.
+        let t = Template::compile("foo } bar {{1 + 1}}").unwrap();
+        assert_eq!(t.render(&Namespaces::empty()).unwrap(), "foo } bar 2");
+        let mut errors = Vec::new();
+        let out = extract_template_exprs("foo } bar {{1 + 1}}", &validate_loc(), &mut errors);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(out, vec!["1 + 1".to_string()]);
+    }
+
+    #[test]
+    fn compile_and_validate_scanners_agree_on_segmentation() {
+        // Locks in the Q-01 unification invariant: for any template that
+        // both paths accept, the count and trimmed text of expression
+        // segments must agree. If the two paths ever diverge again, this
+        // test fails. Inputs cover plain literals, single expressions,
+        // mixed literal+expression sequences, brace-nested map literals,
+        // and `}}` inside CEL string literals.
+        let cases = [
+            "plain literal only",
+            "{{input.name}}",
+            "hello {{input.name}}!",
+            "a={{x}} b={{y}} c={{z}}",
+            "{{ size({\"a\": 1}) }}",
+            "{{ {\"x\": 1}}}",
+            "{{ \"}}\" }}",
+            "{{'{{'}}",
+            "",
+            "foo } bar {{x}}",
+            "}",
+        ];
+        for src in cases {
+            let raw = scan_template_segments(src)
+                .unwrap_or_else(|e| panic!("scanner rejected fixture {src:?}: {e:?}"));
+            let scanner_exprs: Vec<String> = raw
+                .into_iter()
+                .filter_map(|seg| match seg {
+                    RawSegment::Expr { expr_src } => Some(expr_src.trim().to_string()),
+                    RawSegment::Literal(_) => None,
+                })
+                .collect();
+            let mut errors = Vec::new();
+            let validate_exprs = extract_template_exprs(src, &validate_loc(), &mut errors);
+            assert!(
+                errors.is_empty(),
+                "validate path raised errors for {src:?}: {errors:?}"
+            );
+            assert_eq!(
+                validate_exprs, scanner_exprs,
+                "validate path disagrees with shared scanner for {src:?}"
+            );
+        }
     }
 
     #[test]
