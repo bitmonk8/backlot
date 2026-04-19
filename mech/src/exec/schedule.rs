@@ -561,13 +561,12 @@ pub async fn run_function_imperative(
         // this block's writes if commit or transition evaluation errors,
         // before the error propagates. The orchestration is encapsulated in
         // `commit_block_side_effects_then_evaluate`.
-        let common = block.common();
         let result = commit_block_side_effects_then_evaluate(
             workflow,
             &current_block_id,
-            &common.transitions,
-            &common.set_context,
-            &common.set_workflow,
+            block.transitions(),
+            block.set_context(),
+            block.set_workflow(),
             &output,
             ctx,
         )?;
@@ -1993,14 +1992,10 @@ functions:
         let wf2 = load(yaml);
         // Re-use the function's transitions from the loaded workflow.
         let func2 = wf2.document().functions.get("f").unwrap();
-        let block_a = match &func2.blocks["a"] {
-            BlockDef::Prompt(p) => p,
-            _ => panic!("expected prompt"),
-        };
         let result = evaluate_transitions(
             &wf2,
             "a",
-            &block_a.common.transitions,
+            func2.blocks["a"].transitions(),
             &json!({ "x": "anything" }),
             &ctx,
         )
@@ -2029,14 +2024,14 @@ functions:
         // would surface `InternalInvariant` instead of the intended
         // `GuardEvaluationError`.
         let func = wf.document().functions.get("f").unwrap();
-        let check_block = match &func.blocks["check"] {
-            BlockDef::Prompt(p) => p,
-            _ => panic!("expected prompt block"),
-        };
-        let transitions = check_block.common.transitions.clone();
-        let err =
-            evaluate_transitions(&wf, "check", &transitions, &json!({ "status": "ok" }), &ctx)
-                .expect_err("guard evaluation error must propagate as Err");
+        let err = evaluate_transitions(
+            &wf,
+            "check",
+            func.blocks["check"].transitions(),
+            &json!({ "status": "ok" }),
+            &ctx,
+        )
+        .expect_err("guard evaluation error must propagate as Err");
         match err {
             MechError::GuardEvaluationError {
                 block,
