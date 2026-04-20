@@ -20,8 +20,11 @@ pub enum SandboxStdio {
 pub struct SandboxCommand {
     pub(crate) program: OsString,
     pub(crate) args: Vec<OsString>,
-    /// Additional env vars. Platform essentials are always included.
-    /// To forward a parent var, read it from `std::env` and pass it here.
+    /// Additional env vars.
+    /// On Unix, a default `PATH` is always included even when this vec is empty.
+    /// On Windows, an empty vec causes the child to inherit the parent process's
+    /// full environment (per Win32 `CreateProcessW` with a NULL `lpEnvironment`).
+    /// To forward a parent var on Unix, read it from `std::env` and pass it here.
     pub(crate) env: Vec<(OsString, OsString)>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) stdin: SandboxStdio,
