@@ -224,7 +224,17 @@ fn parse_response(json: &serde_json::Value) -> Result<ModelResponse, ProviderErr
 }
 
 /// Build the `cache_control` JSON value for the given retention, or `None` for `CacheRetention::None`.
-/// `ttl` is a string per Anthropic prompt-caching docs (https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching).
+///
+/// The Anthropic Messages API requires the `ttl` field, when present, to be a
+/// duration **string** (e.g. `"1h"`) — integer seconds are rejected with a validation
+/// error. Omitting `ttl` entirely yields the default 5-minute ephemeral cache, which
+/// is what `CacheRetention::Short` emits.
+///
+/// Prompt caching (including the 1-hour extended TTL) is generally available on the
+/// Messages API; no `anthropic-beta: extended-cache-ttl-*` header is required.
+///
+/// Reference: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+/// (see "1-hour cache duration" — `{ "cache_control": { "type": "ephemeral", "ttl": "1h" } }`).
 fn build_cache_control_value(retention: CacheRetention) -> Option<serde_json::Value> {
     match retention {
         CacheRetention::None => None,
