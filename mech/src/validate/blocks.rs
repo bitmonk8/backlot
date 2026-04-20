@@ -300,11 +300,15 @@ impl Validator<'_> {
                 self.validate_call_fn(name, c.input.as_ref(), function_names, wf, bloc);
             }
             CallSpec::Uniform(names) => {
+                // The runtime keys output-mapping namespaces by function name;
+                // a duplicate would silently overwrite earlier results.
+                self.validate_unique_call_fns(names.iter().map(String::as_str), bloc);
                 for name in names {
                     self.validate_call_fn(name, c.input.as_ref(), function_names, wf, bloc);
                 }
             }
             CallSpec::PerCall(entries) => {
+                self.validate_unique_call_fns(entries.iter().map(|e| e.func.as_str()), bloc);
                 for (i, entry) in entries.iter().enumerate() {
                     if entry.func.is_empty() {
                         self.err(
@@ -320,6 +324,32 @@ impl Validator<'_> {
                         bloc,
                     );
                 }
+            }
+        }
+    }
+
+    /// Emit one error per duplicated function name. The output mapping is
+    /// keyed by function name (`<fn>.output.*`), so duplicates would
+    /// silently lose earlier results.
+    fn validate_unique_call_fns<'a>(
+        &mut self,
+        names: impl IntoIterator<Item = &'a str>,
+        bloc: &Location,
+    ) {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut reported: BTreeSet<&str> = BTreeSet::new();
+        for name in names {
+            // PerCall empty `fn` is reported by the per-entry check; skip to avoid a confusing duplicate-of-empty error.
+            if name.is_empty() {
+                continue;
+            }
+            if !seen.insert(name) && reported.insert(name) {
+                self.err(
+                    bloc.clone().with_field("call"),
+                    format!(
+                        "call block lists function `{name}` more than once; output mapping is keyed by function name and would silently lose earlier results"
+                    ),
+                );
             }
         }
     }

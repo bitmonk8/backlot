@@ -1376,6 +1376,244 @@ functions:
 }
 
 #[test]
+fn uniform_list_call_rejects_duplicate_function_names() {
+    // The output mapping is keyed by function name, so a duplicate would
+    // silently lose the earlier result. Reject at validation time.
+    let yaml = r#"
+functions:
+  a:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+  caller:
+    input: { type: object }
+    blocks:
+      fanout:
+        call: [a, a]
+        input: { x: "1" }
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "lists function `a` more than once");
+    let msg = &r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("lists function `a` more than once"))
+        .unwrap()
+        .message;
+    assert!(
+        !msg.contains("  "),
+        "error message has stray whitespace: {msg:?}"
+    );
+}
+
+#[test]
+fn per_call_list_rejects_duplicate_function_names() {
+    let yaml = r#"
+functions:
+  a:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+  caller:
+    input: { type: object }
+    blocks:
+      fanout:
+        call:
+          - fn: a
+            input: { x: "1" }
+          - fn: a
+            input: { x: "2" }
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "lists function `a` more than once");
+    let msg = &r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("lists function `a` more than once"))
+        .unwrap()
+        .message;
+    assert!(
+        !msg.contains("  "),
+        "error message has stray whitespace: {msg:?}"
+    );
+}
+
+#[test]
+fn per_call_list_triplicate_function_name_reports_one_error_per_duplicate() {
+    // [fn: a, fn: a, fn: a]: the helper deduplicates reports per name so we
+    // expect exactly one error mentioning `a`, not one per repeat.
+    let yaml = r#"
+functions:
+  a:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+  caller:
+    input: { type: object }
+    blocks:
+      fanout:
+        call:
+          - fn: a
+            input: { x: "1" }
+          - fn: a
+            input: { x: "2" }
+          - fn: a
+            input: { x: "3" }
+"#;
+    let r = ok(yaml);
+    let count = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("lists function `a` more than once"))
+        .count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one duplicate error for `a`, got {count}; errors: {:#?}",
+        r.errors
+    );
+    let msg = &r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("lists function `a` more than once"))
+        .unwrap()
+        .message;
+    assert!(
+        !msg.contains("  "),
+        "error message has stray whitespace: {msg:?}"
+    );
+}
+
+#[test]
+fn per_call_list_non_adjacent_duplicate_is_caught() {
+    // [fn: a, fn: b, fn: a]: duplicates separated by another entry must
+    // still be caught.
+    let yaml = r#"
+functions:
+  a:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+  b:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+  caller:
+    input: { type: object }
+    blocks:
+      fanout:
+        call:
+          - fn: a
+            input: { x: "1" }
+          - fn: b
+            input: { x: "2" }
+          - fn: a
+            input: { x: "3" }
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "lists function `a` more than once");
+    let msg = &r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("lists function `a` more than once"))
+        .unwrap()
+        .message;
+    assert!(
+        !msg.contains("  "),
+        "error message has stray whitespace: {msg:?}"
+    );
+}
+
+#[test]
+fn uniform_list_triplicate_function_name_reports_one_error_per_duplicate() {
+    // [a, a, a]: the helper deduplicates reports per name so we expect
+    // exactly one error mentioning `a`, not one per repeat.
+    let yaml = r#"
+functions:
+  a:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+  caller:
+    input: { type: object }
+    blocks:
+      fanout:
+        call: [a, a, a]
+        input: { x: "1" }
+"#;
+    let r = ok(yaml);
+    let count = r
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("lists function `a` more than once"))
+        .count();
+    assert_eq!(
+        count, 1,
+        "expected exactly one duplicate error for `a`, got {count}; errors: {:#?}",
+        r.errors
+    );
+    let msg = &r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("lists function `a` more than once"))
+        .unwrap()
+        .message;
+    assert!(
+        !msg.contains("  "),
+        "error message has stray whitespace: {msg:?}"
+    );
+}
+
+#[test]
+fn uniform_list_non_adjacent_duplicate_is_caught() {
+    // [a, b, a]: duplicates separated by another entry must still be caught.
+    let yaml = r#"
+functions:
+  a:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+  b:
+    input: { type: object }
+    blocks:
+      b:
+        prompt: "hi"
+        schema: { type: object, required: [k], properties: { k: { type: string } } }
+  caller:
+    input: { type: object }
+    blocks:
+      fanout:
+        call: [a, b, a]
+        input: { x: "1" }
+"#;
+    let r = ok(yaml);
+    assert_err_contains(&r, "lists function `a` more than once");
+    let msg = &r
+        .errors
+        .iter()
+        .find(|e| e.message.contains("lists function `a` more than once"))
+        .unwrap()
+        .message;
+    assert!(
+        !msg.contains("  "),
+        "error message has stray whitespace: {msg:?}"
+    );
+}
+
+#[test]
 fn parallel_siblings_conflicting_set_context_warns() {
     let yaml = r#"
 functions:

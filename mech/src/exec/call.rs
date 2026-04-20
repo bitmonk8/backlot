@@ -18,7 +18,7 @@
 //! Transitions, `set_context` / `set_workflow` side-effects, and block
 //! scheduling live in [`crate::exec::schedule`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value as JsonValue;
 
@@ -137,6 +137,23 @@ pub(crate) fn validate_function_exists(
     Ok(())
 }
 
+/// Defense in depth — `build_output_mapping_namespaces` keys augmented
+/// namespaces by function name; a duplicate would silently coalesce results
+/// there. The validator should have rejected the workflow first.
+fn validate_unique_call_fns<'a>(fn_names: impl IntoIterator<Item = &'a str>) -> MechResult<()> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for fn_name in fn_names {
+        if !seen.insert(fn_name) {
+            return Err(MechError::ExecutionInvariant {
+                message: format!(
+                    "call block lists function `{fn_name}` more than once; output mapping is keyed by function name and would silently lose earlier results"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Build augmented namespaces for output mapping evaluation. Each function
 /// result is available as a top-level CEL variable `<fn_name>` with an
 /// `output` subfield: `<fn_name>.output.*`.
@@ -177,6 +194,11 @@ pub async fn execute_call_block(
     // 1. Resolve the calls: function names + rendered inputs.
     let namespaces = ctx.namespaces();
     let calls = resolve_calls(workflow, block, &namespaces)?;
+
+    // Fail fast on duplicate function names before any side-effecting
+    // function invocation (defense in depth — validator should have caught
+    // this).
+    validate_unique_call_fns(calls.iter().map(|c| c.fn_name.as_str()))?;
 
     // 2. Validate all called functions exist (defense in depth).
     for call in &calls {
@@ -898,5 +920,66 @@ functions:
         let wf = load(SINGLE_CALL);
         validate_function_exists(&wf, "callee", "do_call")
             .expect("callee exists and must be accepted");
+    }
+
+    // ---- Runtime defense: duplicate function names in a call block --------
+
+    /// The validator normally rejects duplicate function names in `call:`.
+    /// Construct a `CallBlock` directly to exercise the runtime guard that
+    /// would otherwise let `build_output_mapping_namespaces`'s extras map
+    /// silently coalesce results.
+    #[test]
+    fn duplicate_call_fns_trigger_runtime_invariant() {
+        let wf = load(UNIFORM_LIST);
+        let func = wf.document().functions.get("caller").unwrap();
+
+        // Build a call block by hand with `step_a` listed twice. Bypassing
+        // the loader is intentional -- this is a defense-in-depth test.
+        let mut input_map = BTreeMap::new();
+        input_map.insert("text".to_string(), "{{input.text}}".to_string());
+        let block = CallBlock {
+            call: CallSpec::Uniform(vec!["step_a".to_string(), "step_a".to_string()]),
+            input: Some(input_map),
+            output: None,
+            parallel: None,
+            n: None,
+            common: Default::default(),
+        };
+
+        let mut ctx = new_ctx(json!({ "text": "dup" }), &BTreeMap::new());
+        let mut responses = BTreeMap::new();
+        responses.insert("step_a".into(), json!({ "ok": true }));
+        let executor = FakeFuncExecutor::new(responses);
+
+        let err = run_blocking(execute_call_block(
+            &wf,
+            func,
+            "dup_block",
+            &block,
+            &mut ctx,
+            &executor,
+        ))
+        .expect_err("runtime must reject duplicate call function names");
+
+        // Fail-fast: the guard runs before any function invocation.
+        assert!(
+            executor.captured_calls().is_empty(),
+            "executor must not be invoked when duplicates are detected; got: {:?}",
+            executor.captured_calls()
+        );
+
+        match err {
+            MechError::ExecutionInvariant { message } => {
+                assert!(
+                    message.contains("step_a") && message.contains("more than once"),
+                    "error should name duplicated function: {message}"
+                );
+                assert!(
+                    !message.contains("  "),
+                    "error message has stray whitespace: {message:?}"
+                );
+            }
+            other => panic!("expected ExecutionInvariant, got {other:?}"),
+        }
     }
 }

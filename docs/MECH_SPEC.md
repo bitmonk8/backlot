@@ -1152,6 +1152,7 @@ The loader performs all of the following checks when a workflow file is loaded. 
 | Agent `extends` cycle | Error | Circular `extends` chains in named agent configs (e.g., A extends B extends A). |
 | Input schema match | Error | Call block `input` fields must provide all `required` fields declared in the called function's `input` schema. For per-call lists, each entry's `input` is validated against its own target function's schema. |
 | Per-call list consistency | Error | A per-call list block must not have a block-level `input`. A uniform-list or single-function block must have a block-level `input`. Per-call entries must each have `fn` and `input` fields. |
+| Call list duplicate functions | Error | A uniform-list or per-call list block must not list the same function name more than once. The output mapping is keyed by function name (`<fn>.output.*`), so a duplicate would silently overwrite earlier results. |
 | Function output schema | Error | If `output` is an explicit schema: must be valid JSON Schema with root type `object`. Terminal block schemas must be compatible with the declared output schema. |
 | Function output inference | Error | If `output` is `infer` or omitted: at least one terminal block must be detectable. If no terminals found, the author must declare an explicit output schema. |
 | Call block output type checking | Warning | Call block `output` mapping fields and downstream `{{blocks.<name>.output.*}}` references are checked against the called function's output schema (explicit or inferred). |
