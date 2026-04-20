@@ -119,12 +119,14 @@ def build-progress-summary [
 
 # Send a Slack message via Pi (MCP). Uses the same temp-file + @file pattern
 # as fix_issues_loop.nu's slack-report to dodge Nu's batch-arg restriction.
+# Runs with --no-session: the monitor would otherwise pollute the session
+# directory it is meant to observe.
 def send-slack-message [channel: string, session_dir: string, message: string] {
   mkdir $session_dir
   let tmp = $"($session_dir)/.tmp-monitor-msg.md"
   $message | save -f $tmp
   let prompt = $"Use the slack_send_message tool \(NOT slack_send_message_draft\) to post immediately to channel ($channel). The message body is in the attached file. Send its contents verbatim — do not modify, summarize, paraphrase, or add any commentary. Preserve all newlines and markdown exactly as written. This is automated unattended reporting; the message has already been reviewed, so do not create a draft or wait for confirmation — just send."
-  let result = (do { ^pi -p --session-dir $session_dir $"@($tmp)" $prompt } | complete)
+  let result = (do { ^pi -p --no-session $"@($tmp)" $prompt } | complete)
   if $result.exit_code != 0 {
     print $"WARNING: Slack send failed \(exit ($result.exit_code)\): ($result.stderr | str trim | lines | last 5 | str join '; ')"
   }
